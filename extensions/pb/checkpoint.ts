@@ -1,9 +1,9 @@
 /**
- * Checkpoints: shadow snapshots of the working tree around every build round.
+ * Checkpoints: shadow snapshots of the working tree around every task.
  * They live in git's object store (a private index plus refs/pb/checkpoints), so
  * HEAD, your index, your branch and your files are never touched by taking one.
- * Used for the manager's real per-round diff, lost-work and test-tampering
- * detection, and /pb:undo.
+ * Used for lost-work and test-tampering detection, /pb:undo, the review's delta,
+ * and spotting files changed while they should have stayed untouched.
  */
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -68,7 +68,7 @@ export function snapshot(cwd: string, message: string): Snapshot | undefined {
   }
 }
 
-/** Forget this feature's checkpoints; git garbage-collects the objects later. */
+/** Forget pb's checkpoints; git garbage-collects the objects later. */
 export function dropCheckpoints(cwd: string): void {
   tryRun(cwd, ["update-ref", "-d", REF]);
 }
@@ -77,36 +77,12 @@ export function changedPaths(cwd: string, a: string, b: string, paths: string[] 
   return split0(tryRun(cwd, ["diff", "-z", "--name-only", "--no-renames", a, b, "--", ...paths]));
 }
 
-export interface DiffSummary {
-  files: number;
-  added: number;
-  removed: number;
-  stat: string;
-  patch: string;
-}
-
-export function diffSummary(cwd: string, a: string, b: string, patchCap: number): DiffSummary {
-  let files = 0;
-  let added = 0;
-  let removed = 0;
-  for (const line of (tryRun(cwd, ["diff", "--numstat", "--no-renames", a, b]) ?? "").split("\n").filter(Boolean)) {
-    const [ad, rm] = line.split("\t");
-    files++;
-    added += Number(ad) || 0;
-    removed += Number(rm) || 0;
-  }
-  const stat = tryRun(cwd, ["diff", "--stat=100", "--no-renames", a, b])?.trim() ?? "";
-  const full = tryRun(cwd, ["diff", "--no-color", "--no-renames", a, b]) ?? "";
-  const patch = full.length > patchCap ? `${full.slice(0, patchCap)}\n…[diff truncated, ${full.length - patchCap} more chars]` : full;
-  return { files, added, removed, stat, patch };
-}
-
 /** Blob id of a path in a snapshot, or undefined if the path doesn't exist there. */
 function blob(cwd: string, commit: string, p: string): string | undefined {
   return tryRun(cwd, ["rev-parse", "-q", "--verify", `${commit}:${p}`])?.trim() || undefined;
 }
 
-export function content(cwd: string, commit: string, p: string): string | undefined {
+function content(cwd: string, commit: string, p: string): string | undefined {
   return tryRun(cwd, ["show", `${commit}:${p}`]);
 }
 
@@ -140,29 +116,26 @@ const TEST_CASE =
   /@Test\b|@ParameterizedTest\b|@RepeatedTest\b|@TestFactory\b|^\s*(?:async\s+)?def\s+test_|^\s*(?:it|test)(?:\.each\([^)]*\))?\s*\(|#\[(?:tokio::)?test\]|^func\s+Test\w*\s*\(/gm;
 const SKIP = /@Disabled\b|@Ignore\b|\.skip\s*\(|\b(?:xit|xdescribe|xtest)\s*\(|pytest\.mark\.skip|@unittest\.skip|\bt\.Skip(?:Now)?\(|#\[ignore\]|\.todo\s*\(/g;
 
-export const countTestCases = (s: string) => (s.match(TEST_CASE) ?? []).length;
 const count = (s: string, re: RegExp) => (s.match(re) ?? []).length;
 
 export interface Flag {
-  kind: "lost-work" | "tampering" | "merge";
+  kind: "lost-work" | "tampering";
   detail: string;
   files: string[];
 }
 
 /**
- * Look at what a round changed (pre → post) for signs of trouble:
- * - lost work: files an earlier task changed that this round put back to their start-of-build content
+ * Look at what a task changed (pre → post) for signs of trouble:
+ * - lost work: files an earlier task changed that this task put back to their start-of-build content
  *   (the usual trace of a stray git checkout/stash/reset);
  * - tampering: existing test files deleted, fewer test cases, or new skip markers.
  */
-export function inspectRound(
+export function inspectChanges(
   cwd: string,
   pre: Snapshot,
   post: Snapshot,
   start: Snapshot,
   otherTasksFiles: Set<string>,
-  /** test files this round is expected to delete (Spec files being merged) */
-  allowedDeletions: Set<string> = new Set(),
 ): Flag[] {
   const changed = changedPaths(cwd, pre.commit, post.commit);
   const flags: Flag[] = [];
@@ -176,7 +149,7 @@ export function inspectRound(
     if (before === undefined) continue; // a new test file is fine
     const after = content(cwd, post.commit, f);
     if (after === undefined) {
-      if (!allowedDeletions.has(f)) tampered.push(`${f} deleted`);
+      tampered.push(`${f} deleted`);
       continue;
     }
     const [c0, c1] = [count(before, TEST_CASE), count(after, TEST_CASE)];

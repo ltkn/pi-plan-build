@@ -1,13 +1,13 @@
 /**
- * pi-plan-build (pb): plan a feature with Pi, turn it into a self-contained spec,
- * build it in a fresh session task by task behind a check the harness runs, and
- * have it reviewed with fresh eyes.
+ * pi-plan-build (pb): plan a feature with Pi, turn it into a spec, build it task by task
+ * behind checks the harness runs, and have it reviewed with fresh eyes.
  *
  *   /pb:plan <what you want> plan together; the project's files stay untouched
- *   /pb:spec [which]       write the spec(s) from the discussion
- *   /pb:build [name]       build a spec in a new session; resumes after a pause
- *   /pb:review [focus]     fresh, independent review of the build against the spec
- *   /pb:undo [id]          restore the working tree to before a task
+ *   /pb:spec [which]       write or revise the spec(s) from the discussion
+ *   /pb:build [name]       build a spec here (--fresh: in a new session); resumes after a pause
+ *   /pb:review [focus]     fresh, independent review against the spec, or of any uncommitted change
+ *   /pb:deps [scope]       check dependencies and propose upgrades, as a change of their own
+ *   /pb:undo [id]          restore the files, and rewind the conversation, to before a task
  *   /pb:stats [all]        tasks, attempts, checks, tokens and cache per spec
  *   /pb:archive [name]     move a finished spec out of the way
  *   /pb:status             every spec and where it stands
@@ -18,17 +18,37 @@
  */
 import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { changedPaths, dropCheckpoints, inspectRound, restore, snapshot } from "./checkpoint.ts";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { changedPaths, dropCheckpoints, inspectChanges, restore, snapshot } from "./checkpoint.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
-import { REVIEWER_SYSTEM, buildSeed, fixPrompt, planPrompt, reviewerBrief, specPrompt, taskPrompt } from "./prompts.ts";
-import { runFresh } from "./runner.ts";
+import {
+  EXPLORER_SYSTEM,
+  buildIntro,
+  compactionSummary,
+  continuePrompt,
+  depsPrompt,
+  explorerBrief,
+  findingLine,
+  fixText,
+  nudgePrompt,
+  planPrompt,
+  reviewerBrief,
+  specPrompt,
+  taskPrompt,
+} from "./prompts.ts";
+import { registerRenderers } from "./render.ts";
+import { runReview } from "./review.ts";
+import { runFresh, usageOf } from "./runner.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec } from "./spec.ts";
+import { addStandards, agentDir, findStandards, standardsLoaded } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type ParsedSpec, SPEC_NAME, addDecision, parseSpec } from "./spec.ts";
-import { type Checkpoint, type Progress, type Report, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitHead, now } from "./store.ts";
+import { type Checkpoint, type Finding, type Progress, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitHead, now } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
+
+/** Tool output shorter than this is never pruned: it costs less than the cache write pruning causes. */
+const PRUNE_MIN_CHARS = 2000;
 
 /** Spec names for argument completion (completions run without a ctx, in Pi's working directory). */
 const specCompletions = (prefix: string) =>
@@ -37,10 +57,20 @@ const specCompletions = (prefix: string) =>
     .filter((n) => n.startsWith(prefix))
     .map((n) => ({ value: n, label: n }));
 
+type Entry = { id: string; parentId: string | null; type: string; message?: { role?: string; content?: unknown } };
+type Tree = { getLeafId?(): string | null; getEntry?(id: string): Entry | undefined; getSessionName?(): string | undefined };
+const tree = (ctx: ExtensionContext) => ctx.sessionManager as unknown as Tree;
+
+const text = (t: string) => [{ type: "text" as const, text: t }];
+/** A tool result the agent carries on from. */
+const reply = (t: string) => ({ content: text(t), details: undefined });
+/** A tool result that ends the agent's run: the build paused or finished. */
+const stop = (t: string) => ({ content: text(t), details: undefined, terminate: true });
+
 export default function pb(pi: ExtensionAPI) {
   /* ------------------------------- helpers ------------------------------- */
 
-  /** Visible in the session, and part of its context so you can discuss it. */
+  /** Visible in the session, and part of its context so you can discuss it (during a run, Pi adds it at the end of the turn). */
   const post = (content: string) => pi.sendMessage({ customType: "pb", content, display: true }, { triggerTurn: false });
   /** A short visible marker plus full instructions that start a turn. */
   const instruct = (marker: string, prompt: string) => {
@@ -63,10 +93,25 @@ export default function pb(pi: ExtensionAPI) {
   const syncTasks = (spec: ParsedSpec, old: TaskProgress[] = []): TaskProgress[] =>
     spec.tasks.map((t) => {
       const prev = old.find((o) => o.id === t.id);
-      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0 };
+      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary };
     });
 
-  const taskLine = (t: TaskProgress) => `${t.status === "done" ? "✓" : t.status === "doing" ? "▸" : t.status === "blocked" ? "✗" : "·"} ${t.id} ${t.title}${t.attempts > 1 ? ` (${t.attempts} attempts)` : ""}`;
+  const mark = (t: TaskProgress) => (t.status === "done" ? "✓" : t.status === "doing" ? "▸" : t.status === "blocked" ? "✗" : "·");
+  const taskLine = (t: TaskProgress) => `${mark(t)} ${t.id} ${t.title}${t.attempts > 1 ? ` (${t.attempts} attempts)` : ""}`;
+
+  /** The standards to put in a message: none when this session already loaded them from AGENTS.md. */
+  const standardsFor = (ctx: ExtensionContext): string => {
+    const found = findStandards(ctx.cwd);
+    if (!found) return "";
+    const opts = (ctx as Partial<ExtensionCommandContext>).getSystemPromptOptions?.();
+    return opts && standardsLoaded(opts.contextFiles) ? "" : found.text;
+  };
+
+  const sessionModel = (ctx: ExtensionContext) => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+  const findModel = (ctx: ExtensionContext, spec: string) => {
+    const slash = spec.indexOf("/");
+    return (ctx as { modelRegistry?: { find(p: string, id: string): unknown } }).modelRegistry?.find(spec.slice(0, slash), spec.slice(slash + 1));
+  };
 
   const specOfSession = (ctx: ExtensionContext) => {
     const store = new Store(ctx.cwd);
@@ -74,13 +119,55 @@ export default function pb(pi: ExtensionAPI) {
     return { store, name, progress: name ? store.progress(name) : undefined };
   };
 
+  const unfinishedPhase = (phase?: string) => ["building", "paused"].includes(phase ?? "");
+  const nextTodo = (p: Progress) => p.tasks.find((t) => t.status === "doing" || t.status === "todo");
+
+  /** The build's task list above the editor while it runs. */
+  const showProgress = (ctx: ExtensionContext, p: Progress | undefined, note?: string) => {
+    if (!ctx.hasUI) return;
+    if (!p || !unfinishedPhase(p.phase)) return ctx.ui.setWidget("pb", undefined);
+    const status = note ?? (p.phase === "paused" ? "paused" : "");
+    ctx.ui.setWidget("pb", [`pb ${p.spec}  ${p.tasks.map((t) => `${mark(t)}${t.id}`).join(" ")}${status ? `  · ${status}` : ""}`]);
+  };
+
+  /**
+   * Where to rewind the conversation to for an entry: navigating to a user or custom message would
+   * move its text into the editor, so step back to the entry before it.
+   */
+  const rewindPoint = (ctx: ExtensionContext, from: string | undefined): string | undefined => {
+    const sm = tree(ctx);
+    let id: string | undefined = from;
+    while (id) {
+      const e = sm.getEntry?.(id);
+      if (!e) return undefined;
+      const userLike = e.type === "custom_message" || (e.type === "message" && e.message?.role === "user");
+      if (!userLike) return id;
+      id = e.parentId ?? undefined;
+    }
+    return undefined;
+  };
+
+  /** The command that checks a task: its Test: line; without one a compile; the full suite for the final check. */
+  const checkCommand = (spec: ParsedSpec, task: SpecTask | undefined, testCmd: string | null, buildCmd: string | null, final: boolean) =>
+    spec.gate === "tests" ? (final ? testCmd : (task?.test ?? buildCmd)) : spec.gate === "build" ? buildCmd : null;
+
+  // Set while a check runs inside pb_task_done: the prompt cache is certain to be needed afterwards.
+  let checking = false;
+  // Set by /pb:undo while it rewinds the conversation: the branch summary pb supplies instead of an LLM's.
+  let undoSummary: string | undefined;
+  // A task boundary happened in this turn: the moment pruning is allowed.
+  let boundary = false;
+  let baselineRunning = false;
+
+  registerRenderers(pi);
+
   /* -------------------------------- tools -------------------------------- */
 
   pi.registerTool({
     name: "pb_write_spec",
     label: "Write spec",
     description:
-      "Write or rewrite a pb feature spec (.pi/pb/specs/<name>/spec.md). Use it when the user runs /pb:spec. The content must follow the spec format the user's instructions give; the tool rejects a spec that doesn't parse and says why.",
+      "Write or rewrite a pb feature spec (.pi/pb/specs/<name>/spec.md). Use it when the user runs /pb:spec or /pb:build asks for the spec. The content must follow the spec format the user's instructions give; the tool rejects a spec that doesn't parse and says why.",
     parameters: Type.Object({
       name: Type.String({ description: "short kebab-case name, e.g. order-cancellation" }),
       content: Type.String({ description: "the complete spec in markdown" }),
@@ -92,17 +179,18 @@ export default function pb(pi: ExtensionAPI) {
       const store = new Store(ctx.cwd);
       const prev = store.progress(params.name);
       store.writeSpec(params.name, params.content);
-      store.saveProgress({ ...(prev ?? { spec: params.name, phase: "written" }), spec: params.name, tasks: syncTasks(spec, prev?.tasks), updatedAt: now() });
+      store.saveProgress({
+        ...(prev ?? { spec: params.name, phase: "written" }),
+        spec: params.name,
+        tasks: syncTasks(spec, prev?.tasks),
+        writtenIn: ctx.sessionManager.getSessionFile(),
+        edited: false,
+        updatedAt: now(),
+      });
       store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests });
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}.`,
-          },
-        ],
-        details: { name: params.name },
-      };
+      return reply(
+        `Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}.`,
+      );
     },
   });
 
@@ -119,37 +207,170 @@ export default function pb(pi: ExtensionAPI) {
       const { store, name, progress } = specOfSession(ctx);
       const md = name ? store.readSpec(name) : undefined;
       if (!name || !md || !progress) throw new Error("This is not a pb build session.");
-      const text = params.assumption ? `Assumption (build${progress.current ? `, ${progress.current}` : ""}): ${params.decision}` : params.decision;
-      store.writeSpec(name, addDecision(md, text));
+      const entry = params.assumption ? `Assumption (build${progress.current ? `, ${progress.current}` : ""}): ${params.decision}` : params.decision;
+      store.writeSpec(name, addDecision(md, entry));
       if (params.assumption) {
-        progress.assumptions = [...(progress.assumptions ?? []), text];
+        progress.assumptions = [...(progress.assumptions ?? []), entry];
         store.saveProgress(progress);
       }
-      return { content: [{ type: "text", text: "Recorded in the spec's Decisions." }], details: undefined };
+      return reply("Recorded in the spec's Decisions.");
+    },
+  });
+
+  pi.registerTool({
+    name: "pb_ask",
+    label: "Ask",
+    description:
+      "Ask the human one question and wait for the answer, without stopping your work: a choice between options, or an open question. In a pb build the answer is recorded in the spec's Decisions. Ask only what you can't sensibly decide yourself.",
+    parameters: Type.Object({
+      question: Type.String({ description: "one precise question" }),
+      options: Type.Optional(Type.Array(Type.String(), { description: "2 to 4 answers to choose from; the human can always type another" })),
+      recommended: Type.Optional(Type.String({ description: "your recommendation: one of the options, or a suggested answer" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const { store, name, progress: p } = specOfSession(ctx);
+      const building = !!name && !!p && p.phase === "building";
+      if (!ctx.hasUI) {
+        if (building) {
+          pauseBuild(ctx, store, p!, `${p!.current} question: ${params.question}`, "build.paused", "question");
+          return stop("No one can answer here: the build is paused with your question. Stop here.");
+        }
+        return reply("No one can answer right now: take the sensible reading, say which one you took, and carry on.");
+      }
+      let answer: string | undefined;
+      const OTHER = "Something else (type it)";
+      if (params.options?.length) {
+        const labels = params.options.map((o) => (o === params.recommended ? `${o} (recommended)` : o));
+        const choice = await ctx.ui.select(params.question, [...labels, OTHER]);
+        answer = choice === OTHER ? await ctx.ui.input(params.question) : choice ? params.options[labels.indexOf(choice)] : undefined;
+      } else answer = await ctx.ui.input(params.question, params.recommended);
+      if (!answer?.trim()) return reply(`The human dismissed the question: take the sensible reading${building ? ", record it with pb_record_decision (assumption: true)" : ""} and carry on.`);
+      if (building) {
+        const md = store.readSpec(name!);
+        if (md) store.writeSpec(name!, addDecision(md, `${params.question.replace(/\s+$/, "")} → ${answer.trim()}`));
+        store.event(name!, { type: "ask", task: p!.current });
+      }
+      return reply(`The human answered: ${answer.trim()}${building ? " (recorded in the spec's Decisions)" : ""}`);
+    },
+  });
+
+  pi.registerTool({
+    name: "pb_explore",
+    label: "Explore",
+    description:
+      "Answer a question about the code from a separate, read-only context and get back only the answer: where things live, how a similar feature is built, the conventions, what calls what. Use it for broad questions when you need the conclusion, not the file contents; read files yourself when you need exact lines. Several calls can run in parallel.",
+    parameters: Type.Object({
+      question: Type.String({ description: "what to find out, specific enough to answer in a short report" }),
+    }),
+    executionMode: "parallel",
+    async execute(_id, params, signal, onUpdate, ctx) {
+      const store = new Store(ctx.cwd);
+      const cfg = store.config();
+      const name = tree(ctx).getSessionName?.();
+      const res = await runFresh({
+        cwd: ctx.cwd,
+        role: "explorer",
+        systemPrompt: EXPLORER_SYSTEM,
+        brief: explorerBrief(params.question, name?.startsWith("plan: ") ? name.slice(6) : undefined),
+        prompt: "Answer the question in the attached file.",
+        tools: ["read", "grep", "find", "ls", "bash"],
+        model: cfg.explorer.model ?? sessionModel(ctx),
+        thinking: cfg.explorer.thinking ?? "low",
+        signal,
+        onActivity: (a) => onUpdate?.({ content: text(`↳ ${a}`), details: undefined }),
+      });
+      store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
+      if (res.aborted) throw new Error("Exploration stopped.");
+      if (!res.text.trim()) throw new Error(`The explorer produced no answer${res.error ? `: ${res.error.slice(0, 300)}` : ""}`);
+      return { content: text(res.text.trim()), details: undefined, usage: usageOf(res) };
     },
   });
 
   pi.registerTool({
     name: "pb_task_done",
     label: "Task done",
-    description: "In a pb build session: finish the task the harness gave you. status: done (complete and checked), blocked (can't be done properly; say why), question (you need the human's decision).",
+    description:
+      'In a pb build: finish the task the harness gave you. status done: the harness runs the task\'s check and answers with the failure to fix, or the next task. status blocked: it can\'t be done properly (say why); the build pauses for the human.',
     parameters: Type.Object({
       task: Type.String({ description: 'the task id, e.g. "T2" (or "final" for the final check)' }),
-      status: StringEnum(["done", "blocked", "question"]),
+      status: StringEnum(["done", "blocked"]),
       summary: Type.String({ description: "what you changed and why, and what you checked with what result" }),
-      question: Type.Optional(Type.String({ description: "with status question: one precise question, with options and your recommendation" })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const { store, progress } = specOfSession(ctx);
-      if (!progress) throw new Error("This is not a pb build session.");
-      if (params.task !== progress.current) throw new Error(`The current task is ${progress.current ?? "none"}, not ${params.task}.`);
-      progress.report = { task: params.task, status: params.status as Report["status"], summary: params.summary, question: params.question };
-      store.saveProgress(progress);
-      return { content: [{ type: "text", text: "Reported to the harness." }], details: undefined, terminate: true };
+    executionMode: "sequential",
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const { store, progress: p } = specOfSession(ctx);
+      if (!p || p.phase !== "building") throw new Error("No pb build is running in this session.");
+      if (params.task !== p.current) throw new Error(`The current task is ${p.current ?? "none"}, not ${params.task}.`);
+      const tp = p.tasks.find((t) => t.id === p.current);
+      if (tp) tp.summary = params.summary;
+      const loaded = loadSpec(store, p.spec);
+      if (!loaded) {
+        pauseBuild(ctx, store, p, `${store.rel("specs", p.spec, "spec.md")} no longer parses; fix it, then /${cmd("build")}.`, "build.paused", "spec");
+        return stop("The spec no longer parses: the build is paused. Stop here.");
+      }
+      if (params.status === "blocked") {
+        pauseBuild(ctx, store, p, `${params.task} blocked: ${params.summary}`, "build.paused", "blocked");
+        return stop("The build is paused: the human decides how to go on. Stop here.");
+      }
+      return await checkAndAdvance(ctx, store, p, loaded.spec, signal);
     },
   });
 
   /* --------------------------------- plan -------------------------------- */
+
+  /** Run the test suite in the background; its result is posted into the session when it's done. */
+  const startBaseline = (ctx: ExtensionContext, store: Store, command: string) => {
+    if (baselineRunning) return;
+    baselineRunning = true;
+    const cfg = store.config();
+    void runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap)
+      .then((r) => {
+        store.saveBaseline({ ...r, head: gitHead(ctx.cwd) });
+        try {
+          post(`**Baseline** (the test suite as planning began): ${r.ok ? r.summary : `${r.summary}\n\nThe final check runs the whole suite, so it fails until this is fixed.`}`);
+        } catch {
+          // the session was replaced meanwhile: baseline.json still has the result
+        }
+      })
+      .finally(() => {
+        baselineRunning = false;
+      });
+  };
+
+  /** Start planning mode for this session (the snapshot shows later what changed while it was on). */
+  const startPlanning = (ctx: ExtensionContext, store: Store) => {
+    const session = ctx.sessionManager.getSessionFile();
+    if (!session) return;
+    const existing = store.planning(session)?.snapshot;
+    const snap = existing ? undefined : store.config().checkpoints ? snapshot(ctx.cwd, "pb: start of planning") : undefined;
+    store.setPlanning(session, true, existing ?? snap?.commit);
+    store.detachSession(session);
+  };
+
+  /**
+   * Files that changed in the project while this session was planning (bash can write where edit and
+   * write are blocked). Asks whether to keep or restore them; false = cancel.
+   */
+  const reviewPlanningChanges = async (ctx: ExtensionContext, store: Store): Promise<boolean> => {
+    const session = ctx.sessionManager.getSessionFile();
+    const snap = session ? store.planning(session)?.snapshot : undefined;
+    if (!session || !snap) return true;
+    const cur = snapshot(ctx.cwd, "pb: end of planning");
+    if (!cur) return true;
+    const files = changedPaths(ctx.cwd, snap, cur.commit);
+    if (!files.length) return true;
+    const list = `${files.slice(0, 10).join(", ")}${files.length > 10 ? ` … (+${files.length - 10})` : ""}`;
+    const KEEP = "Keep them";
+    const RESTORE = "Restore them to how they were when planning began";
+    const choice = ctx.hasUI ? await ctx.ui.select(`These project files changed while planning: ${list}`, [KEEP, RESTORE, "Cancel"]) : KEEP;
+    if (choice === RESTORE) {
+      restore(ctx.cwd, cur.commit, snap, files);
+      ctx.ui.notify(`Restored ${files.length} file(s).`, "info");
+    } else if (choice !== KEEP) return false;
+    else if (!ctx.hasUI) ctx.ui.notify(`Kept files changed while planning: ${list}`, "warning");
+    store.setPlanning(session, store.planningSessions().includes(session), (choice === RESTORE ? undefined : cur.commit) ?? snap);
+    return true;
+  };
 
   pi.registerCommand(cmd("plan"), {
     description: "Plan something with Pi: /pb:plan <describe what you want to build or change, in your own words>. Pi can run anything to investigate but won't touch the project's files. /pb:plan off ends that",
@@ -158,20 +379,50 @@ export default function pb(pi: ExtensionAPI) {
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
       if (arg === "off") {
+        if (session && !(await reviewPlanningChanges(ctx, store))) return;
         if (session) store.setPlanning(session, false);
         return ctx.ui.notify("Planning mode off: Pi can change the project's files again.", "info");
       }
       if (!arg)
         return ctx.ui.notify(`Describe what you want, in your own words, e.g.\n/${cmd("plan")} let admins cancel an order while it is still pending, and notify the customer`, "warning");
-      if (session) store.setPlanning(session, true);
       // A name makes the planning session easy to find again in /resume, e.g. after a crash.
       const title = arg.length > 60 ? `${arg.slice(0, 57)}…` : arg;
       pi.setSessionName(`plan: ${title}`);
-      const { testCmd } = commands(ctx.cwd, store);
+      const { cfg, testCmd } = commands(ctx.cwd, store);
+
+      // Standards live in AGENTS.md (Pi loads it everywhere); offer pb's default once per project.
+      if (!findStandards(ctx.cwd) && !store.asked("standards") && ctx.hasUI) {
+        store.markAsked("standards");
+        const HERE = "Add pb's engineering standards to this project's AGENTS.md";
+        const ALL = `Add them to ${path.join(agentDir(), "AGENTS.md")} (all projects)`;
+        const choice = await ctx.ui.select("Engineering standards (quality, dependencies, comments without history, tests)", [HERE, ALL, "No thanks"]);
+        if (choice === HERE || choice === ALL) {
+          const file = choice === HERE ? path.join(ctx.cwd, "AGENTS.md") : path.join(agentDir(), "AGENTS.md");
+          addStandards(file);
+          ctx.ui.notify(`Added to ${file}: edit them there. Pi loads them into every session from now on.`, "info");
+        }
+      }
+
+      // After the standards offer: its AGENTS.md isn't a change made while planning.
+      startPlanning(ctx, store);
+
+      // The baseline costs no tokens: the harness runs the suite while the discussion starts.
+      const baseline = cfg.baseline && !!testCmd;
+      if (baseline) startBaseline(ctx, store, testCmd!);
       instruct(
-        `▶ /${cmd("plan")} — ${arg} (the project's files stay untouched)\nThis session: "plan: ${title}" · back to it any time with /resume, or \`pi --session ${ctx.sessionManager.getSessionId()}\``,
-        planPrompt(arg, testCmd),
+        `▶ /${cmd("plan")} — ${arg} (the project's files stay untouched)${baseline ? ` · running \`${testCmd}\` in the background for a baseline` : ""}\nThis session: "plan: ${title}" · back to it any time with /resume, or \`pi --session ${ctx.sessionManager.getSessionId()}\``,
+        planPrompt(arg, testCmd, standardsFor(ctx), baseline ? "running" : "none"),
       );
+    },
+  });
+
+  pi.registerCommand(cmd("deps"), {
+    description: "Check dependencies (versions, deprecations) and propose upgrades as a change of their own. Optional: which ones",
+    handler: async (args, ctx) => {
+      const store = new Store(ctx.cwd);
+      startPlanning(ctx, store);
+      pi.setSessionName(`deps: ${args.trim() || "all"}`);
+      instruct(`▶ /${cmd("deps")}${args.trim() ? ` — ${args.trim()}` : ""} (the project's files stay untouched)`, depsPrompt(args.trim()));
     },
   });
 
@@ -181,8 +432,8 @@ export default function pb(pi: ExtensionAPI) {
     if (ev.toolName !== "edit" && ev.toolName !== "write") return;
     const session = ctx.sessionManager.getSessionFile();
     if (!session || !new Store(ctx.cwd).planningSessions().includes(session)) return;
-    const target = path.resolve(ctx.cwd, ev.input.path ?? "");
-    if (path.relative(ctx.cwd, target).startsWith("..") || path.isAbsolute(path.relative(ctx.cwd, target))) return;
+    const rel = path.relative(ctx.cwd, path.resolve(ctx.cwd, ev.input.path ?? ""));
+    if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return;
     return {
       block: true,
       reason: `Planning mode: the project's files stay untouched until /${cmd("build")}. Put scratch files outside the project (e.g. in a mktemp -d directory), or say what you would change.`,
@@ -199,66 +450,75 @@ export default function pb(pi: ExtensionAPI) {
     },
   });
 
+  /** Let the human edit a spec in the editor; it's saved only when it still parses. */
+  const editSpec = async (ctx: ExtensionContext, store: Store, name: string) => {
+    let md = store.readSpec(name) ?? "";
+    for (;;) {
+      const edited = await ctx.ui.editor(`Edit ${name} (it must keep the spec format)`, md);
+      if (edited === undefined || edited === md) return;
+      const { spec, errors } = parseSpec(edited);
+      if (!spec) {
+        ctx.ui.notify(`Not saved, the spec doesn't parse: ${errors.join("; ")}`, "warning");
+        md = edited;
+        continue;
+      }
+      store.writeSpec(name, edited);
+      const prev = store.progress(name);
+      if (prev) store.saveProgress({ ...prev, tasks: syncTasks(spec, prev.tasks), edited: true });
+      store.event(name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, by: "human" });
+      return ctx.ui.notify(`Saved ${store.rel("specs", name, "spec.md")}.`, "info");
+    }
+  };
+
   /* --------------------------------- build ------------------------------- */
 
-  /** Snapshot and mark a task as started (a new task gets an undo entry); returns what to tell the agent. */
-  const beginTask = (ctx: { cwd: string }, store: Store, p: Progress, taskId: string, guidance = ""): { marker: string; prompt: string } | undefined => {
+  /**
+   * Snapshot and mark a task as started (a new task gets an undo entry); returns what to tell the agent.
+   * inTool: started from pb_task_done, mid-run: the rewind point is set at the end of the turn.
+   */
+  const beginTask = (
+    ctx: ExtensionContext,
+    store: Store,
+    p: Progress,
+    taskId: string,
+    o: { inTool?: boolean; countAttempt?: boolean; intro?: boolean } = {},
+  ): { marker: string; prompt: string; task: SpecTask } | undefined => {
     const loaded = loadSpec(store, p.spec);
     const task = loaded?.spec.tasks.find((t) => t.id === taskId);
     const tp = p.tasks.find((t) => t.id === taskId);
     if (!loaded || !task || !tp) return;
-    const cfg = store.config();
+    const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     if (tp.status === "todo" && cfg.checkpoints) {
       const snap = snapshot(ctx.cwd, `pb: before ${p.spec} ${taskId}`);
       if (snap) {
         const list = store.checkpoints(p.spec);
-        list.push({ id: taskId, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: taskId });
+        const where = o.inTool ? { pendingEntry: true } : { entry: tree(ctx).getLeafId?.() ?? undefined, intro: o.intro || undefined };
+        list.push({ id: taskId, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: taskId, ...where });
         store.saveCheckpoints(p.spec, list);
       }
     }
     tp.status = "doing";
-    tp.attempts += 1;
+    if (o.countAttempt ?? true) tp.attempts += 1;
+    tp.attempts = Math.max(tp.attempts, 1);
     p.current = taskId;
-    p.report = undefined;
     p.pause = undefined;
     p.phase = "building";
     store.saveProgress(p);
+    showProgress(ctx, p);
     return {
+      task,
       marker: `▶ ${taskId}: ${task.title}${tp.attempts > 1 ? ` (attempt ${tp.attempts})` : ""}`,
-      prompt: taskPrompt(task, tp.attempts, cfg.maxAttempts) + (guidance ? `\n\nFrom the human: ${guidance}` : ""),
+      prompt: taskPrompt(task, tp.attempts, cfg.maxAttempts, checkCommand(loaded.spec, task, testCmd, buildCmd, false)),
     };
   };
 
-  /** Start a task in the current session. */
-  const startTask = (ctx: ExtensionContext, store: Store, p: Progress, taskId: string, guidance = "") => {
-    const t = beginTask(ctx, store, p, taskId, guidance);
-    if (t) instruct(t.marker, t.prompt);
-  };
-
-  const pause = (store: Store, p: Progress, reason: string, tipKey: string, vars: Record<string, string | number> = {}) => {
+  const pauseBuild = (ctx: ExtensionContext, store: Store, p: Progress, reason: string, tipKey: string, why: string, vars: Record<string, string | number> = {}) => {
     p.phase = "paused";
     p.pause = reason;
     store.saveProgress(p);
-    store.event(p.spec, { type: "pause", why: p.report?.status === "question" || p.report?.status === "blocked" ? p.report.status : tipKey.replace("build.", ""), task: p.current });
+    store.event(p.spec, { type: "pause", why, task: p.current });
+    showProgress(ctx, p);
     post(`**⏸ Build paused** — ${reason}\n\n${tip(tipKey, { spec: p.spec, ...vars })}`);
-  };
-
-  const nextTodo = (p: Progress) => p.tasks.find((t) => t.status === "doing" || t.status === "todo");
-
-  /** Run the gate for the current task (or the final check). Returns the failure text, or undefined when it passes. */
-  const runGate = async (ctx: ExtensionContext, store: Store, p: Progress, spec: ParsedSpec, final: boolean): Promise<string | undefined> => {
-    const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
-    const task = spec.tasks.find((t) => t.id === p.current);
-    const command = spec.gate === "tests" ? (final ? testCmd : (task?.test ?? testCmd)) : spec.gate === "build" ? buildCmd : null;
-    if (!command) return undefined;
-    ctx.ui.setWidget("pb", [`pb ${p.spec} — checking ${final ? "everything" : p.current}: ${command}`]);
-    try {
-      p.lastVerify = await runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap);
-    } finally {
-      ctx.ui.setWidget("pb", undefined);
-    }
-    store.saveProgress(p);
-    return p.lastVerify.ok === false ? p.lastVerify.summary : undefined;
   };
 
   /** Test-integrity check around a task: deleted, cut down or skipped existing tests fail the task. */
@@ -266,11 +526,11 @@ export default function pb(pi: ExtensionAPI) {
     const cps = store.checkpoints(p.spec);
     const entry = cps.find((c) => c.id === p.current);
     const start = cps[0];
-    const post_ = entry && store.config().checkpoints ? snapshot(ctx.cwd, `pb: after ${p.spec} ${p.current}`) : undefined;
-    if (!entry || !start || !post_) return { tampering: undefined as string | undefined, notices: [] as string[] };
+    const after = entry && store.config().checkpoints ? snapshot(ctx.cwd, `pb: after ${p.spec} ${p.current}`) : undefined;
+    if (!entry || !start || !after) return { tampering: undefined as string | undefined, notices: [] as string[] };
     const others = new Set(cps.filter((c) => c.task && c.task !== p.current).flatMap((c) => c.files ?? []));
-    const flags = inspectRound(ctx.cwd, entry, post_, start, others);
-    entry.files = changedPaths(ctx.cwd, entry.commit, post_.commit);
+    const flags = inspectChanges(ctx.cwd, entry, after, start, others);
+    entry.files = changedPaths(ctx.cwd, entry.commit, after.commit);
     store.saveCheckpoints(p.spec, cps);
     const tamper = flags.find((f) => f.kind === "tampering");
     return {
@@ -279,86 +539,112 @@ export default function pb(pi: ExtensionAPI) {
     };
   };
 
-  /** Called whenever the agent has finished a run in this session: move the build forward. */
-  let driving = false;
-  const drive = async (ctx: ExtensionContext) => {
-    const { store, progress: p } = specOfSession(ctx);
-    if (driving || !p || p.phase !== "building") return;
-    const loaded = loadSpec(store, p.spec);
-    if (!loaded) return pause(store, p, `${store.rel("specs", p.spec, "spec.md")} no longer parses; fix it, then /${cmd("build")}.`, "build.paused");
+  /**
+   * pb_task_done said "done": check the current task inside the tool call, so the run (and with it
+   * the prompt cache) stays alive. A failure goes back as the tool result; a pass hands out the next
+   * task, the final check, or ends the build.
+   */
+  const checkAndAdvance = async (
+    ctx: ExtensionContext,
+    store: Store,
+    p: Progress,
+    spec: ParsedSpec,
+    signal: AbortSignal | undefined,
+  ): Promise<ReturnType<typeof reply> | ReturnType<typeof stop>> => {
+    const final = p.current === "final";
+    const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+    const task = spec.tasks.find((t) => t.id === p.current);
+    const tp = p.tasks.find((t) => t.id === p.current);
+    const integrity = final ? { tampering: undefined, notices: [] as string[] } : inspectTask(ctx, store, p, spec);
 
-
-    const r = p.report;
-    if (!r || r.task !== p.current) return pause(store, p, "the agent stopped without finishing its task (a question in chat, or you stopped it).", "build.paused");
-    if (r.status !== "done") return pause(store, p, `${r.task} ${r.status}: ${r.question ?? r.summary}`, "build.paused");
-
-    driving = true;
-    try {
-      const final = p.current === "final";
-      const { cfg } = commands(ctx.cwd, store);
-      const integrity = final ? { tampering: undefined, notices: [] } : inspectTask(ctx, store, p, loaded.spec);
-      const failure = integrity.tampering ? `existing tests were changed: ${integrity.tampering}` : await runGate(ctx, store, p, loaded.spec, final);
-      const tp = p.tasks.find((t) => t.id === p.current);
-      store.event(p.spec, { type: "check", task: p.current, attempt: tp?.attempts ?? 1, ok: !failure, notices: integrity.notices });
-      if (failure) {
-        const attempts = tp?.attempts ?? (p.lastVerify ? 1 : 0);
-        if (attempts >= cfg.maxAttempts) {
-          if (tp) tp.status = "doing";
-          return pause(store, p, `${p.current} still fails after ${attempts} attempts.`, "build.paused-attempts", { task: p.current ?? "" });
+    let failure: string | undefined;
+    let what = "";
+    let ran: string | null = null;
+    if (integrity.tampering) {
+      failure = `existing tests were changed: ${integrity.tampering}`;
+      what = "existing tests were changed";
+    } else {
+      ran = checkCommand(spec, task, testCmd, buildCmd, final);
+      if (ran) {
+        showProgress(ctx, p, `checking ${final ? "everything" : p.current}: ${ran}`);
+        checking = true;
+        try {
+          p.lastVerify = await runVerify(ran, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal);
+        } finally {
+          checking = false;
         }
-        if (tp) tp.attempts += 1;
-        p.report = undefined;
         store.saveProgress(p);
-        return instruct(`✗ ${p.current} check failed (attempt ${attempts})`, fixPrompt(p.current!, integrity.tampering ? "existing tests were changed" : `\`${p.lastVerify?.command}\``, failure, attempts + 1, cfg.maxAttempts));
+        if (signal?.aborted) {
+          pauseBuild(ctx, store, p, `you stopped the check of ${p.current}.`, "build.paused", "stopped");
+          return stop("The check was stopped: the build is paused. Stop here.");
+        }
+        if (p.lastVerify.ok === false) {
+          failure = p.lastVerify.summary;
+          what = `\`${ran}\``;
+        }
       }
-
-      // Passed: close the task and move on.
-      if (tp) tp.status = "done";
-      const cps = store.checkpoints(p.spec);
-      const entry = cps.find((c) => c.id === p.current);
-      if (entry) {
-        entry.summary = `${p.current} ✓ · ${(entry.files ?? []).length} files · ${r.summary.replace(/\s+/g, " ").slice(0, 70)}`;
-        store.saveCheckpoints(p.spec, cps);
-      }
-      const notices = integrity.notices.length ? `\n⚠ ${integrity.notices.join("\n⚠ ")}` : "";
-      const next = nextTodo(p);
-      if (next) {
-        post(`✓ ${p.current} ${loaded.spec.gate === "none" ? "done (no checks for this feature)" : `passed (\`${p.lastVerify?.command}\`)`}${notices}`);
-        return startTask(ctx, store, p, next.id);
-      }
-      // Every task passed: one full check, unless the last one already was.
-      const { testCmd } = commands(ctx.cwd, store);
-      if (!final && loaded.spec.gate === "tests" && testCmd && p.lastVerify?.command !== testCmd) {
-        post(`✓ ${p.current} passed${notices}\nRunning the full suite…`);
-        p.current = "final";
-        p.report = { task: "final", status: "done", summary: "final check" };
-        p.tasks.push({ id: "final", title: "Final check: full suite", status: "doing", attempts: 1 });
-        store.saveProgress(p);
-        driving = false;
-        return drive(ctx);
-      }
-      p.tasks = p.tasks.filter((t) => t.id !== "final");
-      p.phase = "built";
-      p.current = undefined;
-      p.report = undefined;
-      store.saveProgress(p);
-      store.event(p.spec, { type: "built" });
-      post(
-        [
-          `**✅ BUILD COMPLETE — ${p.spec}**${notices}`,
-          "",
-          "```",
-          ...p.tasks.map(taskLine),
-          "```",
-          `Check: ${p.lastVerify?.summary.split("\n")[0] ?? `none (verification ${loaded.spec.gate})`}`,
-          p.assumptions?.length ? `\nChoices the build made where the spec was unclear (in the spec's Decisions; the review checks them):\n${p.assumptions.map((a) => `- ${a}`).join("\n")}` : "",
-          "",
-          tip("build.done", { spec: p.spec }),
-        ].join("\n"),
-      );
-    } finally {
-      driving = false;
     }
+    store.event(p.spec, { type: "check", task: p.current, attempt: tp?.attempts ?? 1, ok: !failure, command: ran, notices: integrity.notices });
+
+    if (failure) {
+      const attempts = tp?.attempts ?? 1;
+      if (attempts >= cfg.maxAttempts) {
+        if (tp) tp.status = "doing";
+        pauseBuild(ctx, store, p, `${p.current} still fails after ${attempts} attempts.`, "build.paused-attempts", "attempts", { task: p.current ?? "" });
+        return stop(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true));
+      }
+      if (tp) tp.attempts += 1;
+      store.saveProgress(p);
+      showProgress(ctx, p);
+      return reply(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false));
+    }
+
+    // Passed: close the task and move on.
+    if (tp) tp.status = "done";
+    const cps = store.checkpoints(p.spec);
+    const cp = cps.find((c) => c.id === p.current);
+    if (cp) {
+      cp.summary = `${p.current} ✓ · ${(cp.files ?? []).length} files · ${(tp?.summary ?? "").replace(/\s+/g, " ").slice(0, 70)}`;
+      store.saveCheckpoints(p.spec, cps);
+    }
+    const notices = integrity.notices.length ? `\n⚠ ${integrity.notices.join("\n⚠ ")}` : "";
+    const passed = `✓ ${p.current} ${ran ? `passed (\`${ran}\`)` : spec.gate === "none" ? "done (no checks for this feature)" : "done (no check for this task)"}${notices}`;
+
+    const next = nextTodo(p);
+    if (next) {
+      const t = beginTask(ctx, store, p, next.id, { inTool: true })!;
+      boundary = true;
+      return reply(`${passed}\n\n${t.prompt}`);
+    }
+    // Every task passed: one full check, unless the last task's check was the full suite already.
+    if (!final && spec.gate === "tests" && testCmd && ran !== testCmd) {
+      p.current = "final";
+      p.tasks.push({ id: "final", title: "Final check: full suite", status: "doing", attempts: 1 });
+      store.saveProgress(p);
+      const r = await checkAndAdvance(ctx, store, p, spec, signal);
+      return { ...r, content: text(`${passed}\nRunning the full suite…\n\n${r.content[0].text}`) };
+    }
+    p.tasks = p.tasks.filter((t) => t.id !== "final");
+    p.phase = "built";
+    p.current = undefined;
+    p.nudged = undefined;
+    store.saveProgress(p);
+    store.event(p.spec, { type: "built" });
+    showProgress(ctx, p);
+    post(
+      [
+        `**✅ BUILD COMPLETE — ${p.spec}**${notices}`,
+        "",
+        "```",
+        ...p.tasks.map(taskLine),
+        "```",
+        `Check: ${p.lastVerify?.summary.split("\n")[0] ?? `none (verification ${spec.gate})`}`,
+        p.assumptions?.length ? `\nChoices the build made where the spec was unclear (in the spec's Decisions; the review checks them):\n${p.assumptions.map((a) => `- ${a}`).join("\n")}` : "",
+        "",
+        tip("build.done", { spec: p.spec }),
+      ].join("\n"),
+    );
+    return stop(`${passed}\n\nBuild complete: every check passed. Stop here; the harness shows the summary.`);
   };
 
   // The build session's own instance applies the carried-over model and thinking level before its first turn.
@@ -367,15 +653,70 @@ export default function pb(pi: ExtensionAPI) {
     const carry = new Store(ctx.cwd).takeCarry();
     if (!carry) return;
     if (carry.model) {
-      const slash = carry.model.indexOf("/");
-      const model = (ctx as { modelRegistry?: { find(p: string, id: string): unknown } }).modelRegistry?.find(carry.model.slice(0, slash), carry.model.slice(slash + 1));
+      const model = findModel(ctx, carry.model);
       if (model) await pi.setModel(model as Parameters<typeof pi.setModel>[0]);
     }
     if (carry.thinking) pi.setThinkingLevel(carry.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
   });
 
+  // Like a stop hook: an agent that ends its run mid-task gets one reminder per attempt before the build pauses.
+  pi.on("agent_before_settle", (e, ctx) => {
+    if ((e as { outcome?: string }).outcome !== "completed") return;
+    const { store, progress: p } = specOfSession(ctx);
+    if (!p || p.phase !== "building" || !p.current) return;
+    const key = `${p.current}#${p.tasks.find((t) => t.id === p.current)?.attempts ?? 0}`;
+    if (p.nudged === key) return;
+    p.nudged = key;
+    store.saveProgress(p);
+    store.event(p.spec, { type: "nudge", task: p.current });
+    return { entries: [{ type: "custom_message" as const, customType: "pb-instruction", content: nudgePrompt(p.current), display: false }], continue: true };
+  });
+
   pi.on("agent_settled", async (_e, ctx) => {
-    await drive(ctx);
+    if (await offerPendingBuild(ctx)) return;
+    const { store, progress: p } = specOfSession(ctx);
+    if (p?.phase === "building") pauseBuild(ctx, store, p, "the agent stopped without finishing its task (you stopped it, or it stopped again after a reminder).", "build.paused", "stopped");
+  });
+
+  // At the end of a turn: rewind points for tasks started mid-run, and (when configured) pruning at a task boundary.
+  pi.on("turn_end", (e, ctx) => {
+    const { store, name, progress: p } = specOfSession(ctx);
+    const wasBoundary = boundary;
+    boundary = false;
+    if (!name || !p) return;
+    const leaf = tree(ctx).getLeafId?.() ?? undefined;
+    const cps = store.checkpoints(name);
+    const pending = cps.filter((c) => c.pendingEntry);
+    for (const c of pending) {
+      c.entry = leaf;
+      delete c.pendingEntry;
+    }
+    if (pending.length) store.saveCheckpoints(name, cps);
+
+    const cfg = store.config();
+    const usage = ctx.getContextUsage()?.percent;
+    if (!wasBoundary || !cfg.pruneAbove || p.phase !== "building" || usage == null || usage < cfg.pruneAbove) return;
+    type Projected = { sourceEntry: Entry; messages: { content?: unknown }[] };
+    const entries = ((e as { context?: { contextEntries?: Projected[] } }).context?.contextEntries ?? []) as Projected[];
+    // Only what the build produced: everything after its start (the planning discussion stays whole).
+    const startEntry = cps.find((c) => c.id === "start")?.entry;
+    if (!startEntry) return;
+    const from = entries.findIndex((x) => x.sourceEntry.id === startEntry);
+    const to = leaf ? entries.findIndex((x) => x.sourceEntry.id === leaf) : -1;
+    if (to < 0) return;
+    const size = (x: Projected) =>
+      x.messages.reduce((n, m) => n + (Array.isArray(m.content) ? m.content.reduce((k: number, c: { text?: string }) => k + (c.text?.length ?? 0), 0) : String(m.content ?? "").length), 0);
+    const edits = entries
+      .slice(from + 1, to)
+      .filter((x) => x.sourceEntry.type === "message" && x.sourceEntry.message?.role === "toolResult" && size(x) >= PRUNE_MIN_CHARS)
+      .map((x) => ({
+        type: "context_edit" as const,
+        targetId: x.sourceEntry.id,
+        replacement: { content: text(`[pb pruned ${size(x)} chars of tool output from a finished task; run or read it again if you need it]`) },
+      }));
+    if (!edits.length) return;
+    store.event(name, { type: "prune", entries: edits.length, chars: entries.filter((x) => edits.some((d) => d.targetId === x.sourceEntry.id)).reduce((n, x) => n + size(x), 0) });
+    return { entries: edits };
   });
 
   // Stats: every model turn in a build session, with its tokens and cache use.
@@ -397,204 +738,402 @@ export default function pb(pi: ExtensionAPI) {
     });
   });
 
+  // A build session's compaction: the summary comes from the state pb keeps, not from another model call.
+  pi.on("session_before_compact", (e, ctx) => {
+    const { store, name, progress: p } = specOfSession(ctx);
+    if (!name || !p || !unfinishedPhase(p.phase)) return;
+    const ev = e as { preparation: { firstKeptEntryId: string; tokensBefore: number; previousSummary?: string }; reason?: string };
+    store.event(name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore });
+    return {
+      compaction: {
+        summary: compactionSummary(p, store.readSpec(name), ev.preparation.previousSummary),
+        firstKeptEntryId: ev.preparation.firstKeptEntryId,
+        tokensBefore: ev.preparation.tokensBefore,
+      },
+    };
+  });
+
+  pi.on("session_before_tree", () => (undoSummary ? { summary: { summary: undoSummary } } : undefined));
+
+  // Keep the cache warm while a check runs: the agent certainly continues afterwards.
+  pi.on("cache_warming_decision", () => (checking ? { action: "warm" as const } : undefined));
+
+  /**
+   * Start building a spec. In this session by default: the conversation that planned it
+   * stays, and the prompt cache with it. `fresh` opens a new session seeded with the spec
+   * instead (command context only: sessions can't be replaced from event handlers).
+   * decided: the human already chose where (the spec-approval dialog).
+   */
+  const startBuild = async (ctx: ExtensionContext, store: Store, name: string, fresh: boolean, decided = false): Promise<void> => {
+    const loaded = loadSpec(store, name);
+    if (!loaded) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
+    const { spec, md } = loaded;
+    const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+    if (spec.gate === "tests" && !testCmd) return ctx.ui.notify(`Verification is "tests" but no test command is set: set "verify" in ${store.rel("config.json")}, or use Verification: build/none in the spec.`, "warning");
+    if (spec.gate === "build" && !buildCmd) return ctx.ui.notify(`Verification is "build" but no build command is set: set "build" in ${store.rel("config.json")}.`, "warning");
+    if (spec.dependsOn) {
+      const dep = store.progress(spec.dependsOn)?.phase;
+      if (dep !== "built" && dep !== "reviewed") {
+        const go = ctx.hasUI && (await ctx.ui.confirm(`${name} depends on ${spec.dependsOn}`, `${spec.dependsOn} isn't built yet. Build ${name} anyway?`));
+        if (!go) return;
+      }
+    }
+    const baseline = store.baseline();
+    if (spec.gate === "tests" && baseline?.ok === false && baseline.command === testCmd && ctx.hasUI) {
+      const go = await ctx.ui.confirm("The test suite already failed", `${baseline.summary.split("\n")[0]} (${baseline.at}). The final check runs the whole suite, so it fails too unless that's fixed. Build anyway?`);
+      if (!go) return;
+    }
+    if (!(await reviewPlanningChanges(ctx, store))) return;
+
+    // Optionally build on another model (e.g. plan on a strong one, build on a local one).
+    let buildModel: unknown;
+    if (cfg.buildModel) {
+      buildModel = findModel(ctx, cfg.buildModel);
+      if (!buildModel) ctx.ui.notify(`buildModel "${cfg.buildModel}" isn't a model Pi knows; building on ${sessionModel(ctx) ?? "the current model"}.`, "warning");
+    }
+    const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
+    const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";
+    if (!fresh && !decided) {
+      const usage = ctx.getContextUsage()?.percent;
+      const full = usage != null && usage > cfg.freshAbove;
+      if ((full || switching) && ctx.hasUI) {
+        const why = switching ? `building on ${cfg.buildModel} here sends this whole conversation to it again, uncached` : `this session is ${Math.round(usage!)}% full`;
+        const FRESH = "Build in a fresh session, from the spec (recommended)";
+        const choice = await ctx.ui.select(`Build ${name}: ${why}`, [FRESH, "Build here anyway"]);
+        if (!choice) return;
+        fresh = choice === FRESH;
+      } else if (switching) fresh = true;
+    }
+    if (fresh && !canOpenSession) {
+      ctx.ui.setEditorText(`/${cmd("build")} ${name} --fresh`);
+      return ctx.ui.notify(`Press Enter to build ${name} in a fresh session.`, "info");
+    }
+
+    const session = ctx.sessionManager.getSessionFile();
+    const prev = store.progress(name);
+    const restart = !!prev && unfinishedPhase(prev.phase);
+    const p: Progress = {
+      ...prev,
+      spec: name,
+      phase: "building",
+      baseCommit: restart ? (prev!.baseCommit ?? gitHead(ctx.cwd)) : gitHead(ctx.cwd),
+      tasks: syncTasks(spec, prev?.tasks).map((t) => (t.status === "done" ? t : { ...t, status: "todo" as const, attempts: 0 })),
+      current: undefined,
+      pause: undefined,
+      nudged: undefined,
+      needsIntro: undefined,
+      detached: undefined,
+      updatedAt: now(),
+    };
+    const first = p.tasks.find((t) => t.status !== "done")?.id;
+    if (!first) return ctx.ui.notify(`Every task of ${name} is done. Next: /${cmd("review")} ${name}.`, "info");
+    /** The start-of-build undo point, in the session that builds. */
+    const startCheckpoint = (c: ExtensionContext) => {
+      if (!cfg.checkpoints || (restart && store.checkpoints(name).length)) return;
+      const snap = snapshot(c.cwd, `pb: start of ${name}`);
+      const entry = tree(c).getLeafId?.() ?? undefined;
+      store.saveCheckpoints(name, snap ? [{ id: "start", at: now(), ...snap, head: p.baseCommit, tasks: structuredClone(p.tasks), entry, intro: true }] : []);
+    };
+
+    if (!fresh) {
+      // Same session: lift the planning protection, send the build instructions and the first task.
+      if (buildModel && switching) await pi.setModel(buildModel as Parameters<typeof pi.setModel>[0]);
+      p.session = session;
+      if (session) store.setPlanning(session, false);
+      store.saveProgress(p);
+      startCheckpoint(ctx);
+      store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false });
+      const knowsSpec = !!session && p.writtenIn === session && !p.edited;
+      const task = beginTask(ctx, store, p, first, { intro: true })!;
+      instruct(
+        `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${task.marker}`,
+        `${buildIntro(name, spec, buildCmd, standardsFor(ctx), knowsSpec ? undefined : md)}\n\n${task.prompt}`,
+      );
+      return;
+    }
+
+    // Fresh session: seeded with the spec, on the model and thinking level you planned with.
+    const cctx = ctx as ExtensionCommandContext;
+    const carried = { model: buildModel ? cfg.buildModel : sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined };
+    store.setCarry({ ...carried, spec: name });
+    // A new session loads AGENTS.md itself: the standards needn't come along.
+    const intro = buildIntro(name, spec, buildCmd, "", md);
+    const result = await cctx.newSession({
+      parentSession: session,
+      setup: async (sm) => {
+        sm.appendSessionInfo(`build: ${name}`);
+      },
+      withSession: async (c) => {
+        // Only `c` from here on: the captured pi and ctx belong to the replaced session.
+        // The new session gets a fresh runtime with the default tools, so editing is on.
+        p.session = c.sessionManager.getSessionFile();
+        store.saveProgress(p);
+        startCheckpoint(c);
+        store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: true });
+        const task = beginTask(c, store, p, first, { intro: true })!;
+        await c.sendMessage(
+          {
+            customType: "pb",
+            content: `▶ Building **${name}** from ${store.rel("specs", name, "spec.md")}${carried.model ? `, on ${carried.model}` : ""}${carried.thinking ? `, thinking ${carried.thinking}` : ""}.\nThis session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\`\n${task.marker}`,
+            display: true,
+          },
+          { triggerTurn: false },
+        );
+        // Not awaited: the build runs on in this session while the command returns.
+        void c.sendMessage({ customType: "pb-instruction", content: `${intro}\n\n${task.prompt}`, display: false }, { triggerTurn: true });
+      },
+    });
+    if (result.cancelled) ctx.ui.notify("Build cancelled.", "info");
+  };
+
+  /** After /pb:build asked for the spec: once it's written, show it and ask how to go on. */
+  const offerPendingBuild = async (ctx: ExtensionContext): Promise<boolean> => {
+    const store = new Store(ctx.cwd);
+    const session = ctx.sessionManager.getSessionFile();
+    if (!store.pendingBuild(session)) return false;
+    const mine = store
+      .specNames()
+      .map((n) => ({ n, p: store.progress(n) }))
+      .filter((x) => x.p?.writtenIn === session && x.p?.phase === "written")
+      .sort((a, b) => b.p!.updatedAt.localeCompare(a.p!.updatedAt));
+    if (!mine.length) return true; // still talking (e.g. a question before writing): keep waiting
+    store.setPendingBuild(undefined);
+    // Several specs: build the first one whose dependency isn't among the unbuilt ones.
+    const names = mine.map((x) => x.n);
+    const name = names.find((n) => !names.includes(loadSpec(store, n)?.spec.dependsOn ?? "")) ?? names[0];
+    const loaded = loadSpec(store, name);
+    if (!loaded) return true;
+    const { spec } = loaded;
+    post(
+      [
+        `**Spec written: ${name}** (${store.rel("specs", name, "spec.md")})${names.length > 1 ? ` · also: ${names.filter((n) => n !== name).join(", ")}` : ""}`,
+        "",
+        ...spec.tasks.map((t) => `- ${t.id}: ${t.title}${t.test ? ` · \`${t.test}\`` : ""}`),
+        "",
+        `Verification: ${spec.gate}${spec.newTests ? "" : " · no new tests"}`,
+      ].join("\n"),
+    );
+    // The whole spec, to read before saying yes: shown, but not sent to the model (it wrote it).
+    pi.appendEntry("pb-spec", { name, markdown: loaded.md });
+    if (!ctx.hasUI) {
+      post(tip("spec.next"));
+      return true;
+    }
+    const cfg = store.config();
+    const usage = ctx.getContextUsage()?.percent;
+    const switching = !!cfg.buildModel && cfg.buildModel !== sessionModel(ctx) && !!findModel(ctx, cfg.buildModel);
+    const preferFresh = switching || (usage != null && usage > cfg.freshAbove);
+    const HERE = "Build here (keeps our discussion; the cache stays warm)";
+    const FRESH = `Build in a fresh session, from the spec (${switching ? `on ${cfg.buildModel}, ` : ""}lean context)`;
+    const EDIT = "Edit the spec first";
+    const LATER = "Not now";
+    for (;;) {
+      const choice = await ctx.ui.select(`Build ${name} now? ${spec.tasks.length} tasks`, preferFresh ? [FRESH, HERE, EDIT, LATER] : [HERE, FRESH, EDIT, LATER]);
+      if (choice === EDIT) {
+        await editSpec(ctx, store, name);
+        continue;
+      }
+      if (choice === HERE) await startBuild(ctx, store, name, false, true);
+      else if (choice === FRESH) await startBuild(ctx, store, name, true, true);
+      else post(tip("spec.next"));
+      return true;
+    }
+  };
+
   pi.registerCommand(cmd("build"), {
-    description: "Build a spec in a new session, task by task, each checked. In a build session: continue after a pause (optionally with guidance)",
+    description: "Build the planned feature here, task by task, each checked (writes the spec first if there isn't one). --fresh builds in a new session. In a paused build: continue, optionally with guidance",
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
-      const words = args.trim().split(/\s+/).filter(Boolean);
+      const fresh = /(^|\s)--fresh(\s|$)/.test(args);
+      const words = args.replace(/(^|\s)--fresh(?=\s|$)/g, " ").trim().split(/\s+/).filter(Boolean);
+      const session = ctx.sessionManager.getSessionFile();
+      const { cfg, buildCmd } = commands(ctx.cwd, store);
 
-      // Inside a build session: resume.
+      // This session has an unfinished build: continue it.
       const here = specOfSession(ctx);
-      if (here.name && here.progress) {
+      if (here.name && here.progress && unfinishedPhase(here.progress.phase)) {
         const p = here.progress;
-        const guidance = args.trim();
-        if (p.phase === "built" || p.phase === "reviewed") return ctx.ui.notify(`${p.spec} is built. Next: /${cmd("review")}.`, "info");
+        const guidance = words.join(" ");
         if (guidance) {
           const md = store.readSpec(p.spec);
           if (md) store.writeSpec(p.spec, addDecision(md, guidance));
         }
-        if (!p.current) {
-          const first = nextTodo(p);
-          return first ? startTask(ctx, store, p, first.id, guidance) : ctx.ui.notify("Nothing left to build here.", "info");
-        }
+        const from = guidance ? `\n\nFrom the human: ${guidance}` : "";
         if (p.current === "final") {
           const fin = p.tasks.find((t) => t.id === "final");
           if (fin) fin.attempts = 1;
-          p.report = undefined;
           p.phase = "building";
           p.pause = undefined;
           store.saveProgress(p);
-          return instruct("▶ final check", fixPrompt("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", 1, store.config().maxAttempts) + (guidance ? `\n\nFrom the human: ${guidance}` : ""));
+          showProgress(ctx, p);
+          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", 1, cfg.maxAttempts, false) + from);
         }
         const cur = p.current ?? nextTodo(p)?.id;
-        if (!cur) return ctx.ui.notify("Nothing left to build here.", "info");
         const tp = p.tasks.find((t) => t.id === cur);
-        if (tp && tp.attempts >= store.config().maxAttempts) tp.attempts = 0; // your answer buys a fresh set of attempts
-        return startTask(ctx, store, p, cur, guidance);
+        const loaded = loadSpec(store, p.spec);
+        if (!loaded) return ctx.ui.notify(`${store.rel("specs", p.spec, "spec.md")} doesn't parse. Fix it (or /${cmd("spec")} ${p.spec}), then /${cmd("build")}.`, "error");
+        if (!cur || !tp) return ctx.ui.notify("Nothing left to build here.", "info");
+        // Your answer to a task that kept failing buys it a fresh set of attempts; other pauses cost none.
+        const exhausted = tp.attempts >= cfg.maxAttempts;
+        if (exhausted) tp.attempts = 0;
+        const again = exhausted || tp.status === "todo";
+        const intro = !!p.needsIntro;
+        p.needsIntro = undefined;
+        const t = beginTask(ctx, store, p, cur, { countAttempt: again, intro })!;
+        const knowsSpec = !!session && p.writtenIn === session && !p.edited;
+        const body = intro
+          ? `${buildIntro(p.spec, loaded.spec, buildCmd, standardsFor(ctx), knowsSpec ? undefined : loaded.md)}\n\n${t.prompt}`
+          : again
+            ? t.prompt
+            : continuePrompt(t.task);
+        return instruct(t.marker, body + from);
       }
 
-      // Otherwise: pick a spec and open its build session. Unfinished builds can be restarted
-      // in a new session (e.g. after a crash, or a lost session): finished tasks stay done.
+      // Which spec: a named one; else the ones this session wrote; else any ready one.
       const phaseOf = (n: string) => store.progress(n)?.phase ?? "written";
-      const unfinished = (n: string) => ["checking", "building", "paused"].includes(phaseOf(n));
-      const offered = store.specNames().filter((n) => phaseOf(n) === "written" || unfinished(n));
-      const labelOf = (n: string) => (unfinished(n) ? `${n} (restart the build, finished tasks stay done)` : n);
+      const offered = store.specNames().filter((n) => phaseOf(n) === "written" || unfinishedPhase(phaseOf(n)));
       let name = words[0] && store.readSpec(words[0]) ? words[0] : undefined;
       if (!name) {
-        if (!offered.length) return ctx.ui.notify(`No spec ready to build. Write one with /${cmd("spec")}.`, "warning");
-        if (offered.length === 1 || !ctx.hasUI) name = offered[0];
+        const mine = offered.filter((n) => store.progress(n)?.writtenIn === session);
+        const planning = !!session && store.planningSessions().includes(session);
+        if (!mine.length && (planning || !offered.length)) {
+          // No spec from this discussion yet: write it first, then offer to build it.
+          store.setPendingBuild(session);
+          return instruct(`▶ /${cmd("build")} — writing the spec first`, `${specPrompt(words.join(" "), store.specNames())}\n\nAfter writing it, stop: the harness shows it to me and asks whether to build.`);
+        }
+        const pool = mine.length ? mine : offered;
+        const labelOf = (n: string) => (unfinishedPhase(phaseOf(n)) ? `${n} (restart the build, finished tasks stay done)` : n);
+        if (pool.length === 1 || !ctx.hasUI) name = pool[0];
         else {
-          const labels = offered.map(labelOf);
+          const labels = pool.map(labelOf);
           const choice = await ctx.ui.select("Build which spec?", labels);
-          name = choice ? offered[labels.indexOf(choice)] : undefined;
+          name = choice ? pool[labels.indexOf(choice)] : undefined;
         }
         if (!name) return;
       }
-      const loaded = loadSpec(store, name);
-      if (!loaded) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
-      const { spec, md } = loaded;
-      const { testCmd, buildCmd } = commands(ctx.cwd, store);
-      if (spec.gate === "tests" && !testCmd) return ctx.ui.notify(`Verification is "tests" but no test command is set: set "verify" in ${store.rel("config.json")}, or use Verification: build/none in the spec.`, "warning");
-      if (spec.gate === "build" && !buildCmd) return ctx.ui.notify(`Verification is "build" but no build command is set: set "build" in ${store.rel("config.json")}.`, "warning");
-      if (spec.dependsOn) {
-        const dep = store.progress(spec.dependsOn)?.phase;
-        if (dep !== "built" && dep !== "reviewed") {
-          const go = ctx.hasUI && (await ctx.ui.confirm(`${name} depends on ${spec.dependsOn}`, `${spec.dependsOn} isn't built yet. Build ${name} anyway?`));
-          if (!go) return;
-        }
-      }
-
-      const prev = store.progress(name);
-      const restart = !!prev && unfinished(name);
-      const p: Progress = {
-        spec: name,
-        phase: "building",
-        baseCommit: restart ? (prev!.baseCommit ?? gitHead(ctx.cwd)) : gitHead(ctx.cwd),
-        tasks: syncTasks(spec, prev?.tasks).map((t) => (t.status === "done" ? t : { ...t, status: "todo" as const, attempts: 0 })),
-        updatedAt: now(),
-      };
-      if (store.config().checkpoints && !(restart && store.checkpoints(name).length)) {
-        const snap = snapshot(ctx.cwd, `pb: start of ${name}`);
-        store.saveCheckpoints(name, snap ? [{ id: "start", at: now(), ...snap, head: p.baseCommit, tasks: structuredClone(p.tasks) }] : []);
-      }
-      const first = p.tasks.find((t) => t.status !== "done")?.id;
-      if (!first) return ctx.ui.notify(`Every task of ${name} is done. Next: /${cmd("review")} ${name}.`, "info");
-      const seed = buildSeed(name, md, spec, testCmd, buildCmd);
-      const parent = ctx.sessionManager.getSessionFile();
-      // A new session starts from Pi's defaults: carry over the model and thinking level you planned with.
-      const carried = { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: pi.getThinkingLevel() as string | undefined };
-      store.setCarry({ ...carried, spec: name });
-      const result = await ctx.newSession({
-        parentSession: parent,
-        setup: async (sm) => {
-          sm.appendSessionInfo(`build: ${name}`);
-        },
-        withSession: async (c) => {
-          p.session = c.sessionManager.getSessionFile();
-          store.saveProgress(p);
-          store.event(name!, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate });
-          // Only `c` from here on: the captured pi and ctx belong to the replaced session.
-          // The new session gets a fresh runtime with the default tools, so editing is on.
-          await c.sendMessage(
-            {
-              customType: "pb",
-              content: `▶ Building **${name}** from ${store.rel("specs", name!, "spec.md")}${carried.model ? `, on ${carried.model}` : ""}${carried.thinking ? `, thinking ${carried.thinking}` : ""}.\nThis session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\``,
-              display: true,
-            },
-            { triggerTurn: false },
-          );
-          // Not awaited: the build runs on in this session, driven by agent_settled, while the command returns.
-          // The spec and the first open task go out together: the build starts building.
-          const task = beginTask(c, store, p, first)!;
-          await c.sendMessage({ customType: "pb", content: task.marker, display: true }, { triggerTurn: false });
-          void c.sendMessage({ customType: "pb-instruction", content: `${seed}\n\n${task.prompt}`, display: false }, { triggerTurn: true });
-        },
-      });
-      if (result.cancelled) ctx.ui.notify("Build cancelled.", "info");
+      await startBuild(ctx, store, name, fresh);
     },
   });
 
   /* -------------------------------- review ------------------------------- */
 
+  const P_ORDER = ["P0", "P1", "P2", "P3"] as const;
+
   pi.registerCommand(cmd("review"), {
-    description: "Independent review of a build against its spec, by a reviewer who never saw the build (findings land in this session)",
+    description: "Independent review by a reviewer who never saw the build: against the spec, or any uncommitted change against its intent. Follow-ups look only at what changed (--full: everything again)",
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
+      const full = /(^|\s)--full(\s|$)/.test(args);
+      const rest = args.replace(/(^|\s)--full(?=\s|$)/g, " ").trim();
+      const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+
+      // What to review: this session's spec; else a built one or the uncommitted change without a spec.
       let name = specOfSession(ctx).name;
       if (!name) {
-        const done = store.specNames().filter((n) => ["built", "reviewed", "building", "paused"].includes(store.progress(n)?.phase ?? ""));
-        if (!done.length) return ctx.ui.notify(`Nothing built to review yet: /${cmd("build")} first.`, "warning");
-        name = done.length === 1 || !ctx.hasUI ? done[0] : await ctx.ui.select("Review which spec?", done);
-        if (!name) return;
+        const built = store.specNames().filter((n) => ["built", "reviewed", "building", "paused"].includes(store.progress(n)?.phase ?? ""));
+        const ADHOC = "The uncommitted change (no spec)";
+        if (built.length) {
+          const choice = ctx.hasUI ? await ctx.ui.select("Review what?", [...built, ADHOC]) : built[0];
+          if (!choice) return;
+          name = choice === ADHOC ? undefined : choice;
+        }
       }
-      const loaded = loadSpec(store, name);
-      const p = store.progress(name);
-      if (!loaded || !p) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse.`, "error");
-      const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+      const loaded = name ? loadSpec(store, name) : undefined;
+      const p = name ? store.progress(name) : undefined;
+      if (name && (!loaded || !p)) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse.`, "error");
+      const base = p?.baseCommit;
+      const changed = changedSince(ctx.cwd, base);
+      if (!name && !changed.length) return ctx.ui.notify("Nothing to review: there are no uncommitted changes.", "info");
+      const intent = name ? "" : rest || (ctx.hasUI ? ((await ctx.ui.input("What is the change meant to do? (optional)")) ?? "") : "");
 
       const abort = new AbortController();
       const unsubEsc = ctx.mode === "tui" ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
-      let activity = "";
-      const render = (phase: string) => ctx.ui.setWidget("pb", [`pb review ${name} — ${phase}   (Esc to stop)`, ...(activity ? [`  ↳ ${activity}`] : [])]);
+      const label = name ?? "the uncommitted change";
+      const render = (phase: string, activity?: string) => ctx.ui.setWidget("pb-review", [`pb review ${label} — ${phase}   (Esc to stop)`, ...(activity ? [`  ↳ ${activity}`] : [])]);
       try {
         // Fresh ground truth first: the reviewer should judge what's on disk now.
-        const command = loaded.spec.gate === "tests" ? testCmd : loaded.spec.gate === "build" ? buildCmd : null;
+        const command = loaded ? (loaded.spec.gate === "tests" ? testCmd : loaded.spec.gate === "build" ? buildCmd : null) : (testCmd ?? buildCmd);
+        let check = "(not run)";
         if (command) {
           render(`checking: ${command}`);
-          p.lastVerify = await runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, abort.signal);
-          store.saveProgress(p);
+          const v = await runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, abort.signal);
+          check = v.summary;
+          if (p) {
+            p.lastVerify = v;
+            store.saveProgress(p);
+          }
         }
-        render("fresh reviewer");
-        const res = await runFresh({
+        if (abort.signal.aborted) return ctx.ui.notify("Review stopped.", "info");
+
+        // The tree as the reviewer sees it: the next review's delta starts here, and anything the reviewer changes is put back.
+        const before = cfg.checkpoints ? snapshot(ctx.cwd, `pb: review ${label}`) : undefined;
+        const prevReview = p?.review;
+        let previous: { snapshot: string; findings: Finding[]; changed: string[] } | undefined;
+        if (!full && prevReview?.snapshot && before) {
+          const since = changedPaths(ctx.cwd, prevReview.snapshot, before.commit);
+          if (!since.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
+          previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since };
+        }
+
+        const outcome = await runReview({
           cwd: ctx.cwd,
-          role: "reviewer",
-          systemPrompt: REVIEWER_SYSTEM,
           brief: reviewerBrief({
-            name,
-            markdown: loaded.md,
-            spec: loaded.spec,
-            base: p.baseCommit,
-            changed: changedSince(ctx.cwd, p.baseCommit),
-            stat: diffStat(ctx.cwd, p.baseCommit),
-            check: p.lastVerify?.summary ?? "(not run)",
-            focus: args.trim(),
+            spec: loaded && name ? { name, markdown: loaded.md, parsed: loaded.spec } : undefined,
+            intent,
+            base,
+            changed,
+            stat: diffStat(ctx.cwd, base),
+            check,
+            focus: name ? rest : "",
+            previous,
           }),
-          prompt: "Review the change described in the attached file. End with the VERDICT line.",
-          tools: ["read", "grep", "find", "ls", "bash"],
-          model: cfg.reviewer.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
+          base,
+          spec: loaded?.md,
+          model: cfg.reviewer.model ?? sessionModel(ctx),
           thinking: cfg.reviewer.thinking ?? (ctx.thinkingLevel as string | undefined),
-          childExtensions: false,
+          verify: cfg.reviewer.verify !== false,
           signal: abort.signal,
-          onActivity: (a) => {
-            activity = a;
-            render("fresh reviewer");
-          },
+          onPhase: render,
         });
-        if (res.aborted) return ctx.ui.notify("Review stopped.", "info");
-        if (!res.text.trim()) return ctx.ui.notify(`The reviewer produced no output${res.error ? `: ${res.error.slice(0, 300)}` : ""}`, "error");
-        const verdict = [...res.text.matchAll(/^\s*VERDICT:\s*(pass|changes_needed)\b/gim)].at(-1)?.[1].toLowerCase();
-        const prose = res.text.replace(/^\s*VERDICT:.*$/gim, "").trim();
-        store.event(name, { type: "review", verdict: verdict ?? "none", input: res.tokens.input, output: res.tokens.output, cacheRead: res.tokens.cacheRead, cacheWrite: res.tokens.cacheWrite, cost: res.cost, ms: res.ms });
-        if (verdict === "pass") {
-          p.phase = "reviewed";
+
+        const after = before ? snapshot(ctx.cwd, `pb: after review ${label}`) : undefined;
+        if (before && after && before.tree !== after.tree) {
+          const files = restore(ctx.cwd, after.commit, before.commit);
+          ctx.ui.notify(`The reviewer changed ${files.join(", ")}; put back as it was.`, "warning");
+        }
+        if (outcome.aborted) return ctx.ui.notify("Review stopped.", "info");
+        if (outcome.error) return ctx.ui.notify(`The reviewer produced no output: ${outcome.error.slice(0, 300)}`, "error");
+
+        const findings = [...outcome.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
+        const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
+        const { verdict } = outcome;
+        const event = { verdict, p: counts, dismissed: outcome.dismissed.length, followUp: !!previous, ...outcome.tokens, cost: outcome.cost, ms: outcome.ms };
+        if (!name) store.reviewEvent(event);
+        if (name && p) {
+          store.event(name, { type: "review", ...event });
+          p.review = { at: now(), snapshot: before?.commit, verdict, findings: findings.filter((f) => f.priority === "P0" || f.priority === "P1" || f.priority === "P2") };
+          if (verdict === "pass") p.phase = "reviewed";
           store.saveProgress(p);
         }
+        const tally = findings.length || outcome.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
         post(
           [
-            `**Review of ${name}** — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}`,
+            `**Review of ${label}**${previous ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}`,
             "",
-            prose,
+            outcome.prose,
+            ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),
+            ...(outcome.dismissed.length ? ["", "Dismissed after a second look:", ...outcome.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
             "",
-            tip(verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : "review.other", { spec: name }),
+            tip(verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : "review.other", { spec: label }),
           ].join("\n"),
         );
       } finally {
         unsubEsc?.();
-        ctx.ui.setWidget("pb", undefined);
+        ctx.ui.setWidget("pb-review", undefined);
       }
     },
   });
@@ -641,7 +1180,7 @@ export default function pb(pi: ExtensionAPI) {
   /* --------------------------------- undo -------------------------------- */
 
   pi.registerCommand(cmd("undo"), {
-    description: "Go back to before a task of this build: files and task list, picked from a list",
+    description: "Go back to before a task of this build: files, task list and conversation, picked from a list",
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const { store, name, progress: p } = specOfSession(ctx);
@@ -663,7 +1202,8 @@ export default function pb(pi: ExtensionAPI) {
       if (!cur) return ctx.ui.notify("Could not snapshot the working tree (is this a git repository?). Nothing was changed.", "error");
       const files = changedPaths(ctx.cwd, cur.commit, target.commit);
       const idx = cps.indexOf(target);
-      const undone = cps.slice(idx).filter((c) => c.task).map((c) => c.id);
+      const undoneCps = cps.slice(idx).filter((c) => c.task);
+      const undone = undoneCps.map((c) => c.id);
       const head = gitHead(ctx.cwd);
       const summary = [
         `Files: ${files.length ? files.slice(0, 20).join(", ") + (files.length > 20 ? ` … (+${files.length - 20})` : "") : "none"}`,
@@ -674,16 +1214,40 @@ export default function pb(pi: ExtensionAPI) {
         .join("\n");
       if (ctx.hasUI && !(await ctx.ui.confirm(`Undo to before ${target.id === "start" ? "the build" : target.id}?`, summary))) return;
       restore(ctx.cwd, cur.commit, target.commit);
-      const undoEntry: Checkpoint = { id: `u${cps.filter((c) => c.id.startsWith("u")).length + 1}`, at: now(), ...cur, head, tasks: structuredClone(p.tasks) };
+
+      // The conversation goes back too, so the discarded attempt doesn't anchor the next one;
+      // everything before that point is still in the prompt cache.
+      const oldLeaf = tree(ctx).getLeafId?.() ?? undefined;
+      const point = rewindPoint(ctx, target.entry);
+      const nav = (ctx as Partial<ExtensionCommandContext>).navigateTree;
+      let rewound = false;
+      if (point && nav && point !== oldLeaf) {
+        const reverting = target.id.startsWith("u");
+        undoSummary = reverting
+          ? undefined
+          : `[pb] The human undid the work from ${target.id === "start" ? "the start of the build" : target.id} on (/pb:undo restored the files). What had been done: ${undoneCps.map((c) => c.summary ?? `${c.id} (unfinished)`).join("; ") || "nothing finished"}. Don't simply repeat it.`;
+        try {
+          const r = await nav(point, { summarize: !reverting, label: `pb: before ${target.id}` });
+          rewound = !r.cancelled;
+        } catch (e) {
+          ctx.ui.notify(`Files restored, but the conversation couldn't be rewound: ${(e as Error).message}`, "warning");
+        } finally {
+          undoSummary = undefined;
+        }
+      }
+      const undoEntry: Checkpoint = { id: `u${cps.filter((c) => c.id.startsWith("u")).length + 1}`, at: now(), ...cur, head, tasks: structuredClone(p.tasks), entry: rewound ? oldLeaf : undefined };
       store.saveCheckpoints(name, [...cps.slice(0, idx).concat(target.id === "start" ? [target] : []), undoEntry]);
       p.tasks = structuredClone(target.tasks).filter((t) => t.id !== "final");
       p.current = undefined;
-      p.report = undefined;
       p.phase = "paused";
       p.pause = `undone to before ${target.id}`;
+      p.needsIntro = rewound && !!target.intro ? true : undefined;
       store.saveProgress(p);
-      store.event(name, { type: "undo", to: target.id, tasks: undone });
-      post(`**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${files.length} file(s) restored.\n${summary}\n\n${tip("undo.done", { id: undoEntry.id })}`);
+      showProgress(ctx, p);
+      store.event(name, { type: "undo", to: target.id, tasks: undone, rewound });
+      post(
+        `**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${files.length} file(s) restored${rewound ? ", the conversation rewound" : ""}.\n${summary}\n\n${tip("undo.done", { id: undoEntry.id })}`,
+      );
     },
   });
 

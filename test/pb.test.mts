@@ -1,7 +1,9 @@
 /**
  * End-to-end tests of pb with a simulated Pi: commands, tools and events are the
- * extension's real ones; the "agent" is a script that reacts to each instruction by
- * writing files and calling pb's tools, and agent_settled fires after every run.
+ * extension's real ones; the "agent" is a script that reacts to each instruction (or tool
+ * result) by writing files and calling tools. Like Pi, one run goes on while tool results
+ * ask for more, turn_end fires after every turn, agent_before_settle may continue a run,
+ * and agent_settled fires at its end. Sessions are trees of entries with a leaf.
  * Run: npm test
  */
 import assert from "node:assert/strict";
@@ -12,38 +14,76 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 process.env.PI_PB_PI_COMMAND = path.join(path.dirname(new URL(import.meta.url).pathname), "mock-pi.mjs");
+process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const { default: pb } = await import("../extensions/pb/index.ts");
 const { parseSpec, addDecision } = await import("../extensions/pb/spec.ts");
 
-type Tool = (name: string, params: object) => Promise<{ error?: string }>;
+type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
+type Tool = (name: string, params: object) => Promise<Result>;
 type Script = (instruction: string, tool: Tool) => Promise<void> | void;
+type Entry = { id: string; parentId: string | null; type: string; message?: { role: string; content: { type: "text"; text: string }[] }; content?: string; summary?: string };
 
 function setup(config: object = {}) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pb-test-"));
   execSync("git init -q && git config user.email t@t && git config user.name t && echo hi > README && git add . && git commit -qm init", { cwd: repo });
   fs.mkdirSync(path.join(repo, ".pi/pb"), { recursive: true });
-  fs.writeFileSync(path.join(repo, ".pi/pb/config.json"), JSON.stringify({ build: null, maxAttempts: 2, ...config }));
+  fs.writeFileSync(path.join(repo, ".pi/pb/config.json"), JSON.stringify({ build: null, maxAttempts: 2, baseline: false, ...config }));
 
   const posts: string[] = [];
   const notes: string[] = [];
   const instructions: string[] = [];
+  const results: string[] = []; // every pb_task_done result, including the ones that end the run
   const selects: string[] = [];
+  const selectTitles: string[] = [];
+  const confirms: string[] = [];
+  const editors: (string | undefined)[] = [];
+  const views: { customType: string; data: any }[] = [];
+  const navigations: { target: string; summary?: string }[] = [];
+  const edits: { targetId: string; replacement: unknown }[] = [];
   const blocked: string[] = [];
   const agent: { script?: Script } = {};
   const names = new Map<string, string>();
+  const stat = { runs: 0, editorText: "" };
   let sessions = 0;
+
+  // Session trees, by session file: entries and the current leaf.
+  const trees = new Map<string, { entries: Map<string, Entry>; leaf: string | null }>();
+  let ids = 0;
+  const treeOf = (file: string) => {
+    if (!trees.has(file)) trees.set(file, { entries: new Map(), leaf: null });
+    return trees.get(file)!;
+  };
+  const append = (file: string, e: Omit<Entry, "id" | "parentId">) => {
+    const t = treeOf(file);
+    const entry = { ...e, id: `e${++ids}`, parentId: t.leaf } as Entry;
+    t.entries.set(entry.id, entry);
+    t.leaf = entry.id;
+    return entry;
+  };
+  const branch = (file: string) => {
+    const t = treeOf(file);
+    const out: Entry[] = [];
+    for (let id = t.leaf; id; id = t.entries.get(id)!.parentId) out.unshift(t.entries.get(id)!);
+    return out;
+  };
+  const textOf = (e: Entry) => e.message?.content.map((c) => c.text).join("") ?? e.content ?? e.summary ?? "";
 
   // Like Pi: every session gets its own runtime and extension instance; after a session
   // replacement, the old pi and ctx are stale and throw if used.
   type Runtime = {
+    file: () => string;
     cmds: Record<string, any>;
     tools: Record<string, any>;
     handlers: Record<string, ((e: object, ctx: object) => unknown)[]>;
+    renderers: string[];
     pi: any;
     ctx: any;
     stale: boolean;
     model: { provider: string; id: string; contextWindow: number };
     thinking: string;
+    usage: number;
+    hasUI: boolean;
+    contextFiles: { path: string; content: string }[];
   };
   const MODELS = [
     { provider: "p", id: "m", contextWindow: 100000 },
@@ -57,27 +97,45 @@ function setup(config: object = {}) {
         return Reflect.get(obj, key, recv);
       },
     });
+  const fire = async (event: string, e: object, ctx = rt.ctx) => {
+    const out: unknown[] = [];
+    for (const h of rt.handlers[event] ?? []) out.push(await h({ type: event, ...e }, ctx));
+    return out;
+  };
   const makeRuntime = (sessionFile: string): Runtime => {
     const self = {} as Runtime;
     const me = () => self;
+    const file = () => self.ctx.sessionManager.getSessionFile();
+    self.file = file;
     self.cmds = {};
     self.tools = {};
     self.handlers = {};
+    self.renderers = [];
     self.stale = false;
     self.model = MODELS[0]; // like Pi: a new session starts from the settings defaults
     self.thinking = "off";
+    self.usage = 10;
+    self.hasUI = true;
+    self.contextFiles = [];
     self.pi = guard(me, {
       registerCommand: (n: string, o: object) => (self.cmds[n] = o),
       registerTool: (t: { name: string }) => (self.tools[t.name] = t),
+      registerEntryRenderer: (n: string) => self.renderers.push(n),
+      registerMessageRenderer: (n: string) => self.renderers.push(n),
       on: (e: string, h: (e: object, ctx: object) => unknown) => (self.handlers[e] ??= []).push(h),
       getActiveTools: () => ["read", "bash", "edit", "write"],
-      setSessionName: (n: string) => names.set(sessionFile, n),
+      setSessionName: (n: string) => names.set(file(), n),
       getThinkingLevel: () => self.thinking,
       setThinkingLevel: (l: string) => (self.thinking = l),
       setModel: async (m: Runtime["model"]) => ((self.model = m), true),
       setActiveTools: () => {},
+      appendEntry: (customType: string, data: unknown) => {
+        views.push({ customType, data });
+        append(file(), { type: "custom" });
+      },
       sendMessage: (m: { content: string; display?: boolean }, o?: { triggerTurn?: boolean }) => {
         if (m.display) posts.push(m.content);
+        append(file(), { type: "custom_message", content: m.content });
         if (o?.triggerTurn) turn(m.content);
       },
       sendUserMessage: (t: string) => turn(t),
@@ -85,29 +143,54 @@ function setup(config: object = {}) {
     self.ctx = guard(me, {
       cwd: repo,
       mode: "print",
-      hasUI: true,
+      get hasUI() {
+        return self.hasUI;
+      },
       get model() {
         return self.model;
       },
+      get thinkingLevel() {
+        return self.thinking;
+      },
       modelRegistry: { find: (prov: string, id: string) => MODELS.find((m) => m.provider === prov && m.id === id) },
       isIdle: () => true,
-      sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => path.basename(sessionFile, ".jsonl") },
+      getContextUsage: () => ({ tokens: self.usage * 1000, contextWindow: 100000, percent: self.usage }),
+      getSystemPromptOptions: () => ({ contextFiles: self.contextFiles }),
+      sessionManager: {
+        getSessionFile: () => sessionFile,
+        getSessionId: () => path.basename(sessionFile, ".jsonl"),
+        getSessionName: () => names.get(file()),
+        getLeafId: () => treeOf(file()).leaf,
+        getEntry: (id: string) => treeOf(file()).entries.get(id),
+      },
       ui: {
         notify: (m: string) => notes.push(m),
         setWidget: () => {},
         setStatus: () => {},
-        select: async (_t: string, opts: string[]) => selects.shift() ?? opts[0],
-        confirm: async () => true,
-        input: async () => "",
+        setEditorText: (t: string) => (stat.editorText = t),
+        select: async (title: string, opts: string[]) => (selectTitles.push(title), selects.shift() ?? opts[0]),
+        confirm: async (title: string) => (confirms.push(title), true),
+        input: async () => selects.shift() ?? "",
+        editor: async () => editors.shift(),
+      },
+      navigateTree: async (target: string, o: { summarize?: boolean } = {}) => {
+        const [r] = (await fire("session_before_tree", { preparation: { targetId: target } })) as { summary?: { summary: string } }[];
+        const t = treeOf(file());
+        const e = t.entries.get(target)!;
+        t.leaf = e.type === "custom_message" || e.message?.role === "user" ? e.parentId : target;
+        const summary = o.summarize ? r?.summary?.summary : undefined;
+        if (summary) append(file(), { type: "branch_summary", summary });
+        navigations.push({ target, summary });
+        return { cancelled: false };
       },
       newSession: async (opts: { setup?: (sm: object) => Promise<void>; withSession?: (c: object) => Promise<void> }) => {
         self.stale = true;
-        const file = path.join(repo, `build-session-${++sessions}.jsonl`);
-        await opts.setup?.({ appendSessionInfo: (n: string) => names.set(file, n) });
-        rt = makeRuntime(file);
+        const next = path.join(repo, `build-session-${++sessions}.jsonl`);
+        await opts.setup?.({ appendSessionInfo: (n: string) => names.set(next, n) });
+        rt = makeRuntime(next);
         const fresh = rt;
-        for (const h of fresh.handlers.session_start ?? []) await h({ type: "session_start", reason: "new" }, fresh.ctx); // before withSession, as in Pi
-        await opts.withSession?.({ ...fresh.ctx, sessionManager: fresh.ctx.sessionManager, sendMessage: async (m: any, o: any) => fresh.pi.sendMessage(m, o) });
+        await fire("session_start", { reason: "new" }, fresh.ctx); // before withSession, as in Pi
+        await opts.withSession?.({ ...fresh.ctx, ui: fresh.ctx.ui, sessionManager: fresh.ctx.sessionManager, sendMessage: async (m: any, o: any) => fresh.pi.sendMessage(m, o) });
         return { cancelled: false };
       },
     });
@@ -116,7 +199,8 @@ function setup(config: object = {}) {
   };
   rt = makeRuntime(path.join(repo, "planning-session.jsonl"));
 
-  // One agent run per instruction, queued like Pi's follow-ups; agent_settled after each, on the current runtime.
+  // A tool result that asks for more (pb_task_done without terminate) continues the run, as in Pi.
+  let continuation: string | undefined;
   let running: Promise<void> = Promise.resolve();
   const callTool: Tool = async (name, params) => {
     const call = { toolName: name, input: params };
@@ -124,20 +208,51 @@ function setup(config: object = {}) {
       const r = (await h({ type: "tool_call", ...call }, rt.ctx)) as { block?: boolean; reason?: string } | undefined;
       if (r?.block) return blocked.push(`${name} ${(params as { path?: string }).path}`), { error: r.reason };
     }
-    if (!rt.tools[name]) return {}; // a built-in tool: nothing to simulate
-    try {
-      return await rt.tools[name].execute("call", params, undefined, undefined, rt.ctx);
-    } catch (e) {
-      return { error: (e as Error).message };
+    let result: Result = {};
+    if (rt.tools[name]) {
+      try {
+        result = await rt.tools[name].execute("call", params, undefined, undefined, rt.ctx);
+      } catch (e) {
+        result = { error: (e as Error).message };
+      }
     }
+    const out = result.content?.map((c) => c.text).join("") ?? result.error ?? String((params as { output?: string }).output ?? "");
+    append(rt.file(), { type: "message", message: { role: "toolResult", content: [{ type: "text", text: out }] } });
+    if (name === "pb_task_done" && !result.error) {
+      results.push(out);
+      continuation = result.terminate ? undefined : out;
+    }
+    return result;
   };
-  const turn = (text: string) => {
-    instructions.push(text);
+  const turn = (first: string) => {
+    instructions.push(first);
+    stat.runs++;
     running = running.then(async () => {
-      await agent.script?.(text, callTool);
-      const usage = { input: 1000, output: 100, cacheRead: 9000, cacheWrite: 0, cost: { total: 0.001 } };
-      for (const h of rt.handlers.message_end ?? []) await h({ type: "message_end", message: { role: "assistant", usage } }, rt.ctx);
-      for (const h of rt.handlers.agent_settled ?? []) await h({ type: "agent_settled" }, rt.ctx);
+      let input: string | undefined = first;
+      while (input !== undefined) {
+        continuation = undefined;
+        // As in Pi: the assistant message (with its tool calls) first, then the tool results.
+        append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } });
+        await agent.script?.(input, callTool);
+        const usage = { input: 1000, output: 100, cacheRead: 9000, cacheWrite: 0, cost: { total: 0.001 } };
+        await fire("message_end", { message: { role: "assistant", usage } });
+        const contextEntries = branch(rt.file()).map((e) => ({ sourceEntry: e, messages: [{ content: [{ type: "text", text: textOf(e) }] }] }));
+        for (const r of (await fire("turn_end", { context: { contextEntries } })) as { entries?: { targetId: string; replacement: unknown }[] }[])
+          for (const d of r?.entries ?? []) edits.push(d);
+        input = continuation;
+        if (input !== undefined) {
+          instructions.push(input);
+          continue;
+        }
+        for (const r of (await fire("agent_before_settle", { outcome: "completed", entries: [], continue: false })) as { continue?: boolean; entries?: { content: string }[] }[]) {
+          if (r?.continue) {
+            input = r.entries![0].content;
+            append(rt.file(), { type: "custom_message", content: input });
+            instructions.push(input);
+          }
+        }
+      }
+      await fire("agent_settled", {});
     });
   };
 
@@ -154,7 +269,39 @@ function setup(config: object = {}) {
   };
   const read = (f: string) => fs.readFileSync(path.join(repo, f), "utf8");
   const progress = (name: string) => JSON.parse(read(`.pi/pb/specs/${name}/progress.json`));
-  return { repo, names, posts, notes, instructions, selects, blocked, agent, run, read, progress, callTool, settle, runtime: () => rt };
+  const events = (name: string) =>
+    read(`.pi/pb/specs/${name}/events.jsonl`)
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+  return {
+    repo,
+    names,
+    posts,
+    notes,
+    instructions,
+    results,
+    selects,
+    selectTitles,
+    confirms,
+    editors,
+    views,
+    navigations,
+    edits,
+    blocked,
+    agent,
+    stat,
+    run,
+    read,
+    progress,
+    events,
+    callTool,
+    settle,
+    fire: (event: string, e: object) => fire(event, e),
+    entry: (id: string) => treeOf(rt.file()).entries.get(id),
+    text: (id: string) => textOf(treeOf(rt.file()).entries.get(id)!),
+    runtime: () => rt,
+  };
 }
 
 const SPEC = (opts: { verification?: string; newTests?: string; tasks?: string } = {}) => `# Order cancellation
@@ -188,9 +335,12 @@ Create T2.txt.
 }
 `;
 
+/** The task an instruction or tool result is about. */
+const taskOf = (text: string) => text.match(/Task (T\d+)/)?.[1] ?? text.match(/task "(\w+)"/)?.[1];
+
 /** An agent that does each task by creating <task>.txt. */
 const diligent: Script = async (text, tool) => {
-  const task = text.match(/Task (T\d+)/)?.[1] ?? text.match(/task "(\w+)"/)?.[1];
+  const task = taskOf(text);
   if (!task) return;
   if (task !== "final") fs.writeFileSync(`${task}.txt`, "x");
   await tool("pb_task_done", { task, status: "done", summary: `did ${task}` });
@@ -201,6 +351,11 @@ async function written(t: ReturnType<typeof setup>, spec = SPEC()) {
   const r = await t.callTool("pb_write_spec", { name: "order-cancellation", content: spec });
   assert.equal(r.error, undefined, r.error ?? "");
 }
+
+const until = async (cond: () => boolean) => {
+  for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(cond(), "timed out");
+};
 
 /* --------------------------------- spec format --------------------------------- */
 
@@ -231,7 +386,7 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   await t.run("plan", "let admins cancel pending orders");
   assert.equal(t.names.get(path.join(t.repo, "planning-session.jsonl")), "plan: let admins cancel pending orders");
   assert.match(t.posts.at(-1)!, /back to it any time with \/resume, or `pi --session planning-session`/);
-  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl, one-off scripts in a temp directory[\s\S]*run `true` once/);
+  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl, one-off scripts in a temp directory[\s\S]*call pb_explore[\s\S]*Run `true` once[\s\S]*pb_ask/);
   const scratch = path.join(os.tmpdir(), "pb-scratch.py");
   assert.equal((await t.callTool("write", { path: scratch, content: "print(1)" })).error, undefined); // outside the project: fine
   assert.match((await t.callTool("write", { path: "src/Order.java", content: "x" })).error!, /Planning mode: the project's files stay untouched/);
@@ -241,7 +396,7 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   await t.run("plan");
   assert.match(t.notes.at(-1)!, /Describe what you want, in your own words/);
   await t.run("spec");
-  assert.match(t.instructions.at(-1)!, /with the pb_write_spec tool[\s\S]*Not doing X, because/);
+  assert.match(t.instructions.at(-1)!, /with the pb_write_spec tool[\s\S]*Not doing X, because[\s\S]*without it the task is only compiled/);
 });
 
 test("plan mode stays with its session, not with the build session", async () => {
@@ -257,6 +412,23 @@ test("plan mode stays with its session, not with the build session", async () =>
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
+test("plan: files changed while planning (e.g. through bash) are shown before the build: keep or restore", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks"); // the standards offer
+  await t.run("plan", "x");
+  fs.writeFileSync(path.join(t.repo, "stray.txt"), "written by a shell command");
+  fs.writeFileSync(path.join(t.repo, "README"), "changed");
+  await written(t);
+  t.agent.script = diligent;
+  t.selects.push("Restore them to how they were when planning began");
+  await t.run("build");
+  assert.match(t.selectTitles[1], /These project files changed while planning: (README, stray\.txt|stray\.txt, README)/);
+  assert.ok(!fs.existsSync(path.join(t.repo, "stray.txt")));
+  assert.equal(t.read("README"), "hi\n");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
 test("pb_write_spec rejects a spec that doesn't parse, and a bad name", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -266,13 +438,50 @@ test("pb_write_spec rejects a spec that doesn't parse, and a bad name", async ()
   assert.deepEqual(t.progress("order-cancellation").tasks.map((x: any) => [x.id, x.status]), [["T1", "todo"], ["T2", "todo"]]);
 });
 
-/* ------------------------------------- build ------------------------------------- */
-
-test("build: fresh session starting with T1, tasks behind their tests, then the full suite", async () => {
-  const t = setup({ verify: "test -f T1.txt && test -f T2.txt" });
+test("plan: the baseline runs in the background (no tokens) and a red suite warns before building", async () => {
+  const t = setup({ verify: "exit 1", baseline: true });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  assert.match(t.instructions.at(-1)!, /The harness is running `exit 1` in the background/);
+  assert.match(t.posts.find((p) => p.startsWith("▶ /pb:plan"))!, /running `exit 1` in the background for a baseline/);
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
+  assert.match(t.posts.find((p) => p.startsWith("**Baseline**"))!, /FAIL \(exit 1\)[\s\S]*the final check runs the whole suite/i);
+  assert.equal(JSON.parse(t.read(".pi/pb/baseline.json")).ok, false);
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
+  assert.ok(t.confirms.includes("The test suite already failed"));
+});
+
+test("pb_explore answers from a separate context; its usage is reported and counted", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  const r = await t.callTool("pb_explore", { question: "How are order transitions built?" });
+  assert.match(r.content![0].text, /OrderService applies transitions\. \(asked: How are order transitions built\?\)/);
+  assert.equal(r.usage!.totalTokens, 3400);
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("stats");
+  assert.match(t.posts.at(-1)!, /Explorer +1 calls · prompt 3\.0k · output 400 · \$0\.02/);
+});
+
+test("/pb:deps investigates dependencies as a change of its own, in planning mode", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.run("deps", "jackson");
+  assert.match(t.instructions.at(-1)!, /\[pb:deps\] jackson[\s\S]*latest stable[\s\S]*Don't change the project's files/);
+  assert.match((await t.callTool("write", { path: "pom.xml", content: "x" })).error!, /Planning mode/);
+});
+
+/* ------------------------------------- build ------------------------------------- */
+
+test("build --fresh: a new session seeded with the spec, tasks behind their tests, then the full suite", async () => {
+  const t = setup({ verify: "test -f T1.txt && test -f T2.txt" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build", "--fresh");
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "built");
   assert.match(p.session, /build-session-1\.jsonl$/);
@@ -280,9 +489,29 @@ test("build: fresh session starting with T1, tasks behind their tests, then the 
   assert.ok(t.posts.some((x) => /This session: "build: order-cancellation" · back to it with \/resume, or `pi --session build-session-1`/.test(x)));
   assert.deepEqual(p.tasks.map((x: any) => [x.id, x.status]), [["T1", "done"], ["T2", "done"]]);
   assert.match(t.instructions[0], /Build this feature from the spec below[\s\S]*# Order cancellation[\s\S]*Task T1\. Do only this task/);
-  assert.doesNotMatch(t.instructions[0], /pb_spec_gaps/);
   assert.match(t.posts.at(-1)!, /BUILD COMPLETE — order-cancellation[\s\S]*PASS/);
   assert.match(t.read(".pi/pb/specs/order-cancellation/events.jsonl"), /"type":"check","task":"final"/); // full suite after the task tests
+});
+
+test("build: the check runs inside pb_task_done: one agent run from the first task to the end", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.equal(t.stat.runs, 1); // no stop and restart between tasks
+  const next = t.instructions.find((i) => i.startsWith("✓ T1 passed"))!;
+  assert.match(next, /✓ T1 passed \(`test -f T1\.txt`\)\n\n\[pb:build\] Task T2\. Do only this task[\s\S]*it runs `test -f T2\.txt` itself, so don't run that just before/);
+  assert.equal(t.instructions.length, 2); // the first message, then T2 as T1's tool result; the last result ends the run
+  assert.match(t.results.at(-1)!, /✓ T2 passed[\s\S]*Running the full suite…[\s\S]*Build complete: every check passed\. Stop here/);
+});
+
+test("build: a task without a Test: line is compiled, not run against the full suite", async () => {
+  const t = setup({ verify: "true", build: "echo compiled" });
+  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists" }));
+  t.agent.script = diligent;
+  await t.run("build");
+  const checks = t.events("order-cancellation").filter((e) => e.type === "check");
+  assert.deepEqual(checks.map((c) => [c.task, c.command]), [["T1", "echo compiled"], ["T2", "echo compiled"], ["final", "true"]]);
 });
 
 test("build: a failing check goes back to the agent, and passes on the next attempt", async () => {
@@ -297,7 +526,7 @@ test("build: a failing check goes back to the agent, and passes on the next atte
     return diligent(text, tool);
   };
   await t.run("build");
-  assert.ok(t.instructions.some((i) => /The check for T1 failed \(attempt 2 of 2\)[\s\S]*test -f T1\.txt/.test(i)));
+  assert.ok(t.instructions.some((i) => /The check for T1 failed \(attempt 2 of 2\)[\s\S]*test -f T1\.txt[\s\S]*call pb_task_done again/.test(i)));
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
@@ -314,29 +543,72 @@ test("build: after the last attempt it pauses; /pb:build resumes with a fresh se
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "paused");
   assert.match(t.posts.at(-1)!, /Build paused\*\* — T1 still fails after 2 attempts/);
+  assert.match(t.results.at(-1)!, /That was the last attempt: the build is paused\. Stop here/);
   give = true;
   await t.run("build", "create the file in the repo root");
   assert.equal(t.progress("order-cancellation").phase, "built");
   assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /- create the file in the repo root/); // guidance recorded as a decision
+  assert.match(t.instructions.find((i) => /From the human: create the file/.test(i))!, /Task T1 \(attempt 1 of 2\)|Task T1\. Do only/);
 });
 
-test("build: ambiguities become recorded assumptions (no pause); only real questions pause", async () => {
+test("build: ambiguities become recorded assumptions; questions are asked without pausing", async () => {
   const t = setup({ verify: "true" });
   await written(t);
+  let answer: Result | undefined;
   t.agent.script = async (text, tool) => {
     if (text.includes("Task T1")) await tool("pb_record_decision", { decision: "Follow the layout rules over the mockup: the rules are marked exact.", assumption: true });
-    if (text.includes("Task T2")) return void (await tool("pb_task_done", { task: "T2", status: "question", summary: "", question: "Which file name?" }));
+    if (text.includes("Task T2")) answer = await tool("pb_ask", { question: "Which file name?", options: ["t2.txt", "T2.txt"], recommended: "T2.txt" });
+    return diligent(text, tool);
+  };
+  t.selects.push("T2.txt (recommended)");
+  await t.run("build");
+  assert.equal(answer!.content![0].text, "The human answered: T2.txt (recorded in the spec's Decisions)");
+  assert.equal(t.stat.runs, 1); // no pause, no resume
+  const spec = t.read(".pi/pb/specs/order-cancellation/spec.md");
+  assert.match(spec, /- Assumption \(build, T1\): Follow the layout rules over the mockup/);
+  assert.match(spec, /- Which file name\? → T2\.txt/);
+  assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Choices the build made where the spec was unclear[\s\S]*Assumption \(build, T1\): Follow the layout rules/);
+});
+
+test("build: without a UI, a question pauses the build; answering costs the task no attempt", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.runtime().hasUI = false;
+  let asked = false;
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T2") && !asked) {
+      asked = true;
+      const r = await tool("pb_ask", { question: "Which file name?" });
+      assert.equal(r.terminate, true);
+      return;
+    }
+    if (text.includes("Continue task T2")) return diligent("Task T2", tool);
     return diligent(text, tool);
   };
   await t.run("build");
-  assert.ok(fs.existsSync(path.join(t.repo, "T1.txt"))); // T1 went through without stopping
-  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /- Assumption \(build, T1\): Follow the layout rules over the mockup/);
   assert.match(t.posts.at(-1)!, /Build paused\*\* — T2 question: Which file name\?/);
-
-  t.agent.script = diligent;
   await t.run("build", "call it T2.txt");
-  const done = t.posts.at(-1)!;
-  assert.match(done, /BUILD COMPLETE[\s\S]*Choices the build made where the spec was unclear[\s\S]*Assumption \(build, T1\): Follow the layout rules/);
+  assert.ok(t.instructions.some((i) => /^\[pb:build\] Continue task T2: second file\. Finish it with pb_task_done\.\n\nFrom the human: call it T2\.txt$/.test(i)));
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "built");
+  assert.equal(p.tasks.find((x: any) => x.id === "T2").attempts, 1);
+});
+
+test("build: an agent that stops mid-task is reminded once, like a stop hook, before the build pauses", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  let idle = true;
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T2") && idle) {
+      idle = false; // stops with a prose summary instead of pb_task_done
+      return;
+    }
+    if (text.includes("You stopped without finishing T2")) return diligent("Task T2", tool);
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.equal(t.events("order-cancellation").filter((e) => e.type === "nudge").length, 1);
 });
 
 test("build: pb_task_done must name the current task", async () => {
@@ -357,7 +629,7 @@ test("build: verification none runs no checks; no new tests reaches the agent", 
   t.agent.script = diligent;
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "built");
-  assert.match(t.instructions[0], /Tests: add none for this feature \(the human said so\)[\s\S]*runs no checks \(docs only\)/);
+  assert.match(t.instructions[0], /Tests: add none for this feature \(the human said so\)[\s\S]*no checks run \(docs only\)/);
 });
 
 test("build: fewer test cases in an existing test fail the task (gate: tests)", async () => {
@@ -376,20 +648,80 @@ test("build: fewer test cases in an existing test fail the task (gate: tests)", 
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
+test("build: a build session's compaction summary comes from pb's state, not another model call", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T2")) {
+      const [r] = (await t.fire("session_before_compact", { preparation: { firstKeptEntryId: "e9", tokensBefore: 90000, previousSummary: "We discussed audit." }, reason: "threshold" })) as any[];
+      assert.equal(r.compaction.firstKeptEntryId, "e9");
+      assert.match(r.compaction.summary, /^\[pb build state: order-cancellation\][\s\S]*- T1 first file: done — did T1[\s\S]*- T2 second file: doing \(current\)[\s\S]*We discussed audit\.[\s\S]*--- spec ---\n# Order cancellation/);
+    }
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.ok(t.events("order-cancellation").some((e) => e.type === "compact"));
+});
+
+test("build: above pruneAbove, long tool output of finished tasks is pruned at the task boundary", async () => {
+  const t = setup({ verify: "true", pruneAbove: 5 });
+  await written(t);
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T1")) {
+      await tool("bash", { command: "cat big.log", output: "x".repeat(5000) });
+      await tool("bash", { command: "ls", output: "short" });
+    }
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.equal(t.edits.length, 1);
+  assert.match(t.text(t.edits[0].targetId), /^x{5000}$/);
+  assert.match(JSON.stringify(t.edits[0].replacement), /pb pruned 5000 chars of tool output from a finished task/);
+  assert.ok(t.events("order-cancellation").some((e) => e.type === "prune" && e.chars === 5000));
+
+  const u = setup({ verify: "true" }); // off by default
+  await written(u);
+  u.agent.script = t.agent.script;
+  await u.run("build");
+  assert.equal(u.edits.length, 0);
+});
+
 /* ------------------------------------- undo -------------------------------------- */
 
-test("undo restores the files and tasks to before a task, and can be undone", async () => {
+test("undo restores the files and tasks to before a task, rewinds the conversation, and can be undone", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
+  const leafBefore = t.runtime().ctx.sessionManager.getLeafId();
   t.agent.script = undefined;
   await t.run("undo", "T2");
   assert.ok(!fs.existsSync(path.join(t.repo, "T2.txt")) && fs.existsSync(path.join(t.repo, "T1.txt")));
   assert.deepEqual(t.progress("order-cancellation").tasks.map((x: any) => [x.id, x.status]), [["T1", "done"], ["T2", "todo"]]);
-  assert.match(t.posts.at(-1)!, /Undone to before T2/);
+  assert.match(t.posts.at(-1)!, /Undone to before T2\*\* — 1 file\(s\) restored, the conversation rewound/);
+  // Back to where T2 was handed out, with pb's own summary of what was undone.
+  const nav = t.navigations.at(-1)!;
+  assert.match(t.text(nav.target), /✓ T1 passed[\s\S]*Task T2\. Do only this task/);
+  assert.match(nav.summary!, /The human undid the work from T2 on[\s\S]*T2 ✓ · 1 files · did T2/);
+
   await t.run("undo", "u1");
   assert.ok(fs.existsSync(path.join(t.repo, "T2.txt")));
+  assert.equal(t.navigations.at(-1)!.target, leafBefore);
+  assert.equal(t.navigations.at(-1)!.summary, undefined);
+});
+
+test("undo to the start of the build: a resume sends the build's instructions again", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("undo", "start");
+  assert.equal(t.progress("order-cancellation").needsIntro, true);
+  const n = t.instructions.length;
+  await t.run("build");
+  assert.match(t.instructions[n], /^\[pb:build order-cancellation\] Build the spec you wrote[\s\S]*Task T1\. Do only this task/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
 test("status lists every spec with its state and tasks", async () => {
@@ -401,7 +733,7 @@ test("status lists every spec with its state and tasks", async () => {
 
 /* ------------------------------ review, stats, archive ------------------------------ */
 
-test("review: fresh check, then a fresh reviewer with the spec and the diff; pass marks it reviewed", async () => {
+test("review: fresh check, then a fresh reviewer with the spec first and the diff; pass marks it reviewed", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
@@ -411,17 +743,85 @@ test("review: fresh check, then a fresh reviewer with the spec and the diff; pas
   await t.run("review");
   delete process.env.MOCK_BRIEF_OUT;
   const brief = fs.readFileSync(briefFile, "utf8");
-  assert.match(brief, /## Changed files\n\n(T1\.txt\n)?[\s\S]*T2\.txt/);
+  assert.match(brief, /^# The spec[\s\S]*Not doing soft delete[\s\S]*## Changed files\n\n(T1\.txt\n)?[\s\S]*T2\.txt/);
   assert.match(brief, /## The check the harness ran\n\n`true` → PASS/);
-  assert.match(brief, /## The spec[\s\S]*Not doing soft delete/);
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*src\/order\.ts:12/);
-  assert.doesNotMatch(t.posts.at(-1)!, /VERDICT:/);
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
 
-  process.env.MOCK_REVIEW = "changes_needed";
   await t.run("review");
+  assert.match(t.notes.at(-1)!, /Nothing changed since the last review \(pass\)/);
+  process.env.MOCK_REVIEW = "changes_needed";
+  await t.run("review", "--full");
   delete process.env.MOCK_REVIEW;
   assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED/);
+});
+
+test("review: a follow-up looks at the previous findings and what changed since", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  process.env.MOCK_REVIEW = "changes_needed";
+  await t.run("review");
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
+  const briefFile = path.join(os.tmpdir(), `pb-brief2-${process.pid}.md`);
+  process.env.MOCK_BRIEF_OUT = briefFile;
+  delete process.env.MOCK_REVIEW;
+  await t.run("review");
+  delete process.env.MOCK_BRIEF_OUT;
+  const brief = fs.readFileSync(briefFile, "utf8");
+  assert.match(brief, /## This is a follow-up review[\s\S]*1\. \[P1\] src\/order\.ts:12 — consider a guard clause[\s\S]*Changed since the previous review[\s\S]*T1\.txt/);
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* \(follow-up\) — ✅ PASS/);
+});
+
+test("review: findings carry priorities; P0/P1 are double-checked; only line-leading tags count in prose", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  process.env.MOCK_REVIEW = "changes_needed";
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 0/);
+  process.env.MOCK_VERIFY = "reject"; // the verifier finds the P1 isn't real
+  await t.run("review", "--full");
+  delete process.env.MOCK_VERIFY;
+  assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 0[\s\S]*Dismissed after a second look:\n- \[P1\] consider a guard clause — src\/order\.ts:11 already guards it/);
+  process.env.MOCK_REVIEW = "pass";
+  await t.run("review", "--full");
+  assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 1/);
+  process.env.MOCK_REVIEW = "untagged";
+  await t.run("review", "--full");
+  assert.match(t.posts.at(-1)!, /✅ PASS\n/); // no tool call, no tags: the VERDICT line decides
+  process.env.MOCK_REVIEW = "prose";
+  await t.run("review", "--full");
+  delete process.env.MOCK_REVIEW;
+  assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 0/); // "No [P0] or [P1] issues" isn't a finding
+});
+
+test("review: works without a spec, on the uncommitted change and its intent", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("review");
+  assert.match(t.notes.at(-1)!, /Nothing to review: there are no uncommitted changes/);
+  fs.writeFileSync(path.join(t.repo, "README"), "hello\n");
+  const briefFile = path.join(os.tmpdir(), `pb-brief3-${process.pid}.md`);
+  process.env.MOCK_BRIEF_OUT = briefFile;
+  await t.run("review", "greet more warmly");
+  delete process.env.MOCK_BRIEF_OUT;
+  assert.match(fs.readFileSync(briefFile, "utf8"), /^# No spec[\s\S]*Intent: greet more warmly[\s\S]*## Changed files\n\nREADME/);
+  assert.match(t.posts.at(-1)!, /Review of the uncommitted change\*\* — ✅ PASS/);
+});
+
+test("review: files the reviewer changes are put back", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  process.env.MOCK_REVIEW_WRITE = path.join(t.repo, "T1.txt");
+  await t.run("review");
+  delete process.env.MOCK_REVIEW_WRITE;
+  assert.equal(t.read("T1.txt"), "x");
+  assert.ok(t.notes.some((n) => /The reviewer changed T1\.txt; put back as it was/.test(n)));
 });
 
 test("stats: tasks, first try, checks, pauses, review, and the build session's tokens and cache", async () => {
@@ -445,10 +845,23 @@ test("stats: tasks, first try, checks, pauses, review, and the build session's t
   assert.match(card, /Review +pass/);
   assert.match(card, /prompt [\d.]+k \(90% from cache\)/);
   assert.match(card, /Context +peak 10\.0k \(10% of 100\.0k\)/);
-  assert.match(card, /Reviewer +prompt 3\.0k · output 400 · \$0\.02/);
+  assert.match(card, /Reviewer +prompt 6\.0k · output 800 · \$0\.04/); // the mock reviewer answers in two messages
 
   await t.run("stats", "all");
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2 +50%/);
+});
+
+test("stats: after a new plan in the build's session, its turns stop counting for the finished spec", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  const usage = () => t.events("order-cancellation").filter((e) => e.type === "usage").length;
+  const before = usage();
+  await t.run("plan", "the next feature");
+  assert.equal(usage(), before);
 });
 
 test("archive moves a finished spec out of .pi/pb/, and stats still see it", async () => {
@@ -483,7 +896,7 @@ test("an unfinished build (e.g. after a crash) can be restarted in a new session
   await written(t);
   let stop = true;
   t.agent.script = async (text, tool) => {
-    if (text.includes("Task T2") && stop) return; // the session "dies" before T2 finishes
+    if (stop && (text.includes("Task T2") || text.includes("finishing T2"))) return; // the session "dies" before T2 finishes
     return diligent(text, tool);
   };
   await t.run("build");
@@ -497,29 +910,30 @@ test("an unfinished build (e.g. after a crash) can be restarted in a new session
   await t.run("build");
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "built");
-  assert.match(p.session, /build-session-2\.jsonl$/);
+  assert.match(p.session, /elsewhere\.jsonl$/); // restarted here, in the session that ran /pb:build
+  assert.ok(t.instructions.some((i) => /Build this feature from the spec below[\s\S]*# Order cancellation/.test(i))); // this session never saw the spec, so it comes along
   assert.equal(t.instructions.filter((i) => /Task T1/.test(i)).length, 1); // T1 wasn't redone
 });
 
-test("prompts: short, settled, comments without history; a minimal spec is enough", async () => {
+test("prompts: short mechanics plus your standards; a minimal spec is enough", async () => {
+  const { buildMechanics } = await import("../extensions/pb/prompts.ts");
+  const mech = buildMechanics(parseSpec(SPEC()).spec!, null);
+  assert.ok(mech.length < 900, `build mechanics grew to ${mech.length} chars`); // keep them short
+  assert.match(mech, /take the sensible reading, record it with pb_record_decision \(assumption: true\)[\s\S]*Ask with pb_ask only/);
+  assert.match(mech, /leave \.pi\/ alone/);
+  assert.match(mech, /Finish each task with pb_task_done: it runs the task's Test: command \(a compile when there is none\)/);
+
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  const seed = t.instructions[0];
-  assert.match(seed, /The planning is done: implement it as written/);
-  assert.match(seed, /record it with pb_record_decision \(assumption: true\)/);
-  assert.match(seed, /never its history: no dates, no "decided", "agreed", "user" or "spec", no previous values/);
-  assert.match(seed, /leave \.pi\/ alone/);
-  assert.doesNotMatch(seed, /even when it is more work/);
-  const rules = seed.slice(0, seed.indexOf("--- spec:"));
-  assert.ok(rules.length < 1800, `build instructions grew to ${rules.length} chars`); // keep them short
-  assert.match(t.instructions[1] ?? t.instructions.find((i) => /Task T2/.test(i))!, /Comments: the code as it is; no history, dates or decisions/);
+  const first = t.instructions[0];
+  assert.match(first, /Build the spec you wrote[\s\S]*The planning is done: implement it as written/);
+  assert.doesNotMatch(first, /Engineering standards/); // none in this project's AGENTS.md: nothing to add
+  assert.match(t.instructions.find((i) => /Task T2/.test(i))!, /Comments: the code as it is; no history, dates or decisions/);
 
   await t.run("spec");
-  const spec = t.instructions.at(-1)!;
-  assert.match(spec, /Each decision with its reason, as it stands now: no dates, no history, not who decided/);
-  assert.match(spec, /check the spec for contradictions and against the code/);
+  assert.match(t.instructions.at(-1)!, /Each decision with its reason, as it stands now: no dates, no history/);
 
   const minimal = "# Tiny\nVerification: tests\n\n## Goal\ng\n## Decisions\n- d\n## Tasks\n### T1: a\nx\n- Acceptance: y\n";
   assert.deepEqual(parseSpec(minimal).errors, []);
@@ -532,10 +946,119 @@ test("the build session runs on the model and thinking level you planned with, n
   planning.model = { provider: "p", id: "big", contextWindow: 262000 };
   planning.thinking = "high";
   t.agent.script = diligent;
-  await t.run("build");
+  await t.run("build", "--fresh");
   const build = t.runtime();
   assert.notEqual(build, planning);
   assert.deepEqual([build.model.id, build.thinking], ["big", "high"]);
   assert.ok(t.posts.some((x) => /Building \*\*order-cancellation\*\*[^\n]*, on p\/big, thinking high\./.test(x)));
   assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/carry.json"))); // handed over once
+});
+
+/* ------------------------------ same session, auto spec, standards ------------------------------ */
+
+test("build: by default in this session: the planning protection lifts, the spec isn't repeated", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  await written(t);
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T1")) assert.equal((await tool("write", { path: "Order.java", content: "x" })).error, undefined); // editing allowed now
+    return diligent(text, tool);
+  };
+  const planning = t.runtime();
+  await t.run("build");
+  assert.equal(t.runtime(), planning); // no new session
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "built");
+  assert.match(p.session, /planning-session\.jsonl$/);
+  assert.doesNotMatch(t.instructions.find((i) => /\[pb:build order-cancellation\]/.test(i))!, /# Order cancellation/); // it wrote it: no copy
+  assert.match(t.posts.find((x) => /Building \*\*order-cancellation\*\* here/.test(x))!, /▶ T1: first file/);
+});
+
+test("build: when the session is getting full, it offers a fresh session", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.runtime().usage = 72;
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.match(t.selectTitles[0], /Build order-cancellation: this session is 72% full/);
+  assert.match(t.progress("order-cancellation").session, /build-session-1\.jsonl$/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("build without a spec: it writes one first, shows it all, and builds on your choice", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  t.agent.script = async (text, tool) => {
+    if (/pb_write_spec tool/.test(text)) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.match(t.instructions.find((i) => /pb_write_spec tool/.test(i))!, /After writing it, stop/);
+  assert.ok(t.posts.some((x) => /\*\*Spec written: order-cancellation\*\*[\s\S]*- T1: first file · `test -f T1\.txt`/.test(x)));
+  assert.deepEqual(t.views.map((v) => [v.customType, v.data.name]), [["pb-spec", "order-cancellation"]]); // the whole spec, shown, not sent to the model
+  assert.match(t.selectTitles.at(-1)!, /Build order-cancellation now\? 2 tasks/);
+  assert.equal(t.progress("order-cancellation").phase, "built"); // "Build here" → built in this session
+  assert.match(t.progress("order-cancellation").session, /planning-session\.jsonl$/);
+});
+
+test("spec approval: edit the spec first; the build then gets your version", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  t.agent.script = async (text, tool) => {
+    if (/pb_write_spec tool/.test(text)) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
+    return diligent(text, tool);
+  };
+  t.selects.push("Edit the spec first", "Build here (keeps our discussion; the cache stays warm)");
+  t.editors.push("# broken", SPEC().replace("### T2: second file", "### T2: the second file"));
+  await t.run("build");
+  assert.ok(t.notes.some((n) => /Not saved, the spec doesn't parse/.test(n)));
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /### T2: the second file/);
+  assert.match(t.instructions.find((i) => /\[pb:build order-cancellation\]/.test(i))!, /Build this feature from the spec below[\s\S]*T2: the second file/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("standards: offered once into AGENTS.md; repeated in a message only when the session hasn't loaded them", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "x"); // default choice: this project's AGENTS.md
+  const agents = path.join(t.repo, "AGENTS.md");
+  assert.match(fs.readFileSync(agents, "utf8"), /<!-- pb:standards -->[\s\S]*Dependencies: use current, non-deprecated APIs[\s\S]*<!-- \/pb:standards -->/);
+  assert.doesNotMatch(fs.readFileSync(agents, "utf8"), /even when it is more work|latest stable versions/);
+  assert.match(t.instructions.at(-1)!, /Engineering standards \(from AGENTS\.md\)[\s\S]*a proper fix, never a workaround/); // this session started before they existed
+  fs.writeFileSync(agents, fs.readFileSync(agents, "utf8").replace("Tests: test behaviour", "Java 21: records, no Lombok. Tests: test behaviour"));
+
+  await t.run("plan", "y"); // asked once only; now the session has them loaded
+  t.runtime().contextFiles = [{ path: agents, content: fs.readFileSync(agents, "utf8") }];
+  await t.run("plan", "z");
+  assert.doesNotMatch(t.instructions.at(-1)!, /Engineering standards \(from AGENTS\.md\)/);
+  assert.equal((fs.readFileSync(agents, "utf8").match(/<!-- pb:standards -->/g) ?? []).length, 1); // not added twice
+
+  t.runtime().contextFiles = [];
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.match(t.instructions.find((i) => /\[pb:build order-cancellation\]/.test(i))!, /Java 21: records, no Lombok/);
+});
+
+test("build: a different buildModel builds in a fresh session, since switching here would re-send everything uncached", async () => {
+  const t = setup({ verify: "true", buildModel: "p/big" });
+  await written(t);
+  t.agent.script = diligent;
+  const planning = t.runtime();
+  await t.run("build");
+  assert.match(t.selectTitles[0], /building on p\/big here sends this whole conversation to it again, uncached/);
+  assert.notEqual(t.runtime(), planning);
+  assert.equal(t.runtime().model.id, "big");
+  assert.ok(t.posts.some((x) => /Building \*\*order-cancellation\*\* from [^\n]*, on p\/big/.test(x)));
+
+  const u = setup({ verify: "true", buildModel: "p/big" });
+  await written(u);
+  u.agent.script = diligent;
+  u.selects.push("Build here anyway");
+  await u.run("build");
+  assert.equal(u.runtime().model.id, "big");
+  assert.ok(u.posts.some((x) => /Building \*\*order-cancellation\*\* here on p\/big/.test(x)));
 });

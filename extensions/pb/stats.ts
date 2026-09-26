@@ -1,11 +1,12 @@
 /**
  * /pb:stats: numbers per spec from its events.jsonl (live specs and archived ones):
- * tasks, attempts, checks, pauses, undo, review, and the build session's tokens and
- * cache use. Your planning session isn't counted.
+ * tasks, attempts, checks, pauses, undo, review, the build session's tokens and cache use,
+ * and the pb_explore calls of the sessions that wrote or built it. The planning
+ * conversation itself isn't counted.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Progress, Store } from "./store.ts";
+import { type Progress, type Store, readEvents as readJsonl } from "./store.ts";
 
 type Ev = { type: string; at: string; [k: string]: unknown };
 
@@ -13,26 +14,12 @@ export interface SpecStats {
   name: string;
   phase: string;
   events: Ev[];
+  /** pb_explore calls made in the sessions that wrote or built the spec */
+  explore: Ev[];
   progress?: Progress;
 }
 
-function readEvents(dir: string): Ev[] {
-  try {
-    return fs
-      .readFileSync(path.join(dir, "events.jsonl"), "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .flatMap((l) => {
-        try {
-          return [JSON.parse(l) as Ev];
-        } catch {
-          return [];
-        }
-      });
-  } catch {
-    return [];
-  }
-}
+const readEvents = (dir: string) => readJsonl(path.join(dir, "events.jsonl")) as Ev[];
 
 function readProgress(dir: string): Progress | undefined {
   try {
@@ -53,10 +40,18 @@ export function loadStats(store: Store): SpecStats[] {
         .map((d) => path.join(store.archiveRoot, d))
     : [];
   const dirs = [...archived, ...store.specNames().map((n) => store.specDir(n))];
+  const explore = store.exploreEvents() as Ev[];
   return dirs
     .map((dir) => {
       const progress = readProgress(dir);
-      return { name: progress?.spec ?? path.basename(dir), phase: progress?.phase ?? "written", events: readEvents(dir), progress };
+      const sessions = new Set([progress?.writtenIn, progress?.session].filter(Boolean));
+      return {
+        name: progress?.spec ?? path.basename(dir),
+        phase: progress?.phase ?? "written",
+        events: readEvents(dir),
+        explore: explore.filter((x) => sessions.has(x.session as string)),
+        progress,
+      };
     })
     .filter((s) => s.events.length);
 }
@@ -85,6 +80,8 @@ export interface Summary {
   reviews: string[];
   build: { prompt: number; cached: number; output: number; cost: number; peak: number; window?: number; turns: number };
   review: { prompt: number; output: number; cost: number };
+  explorer: { calls: number; prompt: number; output: number; cost: number };
+  context: { compactions: number; prunes: number; nudges: number; asks: number };
   ms: number;
 }
 
@@ -119,6 +116,13 @@ export function summarize(s: SpecStats): Summary {
     review.output += num(r.output);
     review.cost += num(r.cost);
   }
+  const explorer = { calls: s.explore.length, prompt: 0, output: 0, cost: 0 };
+  for (const x of s.explore) {
+    explorer.prompt += num(x.input) + num(x.cacheRead) + num(x.cacheWrite);
+    explorer.output += num(x.output);
+    explorer.cost += num(x.cost);
+  }
+  const count = (type: string) => e.filter((x) => x.type === type).length;
   const start = e.find((x) => x.type === "build-start");
   const end = [...e].reverse().find((x) => x.type === "built") ?? e.at(-1);
   return {
@@ -134,6 +138,8 @@ export function summarize(s: SpecStats): Summary {
     reviews: reviews.map((r) => String(r.verdict)),
     build,
     review,
+    explorer,
+    context: { compactions: count("compact"), prunes: count("prune"), nudges: count("nudge"), asks: count("ask") },
     ms: start && end ? Math.max(0, ts(end.at) - ts(start.at)) : 0,
   };
 }
@@ -153,8 +159,10 @@ export function renderCard(s: SpecStats): string {
     `Build     ${b.turns} turns · prompt ${human(b.prompt)} (${pct(b.cached, b.prompt)} from cache) · output ${human(b.output)} · $${b.cost.toFixed(2)}${x.ms ? ` · ${dur(x.ms)}` : ""}`,
     `Context   peak ${human(b.peak)}${b.window ? ` (${pct(b.peak, b.window)} of ${human(b.window)})` : ""}`,
     `Reviewer  prompt ${human(x.review.prompt)} · output ${human(x.review.output)} · $${x.review.cost.toFixed(2)}`,
+    `Explorer  ${x.explorer.calls ? `${x.explorer.calls} calls · prompt ${human(x.explorer.prompt)} · output ${human(x.explorer.output)} · $${x.explorer.cost.toFixed(2)}` : "not used"}`,
+    `Session   ${x.context.compactions} compactions · ${x.context.prunes} prunes · ${x.context.nudges} reminders · ${x.context.asks} questions`,
     "",
-    "Build = the build session's model turns; your planning session isn't counted.",
+    "Build = the build session's model turns; the planning conversation isn't counted.",
     "```",
   ].join("\n");
 }
@@ -165,7 +173,7 @@ export function renderAll(list: SpecStats[]): string {
   const lp = (v: string, n: number) => v.padStart(n);
   const rows = list.map((s) => {
     const x = summarize(s);
-    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 9)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost).toFixed(2)}`, 9)}${lp(x.ms ? dur(x.ms) : "–", 9)}`;
+    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 9)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost + x.explorer.cost).toFixed(2)}`, 9)}${lp(x.ms ? dur(x.ms) : "–", 9)}`;
   });
   return ["```", `${pad("spec", 26)}${lp("tasks", 7)}${lp("1st try", 9)}${lp("failed", 8)}${lp("pauses", 8)}  ${pad("review", 9)}${lp("tokens", 9)}${lp("cache", 7)}${lp("cost", 9)}${lp("time", 9)}`, ...rows, "```"].join("\n");
 }

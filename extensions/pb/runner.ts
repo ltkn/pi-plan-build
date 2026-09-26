@@ -1,7 +1,6 @@
 /**
- * Fresh-context runner: every manager / worker / reviewer call is a separate
- * `pi` process with no session history (paper §2: "every role is the same
- * model in a fresh context"). It only knows what the brief and the repo tell it.
+ * Fresh-context runner: the explorer, the reviewer and the verifier each run as a separate
+ * `pi` process with no session history. It only knows what the brief and the repo tell it.
  */
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -12,23 +11,28 @@ export interface RunOptions {
   cwd: string;
   role: string;
   systemPrompt: string;
-  /** attached as a file; omitted when resuming a session, whose history already holds it */
-  brief?: string;
-  /** persist the conversation so it can be resumed (default: in-memory, gone when the process ends) */
-  session?: { dir: string; id: string };
-  /** The user message sent with the attached brief; says what to do and which block to end with. */
-  prompt?: string;
-  /** null = no tools at all */
-  tools: string[] | null;
+  /** attached as a file */
+  brief: string;
+  /** The user message sent with the attached brief: what to do with it. */
+  prompt: string;
+  tools: string[];
+  /** extensions to load explicitly (e.g. the reviewer's reporting tools); everything else stays off */
+  extensions?: string[];
   model?: string;
   thinking?: string;
-  childExtensions: boolean;
   signal?: AbortSignal;
   onActivity?: (line: string) => void;
 }
 
+export interface ToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
 export interface RunResult {
   text: string; // final assistant text
+  /** every tool call the model made, in order (the structured channel for reviewer and verifier) */
+  toolCalls: ToolCall[];
   stopReason?: string;
   error?: string;
   exitCode: number;
@@ -38,8 +42,6 @@ export interface RunResult {
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; peakContext: number };
   /** wall-clock duration of the call */
   ms: number;
-  /** compact transcript (assistant text + tool calls), for the cut-off summarizer */
-  transcript: string;
   aborted: boolean;
 }
 
@@ -68,28 +70,26 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
   const sysFile = path.join(tmp, "system.md");
   const briefFile = path.join(tmp, "brief.md");
   await fs.promises.writeFile(sysFile, o.systemPrompt, { mode: 0o600 });
-  if (o.brief !== undefined) await fs.promises.writeFile(briefFile, o.brief, { mode: 0o600 });
+  await fs.promises.writeFile(briefFile, o.brief, { mode: 0o600 });
 
-  const args = ["--mode", "json", "-p", ...(o.session ? ["--session-dir", o.session.dir, "--session-id", o.session.id] : ["--no-session"])];
-  if (!o.childExtensions) args.push("--no-extensions");
+  const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
+  for (const e of o.extensions ?? []) args.push("-e", e);
   if (o.model) args.push("--model", o.model);
   if (o.thinking) args.push("--thinking", o.thinking);
-  if (o.tools === null) args.push("--no-tools");
-  else args.push("--tools", o.tools.join(","));
-  args.push("--append-system-prompt", sysFile, ...(o.brief !== undefined ? [`@${briefFile}`] : []), o.prompt ?? "Carry out the brief in the attached file.");
+  args.push("--tools", o.tools.join(","));
+  args.push("--append-system-prompt", sysFile, `@${briefFile}`, o.prompt);
 
   const started = Date.now();
   const res: RunResult = {
     text: "",
+    toolCalls: [],
     exitCode: 0,
     cost: 0,
     turns: 0,
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, peakContext: 0 },
     ms: 0,
-    transcript: "",
     aborted: false,
   };
-  const transcript: string[] = [];
 
   try {
     res.exitCode = await new Promise<number>((resolve) => {
@@ -121,13 +121,10 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
         if (m.errorMessage) res.error = m.errorMessage;
         const texts: string[] = [];
         for (const part of m.content ?? []) {
-          if (part.type === "text" && part.text?.trim()) {
-            texts.push(part.text);
-            transcript.push(part.text);
-          } else if (part.type === "toolCall") {
-            const line = `${part.name} ${preview(part.arguments ?? {})}`;
-            transcript.push(`[tool] ${line}`);
-            o.onActivity?.(line);
+          if (part.type === "text" && part.text?.trim()) texts.push(part.text);
+          else if (part.type === "toolCall") {
+            res.toolCalls.push({ name: part.name, arguments: part.arguments ?? {} });
+            o.onActivity?.(`${part.name} ${preview(part.arguments ?? {})}`);
           }
         }
         if (texts.length) res.text = texts.join("\n");
@@ -166,62 +163,19 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
   } finally {
     await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
-  res.transcript = transcript.join("\n");
   res.ms = Date.now() - started;
   return res;
 }
 
-/** Escape raw newlines/tabs inside JSON strings: a common slip of smaller models that JSON.parse rejects. */
-function escapeControlInStrings(s: string): string {
-  let out = "";
-  let inStr = false;
-  let esc = false;
-  for (const ch of s) {
-    if (inStr) {
-      if (esc) esc = false;
-      else if (ch === "\\") esc = true;
-      else if (ch === '"') inStr = false;
-      else if (ch === "\n" || ch === "\r" || ch === "\t") {
-        out += ch === "\n" ? "\\n" : ch === "\r" ? "\\r" : "\\t";
-        continue;
-      }
-    } else if (ch === '"') inStr = true;
-    out += ch;
-  }
-  return out;
-}
-
-/** Extract the last ```<tag> fenced JSON block (falls back to the last ```json block). */
-export function extractJson<T>(text: string, tag: string): T | undefined {
-  const noTrailingCommas = (s: string) => s.replace(/,\s*([}\]])/g, "$1");
-  const tryParse = (s: string): T | undefined => {
-    for (const candidate of [s, noTrailingCommas(s), noTrailingCommas(escapeControlInStrings(s))]) {
-      try {
-        return JSON.parse(candidate) as T;
-      } catch {
-        /* try the next repair */
-      }
-    }
-    return undefined;
+/** The run's usage in Pi's shape, so a tool that made the call can report it and session totals stay right. */
+export function usageOf(r: RunResult) {
+  const t = r.tokens;
+  return {
+    input: t.input,
+    output: t.output,
+    cacheRead: t.cacheRead,
+    cacheWrite: t.cacheWrite,
+    totalTokens: t.input + t.output + t.cacheRead + t.cacheWrite,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: r.cost },
   };
-  for (const re of [new RegExp("```" + tag + "\\s*([\\s\\S]*?)```", "g"), /```json\s*([\s\S]*?)```/g]) {
-    const all = [...text.matchAll(re)];
-    for (let i = all.length - 1; i >= 0; i--) {
-      const v = tryParse(all[i][1].trim());
-      if (v) return v;
-    }
-  }
-  return undefined;
-}
-
-/** Content of the last ```<tag> fenced block (free text), or undefined. */
-export function extractBlock(text: string, tag: string): string | undefined {
-  const all = [...text.matchAll(new RegExp("```" + tag + "[^\\S\\n]*\\n([\\s\\S]*?)```", "g"))];
-  const last = all.at(-1)?.[1].trim();
-  return last || undefined;
-}
-
-/** Text before the fenced block, for showing prose to the human. */
-export function stripFence(text: string, tag: string): string {
-  return text.replace(new RegExp("```" + tag + "[\\s\\S]*?```", "g"), "").trim();
 }

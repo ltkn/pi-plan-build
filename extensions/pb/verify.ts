@@ -1,6 +1,6 @@
 /**
- * Verifier: harness logic, no model call (paper §2 step 5). Its verdict is
- * ground truth: a failing run overrides the manager's "done".
+ * The check: harness logic, no model call. Its verdict is ground truth: a failing
+ * run overrides the agent's "done".
  */
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
