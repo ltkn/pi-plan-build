@@ -35,7 +35,20 @@ function setup(config: object = {}) {
 
   // Like Pi: every session gets its own runtime and extension instance; after a session
   // replacement, the old pi and ctx are stale and throw if used.
-  type Runtime = { cmds: Record<string, any>; tools: Record<string, any>; handlers: Record<string, ((e: object, ctx: object) => unknown)[]>; pi: any; ctx: any; stale: boolean };
+  type Runtime = {
+    cmds: Record<string, any>;
+    tools: Record<string, any>;
+    handlers: Record<string, ((e: object, ctx: object) => unknown)[]>;
+    pi: any;
+    ctx: any;
+    stale: boolean;
+    model: { provider: string; id: string; contextWindow: number };
+    thinking: string;
+  };
+  const MODELS = [
+    { provider: "p", id: "m", contextWindow: 100000 },
+    { provider: "p", id: "big", contextWindow: 262000 },
+  ];
   let rt: Runtime;
   const guard = <T extends object>(r: () => Runtime, target: T): T =>
     new Proxy(target, {
@@ -51,12 +64,17 @@ function setup(config: object = {}) {
     self.tools = {};
     self.handlers = {};
     self.stale = false;
+    self.model = MODELS[0]; // like Pi: a new session starts from the settings defaults
+    self.thinking = "off";
     self.pi = guard(me, {
       registerCommand: (n: string, o: object) => (self.cmds[n] = o),
       registerTool: (t: { name: string }) => (self.tools[t.name] = t),
       on: (e: string, h: (e: object, ctx: object) => unknown) => (self.handlers[e] ??= []).push(h),
       getActiveTools: () => ["read", "bash", "edit", "write"],
       setSessionName: (n: string) => names.set(sessionFile, n),
+      getThinkingLevel: () => self.thinking,
+      setThinkingLevel: (l: string) => (self.thinking = l),
+      setModel: async (m: Runtime["model"]) => ((self.model = m), true),
       setActiveTools: () => {},
       sendMessage: (m: { content: string; display?: boolean }, o?: { triggerTurn?: boolean }) => {
         if (m.display) posts.push(m.content);
@@ -68,8 +86,10 @@ function setup(config: object = {}) {
       cwd: repo,
       mode: "print",
       hasUI: true,
-      model: { provider: "p", id: "m", contextWindow: 100000 },
-      thinkingLevel: "low",
+      get model() {
+        return self.model;
+      },
+      modelRegistry: { find: (prov: string, id: string) => MODELS.find((m) => m.provider === prov && m.id === id) },
       isIdle: () => true,
       sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => path.basename(sessionFile, ".jsonl") },
       ui: {
@@ -86,6 +106,7 @@ function setup(config: object = {}) {
         await opts.setup?.({ appendSessionInfo: (n: string) => names.set(file, n) });
         rt = makeRuntime(file);
         const fresh = rt;
+        for (const h of fresh.handlers.session_start ?? []) await h({ type: "session_start", reason: "new" }, fresh.ctx); // before withSession, as in Pi
         await opts.withSession?.({ ...fresh.ctx, sessionManager: fresh.ctx.sessionManager, sendMessage: async (m: any, o: any) => fresh.pi.sendMessage(m, o) });
         return { cancelled: false };
       },
@@ -210,7 +231,7 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   await t.run("plan", "let admins cancel pending orders");
   assert.equal(t.names.get(path.join(t.repo, "planning-session.jsonl")), "plan: let admins cancel pending orders");
   assert.match(t.posts.at(-1)!, /back to it any time with \/resume, or `pi --session planning-session`/);
-  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl an API, write and run one-off scripts[\s\S]*run `true` once/);
+  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl, one-off scripts in a temp directory[\s\S]*run `true` once/);
   const scratch = path.join(os.tmpdir(), "pb-scratch.py");
   assert.equal((await t.callTool("write", { path: scratch, content: "print(1)" })).error, undefined); // outside the project: fine
   assert.match((await t.callTool("write", { path: "src/Order.java", content: "x" })).error!, /Planning mode: the project's files stay untouched/);
@@ -220,7 +241,7 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   await t.run("plan");
   assert.match(t.notes.at(-1)!, /Describe what you want, in your own words/);
   await t.run("spec");
-  assert.match(t.instructions.at(-1)!, /calling the pb_write_spec tool[\s\S]*Not doing X, because/);
+  assert.match(t.instructions.at(-1)!, /with the pb_write_spec tool[\s\S]*Not doing X, because/);
 });
 
 test("plan mode stays with its session, not with the build session", async () => {
@@ -258,7 +279,7 @@ test("build: fresh session starting with T1, tasks behind their tests, then the 
   assert.equal(t.names.get(p.session), "build: order-cancellation");
   assert.ok(t.posts.some((x) => /This session: "build: order-cancellation" · back to it with \/resume, or `pi --session build-session-1`/.test(x)));
   assert.deepEqual(p.tasks.map((x: any) => [x.id, x.status]), [["T1", "done"], ["T2", "done"]]);
-  assert.match(t.instructions[0], /fresh session, from the spec below and nothing else[\s\S]*# Order cancellation[\s\S]*Task T1\. Do only this task/);
+  assert.match(t.instructions[0], /Build this feature from the spec below[\s\S]*# Order cancellation[\s\S]*Task T1\. Do only this task/);
   assert.doesNotMatch(t.instructions[0], /pb_spec_gaps/);
   assert.match(t.posts.at(-1)!, /BUILD COMPLETE — order-cancellation[\s\S]*PASS/);
   assert.match(t.read(".pi/pb/specs/order-cancellation/events.jsonl"), /"type":"check","task":"final"/); // full suite after the task tests
@@ -336,7 +357,7 @@ test("build: verification none runs no checks; no new tests reaches the agent", 
   t.agent.script = diligent;
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "built");
-  assert.match(t.instructions[0], /New tests: NO for this feature \(the human said so\)[\s\S]*runs no checks for this feature \(docs only\)/);
+  assert.match(t.instructions[0], /Tests: add none for this feature \(the human said so\)[\s\S]*runs no checks \(docs only\)/);
 });
 
 test("build: fewer test cases in an existing test fail the task (gate: tests)", async () => {
@@ -480,16 +501,41 @@ test("an unfinished build (e.g. after a crash) can be restarted in a new session
   assert.equal(t.instructions.filter((i) => /Task T1/.test(i)).length, 1); // T1 wasn't redone
 });
 
-test("prompts: the build treats the spec as settled and resolves ambiguities itself; the spec gets a consistency pass", async () => {
+test("prompts: short, settled, comments without history; a minimal spec is enough", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
   const seed = t.instructions[0];
-  assert.match(seed, /The planning is done: the design, the decisions and the tasks in the spec are settled/);
-  assert.match(seed, /choose the best solution[^.]*even when it is more work[\s\S]*pb_record_decision \(assumption: true\)/);
-  assert.match(seed, /Don't read or edit anything under \.pi\/ other than your spec/);
+  assert.match(seed, /The planning is done: implement it as written/);
+  assert.match(seed, /record it with pb_record_decision \(assumption: true\)/);
+  assert.match(seed, /never its history: no dates, no "decided", "agreed", "user" or "spec", no previous values/);
+  assert.match(seed, /leave \.pi\/ alone/);
+  assert.doesNotMatch(seed, /even when it is more work/);
+  const rules = seed.slice(0, seed.indexOf("--- spec:"));
+  assert.ok(rules.length < 1800, `build instructions grew to ${rules.length} chars`); // keep them short
+  assert.match(t.instructions[1] ?? t.instructions.find((i) => /Task T2/.test(i))!, /Comments: the code as it is; no history, dates or decisions/);
+
   await t.run("spec");
-  assert.match(t.instructions.at(-1)!, /Before calling pb_write_spec, check the spec against itself and against the code[\s\S]*best solution/);
-  assert.match(t.instructions.at(-1)!, /State each fact once/);
+  const spec = t.instructions.at(-1)!;
+  assert.match(spec, /Each decision with its reason, as it stands now: no dates, no history, not who decided/);
+  assert.match(spec, /check the spec for contradictions and against the code/);
+
+  const minimal = "# Tiny\nVerification: tests\n\n## Goal\ng\n## Decisions\n- d\n## Tasks\n### T1: a\nx\n- Acceptance: y\n";
+  assert.deepEqual(parseSpec(minimal).errors, []);
+});
+
+test("the build session runs on the model and thinking level you planned with, not Pi's defaults", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const planning = t.runtime();
+  planning.model = { provider: "p", id: "big", contextWindow: 262000 };
+  planning.thinking = "high";
+  t.agent.script = diligent;
+  await t.run("build");
+  const build = t.runtime();
+  assert.notEqual(build, planning);
+  assert.deepEqual([build.model.id, build.thinking], ["big", "high"]);
+  assert.ok(t.posts.some((x) => /Building \*\*order-cancellation\*\*[^\n]*, on p\/big, thinking high\./.test(x)));
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/carry.json"))); // handed over once
 });

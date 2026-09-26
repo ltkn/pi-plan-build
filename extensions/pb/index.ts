@@ -361,6 +361,19 @@ export default function pb(pi: ExtensionAPI) {
     }
   };
 
+  // The build session's own instance applies the carried-over model and thinking level before its first turn.
+  pi.on("session_start", async (e, ctx) => {
+    if ((e as { reason?: string }).reason !== "new") return;
+    const carry = new Store(ctx.cwd).takeCarry();
+    if (!carry) return;
+    if (carry.model) {
+      const slash = carry.model.indexOf("/");
+      const model = (ctx as { modelRegistry?: { find(p: string, id: string): unknown } }).modelRegistry?.find(carry.model.slice(0, slash), carry.model.slice(slash + 1));
+      if (model) await pi.setModel(model as Parameters<typeof pi.setModel>[0]);
+    }
+    if (carry.thinking) pi.setThinkingLevel(carry.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
+  });
+
   pi.on("agent_settled", async (_e, ctx) => {
     await drive(ctx);
   });
@@ -470,6 +483,9 @@ export default function pb(pi: ExtensionAPI) {
       if (!first) return ctx.ui.notify(`Every task of ${name} is done. Next: /${cmd("review")} ${name}.`, "info");
       const seed = buildSeed(name, md, spec, testCmd, buildCmd);
       const parent = ctx.sessionManager.getSessionFile();
+      // A new session starts from Pi's defaults: carry over the model and thinking level you planned with.
+      const carried = { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: pi.getThinkingLevel() as string | undefined };
+      store.setCarry({ ...carried, spec: name });
       const result = await ctx.newSession({
         parentSession: parent,
         setup: async (sm) => {
@@ -484,7 +500,7 @@ export default function pb(pi: ExtensionAPI) {
           await c.sendMessage(
             {
               customType: "pb",
-              content: `▶ Building **${name}** from ${store.rel("specs", name!, "spec.md")}.\nThis session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\``,
+              content: `▶ Building **${name}** from ${store.rel("specs", name!, "spec.md")}${carried.model ? `, on ${carried.model}` : ""}${carried.thinking ? `, thinking ${carried.thinking}` : ""}.\nThis session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\``,
               display: true,
             },
             { triggerTurn: false },

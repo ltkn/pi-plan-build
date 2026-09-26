@@ -34,7 +34,7 @@ export const DEFAULT_CONFIG: Config = {
   build: "auto",
   verifyTimeoutSec: 900,
   maxAttempts: 3,
-  testOutputCap: 20000,
+  testOutputCap: 4000,
   checkpoints: true,
   reviewer: {},
 };
@@ -186,6 +186,20 @@ export class Store {
     if (on) list.add(sessionFile);
     else list.delete(sessionFile);
     writeFile(path.join(this.root, "planning.json"), `${JSON.stringify([...list], null, 2)}\n`);
+  }
+
+  /**
+   * Hand-over to the next build session: the planning session's model and thinking level,
+   * applied by pb's fresh instance at session_start (the old pi is stale by then).
+   */
+  setCarry(c: { model?: string; thinking?: string; spec: string }): void {
+    writeFile(path.join(this.root, "carry.json"), `${JSON.stringify({ ...c, at: Date.now() })}\n`);
+  }
+  takeCarry(): { model?: string; thinking?: string; spec: string } | undefined {
+    const file = path.join(this.root, "carry.json");
+    const c = readJson<{ model?: string; thinking?: string; spec: string; at: number }>(file);
+    fs.rmSync(file, { force: true });
+    return c && Date.now() - c.at < 5 * 60_000 ? c : undefined;
   }
 
   /** The spec whose build runs in this session file, if any. */

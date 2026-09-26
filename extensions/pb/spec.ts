@@ -8,8 +8,7 @@
  *   Verification: tests | build | none — <why, unless tests>
  *   New tests: yes | no — <why, if no>
  *
- *   ## Goal · ## Out of scope · ## Decisions · ## Context · ## Acceptance criteria
- *   ## Tasks
+ *   ## Goal · ## Decisions · ## Tasks   (optional: Out of scope, Context, Acceptance criteria)
  *   ### T1: <title>
  *   <detail>
  *   - Acceptance: <checkable>
@@ -35,7 +34,8 @@ export interface ParsedSpec {
   tasks: SpecTask[];
 }
 
-export const REQUIRED_SECTIONS = ["Goal", "Out of scope", "Decisions", "Context", "Acceptance criteria", "Tasks"];
+/** The rest (Out of scope, Context, Acceptance criteria) is optional: specs stay as short as the change allows. */
+export const REQUIRED_SECTIONS = ["Goal", "Decisions", "Tasks"];
 
 const header = (md: string, label: string) => md.match(new RegExp(`^${label}:\\s*(.+)$`, "mi"))?.[1].trim();
 const splitReason = (v: string) => {

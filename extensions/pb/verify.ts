@@ -55,8 +55,8 @@ const SIGNAL = /(\[ERROR\]|FAIL|Tests run:.*(Failures|Errors): [1-9]|BUILD FAILU
 
 function summarize(output: string, limit: number): string {
   const lines = output.split(/\r?\n/);
-  const hits = [...new Set(lines.filter((l) => SIGNAL.test(l)).map((l) => l.trimEnd()))].slice(0, 100);
-  const tail = lines.slice(-80).join("\n");
+  const hits = [...new Set(lines.filter((l) => SIGNAL.test(l)).map((l) => l.trimEnd()))].slice(0, 30);
+  const tail = lines.slice(-40).join("\n");
   const body = hits.length ? `Key lines:\n${hits.join("\n")}\n\nTail:\n${tail}` : `Tail:\n${tail}`;
   return cap(body, limit);
 }

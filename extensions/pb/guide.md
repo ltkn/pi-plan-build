@@ -69,10 +69,12 @@ Verification: tests            (or: build — why · none — why)
 New tests: yes                 (or: no — why)
 ```
 
-Then the sections: **Goal**, **Out of scope**, **Decisions** (with rejected
-alternatives as "Not doing X, because …"), **Context** (files, conventions,
-test setup), **Acceptance criteria**, and **Tasks**, each as `### T1: title`
-with its detail, an `- Acceptance:` line and optionally `- Test: \`command\``.
+Then three sections: **Goal**, **Decisions** (each with its reason as it
+stands now, no history; rejected ideas as "Not doing X, because …") and
+**Tasks**, each as `### T1: title` with its detail, an `- Acceptance:` line and
+optionally `- Test: \`command\``. **Out of scope**, **Context** and
+**Acceptance criteria** are optional. A spec should be as short as the change
+allows: everything in it is something the build has to read and may echo.
 
 - **Several features from one conversation?** One spec each: each is built,
   reviewed and committed on its own. `Depends on:` orders them; building one
@@ -87,7 +89,8 @@ with its detail, an `- Acceptance:` line and optionally `- Test: \`command\``.
 ## Building
 
 `/pb:build` (pick a spec if there are several) opens a new session named after
-it. Inside:
+it, on the same model and thinking level as the session you ran it from (a new
+Pi session would otherwise start from your settings' defaults). Inside:
 
 1. **The tasks.** The build starts with T1 straight away; the harness hands the
    tasks out one at a time. When Pi says a task
@@ -99,12 +102,16 @@ it. Inside:
 
 The build treats the spec as settled: it implements, it doesn't re-plan. Where
 the spec is ambiguous, contradicts itself or doesn't match the code, Pi doesn't
-stop to ask: it picks the best solution (even when that is more work), records
-it in the spec's Decisions as an **assumption**, and carries on. The build
+stop to ask: it takes the sensible reading, records it in the spec's Decisions
+as an **assumption**, and carries on. The build
 summary lists these choices and the reviewer checks them, so you look once, at
 the end. Pi stops with a question only when a choice would change behaviour, an
-API or data in a way that is costly to undo. It also ignores everything under
-`.pi/` except its spec.
+API or data. It also leaves `.pi/` alone.
+
+The build's instructions are deliberately short (a handful of lines): long rule
+lists make models write more defensive, more verbose code. Comments explain the
+code as it is, never its history: no dates, "decided", previous values or task
+ids; decisions stay in the spec.
 
 Most such problems are caught earlier anyway: before writing a spec, `/pb:spec`
 checks it against itself and the code (examples against rules, "unchanged"

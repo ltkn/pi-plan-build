@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-- **No more gap check at the start of a build**: it cost too much context and stopped the build over points the model could resolve itself. The build now starts with T1 and treats the spec as settled. Where the spec is ambiguous, contradicts itself or doesn't match the code, the builder picks the best solution (even when it is more work), records it as an assumption in the spec's Decisions (`pb_record_decision` with `assumption: true`) and carries on; it stops only for choices that change behaviour, an API or data and are costly to undo. The build summary lists the assumptions and the reviewer checks them. `pb_spec_gaps` is removed
-- `/pb:spec` runs a consistency pass before writing (examples against rules, acceptance against tasks, "unchanged" against "extended", every path and name against the code), resolves what it finds with the best solution, and tells you; specs state each fact once
+- **Cut down.** Build instructions go from ~3,600 to ~1,100 characters (six short lines), the plan prompt from ~1,800 to ~730, the spec prompt from ~3,400 to ~1,450: long rule lists made models write more defensive, verbose code. The spec needs only Goal, Decisions and Tasks (Out of scope, Context, Acceptance criteria are optional), with decisions stated as they stand now, without dates or history. Comments explain the code as it is, never its history (no dates, "decided", previous values, task ids, revisit notes), with a one-line reminder in every task. No more "best solution even if more work". Test output sent back to the agent: 30 key lines and a 40-line tail, 4,000 characters by default
+- **No more gap check at the start of a build**: it cost too much context and stopped the build over points the model could resolve itself. The build now starts with T1 and treats the spec as settled. Where the spec is ambiguous, contradicts itself or doesn't match the code, the builder takes the sensible reading, records it as an assumption in the spec's Decisions (`pb_record_decision` with `assumption: true`) and carries on; it stops only for choices that change behaviour, an API or data. The build summary lists the assumptions and the reviewer checks them. `pb_spec_gaps` is removed
+- `/pb:spec` runs a consistency pass before writing (examples against rules, acceptance against tasks, "unchanged" against "extended", every path and name against the code), fixes what it finds in the spec, and tells you; specs state each fact once
 - The build ignores `.pi/` except its spec
+- The build session runs on the model and thinking level of the session you ran `/pb:build` from; a new Pi session would otherwise start from your settings' defaults (e.g. without thinking)
 
 ## 1.0.0
 

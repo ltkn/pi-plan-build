@@ -50,7 +50,7 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
   back, and the spec has to be complete. Rejected ideas are written into the
   spec ("Not doing X, because …") so they stay rejected.
 - **The build just builds.** It treats the spec as settled. Where the spec is
-  unclear or doesn't match the code, it picks the best solution, records it as
+  unclear or doesn't match the code, it takes the sensible reading, records it as
   an assumption in the spec, and carries on: you see the list at the end, and
   the reviewer checks it. Spec problems are meant to be caught earlier: before
   writing a spec, `/pb:spec` checks it against itself and the code.
@@ -76,10 +76,7 @@ Verification: tests                 # or: build — why  ·  none — why
 New tests: yes                      # or: no — why
 
 ## Goal
-## Out of scope
-## Decisions
-## Context
-## Acceptance criteria
+## Decisions                         # each with its reason, as it stands now
 ## Tasks
 ### T1: Add CANCELLED to OrderStatus and the cancel() transition
 …what to change, where, which pattern to follow…
@@ -87,8 +84,9 @@ New tests: yes                      # or: no — why
 - Test: `mvn -B -q -Dtest=OrderTest test`
 ```
 
-One spec per feature you'd merge on its own; one planning session can produce
-several (`Depends on:` orders them).
+`## Out of scope`, `## Context` and `## Acceptance criteria` are optional: a
+spec is as short as the change allows. One spec per feature you'd merge on its
+own; one planning session can produce several (`Depends on:` orders them).
 
 **Checks and tests are separate choices.** `Verification` decides what runs
 after each task: `tests` (the task's `Test:` command, the full suite at the
@@ -105,7 +103,7 @@ build not to add tests for this feature while the existing ones still run.
 | `build` | `"auto"` | compile/typecheck command for `Verification: build` (e.g. `mvn -B -q -DskipTests test-compile`, `tsc --noEmit`) |
 | `verifyTimeoutSec` | 900 | |
 | `maxAttempts` | 3 | failed checks per task before the build pauses |
-| `testOutputCap` | 20000 | chars of test output shown to the agent and the reviewer |
+| `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo` and the changed-test check |
 | `reviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the fresh reviewer; unset = your session's |
 
