@@ -310,8 +310,9 @@ export default function pb(pi: ExtensionAPI) {
       const building = !!name && !!p && p.phase === "building";
       const session = ctx.sessionManager.getSessionFile() ?? "";
       if (checkpointing.has(session)) return reply("Not now: this is a checkpoint. Write the question under Open questions in the spec instead.");
-      // Writing the spec for a build is unattended too: the human may have walked away after /pb:build.
-      const unattended = building || specWriting.has(session) || store.pendingBuild(session);
+      // The human may have walked away: during a build, while /pb:build writes the spec, and while planning.
+      const planning = store.planningSessions().includes(session);
+      const unattended = building || specWriting.has(session) || store.pendingBuild(session) || planning;
       if (!ctx.hasUI) {
         if (building) {
           pauseBuild(ctx, store, p!, `${p!.current} question: ${params.question}`, "build.paused", "question");
@@ -342,7 +343,13 @@ export default function pb(pi: ExtensionAPI) {
           store.event(name!, { type: "ask", task: p!.current, timedOut: true });
           return reply(`No answer within ${minutes} min: go on with your recommendation (${params.recommended}); it's recorded as an assumption for the review.`);
         }
-        const record = building ? ", record it with pb_record_decision (assumption: true)" : unattended ? `, write it into the spec's Decisions as "Assumption: … because …"` : "";
+        const record = building
+          ? ", record it with pb_record_decision (assumption: true)"
+          : specWriting.has(session) || store.pendingBuild(session)
+            ? `, write it into the spec's Decisions as "Assumption: … because …"`
+            : planning
+              ? ", and tell the human it's an assumption to confirm (under open questions once there's a spec)"
+              : "";
         return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: take the sensible reading${timedOut && params.recommended ? ` (your recommendation: ${params.recommended})` : ""}${record} and carry on.`);
       }
       if (building) {

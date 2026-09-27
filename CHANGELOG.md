@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.3
+
+- `pb_ask` counts down in planning too (`askTimeoutSec`, 5 minutes): unanswered, Pi goes on with its recommendation and tells you it's an assumption to confirm (under open questions once there's a spec)
+
 ## 1.10.2
 
 - The explorer and the project map now think at max by default (Pi clamps it to the model); before, pb passed `--thinking low`, which overrode the level set on the model. `explorer.thinking` in the config lowers it

@@ -116,7 +116,9 @@ starts; if anything changed by the time you build (or run `/pb:plan off`), it
 lists the files and asks whether to keep or restore them.
 
 **Questions.** Pi asks what only you can decide; a choice between options comes
-as a dialog (`pb_ask`) with its recommendation marked.
+as a dialog (`pb_ask`) with its recommendation marked. If you're away, it counts
+down (`askTimeoutSec`, 5 minutes) and Pi goes on with its recommendation, telling
+you it's an assumption to confirm.
 
 Discuss as long as you like. When a discussion turns out to cover two things you
 would merge separately, Pi should say so; they become two specs.

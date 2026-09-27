@@ -1646,3 +1646,14 @@ test("map: its entry reads well: collapsed, what changed; expanded, the map as m
   assert.deepEqual(expanded.removed, ["- `old.ts`: gone"]);
   assert.match(mapView({ ...d, tokens: 3200, warnings: ["`x/y` doesn't resolve"] }, false).head, /over the ~1,500 budget/);
 });
+
+test("pb_ask counts down while planning too: unanswered, the recommendation is taken as an assumption to confirm", async () => {
+  const t = setup({ askTimeoutSec: 0.001 });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  t.selects.push("<timeout>");
+  const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
+  assert.equal(t.dialogTimeouts.at(-1), 1);
+  assert.match(r.content![0].text, /No answer in time: take the sensible reading \(your recommendation: event\), and tell the human it's an assumption to confirm/);
+});
