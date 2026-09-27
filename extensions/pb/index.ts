@@ -1649,7 +1649,7 @@ export default function pb(pi: ExtensionAPI) {
       ...(currentLines >= 6 && removed / currentLines > 0.3 ? [`it removes ${removed} of the map's ${currentLines} lines`] : []),
       ...(tokens > 2 * MAP_TOKENS ? [`~${tokens} tokens, over twice the ~${MAP_TOKENS} budget`] : []),
     ];
-    pi.appendEntry("pb-map", { diff, warnings, tokens });
+    pi.appendEntry("pb-map", { diff, warnings, tokens, map: body, changes });
     if (warnings.length) {
       const APPLY = "Apply it anyway";
       const EDIT = "Edit it first";

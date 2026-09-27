@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9.1
+
+- **The project map's change reads well in Pi**: collapsed, a summary (size, lines added and removed, what changed as the cartographer put it, any warnings); expanded, the new map rendered as markdown, like in AGENTS.md, with the removed lines below. It used to be a raw diff of long, wrapping lines
+
 ## 1.9.0
 
 - **Fixed: the map's path check threw away good content.** It took every backticked path as relative to the project root and dropped the whole line when it didn't exist, so `module/Class` names, package-relative paths and paths inside a module wiped out whole sections (leaving empty headings). Paths now resolve from the root, under the path a section's heading names, and as the end of a real file with or without extension; the ones that still don't resolve go back to the cartographer once to be corrected or removed. pb never deletes map text itself

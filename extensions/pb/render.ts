@@ -16,17 +16,45 @@ export function registerRenderers(pi: ExtensionAPI) {
     return box;
   });
 
-  // A change to the project map: shown to you, not sent to the model.
-  pi.registerEntryRenderer<{ diff: string[]; warnings: string[]; tokens: number }>("pb-map", (entry, _opts, theme) => {
+  // A change to the project map: shown to you, not sent to the model. Collapsed, what changed; expanded, the map itself.
+  pi.registerEntryRenderer<MapView>("pb-map", (entry, { expanded }, theme) => {
     const d = entry.data;
     if (!d) return undefined;
+    const v = mapView(d, expanded);
     const box = new Box(1, 1, (s) => theme.bg("customMessageBg", s));
-    const head = theme.fg("accent", "project map (AGENTS.md)") + theme.fg(d.tokens > 1500 ? "warning" : "dim", `  ~${d.tokens} tokens${d.tokens > 1500 ? ", over the ~1,500 budget" : ""}`);
-    const body = d.diff.map((l) => theme.fg(l.startsWith("+") ? "toolDiffAdded" : "toolDiffRemoved", l));
-    const warnings = (d.warnings ?? []).map((w) => theme.fg("warning", `⚠ ${w}`));
-    box.addChild(new Text([head, ...body, ...warnings].join("\n"), 0, 0));
+    box.addChild(new Text(theme.fg("accent", "project map (AGENTS.md)") + theme.fg(v.over ? "warning" : "dim", `  ${v.head}`), 0, 0));
+    const color = { change: "text", warning: "warning", removed: "toolDiffRemoved", hint: "dim" } as const;
+    if (v.lines.length) box.addChild(new Text(v.lines.map((l) => theme.fg(color[l.kind], l.text)).join("\n"), 0, 0));
+    if (v.markdown) box.addChild(new Markdown(v.markdown, 0, 1, getMarkdownTheme()));
+    if (v.removed.length) box.addChild(new Text([theme.fg("dim", "removed:"), ...v.removed.map((l) => theme.fg("toolDiffRemoved", `- ${l}`))].join("\n"), 0, 0));
     return box;
   });
+}
+
+/* ------------------------------- project map ------------------------------- */
+
+export interface MapView {
+  diff: string[];
+  warnings: string[];
+  tokens: number;
+  /** the new map */
+  map?: string;
+  /** what changed, as the cartographer put it */
+  changes?: string[];
+}
+
+/** What the map's entry shows: collapsed, what changed; expanded, the new map as markdown and what was removed. */
+export function mapView(d: MapView, expanded: boolean) {
+  const added = d.diff.filter((l) => l.startsWith("+")).length;
+  const removedLines = d.diff.filter((l) => l.startsWith("-")).map((l) => l.slice(2));
+  const over = d.tokens > 1500;
+  const head = `~${d.tokens} tokens${over ? ", over the ~1,500 budget" : ""} · ${added} line${added === 1 ? "" : "s"} added, ${removedLines.length} removed`;
+  const lines: { text: string; kind: "change" | "warning" | "hint" }[] = [
+    ...(d.changes ?? []).map((c) => ({ text: `• ${c}`, kind: "change" as const })),
+    ...d.warnings.map((w) => ({ text: `⚠ ${w}`, kind: "warning" as const })),
+  ];
+  if (!expanded) return { head, over, lines: [...lines, { text: "(expand to read the map)", kind: "hint" as const }], markdown: undefined, removed: [] as string[] };
+  return { head, over, lines, markdown: d.map, removed: removedLines };
 }
 
 /* ------------------------------- pb_explore ------------------------------- */
