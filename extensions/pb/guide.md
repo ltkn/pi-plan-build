@@ -100,6 +100,30 @@ as a dialog (`pb_ask`) with its recommendation marked.
 Discuss as long as you like. When a discussion turns out to cover two things you
 would merge separately, Pi should say so; they become two specs.
 
+**Long discussions: the checkpoint.** A planning session isn't compacted like
+other sessions. When it passes `checkpointAt` (75% of its context window, and
+always early enough to stay clear of Pi's own compaction), Pi writes the plan to
+its spec right after its reply, while it still has the whole discussion:
+`Status: planning`, the Findings (with the dead ends, and why), the Decisions
+with rejected ideas, and the Open questions (with each option still being
+weighed and what was found for and against it), so even a discussion that
+settled little keeps what it found. pb then resets the session to that spec,
+plus your last message and the reply to it, word for word. The discussion goes
+on from the plan as it stands, with room to spare. Later checkpoints update only
+the sections that changed.
+
+**On demand**: `/pb:checkpoint` writes and resets now, e.g. before you quit.
+**Changed your mind?** `/pb:checkpoint undo` brings the whole discussion back
+(the reset only changed what the model sees; the session file keeps
+everything). The spec keeps what the checkpoint wrote.
+
+**Coming back later.** Reopen the session (`/resume`): after a checkpoint it
+starts small, from the spec as it was at that checkpoint plus what followed.
+Or start clean from the spec as it is on disk now (including your own edits):
+`/pb:plan <spec>` continues planning in a fresh session, open questions first.
+Quitting a big session that never reached the checkpoint? `/pb:checkpoint`
+first, or it comes back at full size.
+
 `/pb:plan off` lifts the block for this session without building anything.
 
 **Dependencies** are planned on their own: `/pb:deps [which]` checks the
@@ -127,12 +151,28 @@ Verification: tests            (or: build — why · none — why)
 New tests: yes                 (or: no — why)
 ```
 
-Then three sections: **Goal**, **Decisions** (each with its reason as it
-stands now, no history; rejected ideas as "Not doing X, because …") and
-**Tasks**, each as `### T1: title` with its detail, an `- Acceptance:` line and
-optionally `- Test: \`command\``. **Out of scope**, **Context** and
-**Acceptance criteria** are optional. A spec should be as short as the change
-allows: everything in it is something the build has to read and may echo.
+Then the sections:
+
+- **Goal.**
+- **Findings**: what the analysis established, so nobody redoes it: the files
+  and classes involved and their roles, the code to imitate (by path and lines,
+  not pasted), constraints, the test command and baseline.
+- **Decisions**: each with its reason as it stands now, no history; rejected
+  ideas as "Not doing X, because …", so they aren't reconsidered.
+- **Open questions**: only while `Status: planning`.
+- **Tasks**: each as `### T1: title` with its detail, an `- Acceptance:` line
+  and optionally `- Test: \`command\``.
+
+**Out of scope** and **Acceptance criteria** are optional. The aim: a fresh or
+reset session starts where the discussion ended, without re-analysing and
+without being buried. Pi points to code instead of copying it and states each
+fact once; `pb_write_spec` reports the size and only suggests tightening a long
+spec. `pb_update_spec` changes one section at a time.
+
+A spec with `Status: planning` is a checkpoint of an unfinished discussion (no
+tasks or verification needed yet). `/pb:build` finishes it first: open
+questions settled, tasks written, `Status: ready`. `/pb:spec <name>` revises a
+spec from the file on disk, not from memory.
 
 Before writing, Pi checks the spec against itself and the code (examples
 against rules, "unchanged" against "extended", every path and name), resolves
@@ -178,8 +218,7 @@ named "build: <spec>", seeded with the spec, on your model and thinking level.
 **A check after every task** (`"taskChecks": "each"`): the harness also runs each
 task's `Test:` command (a compile when it has none) when the task is done. It
 catches a broken task earlier, but makes every task leave the build green on
-its own, which slices work unnaturally and costs a run per task; the eval's
-`pb-each` arm measures whether it pays for your projects.
+its own, which slices work unnaturally and costs a run per task.
 
 The build treats the spec as settled: it implements, it doesn't re-plan. Where
 the spec is ambiguous, contradicts itself or doesn't match the code, Pi takes
@@ -203,8 +242,7 @@ last failure, the spec) instead of asking a model to summarize.
 **Pruning** (optional, `"pruneAbove": <percent>`): above that share of the
 context window, long tool output of finished tasks is replaced by a short note
 at each task boundary. It rewrites the cached prompt once to make later turns
-lighter, so it pays off only for long builds; measure with the eval before
-turning it on.
+lighter, so it pays off only for long builds.
 
 While it runs, this is an ordinary Pi session: watch, interrupt with Esc, ask
 things. **Decisions you make here** are written into the spec's Decisions

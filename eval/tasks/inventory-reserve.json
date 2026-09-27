@@ -1,7 +1,0 @@
-{
-  "name": "inventory-reserve",
-  "fixture": "fixtures/inventory",
-  "prompt": "Add reservations to Inventory: reserve(sku, qty) holds stock back and returns a reservation id; shipReservation(id) ships the held units; release(id) returns them to stock. Reserved units don't count as available, so ship() can't take them. A reservation can be shipped or released once.",
-  "answers": ["Go with your recommendation."],
-  "hidden": { "dir": "hidden/inventory-reserve", "to": "test", "command": "node --test test/hidden.test.js" }
-}

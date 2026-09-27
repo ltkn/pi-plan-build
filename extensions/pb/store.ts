@@ -41,6 +41,11 @@ export interface Config {
   buildModel?: string;
   /** Above this share of the context window (%), finished tasks' long tool output is pruned at task boundaries; 0 = never. */
   pruneAbove: number;
+  /**
+   * A planning session past this share of its context window (%) writes the plan to its spec and is reset
+   * to it, instead of being compacted; always early enough to stay clear of Pi's own compaction. 0 = never.
+   */
+  checkpointAt: number;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -57,6 +62,7 @@ export const DEFAULT_CONFIG: Config = {
   baseline: true,
   explorer: {},
   pruneAbove: 0,
+  checkpointAt: 75,
 };
 
 export interface VerifyResult {
@@ -107,6 +113,8 @@ export interface Progress {
   writtenIn?: string;
   /** you edited the spec since the session wrote it: that session's copy is stale */
   edited?: boolean;
+  /** the session that wrote it was compacted since, without the spec in the summary: its copy is gone */
+  compacted?: boolean;
   /** a new plan started in the build's session: its later turns aren't this spec's any more */
   detached?: boolean;
   baseCommit?: string;
@@ -261,33 +269,37 @@ export class Store {
     fs.mkdirSync(this.root, { recursive: true });
     fs.appendFileSync(path.join(this.root, "explore.jsonl"), `${JSON.stringify({ at: now(), ...e })}\n`);
   }
-  /** A review without a spec: no spec folder to keep it in. */
-  reviewEvent(e: Record<string, unknown>): void {
-    fs.mkdirSync(this.root, { recursive: true });
-    fs.appendFileSync(path.join(this.root, "reviews.jsonl"), `${JSON.stringify({ at: now(), type: "review", ...e })}\n`);
-  }
   exploreEvents(): Record<string, unknown>[] {
     return readEvents(path.join(this.root, "explore.jsonl"));
   }
 
   /* ------------------------------- planning ------------------------------- */
 
-  /** Planning sessions (project files read-only, see the tool_call guard), with a snapshot of the tree when planning began. */
-  private planningMap(): Record<string, { snapshot?: string }> {
-    const raw = readJson<string[] | Record<string, { snapshot?: string }>>(path.join(this.root, "planning.json"));
+  /**
+   * Planning sessions (project files read-only, see the tool_call guard), with a snapshot of the tree when
+   * planning began and the entry the last checkpoint reset from (what /pb:checkpoint undo goes back to).
+   */
+  private planningMap(): Record<string, { snapshot?: string; checkpointFrom?: string }> {
+    const raw = readJson<string[] | Record<string, { snapshot?: string; checkpointFrom?: string }>>(path.join(this.root, "planning.json"));
     if (Array.isArray(raw)) return Object.fromEntries(raw.map((s) => [s, {}]));
     return raw ?? {};
   }
   planningSessions(): string[] {
     return Object.keys(this.planningMap());
   }
-  planning(sessionFile: string): { snapshot?: string } | undefined {
+  planning(sessionFile: string): { snapshot?: string; checkpointFrom?: string } | undefined {
     return this.planningMap()[sessionFile];
   }
   setPlanning(sessionFile: string, on: boolean, snapshot?: string): void {
     const map = this.planningMap();
-    if (on) map[sessionFile] = { snapshot: snapshot ?? map[sessionFile]?.snapshot };
+    if (on) map[sessionFile] = { ...map[sessionFile], snapshot: snapshot ?? map[sessionFile]?.snapshot };
     else delete map[sessionFile];
+    writeFile(path.join(this.root, "planning.json"), `${JSON.stringify(map, null, 2)}\n`);
+  }
+  setCheckpointFrom(sessionFile: string, entry: string | undefined): void {
+    const map = this.planningMap();
+    if (!map[sessionFile]) return;
+    map[sessionFile] = { ...map[sessionFile], checkpointFrom: entry };
     writeFile(path.join(this.root, "planning.json"), `${JSON.stringify(map, null, 2)}\n`);
   }
 
@@ -335,6 +347,14 @@ export class Store {
     const active = mine.find((x) => ["building", "paused"].includes(x.p!.phase));
     if (active) return active.n;
     return mine.filter((x) => !x.p!.detached).sort((a, b) => b.p!.updatedAt.localeCompare(a.p!.updatedAt))[0]?.n;
+  }
+
+  /** Specs this session wrote that aren't built yet: what a planning session is working on. */
+  specsOfPlanning(sessionFile: string): string[] {
+    return this.specNames().filter((n) => {
+      const p = this.progress(n);
+      return p?.writtenIn === sessionFile && p.phase === "written";
+    });
   }
 
   /** A new plan in this session: the specs it finished building stop claiming its turns. */

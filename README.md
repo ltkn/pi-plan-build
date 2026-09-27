@@ -7,6 +7,8 @@ build. Your engineering standards live in AGENTS.md, written once.
 
 ```
 /pb:plan <what>       plan together; project files untouched; the test baseline runs in the background
+/pb:plan <spec>       continue planning a spec in a fresh session, from the spec
+/pb:checkpoint [undo] write the plan to its spec and reset the planning session to it (automatic at checkpointAt)
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
                       (--fresh: in a new session from the spec)
 /pb:review [focus]    independent review against the spec and your standards, P0–P3, blocking findings
@@ -62,7 +64,7 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   After the last task the harness runs the full suite inside that same call; a
   failure goes straight back to fix, and after `maxAttempts` the build pauses
   for you. The agent's word never ends a build. A check after every task is
-  available (`taskChecks: "each"`); whether it pays is for the eval to show.
+  available (`taskChecks: "each"`).
 - **Refactors are welcome, and reviewed.** Changed existing tests don't stop the
   build (refactors move and merge them); they're listed and the reviewer judges
   each. Refactoring the standards call for comes first, as `(refactor)` tasks.
@@ -97,22 +99,30 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 - **Structured, not parsed from prose.** The agent reports through tools
   (`pb_write_spec`, `pb_task_done`, `pb_record_decision`, `pb_ask`), and so do
   the reviewer and the verifier.
-- **Measured, not assumed.** `eval/` runs the same tasks with bare Pi, bare Pi
-  plus `/pb:review`, and the full flow (checked at the end, or after every
-  task), and compares hidden-test results, a fixed judge's findings, cost,
-  cache share and time. `eval/from-commit.mjs` turns a real commit of yours
-  into a task.
+- **The spec is the planning session's checkpoint.** A long planning session
+  isn't compacted: at `checkpointAt` (75% of the window, always before Pi would
+  compact) Pi writes the plan to its spec while it still has the whole
+  discussion, and pb resets the session to the spec. No summarizing model call,
+  and a better summary: what was found, decided, rejected, and still open.
+  `/pb:plan <spec>` continues any time in a fresh session from the spec.
+- **A spec that saves re-analysis.** Besides goal, decisions and tasks, it keeps
+  the **Findings** (files and roles, the code to imitate by path, constraints,
+  the test baseline), so a fresh or reset session starts from the conclusions
+  instead of redoing the analysis, and rejected ideas stay rejected.
 
 ## The spec
 
 ```
 # Order cancellation
+Status: ready                       # planning: a checkpoint, no tasks yet
 Depends on: none
 Verification: tests                 # or: build — why  ·  none — why
 New tests: yes                      # or: no — why
 
 ## Goal
-## Decisions                         # each with its reason, as it stands now
+## Findings                          # what the analysis established: files, code to imitate, constraints, baseline
+## Decisions                         # each with its reason, as it stands now; rejected ideas too
+## Open questions                    # only while planning
 ## Tasks
 ### T1: Add CANCELLED to OrderStatus and the cancel() transition
 …what to change, where, which pattern to follow…
@@ -120,8 +130,10 @@ New tests: yes                      # or: no — why
 - Test: `mvn -B -q -Dtest=OrderTest test`
 ```
 
-`## Out of scope`, `## Context` and `## Acceptance criteria` are optional: a
-spec is as short as the change allows. One spec per feature you'd merge on its
+`## Out of scope` and `## Acceptance criteria` are optional: a spec is as long
+as the change needs and no longer. Pi points to code instead of copying it;
+`pb_write_spec` reports the spec's size and only suggests tightening a long one.
+`pb_update_spec` changes single sections, so a checkpoint rewrites only what moved. One spec per feature you'd merge on its
 own; one planning session can produce several (`Depends on:` orders them).
 
 **Checks and tests are separate choices.** `Verification` decides what the
@@ -150,6 +162,7 @@ the existing ones still run.
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `pruneAbove` | 0 | above this % of the context window, prune long tool output of finished tasks at task boundaries; 0 = never |
+| `checkpointAt` | 75 | a planning session past this % of its window writes its spec and is reset to it (always before Pi's own compaction); 0 = never |
 
 ## On disk
 
@@ -159,7 +172,7 @@ the existing ones still run.
 | `.pi/pb/specs/<name>/progress.json` | task states, the session the build runs in, the last review, harness-owned |
 | `.pi/pb/specs/<name>/checkpoints.json`, `events.jsonl` | undo points (files and conversation) and stats |
 | `.pi/pb/baseline.json`, `planning.json` | the last test baseline; planning sessions and their snapshots |
-| `.pi/pb/explore.jsonl`, `reviews.jsonl` | `pb_explore` usage per session; reviews without a spec |
+| `.pi/pb/explore.jsonl` | `pb_explore` usage per session |
 | `.pi/pb-archive/` | archived specs (git-ignored by itself) |
 
 Snapshots live in git's object store under `refs/pb/checkpoints`; your branch,
@@ -171,8 +184,6 @@ commits and staging area are never touched.
 npm install
 npm run check        # typecheck + tests (a simulated Pi; no model needed)
 pi -e ./             # run Pi with this working copy loaded
-npm run eval -- --dry                     # the eval's wiring, against your real pi, no model calls
-npm run eval -- --model provider/id       # the A/B eval: costs real tokens (see eval/README.md)
 ```
 
 `PI_PB_PI_COMMAND` overrides the `pi` executable used for the fresh explorer,

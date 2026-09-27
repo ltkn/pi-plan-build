@@ -51,38 +51,88 @@ Check ${scope ? `these dependencies: ${scope}` : "this project's dependencies"}:
 
 /* ================================== spec ================================== */
 
-export function specPrompt(which: string, existing: string[]): string {
-  return `[pb:spec]${which ? ` ${which}` : ""}
-
-Write the spec${which ? ` for: ${which}` : ""} from our discussion with the pb_write_spec tool (one call per spec). The build follows it, the reviewer checks against it, and after a compaction or in a fresh session it's all the build has: put in what it needs and nothing it doesn't, as short as the change allows.
-
-# <title>
+/** The format, and what earns a place in a spec: shared by writing, finishing and checkpointing. */
+const SPEC_FORMAT = `# <title>
+Status: ready | planning
 Depends on: <spec name> | none
 Verification: tests | build — <why> | none — <why>
 New tests: yes | no — <why>
 
 ## Goal
+## Findings
+What the analysis established, so nobody has to redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Dead ends too: what was tried or ruled out, and why.
 ## Decisions
-Each decision with its reason, as it stands now: no dates, no history, not who decided. Rejected ideas as "Not doing X, because …".
+Each decision with its reason, as it stands now: no dates, no history, not who decided. Rejected ideas as "Not doing X, because …", so they aren't reconsidered.
+## Open questions
+Only while Status is planning: what's undecided, the options still being weighed with what was found for and against each, and where the discussion stands.
 ## Tasks
 ### T1: <title>
 What to change and where.
 - Acceptance: <checkable>
 - Test: \`<command for this task's tests>\`   (optional; the full suite runs after the last task)
 
-Add "## Out of scope", "## Context" (files, conventions, test setup) or "## Acceptance criteria" only when they help.
+Add "## Out of scope" or "## Acceptance criteria" only when they help.
+
+- Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.`;
+
+export function specPrompt(which: string, existing: string[], current?: { name: string; markdown: string }): string {
+  return `[pb:spec]${which ? ` ${which}` : ""}
+
+Write the spec${which ? ` for: ${which}` : ""} from our discussion with the pb_write_spec tool (one call per spec; pb_update_spec changes single sections of an existing one). The build follows it, the reviewer checks against it, and a fresh or reset session starts from it alone: put in what it needs and nothing it doesn't.
+
+${SPEC_FORMAT}
 
 - One spec per change you would merge on its own; if the discussion covers several, say so and write one each.
 - Refactoring that the standards call for (outdated code in the way) comes first, as tasks titled "(refactor) …" that keep behaviour; a large one is a spec of its own that this one depends on.
-- Say each fact once: an example or the rule behind it, not both.
 - Before writing, check the spec for contradictions and against the code; fix them in the spec and tell me briefly what you changed.
 - The approach follows the engineering standards (AGENTS.md).
-- Verification defaults to tests; "New tests: no" only if I said so.
-- Name: short kebab-case.${existing.length ? ` Existing: ${existing.join(", ")} (reusing a name rewrites it).` : ""}
+- Status: ready, with no open questions left (ask me first if some are). Verification defaults to tests; "New tests: no" only if I said so.
+- Name: short kebab-case.${existing.length ? ` Existing: ${existing.join(", ")} (reusing a name rewrites it; read its spec.md first, it may differ from what you remember).` : ""}${current ? `\n\n--- current ${P}/specs/${current.name}/spec.md (revise this) ---\n\n${current.markdown}` : ""}
 
 Then tell me where it is. End your reply with this block, verbatim:
 
 ${tip("spec.next")}`;
+}
+
+/** Past the checkpoint: write the plan down while the whole discussion is still in context; pb then resets to it. */
+export function checkpointPrompt(percent: number, specs: string[]): string {
+  return `[pb:checkpoint] This planning conversation is at ${percent}% of its context. Write the plan as it stands to the spec now, while you still have the whole discussion: afterwards the conversation continues from the spec alone.
+
+${specs.length ? `Update ${specs.map((n) => `${P}/specs/${n}/spec.md`).join(", ")} with pb_update_spec, only the sections that changed (or pb_write_spec if most of it did).` : "Write it with pb_write_spec, Status: planning (Tasks and Verification can wait)."} Even if little is settled, the investigation isn't lost: record in Findings what was established and the dead ends (what was tried or ruled out, and why); in Decisions what is decided, with rejected ideas; in Open questions each option still being weighed, with what was found for and against it, and where the discussion stands. Leave out nothing the next step needs, and paste no code. Then reply with one line, nothing else.`;
+}
+
+/** What a planning session is reset to: its spec(s), the plan as it stands, and the last exchange word for word. */
+export function checkpointSummary(specs: { name: string; markdown: string }[], last?: { human?: string; answer?: string }): string {
+  const cut = (t: string) => (t.length > 6000 ? `${t.slice(0, 6000)}\n…[cut]` : t);
+  return [
+    `[pb plan checkpoint] The planning conversation was reset to its spec${specs.length > 1 ? "s" : ""} to free context. Continue from here: the spec is the plan as it stands, and its open questions are where we were. Planning mode is still on: the project's files stay untouched until /pb:build.`,
+    ...specs.map((s) => `\n--- ${P}/specs/${s.name}/spec.md ---\n\n${s.markdown}`),
+    ...(last?.human || last?.answer
+      ? ["\n--- the last exchange before the checkpoint, word for word ---", ...(last.human ? ["", `Human: ${cut(last.human)}`] : []), ...(last.answer ? ["", `Assistant: ${cut(last.answer)}`] : [])]
+      : []),
+  ].join("\n");
+}
+
+/** Continue planning a spec in a fresh session. */
+export function continuePlanPrompt(name: string, markdown: string, standards: string): string {
+  return `[pb:plan ${name}] Let's continue planning this, from its spec below: it holds what was found and decided so far. Don't redo the analysis or reopen rejected ideas unless something new turns up. The project's files stay untouched until /pb:build.
+
+Start with the open questions: summarise where we are in a few lines, and ask what only I can answer.${standardsBlock(standards)}
+
+--- ${P}/specs/${name}/spec.md ---
+
+${markdown}
+
+End your first reply with this block, verbatim:
+
+${tip("plan.next")}`;
+}
+
+/** A spec still marked planning: finish it before building. */
+export function finishSpecPrompt(name: string): string {
+  return `[pb:spec ${name}] Finish the spec ${P}/specs/${name}/spec.md for building: settle its open questions with me first if any need me, add the Tasks and the Verification line, remove Open questions, and set Status: ready (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
+
+${SPEC_FORMAT}`;
 }
 
 /* ================================== build ================================== */

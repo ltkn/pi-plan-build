@@ -24,11 +24,15 @@ import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import {
   EXPLORER_SYSTEM,
   buildIntro,
+  checkpointPrompt,
+  checkpointSummary,
   compactionSummary,
+  continuePlanPrompt,
   continuePrompt,
   depsPrompt,
   explorerBrief,
   findingLine,
+  finishSpecPrompt,
   fixText,
   nudgePrompt,
   planPrompt,
@@ -39,7 +43,7 @@ import {
 import { registerRenderers } from "./render.ts";
 import { runReview } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec } from "./spec.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
 import { addStandards, agentDir, findStandards, isJavaProject, standardsLoaded } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitHead, now } from "./store.ts";
@@ -49,6 +53,14 @@ const cmd = (verb: string) => `${PREFIX}:${verb}`;
 
 /** Tool output shorter than this is never pruned: it costs less than the cache write pruning causes. */
 const PRUNE_MIN_CHARS = 2000;
+/** Pi compacts at the context window minus this reserve (its default reserveTokens): a checkpoint must come earlier. */
+const PI_RESERVE_TOKENS = 16384;
+/** Above this, a spec gets a gentle note about its size; never a rejection. */
+const LONG_SPEC_TOKENS = 12000;
+
+/** What the model is told about a spec's size after writing it. */
+const sizeNote = (tokens: number) =>
+  `~${tokens} tokens${tokens > LONG_SPEC_TOKENS ? ". That's long: if it copies code or repeats facts, pointing to the code and stating each fact once would help the next reader; if it's all needed, keep it" : ""}`;
 
 /** Spec names for argument completion (completions run without a ctx, in Pi's working directory). */
 const specCompletions = (prefix: string) =>
@@ -58,7 +70,8 @@ const specCompletions = (prefix: string) =>
     .map((n) => ({ value: n, label: n }));
 
 type Entry = { id: string; parentId: string | null; type: string; message?: { role?: string; content?: unknown } };
-type Tree = { getLeafId?(): string | null; getEntry?(id: string): Entry | undefined; getSessionName?(): string | undefined };
+type Tree = { getLeafId?(): string | null; getEntry?(id: string): Entry | undefined; getSessionName?(): string | undefined; getBranch?(): Entry[] };
+const contentText = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((x: { type?: string; text?: string }) => (x.type === "text" ? (x.text ?? "") : "")).join("") : "");
 const tree = (ctx: ExtensionContext) => ctx.sessionManager as unknown as Tree;
 
 const text = (t: string) => [{ type: "text" as const, text: t }];
@@ -193,12 +206,43 @@ export default function pb(pi: ExtensionAPI) {
         tasks: syncTasks(spec, prev?.tasks),
         writtenIn: ctx.sessionManager.getSessionFile(),
         edited: false,
+        compacted: false,
         updatedAt: now(),
       });
-      store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests });
-      return reply(
-        `Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}.`,
-      );
+      store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, status: spec.status, tokens: tokensOf(params.content) });
+      const what = spec.status === "planning" ? "status planning" : `${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}`;
+      return reply(`Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${what}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}; ${sizeNote(tokensOf(params.content))}.`);
+    },
+  });
+
+  pi.registerTool({
+    name: "pb_update_spec",
+    label: "Update spec",
+    description:
+      "Change part of an existing pb spec instead of rewriting it: replace or append to one section (e.g. Findings, Decisions, Open questions, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written.",
+    parameters: Type.Object({
+      name: Type.String({ description: "the spec's name" }),
+      section: Type.Optional(Type.String({ description: 'the "## " section to change, e.g. Decisions; created if missing' })),
+      content: Type.Optional(Type.String({ description: "the section's new body (without its heading), or the lines to append" })),
+      mode: Type.Optional(StringEnum(["replace", "append"])),
+      status: Type.Optional(StringEnum(["planning", "ready"])),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const store = new Store(ctx.cwd);
+      let md = store.readSpec(params.name);
+      if (!md) throw new Error(`No spec "${params.name}": write it with pb_write_spec.`);
+      if (params.section) {
+        if (params.content === undefined) throw new Error("content is required with section.");
+        md = setSection(md, params.section, params.content, (params.mode as "replace" | "append" | undefined) ?? "replace");
+      }
+      if (params.status) md = setStatus(md, params.status as "planning" | "ready");
+      const { spec, errors } = parseSpec(md);
+      if (!spec) throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.join("\n- ")}`);
+      store.writeSpec(params.name, md);
+      const prev = store.progress(params.name);
+      store.saveProgress({ ...(prev ?? { spec: params.name, phase: "written" }), spec: params.name, tasks: syncTasks(spec, prev?.tasks), writtenIn: ctx.sessionManager.getSessionFile(), updatedAt: now() });
+      store.event(params.name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md) });
+      return reply(`Updated ${store.rel("specs", params.name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}; ${sizeNote(tokensOf(md))}.`);
     },
   });
 
@@ -398,8 +442,39 @@ export default function pb(pi: ExtensionAPI) {
     return true;
   };
 
+  /** Continue planning a spec in a fresh session, seeded from it: clean context, exact checkpoint. */
+  const continuePlan = async (ctx: ExtensionCommandContext, store: Store, name: string) => {
+    const md = store.readSpec(name)!;
+    store.setCarry({ model: sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined, spec: name });
+    const snap = store.config().checkpoints ? snapshot(ctx.cwd, "pb: start of planning") : undefined;
+    const result = await ctx.newSession({
+      parentSession: ctx.sessionManager.getSessionFile(),
+      setup: async (sm) => {
+        sm.appendSessionInfo(`plan: ${name}`);
+      },
+      withSession: async (c) => {
+        // Only `c` from here on: the captured pi and ctx belong to the replaced session.
+        const session = c.sessionManager.getSessionFile();
+        if (session) store.setPlanning(session, true, snap?.commit);
+        const p = store.progress(name);
+        if (p) store.saveProgress({ ...p, writtenIn: session, compacted: false });
+        await c.sendMessage(
+          {
+            customType: "pb",
+            content: `▶ Planning **${name}** on, from ${store.rel("specs", name, "spec.md")} (the project's files stay untouched).\nThis session: "plan: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\``,
+            display: true,
+          },
+          { triggerTurn: false },
+        );
+        void c.sendMessage({ customType: "pb-instruction", content: continuePlanPrompt(name, md, ""), display: false }, { triggerTurn: true });
+      },
+    });
+    if (result.cancelled) ctx.ui.notify("Cancelled.", "info");
+  };
+
   pi.registerCommand(cmd("plan"), {
-    description: "Plan something with Pi: /pb:plan <describe what you want to build or change, in your own words>. Pi can run anything to investigate but won't touch the project's files. /pb:plan off ends that",
+    description: "Plan something with Pi: /pb:plan <describe what you want to build or change, in your own words>, or /pb:plan <spec> to continue planning a spec in a fresh session. Pi can run anything to investigate but won't touch the project's files. /pb:plan off ends that",
+    getArgumentCompletions: (prefix: string) => [{ value: "off", label: "off" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
     handler: async (args, ctx) => {
       const arg = args.trim();
       const store = new Store(ctx.cwd);
@@ -411,6 +486,10 @@ export default function pb(pi: ExtensionAPI) {
       }
       if (!arg)
         return ctx.ui.notify(`Describe what you want, in your own words, e.g.\n/${cmd("plan")} let admins cancel an order while it is still pending, and notify the customer`, "warning");
+      if (SPEC_NAME.test(arg) && store.readSpec(arg) && (store.progress(arg)?.phase ?? "written") === "written") {
+        if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+        return continuePlan(ctx, store, arg);
+      }
       // A name makes the planning session easy to find again in /resume, e.g. after a crash.
       const title = arg.length > 60 ? `${arg.slice(0, 57)}…` : arg;
       pi.setSessionName(`plan: ${title}`);
@@ -473,7 +552,9 @@ export default function pb(pi: ExtensionAPI) {
     description: "Write the spec for what we planned (one per feature); run it again to revise. Optional: which feature",
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
-      instruct(`▶ /${cmd("spec")}${args.trim() ? ` — ${args.trim()}` : ""}`, specPrompt(args.trim(), store.specNames()));
+      const which = args.trim();
+      const md = which && SPEC_NAME.test(which) ? store.readSpec(which) : undefined;
+      instruct(`▶ /${cmd("spec")}${which ? ` — ${which}` : ""}`, specPrompt(which, store.specNames(), md ? { name: which, markdown: md } : undefined));
     },
   });
 
@@ -698,6 +779,108 @@ export default function pb(pi: ExtensionAPI) {
     return { entries: [{ type: "custom_message" as const, customType: "pb-instruction", content: nudgePrompt(p.current), display: false }], continue: true };
   });
 
+  /*
+   * The planning checkpoint. Past checkpointAt (and always before Pi would compact), the model writes the
+   * plan to its spec while it still has the whole discussion; at the end of that run pb resets the session
+   * to the spec: a compaction whose summary is the spec, keeping nothing else. No summarizing model call,
+   * and the spec is the smarter summary: what was found, decided and rejected, and what is still open.
+   */
+  const checkpointing = new Map<string, { since: string; percent: number; from?: string; last: { human?: string; answer?: string } }>();
+  // Don't ask again until the session has grown another 5% of its window (after a failed or undone checkpoint).
+  const checkpointQuiet = new Map<string, number>();
+
+  /** The human's last message and the reply to it, for the reset summary: the thread you were in stays word for word. */
+  const lastExchange = (ctx: ExtensionContext) => {
+    const branch = tree(ctx).getBranch?.() ?? [];
+    let human: string | undefined;
+    let answer: string | undefined;
+    for (let i = branch.length - 1; i >= 0 && !human; i--) {
+      const e = branch[i];
+      if (e.type !== "message") continue;
+      const t = contentText(e.message?.content).trim();
+      if (!t) continue;
+      if (e.message?.role === "assistant" && !answer) answer = t;
+      else if (e.message?.role === "user") human = t;
+    }
+    return { human, answer };
+  };
+
+  /** Ask for the checkpoint now: the spec is written in this run, and the reset follows when it settles. */
+  const requestCheckpoint = (ctx: ExtensionContext, store: Store, session: string) => {
+    const usage = ctx.getContextUsage();
+    const percent = usage?.tokens != null ? Math.round((100 * usage.tokens) / usage.contextWindow) : Math.round(usage?.percent ?? 0);
+    checkpointing.set(session, { since: now(), percent, from: tree(ctx).getLeafId?.() ?? undefined, last: lastExchange(ctx) });
+    return checkpointPrompt(percent, store.specsOfPlanning(session));
+  };
+
+  pi.registerCommand(cmd("checkpoint"), {
+    description: "Write the plan to its spec now and reset this planning session to it (e.g. before quitting). /pb:checkpoint undo brings the whole discussion back",
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      const store = new Store(ctx.cwd);
+      const session = ctx.sessionManager.getSessionFile();
+      if (!session || !store.planningSessions().includes(session)) return ctx.ui.notify(`Checkpoints are for planning sessions (/${cmd("plan")}).`, "warning");
+      if (args.trim() !== "undo") return instruct(`▶ /${cmd("checkpoint")} — writing the plan to its spec, then resetting to it`, requestCheckpoint(ctx, store, session));
+
+      const from = store.planning(session)?.checkpointFrom;
+      const nav = (ctx as Partial<ExtensionCommandContext>).navigateTree;
+      if (!from || !nav || !tree(ctx).getEntry?.(from)) return ctx.ui.notify("No checkpoint to undo in this session.", "info");
+      const branch = tree(ctx).getBranch?.() ?? [];
+      const reset = branch.map((e) => e.type).lastIndexOf("compaction");
+      const since = reset < 0 ? 0 : branch.slice(reset + 1).filter((e) => e.type === "message").length;
+      if (since && ctx.hasUI && !(await ctx.ui.confirm("Undo the checkpoint?", `The ${since} message(s) since it stay on the other branch (reachable with /tree).`))) return;
+      const r = await nav(from, { summarize: false, label: "pb: checkpoint undone" });
+      if (r.cancelled) return;
+      store.setCheckpointFrom(session, undefined);
+      checkpointQuiet.set(session, ctx.getContextUsage()?.tokens ?? Number.MAX_SAFE_INTEGER);
+      post(`**↺ Checkpoint undone**: the whole discussion is back in the context. The spec keeps what the checkpoint wrote; \`/${cmd("checkpoint")}\` writes and resets again when you want.`);
+    },
+  });
+
+  pi.on("agent_before_settle", (e, ctx) => {
+    if ((e as { outcome?: string }).outcome !== "completed") return;
+    const session = ctx.sessionManager.getSessionFile();
+    if (!session) return;
+    const store = new Store(ctx.cwd);
+    if (!store.planningSessions().includes(session)) return;
+    const cfg = store.config();
+    const usage = ctx.getContextUsage();
+    const pending = checkpointing.get(session);
+    if (pending) {
+      checkpointing.delete(session);
+      const planned = store.specsOfPlanning(session);
+      if (!planned.some((n) => (store.progress(n)?.updatedAt ?? "") >= pending.since)) {
+        checkpointQuiet.set(session, usage?.tokens ?? 0);
+        return { entries: [{ type: "custom_message" as const, customType: "pb", content: "pb: the plan wasn't written to a spec, so the conversation goes on as it is (Pi compacts it when it's full).", display: true }] };
+      }
+      const specs = planned.map((n) => ({ name: n, markdown: store.readSpec(n) ?? "" }));
+      store.setCheckpointFrom(session, pending.from);
+      for (const n of planned) {
+        const q = store.progress(n)!;
+        store.saveProgress({ ...q, compacted: false });
+        store.event(n, { type: "checkpoint", tokensBefore: usage?.tokens, percent: pending.percent });
+      }
+      return {
+        entries: [
+          { type: "compaction" as const, summary: checkpointSummary(specs, pending.last), firstKeptEntryId: null, details: { pb: "checkpoint", specs: planned } },
+          {
+            type: "custom_message" as const,
+            customType: "pb",
+            content: `**Plan checkpointed** to ${planned.map((n) => store.rel("specs", n, "spec.md")).join(", ")}: the conversation was reset to it (it was ${pending.percent}% full). Carry on; \`/${cmd("build")}\` when ready · \`/${cmd("checkpoint")} undo\` brings the whole discussion back.`,
+            display: true,
+          },
+        ],
+      };
+    }
+    if (!cfg.checkpointAt || !usage || usage.tokens == null) return;
+    const specTokens = store.specsOfPlanning(session).reduce((n, name) => n + tokensOf(store.readSpec(name) ?? ""), 0);
+    const limit = Math.min((usage.contextWindow * cfg.checkpointAt) / 100, usage.contextWindow - PI_RESERVE_TOKENS - Math.max(12000, 2 * specTokens));
+    if (usage.tokens < limit) return;
+    const quietUntil = checkpointQuiet.get(session);
+    if (quietUntil !== undefined && usage.tokens < quietUntil + usage.contextWindow * 0.05) return; // don't insist every turn
+    return { entries: [{ type: "custom_message" as const, customType: "pb-instruction", content: requestCheckpoint(ctx, store, session), display: false }], continue: true };
+  });
+
   pi.on("agent_settled", async (_e, ctx) => {
     if (await offerPendingBuild(ctx)) return;
     const { store, progress: p } = specOfSession(ctx);
@@ -764,11 +947,34 @@ export default function pb(pi: ExtensionAPI) {
     });
   });
 
-  // A build session's compaction: the summary comes from the state pb keeps, not from another model call.
+  /*
+   * Compaction without another model call. A build session: the summary comes from the build's state.
+   * A planning session with a spec: the spec is the summary (normally the checkpoint below resets the
+   * session before Pi compacts; this covers a single turn that overshoots). Anywhere else Pi summarizes,
+   * and the specs this session wrote are no longer in its context word for word.
+   */
   pi.on("session_before_compact", (e, ctx) => {
     const { store, name, progress: p } = specOfSession(ctx);
-    if (!name || !p || !unfinishedPhase(p.phase)) return;
     const ev = e as { preparation: { firstKeptEntryId: string; tokensBefore: number; previousSummary?: string }; reason?: string };
+    if (!name || !p || !unfinishedPhase(p.phase)) {
+      const session = ctx.sessionManager.getSessionFile();
+      const planned = session ? store.specsOfPlanning(session) : [];
+      if (session && planned.length && store.planningSessions().includes(session)) {
+        for (const n of planned) store.event(n, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, planning: true });
+        return {
+          compaction: {
+            summary: checkpointSummary(planned.map((n) => ({ name: n, markdown: store.readSpec(n) ?? "" }))),
+            firstKeptEntryId: ev.preparation.firstKeptEntryId,
+            tokensBefore: ev.preparation.tokensBefore,
+          },
+        };
+      }
+      for (const n of planned) {
+        const q = store.progress(n)!;
+        store.saveProgress({ ...q, compacted: true });
+      }
+      return;
+    }
     store.event(name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore });
     return {
       compaction: {
@@ -794,6 +1000,7 @@ export default function pb(pi: ExtensionAPI) {
     const loaded = loadSpec(store, name);
     if (!loaded) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
     const { spec, md } = loaded;
+    if (spec.status === "planning") return ctx.ui.notify(`${name} is still being planned: /${cmd("build")} ${name} finishes it first.`, "warning");
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     if (spec.gate === "tests" && !testCmd) return ctx.ui.notify(`Verification is "tests" but no test command is set: set "verify" in ${store.rel("config.json")}, or use Verification: build/none in the spec.`, "warning");
     if (spec.gate === "build" && !buildCmd) return ctx.ui.notify(`Verification is "build" but no build command is set: set "build" in ${store.rel("config.json")}.`, "warning");
@@ -869,7 +1076,7 @@ export default function pb(pi: ExtensionAPI) {
       store.saveProgress(p);
       startCheckpoint(ctx);
       store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false });
-      const knowsSpec = !!session && p.writtenIn === session && !p.edited;
+      const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
       const task = beginTask(ctx, store, p, first, { intro: true })!;
       instruct(
         `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${task.marker}`,
@@ -920,7 +1127,7 @@ export default function pb(pi: ExtensionAPI) {
     const mine = store
       .specNames()
       .map((n) => ({ n, p: store.progress(n) }))
-      .filter((x) => x.p?.writtenIn === session && x.p?.phase === "written")
+      .filter((x) => x.p?.writtenIn === session && x.p?.phase === "written" && loadSpec(store, x.n)?.spec.status === "ready")
       .sort((a, b) => b.p!.updatedAt.localeCompare(a.p!.updatedAt));
     if (!mine.length) return true; // still talking (e.g. a question before writing): keep waiting
     store.setPendingBuild(undefined);
@@ -1008,7 +1215,7 @@ export default function pb(pi: ExtensionAPI) {
         const intro = !!p.needsIntro;
         p.needsIntro = undefined;
         const t = beginTask(ctx, store, p, cur, { countAttempt: again, intro })!;
-        const knowsSpec = !!session && p.writtenIn === session && !p.edited;
+        const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
         const body = intro
           ? `${buildIntro(p.spec, loaded.spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : loaded.md)}\n\n${t.prompt}`
           : again
@@ -1038,6 +1245,11 @@ export default function pb(pi: ExtensionAPI) {
           name = choice ? pool[labels.indexOf(choice)] : undefined;
         }
         if (!name) return;
+      }
+      if (loadSpec(store, name)?.spec.status === "planning") {
+        // A checkpoint of an unfinished discussion: finish it (tasks, verification), then offer the build.
+        store.setPendingBuild(session);
+        return instruct(`▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name));
       }
       await startBuild(ctx, store, name, fresh);
     },
@@ -1155,10 +1367,8 @@ export default function pb(pi: ExtensionAPI) {
         const findings = [...outcome.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
         const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
         const { verdict } = outcome;
-        const event = { verdict, p: counts, dismissed: outcome.dismissed.length, followUp: !!previous, ...outcome.tokens, cost: outcome.cost, ms: outcome.ms };
-        if (!name) store.reviewEvent(event);
         if (name && p) {
-          store.event(name, { type: "review", ...event });
+          store.event(name, { type: "review", verdict, p: counts, dismissed: outcome.dismissed.length, followUp: !!previous, ...outcome.tokens, cost: outcome.cost, ms: outcome.ms });
           p.review = { at: now(), snapshot: before?.commit, verdict, findings: findings.filter((f) => f.priority === "P0" || f.priority === "P1" || f.priority === "P2") };
           if (verdict === "pass") p.phase = "reviewed";
           store.saveProgress(p);

@@ -33,8 +33,7 @@
   "scripts": {
     "typecheck": "tsc -p .",
     "test": "tsx --test test/pb.test.mts",
-    "check": "npm run typecheck && npm test",
-    "eval": "node eval/run.mjs"
+    "check": "npm run typecheck && npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

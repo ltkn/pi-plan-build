@@ -40,6 +40,7 @@ function setup(config: object = {}) {
   const editors: (string | undefined)[] = [];
   const views: { customType: string; data: any }[] = [];
   const navigations: { target: string; summary?: string }[] = [];
+  const resets: { summary: string; firstKeptEntryId: string | null }[] = [];
   const edits: { targetId: string; replacement: unknown }[] = [];
   const blocked: string[] = [];
   const agent: { script?: Script } = {};
@@ -65,7 +66,9 @@ function setup(config: object = {}) {
     const t = treeOf(file);
     const out: Entry[] = [];
     for (let id = t.leaf; id; id = t.entries.get(id)!.parentId) out.unshift(t.entries.get(id)!);
-    return out;
+    // Like Pi's context: from the last compaction on (these tests' compactions keep nothing before them).
+    const last = out.map((e) => e.type).lastIndexOf("compaction");
+    return last < 0 ? out : out.slice(last);
   };
   const textOf = (e: Entry) => e.message?.content.map((c) => c.text).join("") ?? e.content ?? e.summary ?? "";
 
@@ -139,7 +142,10 @@ function setup(config: object = {}) {
         append(file(), { type: "custom_message", content: m.content });
         if (o?.triggerTurn) turn(m.content);
       },
-      sendUserMessage: (t: string) => turn(t),
+      sendUserMessage: (t: string) => {
+        append(file(), { type: "message", message: { role: "user", content: [{ type: "text", text: t }] } });
+        turn(t);
+      },
     });
     self.ctx = guard(me, {
       cwd: repo,
@@ -163,6 +169,12 @@ function setup(config: object = {}) {
         getSessionName: () => names.get(file()),
         getLeafId: () => treeOf(file()).leaf,
         getEntry: (id: string) => treeOf(file()).entries.get(id),
+        getBranch: () => {
+          const t = treeOf(file());
+          const out: Entry[] = [];
+          for (let id = t.leaf; id; id = t.entries.get(id)!.parentId) out.unshift(t.entries.get(id)!);
+          return out;
+        },
       },
       ui: {
         notify: (m: string) => notes.push(m),
@@ -251,10 +263,19 @@ function setup(config: object = {}) {
           instructions.push(input);
           continue;
         }
-        for (const r of (await fire("agent_before_settle", { outcome: "completed", entries: [], continue: false })) as { continue?: boolean; entries?: { content: string }[] }[]) {
+        type Draft = { type: string; content?: string; display?: boolean; summary?: string; firstKeptEntryId?: string | null };
+        for (const r of (await fire("agent_before_settle", { outcome: "completed", entries: [], continue: false })) as { continue?: boolean; entries?: Draft[] }[]) {
+          for (const d of r?.entries ?? []) {
+            if (d.type === "compaction") {
+              resets.push({ summary: d.summary!, firstKeptEntryId: d.firstKeptEntryId ?? null });
+              append(rt.file(), { type: "compaction", summary: d.summary });
+            } else if (d.type === "custom_message") {
+              append(rt.file(), { type: "custom_message", content: d.content });
+              if (d.display) posts.push(d.content!);
+            }
+          }
           if (r?.continue) {
-            input = r.entries![0].content;
-            append(rt.file(), { type: "custom_message", content: input });
+            input = r.entries!.find((d) => d.type === "custom_message")!.content!;
             instructions.push(input);
           }
         }
@@ -295,6 +316,7 @@ function setup(config: object = {}) {
     editors,
     views,
     navigations,
+    resets,
     edits,
     blocked,
     agent,
@@ -310,6 +332,8 @@ function setup(config: object = {}) {
     /** The human types a message into the current session (no run). */
     say: (text: string) => append(rt.file(), { type: "message", message: { role: "user", content: [{ type: "text", text }] } }),
     text: (id: string) => textOf(treeOf(rt.file()).entries.get(id)!),
+    /** What the model sees now: the session's context, as text. */
+    context: () => branch(rt.file()).map(textOf).join("\n"),
     runtime: () => rt,
   };
 }
@@ -1159,4 +1183,211 @@ test("build: a different buildModel builds in a fresh session, since switching h
   await u.run("build");
   assert.equal(u.runtime().model.id, "big");
   assert.ok(u.posts.some((x) => /Building \*\*order-cancellation\*\* here on p\/big/.test(x)));
+});
+
+/* ------------------------------ the spec as the planning checkpoint ------------------------------ */
+
+const PLANNING = `# Order cancellation
+Status: planning
+
+## Goal
+Cancel pending orders.
+## Findings
+- src/order/OrderService.java owns the transitions; follow refund() (lines 40-80).
+## Decisions
+- Only PENDING orders can be cancelled.
+- Not doing soft delete, because audit lives elsewhere.
+## Open questions
+- Notify the customer by mail or by event?
+`;
+
+test("spec: a planning spec needs no tasks or verification yet; a ready one does", () => {
+  const { spec, errors } = parseSpec(PLANNING);
+  assert.deepEqual(errors, []);
+  assert.equal(spec!.status, "planning");
+  assert.ok(parseSpec(PLANNING.replace("Status: planning", "Status: ready")).errors.some((e) => /no tasks/.test(e)));
+  assert.equal(parseSpec(SPEC()).spec!.status, "ready");
+});
+
+test("pb_update_spec changes one section or the status, and writes nothing that wouldn't parse", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  assert.match((await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING })).content![0].text, /status planning; ~\d+ tokens\.$/);
+  const r = await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Notify by event: mail belongs to the notification service.", mode: "append" });
+  assert.match(r.content![0].text, /Updated .*spec\.md \(Decisions\): status planning/);
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /- Not doing soft delete, because audit lives elsewhere\.\n- Notify by event: mail belongs to the notification service\.\n\n## Open questions/);
+  assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", status: "ready" })).error!, /Not written: the spec wouldn't parse[\s\S]*Verification[\s\S]*no tasks/);
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /Status: planning/);
+  assert.match((await t.callTool("pb_update_spec", { name: "nope", section: "Goal", content: "x" })).error!, /No spec "nope"/);
+});
+
+test("spec size is reported, with a gentle note (never a rejection) when it's long", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const long = SPEC().replace("Cancel orders.", "Cancel orders. " + "Detail. ".repeat(7000));
+  const r = await t.callTool("pb_write_spec", { name: "order-cancellation", content: long });
+  assert.equal(r.error, undefined);
+  assert.match(r.content![0].text, /~1\d{4} tokens\. That's long: if it copies code or repeats facts, pointing to the code/);
+});
+
+test("checkpoint: a planning session past checkpointAt writes its spec, then is reset to it without a compaction call", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  let checkpointAsked = "";
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:checkpoint]")) {
+      checkpointAsked = text;
+      await tool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+    }
+  };
+  t.runtime().usage = 70; // below the cap (100k window: min(75k, 100k - 16k reserve - 12k margin) = 71.6k)
+  t.runtime().pi.sendUserMessage("what about notifications?");
+  await t.settle();
+  assert.equal(t.resets.length, 0);
+
+  t.runtime().usage = 73;
+  t.runtime().pi.sendUserMessage("and refunds are out of scope");
+  await t.settle();
+  assert.match(checkpointAsked, /at 73% of its context[\s\S]*pb_write_spec, Status: planning[\s\S]*the dead ends[\s\S]*each option still being weighed, with what was found for and against it/);
+  assert.equal(t.resets.length, 1);
+  assert.equal(t.resets[0].firstKeptEntryId, null); // nothing kept but the spec
+  assert.match(t.resets[0].summary, /^\[pb plan checkpoint\][\s\S]*Planning mode is still on[\s\S]*--- \.pi\/pb\/specs\/order-cancellation\/spec\.md ---[\s\S]*## Open questions[\s\S]*--- the last exchange before the checkpoint, word for word ---\n\nHuman: and refunds are out of scope\n\nAssistant: ok$/);
+  assert.match(t.posts.at(-1)!, /\*\*Plan checkpointed\*\* to \.pi\/pb\/specs\/order-cancellation\/spec\.md: the conversation was reset to it \(it was 73% full\)/);
+  assert.doesNotMatch(t.context(), /\[pb:plan\]|what about notifications/); // the discussion is gone from the context: the spec and the last exchange are there
+  assert.equal(t.context().match(/and refunds are out of scope/g)?.length, 1);
+  assert.match(t.context(), /Only PENDING orders can be cancelled/);
+  assert.ok(t.events("order-cancellation").some((e) => e.type === "checkpoint" && e.percent === 73));
+
+  // The next checkpoint updates the existing spec instead of writing a new one.
+  checkpointAsked = "";
+  t.runtime().pi.sendUserMessage("more");
+  await t.settle();
+  assert.match(checkpointAsked, /Update \.pi\/pb\/specs\/order-cancellation\/spec\.md with pb_update_spec/);
+});
+
+test("checkpoint: when the plan isn't written, the conversation goes on as it is, without asking every turn", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  t.agent.script = async () => {};
+  t.runtime().usage = 80;
+  t.runtime().pi.sendUserMessage("go on");
+  await t.settle();
+  assert.equal(t.resets.length, 0);
+  assert.match(t.posts.at(-1)!, /the plan wasn't written to a spec, so the conversation goes on as it is/);
+  const asked = t.instructions.filter((i) => i.startsWith("[pb:checkpoint]")).length;
+  t.runtime().pi.sendUserMessage("again");
+  await t.settle();
+  assert.equal(t.instructions.filter((i) => i.startsWith("[pb:checkpoint]")).length, asked);
+});
+
+test("checkpoint: sessions that aren't planning are left to Pi; checkpointAt 0 turns it off", async () => {
+  const t = setup({ verify: "true", checkpointAt: 0 });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  t.runtime().usage = 90;
+  t.runtime().pi.sendUserMessage("go on");
+  await t.settle();
+  assert.ok(!t.instructions.some((i) => i.startsWith("[pb:checkpoint]")));
+});
+
+test("compaction: a planning session's summary is its spec; elsewhere a compacted session gets the spec sent along at build", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  const [r] = (await t.fire("session_before_compact", { preparation: { firstKeptEntryId: "e3", tokensBefore: 90000 }, reason: "overflow" })) as any[];
+  assert.equal(r.compaction.firstKeptEntryId, "e3");
+  assert.match(r.compaction.summary, /^\[pb plan checkpoint\][\s\S]*Not doing soft delete/);
+
+  const u = setup({ verify: "true" });
+  await written(u); // written in a session that isn't planning
+  const [none] = (await u.fire("session_before_compact", { preparation: { firstKeptEntryId: "e3", tokensBefore: 90000 }, reason: "threshold" })) as any[];
+  assert.equal(none, undefined); // Pi summarizes
+  assert.equal(u.progress("order-cancellation").compacted, true);
+  u.agent.script = diligent;
+  await u.run("build");
+  assert.match(u.instructions[0], /Build this feature from the spec below[\s\S]*# Order cancellation/); // not "the spec you wrote"
+});
+
+test("/pb:build on a planning spec finishes it first, then offers the build", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:spec order-cancellation] Finish the spec")) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.match(t.posts.find((p) => p.startsWith("▶ /pb:build"))!, /finishing the spec order-cancellation first/);
+  assert.match(t.instructions.find((i) => i.startsWith("[pb:spec order-cancellation]"))!, /add the Tasks and the Verification line, remove Open questions, and set Status: ready/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("/pb:plan <spec> continues planning in a fresh session seeded from the spec", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  const before = t.runtime();
+  before.model = { provider: "p", id: "big", contextWindow: 262000 };
+  await t.run("plan", "order-cancellation");
+  const r = t.runtime();
+  assert.notEqual(r, before);
+  const session = r.ctx.sessionManager.getSessionFile();
+  assert.equal(t.names.get(session), "plan: order-cancellation");
+  assert.equal(r.model.id, "big");
+  assert.match(t.instructions.at(-1)!, /^\[pb:plan order-cancellation\] Let's continue planning this[\s\S]*Don't redo the analysis or reopen rejected ideas[\s\S]*Start with the open questions[\s\S]*## Open questions/);
+  assert.equal(t.progress("order-cancellation").writtenIn, session); // it knows the spec now
+  assert.match((await t.callTool("write", { path: "x.java", content: "x" })).error!, /Planning mode/); // planning mode in the new session
+});
+
+test("/pb:spec <name> revises the spec from the file, not from memory", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  await t.run("spec", "order-cancellation");
+  assert.match(t.instructions.at(-1)!, /--- current \.pi\/pb\/specs\/order-cancellation\/spec\.md \(revise this\) ---[\s\S]*follow refund\(\) \(lines 40-80\)/);
+  await t.run("spec");
+  assert.match(t.instructions.at(-1)!, /Existing: order-cancellation \(reusing a name rewrites it; read its spec\.md first/);
+});
+
+test("/pb:checkpoint writes and resets on demand (e.g. before quitting); undo brings the whole discussion back", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:checkpoint]")) await tool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  };
+  t.runtime().pi.sendUserMessage("refunds are out of scope");
+  await t.settle();
+  assert.equal(t.resets.length, 0); // 10%: far below the checkpoint
+  await t.run("checkpoint");
+  assert.equal(t.resets.length, 1);
+  assert.match(t.context(), /^\[pb plan checkpoint\][\s\S]*Only PENDING orders[\s\S]*Human: refunds are out of scope/);
+  assert.doesNotMatch(t.context(), /\[pb:plan\] cancel orders/);
+
+  t.runtime().usage = 73; // the whole discussion, back
+  await t.run("checkpoint", "undo");
+  assert.match(t.posts.at(-1)!, /Checkpoint undone\*\*: the whole discussion is back/);
+  assert.match(t.context(), /\[pb:plan\] cancel orders[\s\S]*refunds are out of scope/);
+  assert.doesNotMatch(t.context(), /\[pb plan checkpoint\]/);
+  t.runtime().usage = 76; // past the threshold, but just undone: no new checkpoint before it grows another 5%
+  t.runtime().pi.sendUserMessage("go on");
+  await t.settle();
+  assert.equal(t.resets.length, 1);
+  await t.run("checkpoint", "undo");
+  assert.match(t.notes.at(-1)!, /No checkpoint to undo/);
+
+  const u = setup();
+  process.chdir(u.repo);
+  await u.run("checkpoint");
+  assert.match(u.notes.at(-1)!, /Checkpoints are for planning sessions/);
 });
