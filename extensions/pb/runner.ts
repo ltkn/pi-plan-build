@@ -62,8 +62,7 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
 
 function preview(args: Record<string, unknown>): string {
   const v = (args.command ?? args.path ?? args.file_path ?? args.pattern ?? "") as string;
-  const s = String(v).replace(/\s+/g, " ");
-  return s.length > 70 ? `${s.slice(0, 70)}…` : s;
+  return String(v).replace(/\s+/g, " ");
 }
 
 export async function runFresh(o: RunOptions): Promise<RunResult> {

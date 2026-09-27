@@ -393,7 +393,7 @@ export default function pb(pi: ExtensionAPI) {
       });
       store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
       if (res.aborted) throw new Error("Exploration stopped.");
-      if (!res.text.trim()) throw new Error(`The explorer produced no answer${res.error ? `: ${res.error.slice(0, 300)}` : ""}`);
+      if (!res.text.trim()) throw new Error(`The explorer produced no answer${res.error ? `: ${res.error}` : ""}`);
       const t = res.tokens;
       return { content: text(res.text.trim()), details: { ...details(), ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite }, usage: usageOf(res) };
     },
@@ -781,7 +781,7 @@ export default function pb(pi: ExtensionAPI) {
     const cps = store.checkpoints(p.spec);
     const cp = cps.find((c) => c.id === p.current);
     if (cp) {
-      cp.summary = `${p.current} ✓ · ${(cp.files ?? []).length} files · ${(tp?.summary ?? "").replace(/\s+/g, " ").slice(0, 70)}`;
+      cp.summary = `${p.current} ✓ · ${(cp.files ?? []).length} files · ${(tp?.summary ?? "").replace(/\s+/g, " ")}`;
       store.saveCheckpoints(p.spec, cps);
     }
     const notices = found.length ? `\n⚠ ${found.join("\n⚠ ")}` : "";
@@ -1530,7 +1530,7 @@ export default function pb(pi: ExtensionAPI) {
           ctx.ui.notify(`The reviewer changed ${files.join(", ")}; put back as it was.`, "warning");
         }
         if (outcome.aborted) return ctx.ui.notify("Review stopped.", "info");
-        if (outcome.error) return ctx.ui.notify(`The reviewer produced no output: ${outcome.error.slice(0, 300)}`, "error");
+        if (outcome.error) return ctx.ui.notify(`The reviewer produced no output: ${outcome.error}`, "error");
 
         const findings = [...outcome.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
         const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
@@ -1621,7 +1621,7 @@ export default function pb(pi: ExtensionAPI) {
       store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...first.tokens, cost: first.cost, ms: first.ms });
       if (first.aborted) return ctx.ui.notify("Map update stopped.", "info");
       ({ map: body, changes } = mapOf(first));
-      if (!body) return ctx.ui.notify(`No map came back${first.error ? `: ${first.error.slice(0, 200)}` : ""}.`, "warning");
+      if (!body) return ctx.ui.notify(`No map came back${first.error ? `: ${first.error}` : ""}.`, "warning");
       unresolved = unresolvedPaths(ctx.cwd, body);
       if (unresolved.length) {
         // Once: the cartographer corrects or removes what doesn't resolve; nothing is deleted behind its back.

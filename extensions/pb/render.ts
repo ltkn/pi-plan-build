@@ -78,10 +78,10 @@ const secs = (ms: number) => `${Math.round(ms / 1000)}s`;
 /** The lines shown for an exploration: live steps while it runs, then one summary line (all of it when expanded). */
 export function exploreLines(o: { details?: ExploreDetails; answer: string; partial: boolean; expanded: boolean; error?: boolean; now?: number }): { text: string; kind: "step" | "count" | "done" | "answer" | "file" | "error" }[] {
   const d = o.details;
-  if (o.error) return [{ text: short(o.answer.split("\n")[0] || "exploration failed", 120), kind: "error" }];
+  if (o.error) return [{ text: o.answer.trim() || "exploration failed", kind: "error" }];
   if (o.partial) {
     if (!d) return [{ text: "starting…", kind: "count" }];
-    return [...d.steps.map((s) => ({ text: `↳ ${short(s, 100)}`, kind: "step" as const })), { text: `${d.count} step${d.count === 1 ? "" : "s"} · ${secs((o.now ?? Date.now()) - d.started)}`, kind: "count" as const }];
+    return [...d.steps.map((s) => ({ text: `↳ ${s}`, kind: "step" as const })), { text: `${d.count} step${d.count === 1 ? "" : "s"} · ${secs((o.now ?? Date.now()) - d.started)}`, kind: "count" as const }];
   }
   const head = d ? `explored in ${secs(d.ms ?? 0)} · ${d.files.length} file${d.files.length === 1 ? "" : "s"} read${d.tokens ? ` · ${human(d.tokens)} tokens` : ""}` : "explored";
   const first = o.answer.split("\n").find((l) => l.trim()) ?? "";
@@ -96,7 +96,7 @@ export function exploreLines(o: { details?: ExploreDetails; answer: string; part
 type Theme = { fg(color: string, text: string): string; bold(text: string): string };
 
 export function renderExploreCall(args: { question?: string }, theme: Theme) {
-  return new Text(theme.fg("toolTitle", theme.bold("explore ")) + theme.fg("accent", short(args.question ?? "", 110)), 0, 0);
+  return new Text(theme.fg("toolTitle", theme.bold("explore ")) + theme.fg("accent", args.question ?? ""), 0, 0);
 }
 
 export function renderExploreResult(result: { content: { type: string; text?: string }[]; details?: ExploreDetails }, opts: { expanded: boolean; isPartial: boolean }, theme: Theme, isError = false) {
