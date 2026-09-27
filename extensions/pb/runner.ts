@@ -21,7 +21,8 @@ export interface RunOptions {
   model?: string;
   thinking?: string;
   signal?: AbortSignal;
-  onActivity?: (line: string) => void;
+  /** Each tool call the fresh model makes, as it happens: a one-line preview and the call itself. */
+  onActivity?: (line: string, call: ToolCall) => void;
 }
 
 export interface ToolCall {
@@ -123,8 +124,9 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
         for (const part of m.content ?? []) {
           if (part.type === "text" && part.text?.trim()) texts.push(part.text);
           else if (part.type === "toolCall") {
-            res.toolCalls.push({ name: part.name, arguments: part.arguments ?? {} });
-            o.onActivity?.(`${part.name} ${preview(part.arguments ?? {})}`);
+            const call = { name: part.name, arguments: part.arguments ?? {} };
+            res.toolCalls.push(call);
+            o.onActivity?.(`${part.name} ${preview(call.arguments)}`, call);
           }
         }
         if (texts.length) res.text = texts.join("\n");

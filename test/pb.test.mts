@@ -516,6 +516,9 @@ test("pb_explore answers from a separate context; its usage is reported and coun
   const r = await t.callTool("pb_explore", { question: "How are order transitions built?" });
   assert.match(r.content![0].text, /OrderService applies transitions\. \(asked: How are order transitions built\?\)/);
   assert.equal(r.usage!.totalTokens, 3400);
+  const d = (r as { details?: any }).details;
+  assert.equal(d.tokens, 3400);
+  assert.equal(typeof d.ms, "number");
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -1390,4 +1393,19 @@ test("/pb:checkpoint writes and resets on demand (e.g. before quitting); undo br
   process.chdir(u.repo);
   await u.run("checkpoint");
   assert.match(u.notes.at(-1)!, /Checkpoints are for planning sessions/);
+});
+
+test("pb_explore shows what it's doing: the question, its live steps, then a one-line summary (all of it expanded)", async () => {
+  const { exploreLines } = await import("../extensions/pb/render.ts");
+  const details = { steps: ["grep transition src/order", "read src/order/OrderService.java", "read src/order/Order.java"], count: 7, files: ["src/order/OrderService.java", "src/order/Order.java"], started: 1000 };
+  assert.deepEqual(
+    exploreLines({ details, answer: "", partial: true, expanded: false, now: 19_000 }).map((l) => l.text),
+    ["↳ grep transition src/order", "↳ read src/order/OrderService.java", "↳ read src/order/Order.java", "7 steps · 18s"],
+  );
+  const answer = "OrderService applies the transitions.\nOrder holds the state.";
+  const done = { ...details, ms: 34_000, tokens: 3200 };
+  assert.deepEqual(exploreLines({ details: done, answer, partial: false, expanded: false }).map((l) => l.text), ["explored in 34s · 2 files read · 3.2k tokens", "OrderService applies the transitions."]);
+  const all = exploreLines({ details: done, answer, partial: false, expanded: true }).map((l) => l.text);
+  assert.deepEqual(all, ["explored in 34s · 2 files read · 3.2k tokens", "OrderService applies the transitions.", "Order holds the state.", "files read:", "  src/order/OrderService.java", "  src/order/Order.java"]);
+  assert.deepEqual(exploreLines({ answer: "Exploration stopped.", partial: false, expanded: false, error: true }).map((l) => l.kind), ["error"]);
 });

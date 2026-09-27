@@ -83,7 +83,9 @@ background and without tokens, and posts the result into the session. A suite th
 is built, what calls what), Pi calls `pb_explore`: a separate, read-only
 context that reads what it needs and hands back only the answer, so the
 planning conversation stays lean. Pi decides when it's worth it; several can
-run at once. Give it a cheaper model in the config
+run at once. Each shows its question, its live steps (what it greps and reads)
+and then one summary line: time, files read, tokens, and the answer's first
+line; expand it for the whole answer and the files it read. Give it a cheaper model in the config
 (`"explorer": {"model": "provider/id"}`); its thinking level defaults to low.
 
 **Investigating is free, changing the project isn't.** Pi can read, search, run

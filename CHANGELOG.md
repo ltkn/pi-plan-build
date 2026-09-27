@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.0
+
+- **See what `pb_explore` is doing**: its row shows the question, the explorer's live steps (the last few greps and reads, with a step count and elapsed time), then one summary line (time, files read, tokens, the answer's first line); expanded, the whole answer and the files it read. Display only: nothing more is sent to the model, and no extra model call
+
 ## 1.1.0
 
 - **Builds run in the same session by default.** `/pb:build` lifts the planning protection and starts T1 right in the conversation that planned it, so nothing discussed is lost and the prompt cache keeps working; the spec isn't repeated when that session wrote it. `/pb:build --fresh` builds in a new session seeded with the spec (named, on your model and thinking level). pb recommends the fresh session itself when this one is over `freshAbove` (50%) of its context window, or when `buildModel` names another model: switching models mid-conversation re-sends the whole conversation uncached

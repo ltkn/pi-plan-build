@@ -42,7 +42,7 @@ import {
   specPrompt,
   taskPrompt,
 } from "./prompts.ts";
-import { registerRenderers } from "./render.ts";
+import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
 import { runReview } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
@@ -334,10 +334,17 @@ export default function pb(pi: ExtensionAPI) {
       question: Type.String({ description: "what to find out, specific enough to answer in a short report" }),
     }),
     executionMode: "parallel",
+    // What it's doing, from the explorer's own steps: shown to you, never sent to the model.
+    renderCall: (args, theme) => renderExploreCall(args, theme),
+    renderResult: (result, opts, theme, context) => renderExploreResult(result as { content: { type: string; text?: string }[]; details?: ExploreDetails }, opts, theme, context?.isError),
     async execute(_id, params, signal, onUpdate, ctx) {
       const store = new Store(ctx.cwd);
       const cfg = store.config();
       const name = tree(ctx).getSessionName?.();
+      const started = Date.now();
+      const steps: string[] = [];
+      const files = new Set<string>();
+      const details = (): ExploreDetails => ({ steps: steps.slice(-3), count: steps.length, files: [...files], started });
       const res = await runFresh({
         cwd: ctx.cwd,
         role: "explorer",
@@ -348,12 +355,18 @@ export default function pb(pi: ExtensionAPI) {
         model: cfg.explorer.model ?? sessionModel(ctx),
         thinking: cfg.explorer.thinking ?? "low",
         signal,
-        onActivity: (a) => onUpdate?.({ content: text(`↳ ${a}`), details: undefined }),
+        onActivity: (line, call) => {
+          steps.push(line);
+          const p = call.arguments.path ?? call.arguments.file_path;
+          if (call.name === "read" && typeof p === "string") files.add(p);
+          onUpdate?.({ content: text(`↳ ${line}`), details: details() });
+        },
       });
       store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
       if (res.aborted) throw new Error("Exploration stopped.");
       if (!res.text.trim()) throw new Error(`The explorer produced no answer${res.error ? `: ${res.error.slice(0, 300)}` : ""}`);
-      return { content: text(res.text.trim()), details: undefined, usage: usageOf(res) };
+      const t = res.tokens;
+      return { content: text(res.text.trim()), details: { ...details(), ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite }, usage: usageOf(res) };
     },
   });
 
