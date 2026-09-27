@@ -123,6 +123,8 @@ export interface Progress {
   current?: string;
   /** choices the builder made where the spec was ambiguous or didn't match the code */
   assumptions?: string[];
+  /** choices pb made because nobody answered a dialog in time (askTimeoutSec) */
+  unattended?: string[];
   /** existing tests the build deleted, cut down or skipped, per task: for the reviewer to judge */
   testChanges?: string[];
   pause?: string;

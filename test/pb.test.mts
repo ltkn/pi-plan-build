@@ -160,7 +160,8 @@ function setup(config: object = {}) {
         return self.thinking;
       },
       modelRegistry: { find: (prov: string, id: string) => MODELS.find((m) => m.provider === prov && m.id === id), getAvailable: () => MODELS },
-      isIdle: () => true,
+      isIdle: () => queued === 0,
+      waitForIdle: () => settle(),
       getContextUsage: () => ({ tokens: self.usage * 1000, contextWindow: 100000, percent: self.usage }),
       getSystemPromptOptions: () => ({ contextFiles: self.contextFiles }),
       sessionManager: {
@@ -221,6 +222,7 @@ function setup(config: object = {}) {
   // A tool result that asks for more (pb_task_done without terminate) continues the run, as in Pi.
   let continuation: string | undefined;
   let running: Promise<void> = Promise.resolve();
+  let queued = 0; // runs queued or going: Pi isn't idle
   const callTool: Tool = async (name, params) => {
     const call = { toolName: name, input: params };
     for (const h of rt.handlers.tool_call ?? []) {
@@ -246,6 +248,7 @@ function setup(config: object = {}) {
   const turn = (first: string) => {
     instructions.push(first);
     stat.runs++;
+    queued++;
     running = running.then(async () => {
       let input: string | undefined = first;
       while (input !== undefined) {
@@ -281,6 +284,7 @@ function setup(config: object = {}) {
         }
       }
       await fire("agent_settled", {});
+      queued--;
     });
   };
 
@@ -484,7 +488,7 @@ test("plan: the baseline runs in the background (no tokens) and a red suite warn
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  assert.ok(t.confirms.includes("The test suite already failed"));
+  assert.ok(t.selectTitles.some((x) => /^The test suite already failed when planning began \(`exit 1` → FAIL/.test(x)));
 });
 
 test("standards: a Java project gets the Java 25 defaults with pb's section", async () => {
@@ -1117,7 +1121,7 @@ test("build: when the session is getting full, it offers a fresh session", async
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
-test("build without a spec: it writes one first, shows it all, and builds on your choice", async () => {
+test("build without a spec: it asks first, then writes the spec and builds it with no dialog after", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   await t.run("plan", "cancel orders");
@@ -1126,11 +1130,11 @@ test("build without a spec: it writes one first, shows it all, and builds on you
     return diligent(text, tool);
   };
   await t.run("build");
-  assert.match(t.instructions.find((i) => /pb_write_spec tool/.test(i))!, /After writing it, stop/);
+  assert.equal(t.selectTitles.at(-1), "Pi writes the spec first. Then?"); // asked before the spec, while you're here
+  assert.match(t.instructions.find((i) => /pb_write_spec tool/.test(i))!, /After writing it, stop: the build starts by itself/);
   assert.ok(t.posts.some((x) => /\*\*Spec written: order-cancellation\*\*[\s\S]*- T1: first file · `test -f T1\.txt`/.test(x)));
   assert.deepEqual(t.views.map((v) => [v.customType, v.data.name]), [["pb-spec", "order-cancellation"]]); // the whole spec, shown, not sent to the model
-  assert.match(t.selectTitles.at(-1)!, /Build order-cancellation now\? 2 tasks/);
-  assert.equal(t.progress("order-cancellation").phase, "built"); // "Build here" → built in this session
+  assert.equal(t.progress("order-cancellation").phase, "built"); // built here, with no dialog after the spec
   assert.match(t.progress("order-cancellation").session, /planning-session\.jsonl$/);
 });
 
@@ -1142,7 +1146,7 @@ test("spec approval: edit the spec first; the build then gets your version", asy
     if (/pb_write_spec tool/.test(text)) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
     return diligent(text, tool);
   };
-  t.selects.push("Edit the spec first", "Build here (keeps our discussion; the cache stays warm)");
+  t.selects.push("Show me the spec first", "Edit the spec first", "Build here (keeps our discussion; the cache stays warm)");
   t.editors.push("# broken", SPEC().replace("### T2: second file", "### T2: the second file"));
   await t.run("build");
   assert.ok(t.notes.some((n) => /Not saved, the spec doesn't parse/.test(n)));
@@ -1415,4 +1419,64 @@ test("pb_explore shows what it's doing: the question, its live steps, then a one
   const all = exploreLines({ details: done, answer, partial: false, expanded: true }).map((l) => l.text);
   assert.deepEqual(all, ["explored in 34s · 2 files read · 3.2k tokens", "OrderService applies the transitions.", "Order holds the state.", "files read:", "  src/order/OrderService.java", "  src/order/Order.java"]);
   assert.deepEqual(exploreLines({ answer: "Exploration stopped.", partial: false, expanded: false, error: true }).map((l) => l.kind), ["error"]);
+});
+
+test("build: asked up front for a fresh session, the command waits for the spec and opens it itself", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  t.agent.script = async (text, tool) => {
+    if (/pb_write_spec tool/.test(text)) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
+    return diligent(text, tool);
+  };
+  const planning = t.runtime();
+  t.selects.push("Build in a fresh session as soon as the spec is written (lean context)");
+  await t.run("build");
+  assert.notEqual(t.runtime(), planning);
+  const p = t.progress("order-cancellation");
+  assert.match(p.session, /build-session-1\.jsonl$/);
+  assert.equal(p.phase, "built");
+});
+
+test("build: nobody answers: after askTimeoutSec every dialog goes on with pb's choice, and the summary says so", async () => {
+  const t = setup({ verify: "true", askTimeoutSec: 0.001 });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  t.agent.script = async (text, tool) => {
+    if (/pb_write_spec tool/.test(text)) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
+    return diligent(text, tool);
+  };
+  t.selects.push("Show me the spec first", "<timeout>"); // you asked to see it, then went to bed
+  await t.run("build");
+  assert.match(t.selectTitles.at(-1)!, /Build order-cancellation now\? 2 tasks/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Decided without you \(no answer in time\):\n- Build order-cancellation now\? 2 tasks → Build here/);
+});
+
+test("build: Esc on the first dialog cancels; a spec that isn't written yet is offered once it is", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  t.selects.push("<timeout>"); // with the default timeout, an immediate undefined is Esc
+  await t.run("build");
+  assert.ok(!t.instructions.some((i) => /pb_write_spec tool/.test(i)));
+
+  let asked = false;
+  t.agent.script = async (text, tool) => {
+    if (/pb_write_spec tool/.test(text) && !asked) {
+      asked = true; // a question in chat first
+      return;
+    }
+    if (/refunds/.test(text)) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.match(t.posts.at(-1)!, /No spec ready to build yet/);
+  t.runtime().pi.sendUserMessage("refunds are out of scope");
+  await t.settle();
+  assert.match(t.selectTitles.at(-1)!, /Build order-cancellation now\? 2 tasks/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
 });

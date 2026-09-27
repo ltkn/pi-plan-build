@@ -22,7 +22,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.2.1   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.3.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -41,8 +41,9 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
    … a long discussion? at 75% of the window Pi writes the plan to its spec
      and the session is reset to it (/pb:checkpoint does it on demand)
 /pb:build
+   → asks now, while you're here: build here / in a fresh session / show me the spec first
    → Pi writes .pi/pb/specs/order-cancellation/spec.md (goal, findings,
-     decisions, tasks with their test commands); you read it: build here / fresh / edit / not now
+     decisions, tasks with their test commands) and the build starts by itself
    → one run: T1 → T2 → … → full suite ✗ → fix → full suite ✓
    ✅ BUILD COMPLETE
 /pb:review
@@ -155,7 +156,7 @@ the existing ones still run.
 | `verifyTimeoutSec` | 900 | |
 | `maxAttempts` | 3 | failed checks (the final one, or a task's) before the build pauses |
 | `taskChecks` | `"end"` | `"end"`: the full check after the last task; `"each"`: also a check after every task |
-| `askTimeoutSec` | 300 | how long a `pb_ask` dialog in a build waits before going on with the recommendation; 0 = forever |
+| `askTimeoutSec` | 300 | how long a dialog waits before going on without you: a `pb_ask` question in a build takes the recommendation, a dialog on the way into a build takes pb's choice; 0 = forever |
 | `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, the planning and reviewer guards |
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |

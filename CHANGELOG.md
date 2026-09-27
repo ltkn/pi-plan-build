@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+- **`/pb:build` asks first, then builds by itself.** Everything that needs you is asked right away, while you're at the keyboard: files changed while planning, a red baseline, and how to go on once the spec is written (build here, build in a fresh session, or show me the spec first). Then Pi writes the spec and the build starts with no further dialog, so you can walk away. The command waits for the spec itself, so a fresh session now works too (before, it could only be prefilled for you to confirm)
+- **Nothing on the way into a build waits all night**: the spec review (if you asked for it), a dependency that isn't built, a full session, files changed while planning and a red baseline all count down (`askTimeoutSec`, 5 minutes) and go on with pb's choice; the build summary lists what was decided without you
+- If the spec isn't written yet (Pi asked a question in chat first), pb offers the build once it is
+
 ## 1.2.1
 
 - **Fixed: several questions at once lost all but the last.** `pb_ask` calls from one message ran in parallel, and each new dialog dismissed the one before it; they now come one after another, each with its own answer

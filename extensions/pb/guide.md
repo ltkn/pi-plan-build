@@ -14,9 +14,11 @@ step Pi shows a short **What now** block; `/pb:help <topic>` posts any section b
    in the background meanwhile, so you both know whether it passes today. Then
    you discuss: the approach, the trade-offs, the questions only you can answer.
    This is the cheapest place to change your mind.
-2. **`/pb:build`**: Pi writes a short **spec** from the discussion (goal,
-   decisions, tasks); you read it and choose: build here, build in a fresh
-   session, edit it first, or not now. The tasks then run one by one, and the
+2. **`/pb:build`**: first it asks, while you're here, how to go on once the
+   spec is written: build here, build in a fresh session, or show you the spec
+   first. Then Pi writes a short **spec** from the discussion (goal, findings,
+   decisions, tasks) and, unless you wanted to see it, the build starts by
+   itself, so you can walk away. The tasks then run one by one, and the
    harness runs the full test suite after the last one; a failure goes back to
    Pi to fix.
 3. **`/pb:review`**: a fresh reviewer compares the change with the spec and
@@ -119,6 +121,12 @@ the sections that changed.
 (the reset only changed what the model sees; the session file keeps
 everything). The spec keeps what the checkpoint wrote.
 
+**Walking away.** Every dialog on the way into a build counts down
+(`askTimeoutSec`, 5 minutes) and then goes on with pb's choice: build (here, if
+a fresh session can't be opened at that point), keep files changed while
+planning, build despite a red baseline or an unbuilt dependency. The build
+summary lists what was decided without you.
+
 **Coming back later.** Reopen the session (`/resume`): after a checkpoint it
 starts small, from the spec as it was at that checkpoint plus what followed.
 Or start clean from the spec as it is on disk now (including your own edits):
@@ -180,9 +188,11 @@ Before writing, Pi checks the spec against itself and the code (examples
 against rules, "unchanged" against "extended", every path and name), resolves
 what it finds, and tells you.
 
-When `/pb:build` wrote it, you see the whole spec and choose: **build here**,
-**build in a fresh session**, **edit the spec first** (in an editor; it's saved
-only when it still parses, and the build then gets your version), or **not now**.
+When `/pb:build` writes it, it asks first: **build here**, **build in a fresh
+session**, or **show me the spec first**. Built straight away, the spec is still
+shown in the session for later. Shown first, you choose: build here, build in a
+fresh session, **edit the spec first** (in an editor; it's saved only when it
+still parses, and the build then gets your version), or not now.
 
 - **Refactoring first.** When outdated code stands in the way (your standards
   ask for current practice), the spec starts with tasks titled `(refactor) …`
@@ -392,7 +402,7 @@ in between, the undone work shows up as uncommitted changes (you're warned).
 <!-- pb:tip plan.next -->
 **What now**
 - Answer the questions, push back on the recommendation, take your time.
-- Ready? `/pb:build` writes the spec, shows it, and builds on your choice · more: `/pb:help plan`
+- Ready? `/pb:build` asks how to build, writes the spec, and builds · more: `/pb:help plan`
 <!-- /pb -->
 
 ### After /pb:spec

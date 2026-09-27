@@ -146,6 +146,28 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   /**
+   * A dialog that goes on without you: after askTimeoutSec (with a countdown), `fallback` is taken and noted
+   * in `notes`, so a build started before you walk away doesn't wait all night. Esc still cancels (undefined).
+   */
+  const choose = async (ctx: ExtensionContext, store: Store, title: string, options: string[], fallback: string, notes?: string[]): Promise<string | undefined> => {
+    if (!ctx.hasUI) return fallback;
+    const ms = store.config().askTimeoutSec * 1000;
+    const asked = Date.now();
+    const choice = await ctx.ui.select(title, options, ms > 0 ? { timeout: ms } : undefined);
+    if (choice !== undefined) return choice;
+    if (ms > 0 && Date.now() - asked >= ms - 1000) {
+      notes?.push(`${title} → ${fallback} (no answer within ${Math.max(1, Math.round(ms / 60_000))} min)`);
+      return fallback;
+    }
+    return undefined;
+  };
+  /** A yes/no that goes on (yes) without you. */
+  const agree = async (ctx: ExtensionContext, store: Store, title: string, notes?: string[]) => {
+    const GO = "Yes, go on";
+    return (await choose(ctx, store, title, [GO, "No, stop here"], GO, notes)) === GO;
+  };
+
+  /**
    * Where to rewind the conversation to for an entry: navigating to a user or custom message would
    * move its text into the editor, so step back to the entry before it. keepUser: stop at your own
    * message (going back to a branch, its text returns to the editor instead of being lost).
@@ -438,7 +460,7 @@ export default function pb(pi: ExtensionAPI) {
    * Files that changed in the project while this session was planning (bash can write where edit and
    * write are blocked). Asks whether to keep or restore them; false = cancel.
    */
-  const reviewPlanningChanges = async (ctx: ExtensionContext, store: Store): Promise<boolean> => {
+  const reviewPlanningChanges = async (ctx: ExtensionContext, store: Store, notes?: string[]): Promise<boolean> => {
     const session = ctx.sessionManager.getSessionFile();
     const snap = session ? store.planning(session)?.snapshot : undefined;
     if (!session || !snap) return true;
@@ -449,7 +471,7 @@ export default function pb(pi: ExtensionAPI) {
     const list = `${files.slice(0, 10).join(", ")}${files.length > 10 ? ` … (+${files.length - 10})` : ""}`;
     const KEEP = "Keep them";
     const RESTORE = "Restore them to how they were when planning began";
-    const choice = ctx.hasUI ? await ctx.ui.select(`These project files changed while planning: ${list}`, [KEEP, RESTORE, "Cancel"]) : KEEP;
+    const choice = await choose(ctx, store, `These project files changed while planning: ${list}`, [KEEP, RESTORE, "Cancel"], KEEP, notes);
     if (choice === RESTORE) {
       restore(ctx.cwd, cur.commit, snap, files);
       ctx.ui.notify(`Restored ${files.length} file(s).`, "info");
@@ -763,6 +785,7 @@ export default function pb(pi: ExtensionAPI) {
         "```",
         `Check: ${p.lastVerify?.summary.split("\n")[0] ?? `none (verification ${spec.gate})`}`,
         p.assumptions?.length ? `\nChoices the build made where the spec was unclear (in the spec's Decisions; the review checks them):\n${p.assumptions.map((a) => `- ${a}`).join("\n")}` : "",
+        p.unattended?.length ? `\nDecided without you (no answer in time):\n${p.unattended.map((c) => `- ${c}`).join("\n")}` : "",
         p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
         "",
         tip("build.done", { spec: p.spec }),
@@ -1013,7 +1036,14 @@ export default function pb(pi: ExtensionAPI) {
    * instead (command context only: sessions can't be replaced from event handlers).
    * decided: the human already chose where (the spec-approval dialog).
    */
-  const startBuild = async (ctx: ExtensionContext, store: Store, name: string, fresh: boolean, decided = false): Promise<void> => {
+  const startBuild = async (
+    ctx: ExtensionContext,
+    store: Store,
+    name: string,
+    fresh: boolean,
+    o: { decided?: boolean; checked?: boolean; notes?: string[] } = {},
+  ): Promise<void> => {
+    const notes = o.notes ?? [];
     const loaded = loadSpec(store, name);
     if (!loaded) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
     const { spec, md } = loaded;
@@ -1024,16 +1054,14 @@ export default function pb(pi: ExtensionAPI) {
     if (spec.dependsOn) {
       const dep = store.progress(spec.dependsOn)?.phase;
       if (dep !== "built" && dep !== "reviewed") {
-        const go = ctx.hasUI && (await ctx.ui.confirm(`${name} depends on ${spec.dependsOn}`, `${spec.dependsOn} isn't built yet. Build ${name} anyway?`));
-        if (!go) return;
+        if (!(await agree(ctx, store, `${name} depends on ${spec.dependsOn}, which isn't built yet. Build ${name} anyway?`, notes))) return;
       }
     }
     const baseline = store.baseline();
-    if (spec.gate === "tests" && baseline?.ok === false && baseline.command === testCmd && ctx.hasUI) {
-      const go = await ctx.ui.confirm("The test suite already failed", `${baseline.summary.split("\n")[0]} (${baseline.at}). The final check runs the whole suite, so it fails too unless that's fixed. Build anyway?`);
-      if (!go) return;
+    if (!o.checked && spec.gate === "tests" && baseline?.ok === false && baseline.command === testCmd) {
+      if (!(await agree(ctx, store, baselineQuestion(baseline), notes))) return;
     }
-    if (!(await reviewPlanningChanges(ctx, store))) return;
+    if (!o.checked && !(await reviewPlanningChanges(ctx, store, notes))) return;
 
     // Optionally build on another model (e.g. plan on a strong one, build on a local one).
     let buildModel: unknown;
@@ -1043,13 +1071,14 @@ export default function pb(pi: ExtensionAPI) {
     }
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
     const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";
-    if (!fresh && !decided) {
+    if (!fresh && !o.decided) {
       const usage = ctx.getContextUsage()?.percent;
       const full = usage != null && usage > cfg.freshAbove;
       if ((full || switching) && ctx.hasUI) {
         const why = switching ? `building on ${cfg.buildModel} here sends this whole conversation to it again, uncached` : `this session is ${Math.round(usage!)}% full`;
         const FRESH = "Build in a fresh session, from the spec (recommended)";
-        const choice = await ctx.ui.select(`Build ${name}: ${why}`, [FRESH, "Build here anyway"]);
+        const HERE = "Build here anyway";
+        const choice = await choose(ctx, store, `Build ${name}: ${why}`, [FRESH, HERE], canOpenSession ? FRESH : HERE, notes);
         if (!choice) return;
         fresh = choice === FRESH;
       } else if (switching) fresh = true;
@@ -1073,6 +1102,7 @@ export default function pb(pi: ExtensionAPI) {
       nudged: undefined,
       needsIntro: undefined,
       detached: undefined,
+      unattended: notes.length ? notes : undefined,
       updatedAt: now(),
     };
     const first = p.tasks.find((t) => t.status !== "done")?.id;
@@ -1136,35 +1166,93 @@ export default function pb(pi: ExtensionAPI) {
     if (result.cancelled) ctx.ui.notify("Build cancelled.", "info");
   };
 
+  /** The spec that was just written: its tasks in the session, the whole of it as a view (not sent to the model: it wrote it). */
+  const showSpec = (store: Store, name: string, names: string[] = [name]) => {
+    const loaded = loadSpec(store, name);
+    if (!loaded) return;
+    post(
+      [
+        `**Spec written: ${name}** (${store.rel("specs", name, "spec.md")})${names.length > 1 ? ` · also: ${names.filter((n) => n !== name).join(", ")}` : ""}`,
+        "",
+        ...loaded.spec.tasks.map((t) => `- ${t.id}: ${t.title}${t.test ? ` · \`${t.test}\`` : ""}`),
+        "",
+        `Verification: ${loaded.spec.gate}${loaded.spec.newTests ? "" : " · no new tests"}`,
+      ].join("\n"),
+    );
+    pi.appendEntry("pb-spec", { name, markdown: loaded.md });
+  };
+
+  const baselineQuestion = (b: { summary: string; at: string }) =>
+    `The test suite already failed when planning began (${b.summary.split("\n")[0]}, ${b.at}): the final check runs it, so it fails too unless that's fixed. Build anyway?`;
+
+  /** The specs this session has written, ready to build, first those nothing else among them depends on. */
+  const readySpecs = (store: Store, session: string | undefined, since = "") => {
+    const names = store
+      .specNames()
+      .map((n) => ({ n, p: store.progress(n) }))
+      .filter((x) => x.p?.writtenIn === session && x.p?.phase === "written" && x.p.updatedAt >= since && loadSpec(store, x.n)?.spec.status === "ready")
+      .sort((a, b) => b.p!.updatedAt.localeCompare(a.p!.updatedAt))
+      .map((x) => x.n);
+    return names.sort((a, b) => Number(names.includes(loadSpec(store, a)?.spec.dependsOn ?? "")) - Number(names.includes(loadSpec(store, b)?.spec.dependsOn ?? "")));
+  };
+
+  /**
+   * /pb:build before there's a (ready) spec. Everything that needs you is asked now, while you're here:
+   * files changed while planning, a red baseline, where to build, and whether to see the spec first. Then
+   * Pi writes the spec and, unless you wanted to see it, this command waits for it and starts the build
+   * itself: from a command, a fresh session can be opened too. Nothing waits on you after this point
+   * except pb_ask questions, which go on with the recommendation after askTimeoutSec.
+   */
+  const specThenBuild = async (ctx: ExtensionCommandContext, store: Store, marker: string, prompt: string) => {
+    const session = ctx.sessionManager.getSessionFile();
+    const { cfg, testCmd } = commands(ctx.cwd, store);
+    const notes: string[] = [];
+    if (!(await reviewPlanningChanges(ctx, store, notes))) return;
+    const baseline = store.baseline();
+    if (baseline?.ok === false && baseline.command === testCmd && !(await agree(ctx, store, baselineQuestion(baseline), notes))) return;
+
+    const usage = ctx.getContextUsage()?.percent;
+    const switching = !!cfg.buildModel && cfg.buildModel !== sessionModel(ctx) && !!findModel(ctx, cfg.buildModel);
+    const preferFresh = switching || (usage != null && usage > cfg.freshAbove);
+    const HERE = "Build here as soon as the spec is written (keeps our discussion; the cache stays warm)";
+    const FRESH = `Build in a fresh session as soon as the spec is written (${switching ? `on ${cfg.buildModel}, ` : ""}lean context)`;
+    const SHOW = "Show me the spec first";
+    const options = preferFresh ? [FRESH, HERE, SHOW] : [HERE, FRESH, SHOW];
+    const choice = await choose(ctx, store, "Pi writes the spec first. Then?", options, options[0], notes);
+    if (!choice) return;
+    if (choice === SHOW) {
+      store.setPendingBuild(session);
+      return instruct(marker, `${prompt}\n\nAfter writing it, stop: the harness shows it to me and asks whether to build.`);
+    }
+
+    const since = now();
+    instruct(marker, `${prompt}\n\nAfter writing it, stop: the build starts by itself.`);
+    // Wait for the spec here, in the command: the run starts right after this handler hands it over.
+    for (let i = 0; i < 40 && ctx.isIdle(); i++) await new Promise((r) => setTimeout(r, 50));
+    await ctx.waitForIdle();
+    const ready = readySpecs(store, session, since);
+    if (!ready.length) {
+      // A question in chat, or the spec isn't ready yet: pb offers the build once it is.
+      store.setPendingBuild(session);
+      return post(`No spec ready to build yet. Answer Pi's questions; once the spec is written, pb shows it and asks how to build.`);
+    }
+    showSpec(store, ready[0], ready);
+    await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes });
+  };
+
   /** After /pb:build asked for the spec: once it's written, show it and ask how to go on. */
   const offerPendingBuild = async (ctx: ExtensionContext): Promise<boolean> => {
     const store = new Store(ctx.cwd);
     const session = ctx.sessionManager.getSessionFile();
     if (!store.pendingBuild(session)) return false;
-    const mine = store
-      .specNames()
-      .map((n) => ({ n, p: store.progress(n) }))
-      .filter((x) => x.p?.writtenIn === session && x.p?.phase === "written" && loadSpec(store, x.n)?.spec.status === "ready")
-      .sort((a, b) => b.p!.updatedAt.localeCompare(a.p!.updatedAt));
-    if (!mine.length) return true; // still talking (e.g. a question before writing): keep waiting
+    const names = readySpecs(store, session);
+    if (!names.length) return true; // still talking (e.g. a question before writing): keep waiting
     store.setPendingBuild(undefined);
-    // Several specs: build the first one whose dependency isn't among the unbuilt ones.
-    const names = mine.map((x) => x.n);
-    const name = names.find((n) => !names.includes(loadSpec(store, n)?.spec.dependsOn ?? "")) ?? names[0];
+    const name = names[0];
     const loaded = loadSpec(store, name);
     if (!loaded) return true;
     const { spec } = loaded;
-    post(
-      [
-        `**Spec written: ${name}** (${store.rel("specs", name, "spec.md")})${names.length > 1 ? ` · also: ${names.filter((n) => n !== name).join(", ")}` : ""}`,
-        "",
-        ...spec.tasks.map((t) => `- ${t.id}: ${t.title}${t.test ? ` · \`${t.test}\`` : ""}`),
-        "",
-        `Verification: ${spec.gate}${spec.newTests ? "" : " · no new tests"}`,
-      ].join("\n"),
-    );
-    // The whole spec, to read before saying yes: shown, but not sent to the model (it wrote it).
-    pi.appendEntry("pb-spec", { name, markdown: loaded.md });
+    showSpec(store, name, names);
     if (!ctx.hasUI) {
       post(tip("spec.next"));
       return true;
@@ -1177,14 +1265,16 @@ export default function pb(pi: ExtensionAPI) {
     const FRESH = `Build in a fresh session, from the spec (${switching ? `on ${cfg.buildModel}, ` : ""}lean context)`;
     const EDIT = "Edit the spec first";
     const LATER = "Not now";
+    const notes: string[] = [];
     for (;;) {
-      const choice = await ctx.ui.select(`Build ${name} now? ${spec.tasks.length} tasks`, preferFresh ? [FRESH, HERE, EDIT, LATER] : [HERE, FRESH, EDIT, LATER]);
+      // Unanswered, it builds here: a fresh session can't be opened from here, only from a command.
+      const choice = await choose(ctx, store, `Build ${name} now? ${spec.tasks.length} tasks`, preferFresh ? [FRESH, HERE, EDIT, LATER] : [HERE, FRESH, EDIT, LATER], HERE, notes);
       if (choice === EDIT) {
         await editSpec(ctx, store, name);
         continue;
       }
-      if (choice === HERE) await startBuild(ctx, store, name, false, true);
-      else if (choice === FRESH) await startBuild(ctx, store, name, true, true);
+      if (choice === HERE) await startBuild(ctx, store, name, false, { decided: true, notes });
+      else if (choice === FRESH) await startBuild(ctx, store, name, true, { decided: true, notes });
       else post(tip("spec.next"));
       return true;
     }
@@ -1249,9 +1339,8 @@ export default function pb(pi: ExtensionAPI) {
         const mine = offered.filter((n) => store.progress(n)?.writtenIn === session);
         const planning = !!session && store.planningSessions().includes(session);
         if (!mine.length && (planning || !offered.length)) {
-          // No spec from this discussion yet: write it first, then offer to build it.
-          store.setPendingBuild(session);
-          return instruct(`▶ /${cmd("build")} — writing the spec first`, `${specPrompt(words.join(" "), store.specNames())}\n\nAfter writing it, stop: the harness shows it to me and asks whether to build.`);
+          // No spec from this discussion yet: write it first, then build it.
+          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames()));
         }
         const pool = mine.length ? mine : offered;
         const labelOf = (n: string) => (unfinishedPhase(phaseOf(n)) ? `${n} (restart the build, finished tasks stay done)` : n);
@@ -1264,9 +1353,8 @@ export default function pb(pi: ExtensionAPI) {
         if (!name) return;
       }
       if (loadSpec(store, name)?.spec.status === "planning") {
-        // A checkpoint of an unfinished discussion: finish it (tasks, verification), then offer the build.
-        store.setPendingBuild(session);
-        return instruct(`▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name));
+        // A checkpoint of an unfinished discussion: finish it (tasks, verification), then build it.
+        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name).replace(/\s*After writing it, stop:[^\n]*/, ""));
       }
       await startBuild(ctx, store, name, fresh);
     },
