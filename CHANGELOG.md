@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1
+
+- **Fixed: several questions at once lost all but the last.** `pb_ask` calls from one message ran in parallel, and each new dialog dismissed the one before it; they now come one after another, each with its own answer
+- `pb_ask` tells the model to ask independent questions together, and a question that depends on another's answer only once it has that answer (questions in one message are all written before any is answered)
+
 ## 1.2.0
 
 - **See what `pb_explore` is doing**: its row shows the question, the explorer's live steps (the last few greps and reads, with a step count and elapsed time), then one summary line (time, files read, tokens, the answer's first line); expanded, the whole answer and the files it read. Display only: nothing more is sent to the model, and no extra model call

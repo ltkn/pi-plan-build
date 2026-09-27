@@ -275,12 +275,14 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_ask",
     label: "Ask",
     description:
-      "Ask the human one question and wait for the answer, without stopping your work: a choice between options, or an open question. In a pb build the answer is recorded in the spec's Decisions. Ask only what you can't sensibly decide yourself.",
+      "Ask the human one question and wait for the answer, without stopping your work: a choice between options, or an open question. In a pb build the answer is recorded in the spec's Decisions. Ask only what you can't sensibly decide yourself. Ask independent questions together; ask a question that depends on another's answer only after you have that answer.",
     parameters: Type.Object({
       question: Type.String({ description: "one precise question" }),
       options: Type.Optional(Type.Array(Type.String(), { description: "2 to 4 answers to choose from; the human can always type another" })),
       recommended: Type.Optional(Type.String({ description: "your recommendation: one of the options, or a suggested answer" })),
     }),
+    // One dialog at a time: Pi shows a single dialog, and a second one opened in parallel dismisses the first.
+    executionMode: "sequential",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const { store, name, progress: p } = specOfSession(ctx);
       const building = !!name && !!p && p.phase === "building";

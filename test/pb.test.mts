@@ -645,6 +645,13 @@ test("build: an unanswered question goes on with the recommendation after askTim
   assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*no answer within 0 min/);
 });
 
+test("pb_ask runs one at a time: two questions in one message come as two dialogs, not one dismissing the other", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  assert.equal(t.runtime().tools.pb_ask.executionMode, "sequential");
+  assert.match(t.runtime().tools.pb_ask.description, /ask a question that depends on another's answer only after you have that answer/);
+});
+
 test("build: without a UI, a question pauses the build; answering costs the task no attempt", async () => {
   const t = setup({ verify: "true" });
   await written(t);
