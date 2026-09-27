@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0
 
 - **Builds run in the same session by default.** `/pb:build` lifts the planning protection and starts T1 right in the conversation that planned it, so nothing discussed is lost and the prompt cache keeps working; the spec isn't repeated when that session wrote it. `/pb:build --fresh` builds in a new session seeded with the spec (named, on your model and thinking level). pb recommends the fresh session itself when this one is over `freshAbove` (50%) of its context window, or when `buildModel` names another model: switching models mid-conversation re-sends the whole conversation uncached
 - **The check runs inside `pb_task_done`.** The tool that finishes a task hands out the next one, and the harness runs its checks in that same call (the final check, by default), answering with the failure to fix, so a whole build is one run: no stop and restart per task, the prompt cache stays warm through long test runs (pb also asks Pi to keep it warm while a check runs), and a task can't be closed from a parallel tool batch. Its statuses are `done` and `blocked`; the task prompt names the command, so the agent doesn't run it again just before

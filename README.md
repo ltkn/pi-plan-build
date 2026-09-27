@@ -22,7 +22,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.0.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.1.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -38,9 +38,11 @@ in the repository.
      asks pb_explore for the broad questions, proposes an approach and asks
      what only you can decide
 you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
+   … a long discussion? at 75% of the window Pi writes the plan to its spec
+     and the session is reset to it (/pb:checkpoint does it on demand)
 /pb:build
-   → Pi writes .pi/pb/specs/order-cancellation/spec.md (goal, decisions,
-     tasks with their test commands); you read it: build here / fresh / edit / not now
+   → Pi writes .pi/pb/specs/order-cancellation/spec.md (goal, findings,
+     decisions, tasks with their test commands); you read it: build here / fresh / edit / not now
    → one run: T1 → T2 → … → full suite ✗ → fix → full suite ✓
    ✅ BUILD COMPLETE
 /pb:review
@@ -193,10 +195,18 @@ reviewer and verifier (the tests use it for `test/mock-pi.mjs`).
 
 Inspired by **GVS5H** by Victor Gao, Vida Khosrowshahi, Ali Khosrowshahi,
 Xihao Sun, Juhyun Lee, Ethan Tran and Simon (Sang Won) Lee
-([arXiv:2608.26480](https://arxiv.org/abs/2608.26480)): decomposition into
-small tasks, a verifier whose verdict outranks the model's own "done", and
-fresh eyes against anchoring. pb is an independent tool for interactive work
-in Pi, not an implementation of the paper; its results don't directly apply.
+([arXiv:2608.26480](https://arxiv.org/abs/2608.26480)), which started pb with
+three ideas: decomposition into small tasks, a verifier whose verdict outranks
+the model's own "done", and fresh eyes against anchoring.
+
+pb has since deviated a long way from it. The paper runs every role (manager,
+worker, reviewer) in a fresh context over a shared ledger; pb's early versions
+did the same, and pb dropped it: it plans and builds in one conversation to keep
+the discussion and the prompt cache, checks by default only once, after the last
+task, rather than after each, and keeps a fresh context only for the explorer and the
+review. The spec as a checkpoint, the planning reset, and most of the rest are
+pb's own. The paper's evaluation says nothing about pb: pb is an independent
+tool for interactive work in Pi, not an implementation of it.
 
 Built on [Pi](https://pi.dev) by Earendil.
 

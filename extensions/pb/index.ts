@@ -2,7 +2,8 @@
  * pi-plan-build (pb): plan a feature with Pi, turn it into a spec, build it task by task
  * behind checks the harness runs, and have it reviewed with fresh eyes.
  *
- *   /pb:plan <what you want> plan together; the project's files stay untouched
+ *   /pb:plan <what you want> plan together; the project's files stay untouched (/pb:plan <spec>: continue one)
+ *   /pb:checkpoint [undo]  write the plan to its spec and reset the planning session to it
  *   /pb:spec [which]       write or revise the spec(s) from the discussion
  *   /pb:build [name]       build a spec here (--fresh: in a new session); resumes after a pause
  *   /pb:review [focus]     fresh, independent review against the spec, or of any uncommitted change
@@ -14,7 +15,8 @@
  *   /pb:help [topic]       what to do next
  *
  * Inspired by GVS5H (Gao et al., arXiv:2608.26480): small tasks, a verifier that
- * outranks the model's own "done", and fresh eyes against anchoring.
+ * outranks the model's own "done", and fresh eyes against anchoring. pb has since
+ * deviated far from it; see the README's credits.
  */
 import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
