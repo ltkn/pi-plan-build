@@ -15,6 +15,18 @@ export function registerRenderers(pi: ExtensionAPI) {
     box.addChild(new Markdown(body, 0, 1, getMarkdownTheme()));
     return box;
   });
+
+  // A proposed change to the project map: shown to you, not sent to the model.
+  pi.registerEntryRenderer<{ diff: string[]; dropped: string[]; lines: number }>("pb-map", (entry, _opts, theme) => {
+    const d = entry.data;
+    if (!d) return undefined;
+    const box = new Box(1, 1, (s) => theme.bg("customMessageBg", s));
+    const head = theme.fg("accent", "project map (AGENTS.md)") + theme.fg(d.lines > 60 ? "warning" : "dim", `  ${d.lines} lines${d.lines > 60 ? ", over the ~60-line budget" : ""}`);
+    const body = d.diff.length ? d.diff.map((l) => theme.fg(l.startsWith("+") ? "toolDiffAdded" : "toolDiffRemoved", l)) : [theme.fg("dim", "no changes")];
+    const dropped = d.dropped.map((l) => theme.fg("warning", `dropped (path doesn't exist): ${l}`));
+    box.addChild(new Text([head, ...body, ...dropped].join("\n"), 0, 0));
+    return box;
+  });
 }
 
 /* ------------------------------- pb_explore ------------------------------- */

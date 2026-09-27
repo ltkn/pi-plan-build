@@ -1545,3 +1545,71 @@ test("spec writing settles small things as assumptions; the checkpoint asks noth
   assert.match(refused!.content![0].text, /Not now: this is a checkpoint\. Write the question under Open questions/);
   assert.equal(u.resets.length, 1);
 });
+
+/* ------------------------------------ project map ------------------------------------ */
+
+test("map: helpers read and write the AGENTS.md section, find its paths, and diff it", async () => {
+  const { readMap, writeMap, mapPaths, dropMissing, mapDiff } = await import("../extensions/pb/map.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-map-"));
+  fs.writeFileSync(path.join(dir, "AGENTS.md"), "# Mine\n\nMy own notes.\n");
+  writeMap(dir, "- `src/a.ts`: a");
+  writeMap(dir, "- `src/b.ts`: b");
+  const md = fs.readFileSync(path.join(dir, "AGENTS.md"), "utf8");
+  assert.match(md, /^# Mine\n\nMy own notes\.\n\n<!-- pb:map -->\n## Project map\n\n- `src\/b\.ts`: b\n<!-- \/pb:map -->\n$/); // replaced, your text kept
+  assert.equal(readMap(dir), "- `src/b.ts`: b");
+  assert.deepEqual(mapPaths("- `src/a.ts:12` and `pom.xml`, `./mvnw -pl api`, `http://x/y`, `**/*.ts`"), ["src/a.ts", "pom.xml"]);
+  fs.mkdirSync(path.join(dir, "src"));
+  fs.writeFileSync(path.join(dir, "src/b.ts"), "");
+  assert.deepEqual(dropMissing(dir, "- `src/b.ts`: b\n- `src/gone.ts`: g"), { body: "- `src/b.ts`: b", dropped: ["- `src/gone.ts`: g"] });
+  assert.deepEqual(mapDiff("- a\n- b", "- a\n- c"), ["- - b", "+ - c"]);
+});
+
+test("map: /pb:archive offers to fold the feature's findings into the map; you see the change and accept it", async () => {
+  const t = setup({ verify: "true" });
+  fs.mkdirSync(path.join(t.repo, "src"));
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "AGENTS.md"), "# Shop\n");
+  execSync("git add . && git commit -qm src", { cwd: t.repo });
+  await written(t, SPEC().replace("## Context\nsrc/order.ts holds the model.", "## Findings\n- `src/order.ts` holds the model."));
+  t.agent.script = diligent;
+  await t.run("build");
+  const briefFile = path.join(os.tmpdir(), `pb-map-brief-${process.pid}.md`);
+  process.env.MOCK_BRIEF_OUT = briefFile;
+  t.selects.push("Update the project map in AGENTS.md from this feature", "Accept");
+  await t.run("archive");
+  delete process.env.MOCK_BRIEF_OUT;
+  assert.match(fs.readFileSync(briefFile, "utf8"), /# The current map\n\n\(none yet[\s\S]*# The feature just finished: order-cancellation[\s\S]*`src\/order\.ts` holds the model[\s\S]*# Files that feature changed\n\n[\s\S]*T1\.txt/);
+  const view = t.views.find((v) => v.customType === "pb-map")!.data;
+  assert.ok(view.diff.includes("+ - `src/order.ts`: the order model and its transitions"));
+  assert.deepEqual(view.dropped, ["- `src/gone.ts`: removed long ago"]); // a path that doesn't exist never gets in
+  assert.match(t.selectTitles.at(-1)!, /Project map: added Orders; noted transactions \(\d+ lines\)/);
+  const agents = t.read("AGENTS.md");
+  assert.match(agents, /^# Shop\n\n<!-- pb:map -->\n## Project map\n\n### Orders\n- `src\/order\.ts`: the order model[\s\S]*Services own transactions[\s\S]*<!-- \/pb:map -->/);
+  assert.doesNotMatch(agents, /gone\.ts/);
+  assert.match(t.notes.at(-1)!, /Project map updated in AGENTS\.md \(1 line\(s\) with missing paths dropped\)/);
+
+  // Nothing new: no change, nothing to accept.
+  await t.run("map");
+  assert.match(t.notes.at(-1)!, /The project map is up to date/);
+});
+
+test("map: skipping writes nothing; unattended archives skip it; /pb:plan warns about paths that vanished", async () => {
+  const t = setup({ verify: "true", askTimeoutSec: 0.001 });
+  fs.mkdirSync(path.join(t.repo, "src"));
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.selects.push("<timeout>"); // nobody there at archive: the map isn't touched
+  await t.run("archive");
+  assert.ok(!fs.existsSync(path.join(t.repo, "AGENTS.md")));
+  t.selects.push("Skip");
+  await t.run("map");
+  assert.ok(!fs.existsSync(path.join(t.repo, "AGENTS.md")));
+
+  const { writeMap } = await import("../extensions/pb/map.ts");
+  writeMap(t.repo, "- `src/order.ts`: orders\n- `src/billing/Invoice.java`: invoices");
+  t.selects.push("No thanks");
+  await t.run("plan", "next feature");
+  assert.ok(t.notes.some((n) => /The project map in AGENTS\.md names 1 path\(s\) that no longer exist \(src\/billing\/Invoice\.java\): \/pb:map refreshes it/.test(n)));
+});

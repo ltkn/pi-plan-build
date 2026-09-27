@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.0
+
+- **The project map**: a short section of the project's AGENTS.md (`<!-- pb:map -->`) with what stays true across features: layout and module roles, patterns to follow by path, constraints the code doesn't make obvious, test and build quirks. Pi loads it into every session, so the next feature starts from it instead of re-exploring
+- `/pb:archive` offers to update it from the finished feature (its Findings, the files it changed); `/pb:map [focus]` refreshes it any time. A fresh, read-only call proposes the whole new map against the code as it is now (revisiting all of it); lines naming paths that don't exist are dropped; you see a diff and accept, edit or skip. Nothing is written without you; about 60 lines, longer is flagged, never refused
+- `/pb:plan` warns when paths in the map no longer exist (no model call)
+
 ## 1.5.0
 
 - **A full build session is reset between two tasks**: past `checkpointAt` (75%, always before Pi's compaction), right after a task passes, pb resets the session to a summary it writes itself: the build's rules, every task with its summary, the assumptions, the spec and the next task's full prompt. Nothing is half-done at that point, and there's no summarizing model call. Undo to the reset brings back exactly that point

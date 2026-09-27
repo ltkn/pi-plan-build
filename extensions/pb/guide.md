@@ -378,6 +378,29 @@ try, and everything before that point is still in the prompt cache.
 in between, the undone work shows up as uncommitted changes (you're warned).
 <!-- /pb -->
 
+<!-- pb:topic map -->
+## The project map
+
+A short section of this project's AGENTS.md (marked `<!-- pb:map -->`, apart
+from the standards and from what you wrote) with what stays true across
+features: the layout and the role of each module, the patterns to follow (by
+path), constraints the code doesn't make obvious, test and build quirks. Pi
+loads AGENTS.md into every session, so every plan, build, review and
+exploration starts with it instead of rediscovering it.
+
+- **When a feature is done**, `/pb:archive` offers to update it from what the
+  feature established (its spec's Findings, the files it changed).
+- **Any time**, `/pb:map [focus]` refreshes it from the code as it is now.
+
+A fresh, read-only call proposes the whole new map (it revisits all of it, not
+only the new area) and your session doesn't grow. Lines naming a path that
+doesn't exist are dropped. You see the change as a diff and choose: accept,
+edit it first, or skip. Nothing is written without you, and an unattended
+archive leaves it alone. Aim for about 60 lines: it's read in every session;
+longer is flagged, never refused. `/pb:plan` warns when paths in the map no
+longer exist (a cheap check, no model call).
+<!-- /pb -->
+
 <!-- pb:topic status -->
 ## Status, stats and archive
 
@@ -388,7 +411,8 @@ in between, the undone work shows up as uncommitted changes (you're warned).
   the session was compacted, reset, reminded or asked you something.
   `/pb:stats all` compares every spec, archived ones included.
 - **`/pb:archive`**: moves a finished spec to `.pi/pb-archive/` (which git
-  ignores), so `/pb:build` and `/pb:status` only show live work.
+  ignores), so `/pb:build` and `/pb:status` only show live work, and offers to
+  update the project map (`/pb:help map`).
 <!-- /pb -->
 
 <!-- pb:topic rules -->

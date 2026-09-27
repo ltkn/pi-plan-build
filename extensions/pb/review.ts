@@ -8,7 +8,7 @@ import { REVIEWER_SYSTEM, VERIFIER_SYSTEM, verifierBrief } from "./prompts.ts";
 import { type RunResult, runFresh } from "./runner.ts";
 import type { Finding, Priority } from "./store.ts";
 
-const REVIEW_TOOLS = fileURLToPath(new URL("./review-tools.ts", import.meta.url));
+export const REVIEW_TOOLS = fileURLToPath(new URL("./review-tools.ts", import.meta.url));
 const INSPECT = ["read", "grep", "find", "ls", "bash"];
 
 export type Verdict = "pass" | "changes_needed" | "none";

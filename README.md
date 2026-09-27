@@ -15,6 +15,7 @@ build. Your engineering standards live in AGENTS.md, written once.
                       double-checked; follow-ups look only at what changed (--full: everything)
                       no spec? reviews the uncommitted change against its intent
 /pb:deps [which]      check dependencies and propose upgrades, as a change of their own
+/pb:map [focus]       refresh the project map in AGENTS.md (also offered at /pb:archive)
 /pb:spec [which]      write or revise a spec without building (optional)
 /pb:undo · /pb:status · /pb:stats · /pb:archive · /pb:help
 ```
@@ -22,7 +23,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.5.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.6.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -95,6 +96,13 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   blocking ones, so a false P1 doesn't cost you a fix cycle. pb offers once to
   run it on another model family than the one that built the change. It can't
   change your files: anything it touches is put back.
+- **A project map, so the next feature doesn't start from zero.** When you
+  archive a feature, pb offers to fold what it established about the project
+  (layout, patterns to follow, constraints, test quirks) into a short map in
+  AGENTS.md. A fresh call proposes the update against the code as it is now,
+  lines naming paths that don't exist are dropped, and you see the change and
+  accept it. Every later session, plan, build, review and exploration starts
+  with it; `/pb:plan` warns when paths in it vanished.
 - **Your standards, once, where Pi already looks.** Engineering standards
   live in AGENTS.md, which Pi loads into every session. pb offers once to add
   its default section (with Java 25 defaults in a Maven or Gradle project).

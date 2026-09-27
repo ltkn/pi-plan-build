@@ -43,8 +43,9 @@ import {
   specPrompt,
   taskPrompt,
 } from "./prompts.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_LINES, cartographerBrief, dropMissing, findingsOf, mapDiff, missingPaths, readMap, writeMap } from "./map.ts";
 import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
-import { runReview } from "./review.ts";
+import { REVIEW_TOOLS, runReview } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
 import { addStandards, agentDir, findStandards, isJavaProject, standardsLoaded } from "./standards.ts";
@@ -554,6 +555,9 @@ export default function pb(pi: ExtensionAPI) {
 
       // After the standards offer: its AGENTS.md isn't a change made while planning.
       startPlanning(ctx, store);
+      // A cheap staleness check of the project map, no model call: paths it names that are gone.
+      const gone = missingPaths(ctx.cwd, readMap(ctx.cwd));
+      if (gone.length) ctx.ui.notify(`The project map in AGENTS.md names ${gone.length} path(s) that no longer exist (${gone.slice(0, 3).join(", ")}${gone.length > 3 ? ", …" : ""}): /${cmd("map")} refreshes it.`, "warning");
 
       // The baseline costs no tokens: the harness runs the suite while the discussion starts.
       const baseline = cfg.baseline && !!testCmd;
@@ -1567,6 +1571,71 @@ export default function pb(pi: ExtensionAPI) {
     },
   });
 
+  /* ------------------------------ project map ----------------------------- */
+
+  /**
+   * Propose an updated project map in a fresh, read-only call (the session doesn't grow), drop lines
+   * naming paths that don't exist, show the change, and write it only when you accept it.
+   */
+  const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string } = {}) => {
+    if (!ctx.hasUI) return ctx.ui.notify("The project map is only updated with you there to accept it.", "info");
+    const cfg = store.config();
+    const current = readMap(ctx.cwd);
+    const abort = new AbortController();
+    const unsubEsc = ctx.mode === "tui" ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
+    const render = (activity?: string) => ctx.ui.setWidget("pb-map", [`pb map — reading the project   (Esc to stop)`, ...(activity ? [`  ↳ ${activity}`] : [])]);
+    let res;
+    try {
+      render();
+      res = await runFresh({
+        cwd: ctx.cwd,
+        role: "cartographer",
+        systemPrompt: CARTOGRAPHER_SYSTEM,
+        brief: cartographerBrief({ current, ...o }),
+        prompt: "Update the project map as the attached file describes; report it with report_map.",
+        tools: ["read", "grep", "find", "ls", "bash", "report_map"],
+        extensions: [REVIEW_TOOLS],
+        model: cfg.explorer.model ?? sessionModel(ctx),
+        thinking: cfg.explorer.thinking ?? "low",
+        signal: abort.signal,
+        onActivity: (a) => render(a),
+      });
+    } finally {
+      unsubEsc?.();
+      ctx.ui.setWidget("pb-map", undefined);
+    }
+    if (res.aborted) return ctx.ui.notify("Map update stopped.", "info");
+    const call = res.toolCalls.filter((c) => c.name === "report_map").at(-1);
+    const proposed = typeof call?.arguments.map === "string" ? call.arguments.map.trim() : "";
+    if (!proposed) return ctx.ui.notify(`No map came back${res.error ? `: ${res.error.slice(0, 200)}` : ""}.`, "warning");
+    const { body, dropped } = dropMissing(ctx.cwd, proposed);
+    const diff = mapDiff(current, body);
+    const lines = body.split("\n").length;
+    if (!diff.length) return ctx.ui.notify("The project map is up to date: nothing to change.", "info");
+    pi.appendEntry("pb-map", { diff, dropped, lines });
+    const changes = Array.isArray(call?.arguments.changes) ? (call.arguments.changes as string[]) : [];
+    const ACCEPT = "Accept";
+    const EDIT = "Edit it first";
+    let text = body;
+    const choice = await ctx.ui.select(`Project map: ${changes.length ? changes.slice(0, 3).join("; ") + (changes.length > 3 ? "; …" : "") : `${diff.length} line(s) changed`} (${lines} lines${lines > MAP_LINES ? `, over the ~${MAP_LINES}-line budget` : ""})`, [ACCEPT, EDIT, "Skip"]);
+    if (choice === EDIT) {
+      const edited = await ctx.ui.editor("Edit the project map", body);
+      if (edited === undefined) return ctx.ui.notify("Map not changed.", "info");
+      text = edited;
+    } else if (choice !== ACCEPT) return ctx.ui.notify("Map not changed.", "info");
+    writeMap(ctx.cwd, text);
+    store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
+    ctx.ui.notify(`Project map updated in AGENTS.md${dropped.length ? ` (${dropped.length} line(s) with missing paths dropped)` : ""}. Pi loads it into every session.`, "info");
+  };
+
+  pi.registerCommand(cmd("map"), {
+    description: "Refresh the project map in AGENTS.md (layout, patterns, constraints) from the code as it is now. Optional: what to focus on",
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      await updateMap(ctx, new Store(ctx.cwd), { focus: args.trim() || undefined });
+    },
+  });
+
   /* ------------------------------- archive ------------------------------- */
 
   pi.registerCommand(cmd("archive"), {
@@ -1583,9 +1652,15 @@ export default function pb(pi: ExtensionAPI) {
       }
       if (!store.readSpec(name)) return ctx.ui.notify(`No spec "${name}".`, "warning");
       if (!candidates.includes(name) && ctx.hasUI && !(await ctx.ui.confirm(`${name} isn't finished`, "Archive it anyway?"))) return;
+      const markdown = store.readSpec(name) ?? "";
+      const changed = changedSince(ctx.cwd, store.progress(name)?.baseCommit);
       const dest = store.archive(name);
       if (!store.specNames().length) dropCheckpoints(ctx.cwd); // no live spec left to undo: let git reclaim the snapshots
       ctx.ui.notify(`Archived ${name} to ${path.relative(ctx.cwd, dest)}.`, "info");
+      // The feature is done: what it established about the project can go into the map every session reads.
+      const UPDATE = "Update the project map in AGENTS.md from this feature";
+      if ((await choose(ctx, store, `${name} is archived. What it found about the project (layout, patterns, constraints) can go into the map every session reads.`, [UPDATE, "Not now"], "Not now")) === UPDATE)
+        await updateMap(ctx, store, { spec: { name, findings: findingsOf(markdown) }, changed });
     },
   });
 

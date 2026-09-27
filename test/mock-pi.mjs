@@ -28,6 +28,10 @@ if (sys.includes("REVIEWER")) {
   const n = (brief.match(/^\d+\. \[P/gm) ?? []).length;
   const verdict = process.env.MOCK_VERIFY === "reject" ? "rejected" : "confirmed";
   say([call("report_verdicts", { verdicts: Array.from({ length: n }, (_, i) => ({ finding: i + 1, verdict, evidence: "src/order.ts:11 already guards it" })) })]);
+} else if (sys.includes("CARTOGRAPHER")) {
+  if (process.env.MOCK_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_BRIEF_OUT, brief);
+  const map = "### Orders\n- `src/order.ts`: the order model and its transitions\n- `src/gone.ts`: removed long ago\n- Services own transactions; controllers never call repositories.";
+  say([call("report_map", { map, changes: ["added Orders", "noted transactions"] })]);
 } else if (sys.includes("EXPLORER")) {
   say([{ type: "text", text: `src/order/Order.java holds the model; OrderService applies transitions. (asked: ${brief.split("\n")[2]})` }]);
 } else say([{ type: "text", text: "unexpected role" }]);
