@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9.2
+
+- Fixed: relaunching a session with project-map entries from 1.6–1.8 showed "renderer failed"; those entries are no longer shown
+
 ## 1.9.1
 
 - **The project map's change reads well in Pi**: collapsed, a summary (size, lines added and removed, what changed as the cartographer put it, any warnings); expanded, the new map rendered as markdown, like in AGENTS.md, with the removed lines below. It used to be a raw diff of long, wrapping lines

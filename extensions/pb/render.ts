@@ -19,7 +19,7 @@ export function registerRenderers(pi: ExtensionAPI) {
   // A change to the project map: shown to you, not sent to the model. Collapsed, what changed; expanded, the map itself.
   pi.registerEntryRenderer<MapView>("pb-map", (entry, { expanded }, theme) => {
     const d = entry.data;
-    if (!d) return undefined;
+    if (!Array.isArray(d?.diff) || !Array.isArray(d.warnings)) return undefined; // entries from earlier versions: not shown
     const v = mapView(d, expanded);
     const box = new Box(1, 1, (s) => theme.bg("customMessageBg", s));
     box.addChild(new Text(theme.fg("accent", "project map (AGENTS.md)") + theme.fg(v.over ? "warning" : "dim", `  ${v.head}`), 0, 0));
