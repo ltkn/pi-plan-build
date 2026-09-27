@@ -39,11 +39,10 @@ export interface Config {
   explorer: { model?: string; thinking?: string };
   /** Build on this model ("provider/id") instead of the planning session's; unset = the same model. */
   buildModel?: string;
-  /** Above this share of the context window (%), finished tasks' long tool output is pruned at task boundaries; 0 = never. */
-  pruneAbove: number;
   /**
-   * A planning session past this share of its context window (%) writes the plan to its spec and is reset
-   * to it, instead of being compacted; always early enough to stay clear of Pi's own compaction. 0 = never.
+   * Past this share of the context window (%), and always early enough to stay clear of Pi's own compaction:
+   * a planning session writes the plan to its spec and is reset to it; a build session is reset to the
+   * build's state at the next task boundary. 0 = never (Pi compacts; pb still writes the summary).
    */
   checkpointAt: number;
 }
@@ -61,7 +60,6 @@ export const DEFAULT_CONFIG: Config = {
   freshAbove: 50,
   baseline: true,
   explorer: {},
-  pruneAbove: 0,
   checkpointAt: 75,
 };
 
@@ -151,6 +149,8 @@ export interface Checkpoint {
   /** session entry to rewind the conversation to; set at the end of the turn when the task started mid-run */
   entry?: string;
   pendingEntry?: boolean;
+  /** the task was handed out right before a reset: its rewind point becomes that reset, at the next turn */
+  pendingReset?: boolean;
   /** the build's first message comes after `entry`: rewinding here drops it */
   intro?: boolean;
 }

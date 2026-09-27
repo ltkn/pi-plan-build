@@ -255,14 +255,17 @@ A progress line above the editor shows the tasks while it runs. If Pi stops
 mid-task without finishing it, pb reminds it once; if it stops again, the build
 pauses.
 
-**Compaction.** When a build session fills up, pb writes the compaction summary
-itself from what it knows (the tasks and their summaries, the current task, the
-last failure, the spec) instead of asking a model to summarize.
-
-**Pruning** (optional, `"pruneAbove": <percent>`): above that share of the
-context window, long tool output of finished tasks is replaced by a short note
-at each task boundary. It rewrites the cached prompt once to make later turns
-lighter, so it pays off only for long builds.
+**A full build session.** When a task finishes and the session is past
+`checkpointAt` (75% of its window, always before Pi would compact), pb resets it
+right there, between two tasks, where nothing is half-done. The build goes on
+from a summary pb writes itself: the build's rules, every task with its
+summary, the assumptions, the spec and the next task. No summarizing model call,
+and nothing of the finished task is needed any more. Should a single task still
+run into Pi's own compaction, pb writes that summary too, adding the files the
+task has changed so far and the files read before, so it carries on instead of
+starting over. `/pb:undo` to a task from before a reset restores the files only
+(the old conversation would bring the whole context back) and says what was
+undone.
 
 While it runs, this is an ordinary Pi session: watch, interrupt with Esc, ask
 things. **Decisions you make here** are written into the spec's Decisions
@@ -382,7 +385,7 @@ in between, the undone work shows up as uncommitted changes (you're warned).
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and
   failed, pauses, the review verdicts, the build session's tokens, share served
   from cache, peak context, cost and time, the explorer's calls, and how often
-  the session was compacted, pruned, reminded or asked you something.
+  the session was compacted, reset, reminded or asked you something.
   `/pb:stats all` compares every spec, archived ones included.
 - **`/pb:archive`**: moves a finished spec to `.pi/pb-archive/` (which git
   ignores), so `/pb:build` and `/pb:status` only show live work.

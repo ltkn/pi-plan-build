@@ -81,7 +81,7 @@ export interface Summary {
   build: { prompt: number; cached: number; output: number; cost: number; peak: number; window?: number; turns: number };
   review: { prompt: number; output: number; cost: number };
   explorer: { calls: number; prompt: number; output: number; cost: number };
-  context: { compactions: number; prunes: number; nudges: number; asks: number };
+  context: { compactions: number; resets: number; nudges: number; asks: number };
   ms: number;
 }
 
@@ -139,7 +139,7 @@ export function summarize(s: SpecStats): Summary {
     build,
     review,
     explorer,
-    context: { compactions: count("compact"), prunes: count("prune"), nudges: count("nudge"), asks: count("ask") },
+    context: { compactions: count("compact"), resets: count("reset"), nudges: count("nudge"), asks: count("ask") },
     ms: start && end ? Math.max(0, ts(end.at) - ts(start.at)) : 0,
   };
 }
@@ -160,7 +160,7 @@ export function renderCard(s: SpecStats): string {
     `Context   peak ${human(b.peak)}${b.window ? ` (${pct(b.peak, b.window)} of ${human(b.window)})` : ""}`,
     `Reviewer  prompt ${human(x.review.prompt)} · output ${human(x.review.output)} · $${x.review.cost.toFixed(2)}`,
     `Explorer  ${x.explorer.calls ? `${x.explorer.calls} calls · prompt ${human(x.explorer.prompt)} · output ${human(x.explorer.output)} · $${x.explorer.cost.toFixed(2)}` : "not used"}`,
-    `Session   ${x.context.compactions} compactions · ${x.context.prunes} prunes · ${x.context.nudges} reminders · ${x.context.asks} questions`,
+    `Session   ${x.context.compactions} compactions · ${x.context.resets} resets · ${x.context.nudges} reminders · ${x.context.asks} questions`,
     "",
     "Build = the build session's model turns; the planning conversation isn't counted.",
     "```",

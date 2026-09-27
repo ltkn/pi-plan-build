@@ -26,9 +26,10 @@ import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import {
   EXPLORER_SYSTEM,
   buildIntro,
+  buildMechanics,
+  buildStateSummary,
   checkpointPrompt,
   checkpointSummary,
-  compactionSummary,
   continuePlanPrompt,
   continuePrompt,
   depsPrompt,
@@ -53,8 +54,6 @@ import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
 
-/** Tool output shorter than this is never pruned: it costs less than the cache write pruning causes. */
-const PRUNE_MIN_CHARS = 2000;
 /** Pi compacts at the context window minus this reserve (its default reserveTokens): a checkpoint must come earlier. */
 const PI_RESERVE_TOKENS = 16384;
 /** Above this, a spec gets a gentle note about its size; never a rejection. */
@@ -664,6 +663,31 @@ export default function pb(pi: ExtensionAPI) {
     };
   };
 
+  /** The build's state as a summary, for a reset at a task boundary or a compaction in the middle of a task. */
+  const stateSummary = (ctx: ExtensionContext, store: Store, p: Progress, reason: "reset" | "compaction", extra: { changed?: string[]; read?: string[]; previous?: string } = {}) => {
+    const loaded = loadSpec(store, p.spec);
+    const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+    const each = cfg.taskChecks === "each";
+    const tp = p.tasks.find((t) => t.id === p.current);
+    const task = loaded?.spec.tasks.find((t) => t.id === p.current);
+    const current =
+      p.current === "final"
+        ? fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", tp?.attempts ?? 1, cfg.maxAttempts, false)
+        : task && loaded
+          ? taskPrompt(task, tp?.attempts ?? 1, cfg.maxAttempts, checkCommand(loaded.spec, task, testCmd, buildCmd, false, each))
+          : `Carry on with ${p.current ?? "the build"}; finish it with pb_task_done.`;
+    return buildStateSummary({ p, markdown: loaded?.md, mechanics: loaded ? buildMechanics(loaded.spec, buildCmd, each) : "", current, reason, ...extra });
+  };
+
+  /** When a build session should be reset at a task boundary: past checkpointAt, always before Pi would compact. */
+  const pastCheckpoint = (ctx: ExtensionContext, store: Store, specTokens: number) => {
+    const cfg = store.config();
+    const usage = ctx.getContextUsage();
+    if (!cfg.checkpointAt || !usage || usage.tokens == null) return undefined;
+    const limit = Math.min((usage.contextWindow * cfg.checkpointAt) / 100, usage.contextWindow - PI_RESERVE_TOKENS - Math.max(12000, 2 * specTokens));
+    return usage.tokens >= limit ? Math.round((100 * usage.tokens) / usage.contextWindow) : undefined;
+  };
+
   const pauseBuild = (ctx: ExtensionContext, store: Store, p: Progress, reason: string, tipKey: string, why: string, vars: Record<string, string | number> = {}) => {
     p.phase = "paused";
     p.pause = reason;
@@ -932,45 +956,50 @@ export default function pb(pi: ExtensionAPI) {
     if (p?.phase === "building") pauseBuild(ctx, store, p, "the agent stopped without finishing its task (you stopped it, or it stopped again after a reminder).", "build.paused", "stopped");
   });
 
-  // At the end of a turn: rewind points for tasks started mid-run, and (when configured) pruning at a task boundary.
-  pi.on("turn_end", (e, ctx) => {
+  /*
+   * At the end of a turn: rewind points for tasks started mid-run, and the build's reset. Right after a task
+   * passed and the next was handed out, past checkpointAt, the session is reset to the build's state: the
+   * finished task is done and summarized, the next hasn't started, so nothing half-done is lost (unlike a
+   * compaction in the middle of a task). No summarizing model call.
+   */
+  pi.on("turn_end", (_e, ctx) => {
     const { store, name, progress: p } = specOfSession(ctx);
     const wasBoundary = boundary;
     boundary = false;
     if (!name || !p) return;
     const leaf = tree(ctx).getLeafId?.() ?? undefined;
     const cps = store.checkpoints(name);
-    const pending = cps.filter((c) => c.pendingEntry);
-    for (const c of pending) {
+    let changed = false;
+    // A reset in the last turn: the task it handed out starts at that reset (undo goes back to it).
+    const branch = tree(ctx).getBranch?.() ?? [];
+    const lastReset = [...branch].reverse().find((x) => x.type === "compaction")?.id;
+    for (const c of cps.filter((c) => c.pendingReset)) {
+      if (lastReset) c.entry = lastReset;
+      delete c.pendingReset;
+      changed = true;
+    }
+    for (const c of cps.filter((c) => c.pendingEntry)) {
       c.entry = leaf;
       delete c.pendingEntry;
+      changed = true;
     }
-    if (pending.length) store.saveCheckpoints(name, cps);
+    if (changed) store.saveCheckpoints(name, cps);
 
-    const cfg = store.config();
-    const usage = ctx.getContextUsage()?.percent;
-    if (!wasBoundary || !cfg.pruneAbove || p.phase !== "building" || usage == null || usage < cfg.pruneAbove) return;
-    type Projected = { sourceEntry: Entry; messages: { content?: unknown }[] };
-    const entries = ((e as { context?: { contextEntries?: Projected[] } }).context?.contextEntries ?? []) as Projected[];
-    // Only what the build produced: everything after its start (the planning discussion stays whole).
-    const startEntry = cps.find((c) => c.id === "start")?.entry;
-    if (!startEntry) return;
-    const from = entries.findIndex((x) => x.sourceEntry.id === startEntry);
-    const to = leaf ? entries.findIndex((x) => x.sourceEntry.id === leaf) : -1;
-    if (to < 0) return;
-    const size = (x: Projected) =>
-      x.messages.reduce((n, m) => n + (Array.isArray(m.content) ? m.content.reduce((k: number, c: { text?: string }) => k + (c.text?.length ?? 0), 0) : String(m.content ?? "").length), 0);
-    const edits = entries
-      .slice(from + 1, to)
-      .filter((x) => x.sourceEntry.type === "message" && x.sourceEntry.message?.role === "toolResult" && size(x) >= PRUNE_MIN_CHARS)
-      .map((x) => ({
-        type: "context_edit" as const,
-        targetId: x.sourceEntry.id,
-        replacement: { content: text(`[pb pruned ${size(x)} chars of tool output from a finished task; run or read it again if you need it]`) },
-      }));
-    if (!edits.length) return;
-    store.event(name, { type: "prune", entries: edits.length, chars: entries.filter((x) => edits.some((d) => d.targetId === x.sourceEntry.id)).reduce((n, x) => n + size(x), 0) });
-    return { entries: edits };
+    if (!wasBoundary || p.phase !== "building" || !p.current) return;
+    const percent = pastCheckpoint(ctx, store, tokensOf(store.readSpec(name) ?? ""));
+    if (percent === undefined) return;
+    const cp = cps.find((c) => c.id === p.current);
+    if (cp) {
+      cp.pendingReset = true;
+      store.saveCheckpoints(name, cps);
+    }
+    store.event(name, { type: "reset", task: p.current, percent });
+    return {
+      entries: [
+        { type: "compaction" as const, summary: stateSummary(ctx, store, p, "reset"), firstKeptEntryId: null, details: { pb: "build-reset", task: p.current } },
+        { type: "custom_message" as const, customType: "pb", content: `**Context reset** before ${p.current} (it was ${percent}% full): the build goes on from its state and the spec.`, display: true },
+      ],
+    };
   });
 
   // Stats: every model turn in a build session, with its tokens and cache use.
@@ -1020,10 +1049,16 @@ export default function pb(pi: ExtensionAPI) {
       }
       return;
     }
-    store.event(name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore });
+    store.event(name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, task: p.current });
+    // What the current task has done so far, from git: the files it changed since its undo point.
+    const cp = store.checkpoints(name).find((c) => c.id === p.current);
+    const now_ = cp ? snapshot(ctx.cwd, `pb: compaction during ${p.current}`) : undefined;
+    const changed = cp && now_ ? changedPaths(ctx.cwd, cp.commit, now_.commit) : undefined;
+    const ops = (ev.preparation as { fileOps?: { read?: Iterable<string>; edited?: Iterable<string>; written?: Iterable<string> } }).fileOps;
+    const read = ops?.read ? [...ops.read].filter((f) => !changed?.includes(f)) : undefined;
     return {
       compaction: {
-        summary: compactionSummary(p, store.readSpec(name), ev.preparation.previousSummary),
+        summary: stateSummary(ctx, store, p, "compaction", { changed, read, previous: ev.preparation.previousSummary }),
         firstKeptEntryId: ev.preparation.firstKeptEntryId,
         tokensBefore: ev.preparation.tokensBefore,
       },
@@ -1596,7 +1631,12 @@ export default function pb(pi: ExtensionAPI) {
       // everything before that point is still in the prompt cache.
       const oldLeaf = tree(ctx).getLeafId?.() ?? undefined;
       const reverting = target.id.startsWith("u");
-      const point = rewindPoint(ctx, target.entry, reverting);
+      let point = rewindPoint(ctx, target.entry, reverting);
+      // A point before the latest compaction or reset would bring back the whole old context: files only then.
+      const branch = tree(ctx).getBranch?.() ?? [];
+      const at = point ? branch.findIndex((x) => x.id === point) : -1;
+      const beforeCompaction = !!point && !reverting && (at < 0 || at < branch.map((x) => x.type).lastIndexOf("compaction"));
+      if (beforeCompaction) point = undefined;
       const nav = (ctx as Partial<ExtensionCommandContext>).navigateTree;
       let rewound = false;
       if (point && nav && point !== oldLeaf) {
@@ -1634,8 +1674,11 @@ export default function pb(pi: ExtensionAPI) {
       store.saveProgress(p);
       showProgress(ctx, p);
       store.event(name, { type: "undo", to: target.id, tasks: undone, rewound });
+      const note = beforeCompaction
+        ? `\nThe conversation wasn't rewound (that point is before a context reset or compaction). What was undone: ${undoneCps.map((c) => c.summary ?? `${c.id} (unfinished)`).join("; ") || "nothing finished"}.`
+        : "";
       post(
-        `**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${files.length} file(s) restored${rewound ? ", the conversation rewound" : ""}.\n${summary}\n\n${tip("undo.done", { id: undoEntry.id })}`,
+        `**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${files.length} file(s) restored${rewound ? ", the conversation rewound" : ""}.\n${summary}${note}\n\n${tip("undo.done", { id: undoEntry.id })}`,
       );
     },
   });

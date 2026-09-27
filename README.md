@@ -22,7 +22,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.4.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.5.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -81,9 +81,11 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   read-only context (on a cheaper model if you like) that returns only the
   answer; the planner calls it when it's worth it. The test baseline runs in the
   harness, not the model, in a separate worktree so it can't collide with a
-  build in your working copy. A build session's compaction is written by pb from its
-  own state, not by another model call; optionally, long tool output of finished
-  tasks is pruned at task boundaries.
+  build in your working copy. A full build session is reset between two tasks,
+  where nothing is half-done, to a summary pb writes from its own state (the
+  rules, the finished tasks, the spec, the next task), with no summarizing model
+  call; if a single task still runs into Pi's compaction, pb's summary also
+  carries what that task has changed so far.
 - **Undo means undo.** `/pb:undo` restores the files and rewinds the
   conversation to before the task, so a discarded attempt doesn't anchor the
   next one, and everything before that point is still cached.
@@ -164,8 +166,7 @@ the existing ones still run.
 | `reviewer` | `{"verify": true}` | `{"model": "provider/id", "thinking": "high", "verify": true}`: the fresh reviewer, and whether P0/P1 findings get a second look |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
-| `pruneAbove` | 0 | above this % of the context window, prune long tool output of finished tasks at task boundaries; 0 = never |
-| `checkpointAt` | 75 | a planning session past this % of its window writes its spec and is reset to it (always before Pi's own compaction); 0 = never |
+| `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build is reset to its state at the next task boundary; 0 = never |
 
 ## On disk
 

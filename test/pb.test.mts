@@ -41,7 +41,6 @@ function setup(config: object = {}) {
   const views: { customType: string; data: any }[] = [];
   const navigations: { target: string; summary?: string }[] = [];
   const resets: { summary: string; firstKeptEntryId: string | null }[] = [];
-  const edits: { targetId: string; replacement: unknown }[] = [];
   const blocked: string[] = [];
   const agent: { script?: Script } = {};
   const names = new Map<string, string>();
@@ -245,6 +244,19 @@ function setup(config: object = {}) {
     }
     return result;
   };
+  // Entries a boundary handler (turn_end, agent_before_settle) asks Pi to append.
+  type Draft = { type: string; content?: string; display?: boolean; summary?: string; firstKeptEntryId?: string | null };
+  const applyDrafts = (drafts: Draft[] = []) => {
+    for (const d of drafts) {
+      if (d.type === "compaction") {
+        resets.push({ summary: d.summary!, firstKeptEntryId: d.firstKeptEntryId ?? null });
+        append(rt.file(), { type: "compaction", summary: d.summary });
+      } else if (d.type === "custom_message") {
+        append(rt.file(), { type: "custom_message", content: d.content });
+        if (d.display) posts.push(d.content!);
+      }
+    }
+  };
   const turn = (first: string) => {
     instructions.push(first);
     stat.runs++;
@@ -258,25 +270,14 @@ function setup(config: object = {}) {
         await agent.script?.(input, callTool);
         const usage = { input: 1000, output: 100, cacheRead: 9000, cacheWrite: 0, cost: { total: 0.001 } };
         await fire("message_end", { message: { role: "assistant", usage } });
-        const contextEntries = branch(rt.file()).map((e) => ({ sourceEntry: e, messages: [{ content: [{ type: "text", text: textOf(e) }] }] }));
-        for (const r of (await fire("turn_end", { context: { contextEntries } })) as { entries?: { targetId: string; replacement: unknown }[] }[])
-          for (const d of r?.entries ?? []) edits.push(d);
+        for (const r of (await fire("turn_end", {})) as { entries?: Draft[] }[]) applyDrafts(r?.entries);
         input = continuation;
         if (input !== undefined) {
           instructions.push(input);
           continue;
         }
-        type Draft = { type: string; content?: string; display?: boolean; summary?: string; firstKeptEntryId?: string | null };
         for (const r of (await fire("agent_before_settle", { outcome: "completed", entries: [], continue: false })) as { continue?: boolean; entries?: Draft[] }[]) {
-          for (const d of r?.entries ?? []) {
-            if (d.type === "compaction") {
-              resets.push({ summary: d.summary!, firstKeptEntryId: d.firstKeptEntryId ?? null });
-              append(rt.file(), { type: "compaction", summary: d.summary });
-            } else if (d.type === "custom_message") {
-              append(rt.file(), { type: "custom_message", content: d.content });
-              if (d.display) posts.push(d.content!);
-            }
-          }
+          applyDrafts(r?.entries);
           if (r?.continue) {
             input = r.entries!.find((d) => d.type === "custom_message")!.content!;
             instructions.push(input);
@@ -321,7 +322,6 @@ function setup(config: object = {}) {
     views,
     navigations,
     resets,
-    edits,
     blocked,
     agent,
     stat,
@@ -765,43 +765,65 @@ test("build: by default, tasks aren't checked one by one; the full suite runs af
   assert.equal(t.stat.runs, 1);
 });
 
-test("build: a build session's compaction summary comes from pb's state, not another model call", async () => {
+test("build: a compaction in the middle of a task: pb's summary carries the rules, the task, and what it changed so far", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = async (text, tool) => {
     if (text.includes("Task T2")) {
-      const [r] = (await t.fire("session_before_compact", { preparation: { firstKeptEntryId: "e9", tokensBefore: 90000, previousSummary: "We discussed audit." }, reason: "threshold" })) as any[];
+      fs.writeFileSync("T2.txt", "halfway");
+      const prep = { firstKeptEntryId: "e9", tokensBefore: 90000, previousSummary: "We discussed audit.", fileOps: { read: new Set(["src/order.ts", "T2.txt"]), edited: new Set(), written: new Set() } };
+      const [r] = (await t.fire("session_before_compact", { preparation: prep, reason: "threshold" })) as any[];
       assert.equal(r.compaction.firstKeptEntryId, "e9");
-      assert.match(r.compaction.summary, /^\[pb build state: order-cancellation\][\s\S]*- T1 first file: done — did T1[\s\S]*- T2 second file: doing \(current\)[\s\S]*We discussed audit\.[\s\S]*--- spec ---\n# Order cancellation/);
+      assert.match(
+        r.compaction.summary,
+        /^\[pb build state: order-cancellation\] This conversation was compacted in the middle of T2\. Carry on[\s\S]*How this build works:\n- Where the spec is unclear[\s\S]*Finish each task with pb_task_done[\s\S]*- T1 first file: done — did T1[\s\S]*- T2 second file: doing \(current\)[\s\S]*Files T2 has changed so far:\n- T2\.txt[\s\S]*Files read before this point \(read again what you need\):\n- src\/order\.ts\n[\s\S]*We discussed audit\.[\s\S]*--- spec ---\n# Order cancellation[\s\S]*--- current ---\n\[pb:build\] Task T2\. Do only this task/,
+      );
+      // A planning checkpoint as the previous summary isn't repeated: the spec is there already.
+      const [again] = (await t.fire("session_before_compact", { preparation: { ...prep, previousSummary: "[pb plan checkpoint] … the whole spec …" }, reason: "threshold" })) as any[];
+      assert.doesNotMatch(again.compaction.summary, /the whole spec/);
     }
     return diligent(text, tool);
   };
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "built");
-  assert.ok(t.events("order-cancellation").some((e) => e.type === "compact"));
+  assert.ok(t.events("order-cancellation").some((e) => e.type === "compact" && e.task === "T2"));
 });
 
-test("build: above pruneAbove, long tool output of finished tasks is pruned at the task boundary", async () => {
-  const t = setup({ verify: "true", pruneAbove: 5 });
-  await written(t);
-  t.agent.script = async (text, tool) => {
-    if (text.includes("Task T1")) {
-      await tool("bash", { command: "cat big.log", output: "x".repeat(5000) });
-      await tool("bash", { command: "ls", output: "short" });
-    }
+test("build: past checkpointAt, the session is reset at the next task boundary; undo works on both sides of it", async () => {
+  /** T1 fills the context to 73%. */
+  const filling = (x: ReturnType<typeof setup>): Script => async (text, tool) => {
+    if (text.includes("Task T1")) x.runtime().usage = 73;
+    if (text.includes("Task T2")) x.runtime().usage = 5;
     return diligent(text, tool);
   };
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = filling(t);
   await t.run("build");
-  assert.equal(t.edits.length, 1);
-  assert.match(t.text(t.edits[0].targetId), /^x{5000}$/);
-  assert.match(JSON.stringify(t.edits[0].replacement), /pb pruned 5000 chars of tool output from a finished task/);
-  assert.ok(t.events("order-cancellation").some((e) => e.type === "prune" && e.chars === 5000));
+  assert.equal(t.resets.length, 1);
+  assert.equal(t.resets[0].firstKeptEntryId, null);
+  assert.match(t.resets[0].summary, /^\[pb build state: order-cancellation\] The build session was reset between two tasks[\s\S]*How this build works:[\s\S]*- T1 first file: done — did T1[\s\S]*--- spec ---[\s\S]*--- next ---\n\[pb:build\] Task T2\. Do only this task/);
+  assert.ok(t.posts.some((p) => /\*\*Context reset\*\* before T2 \(it was 73% full\)/.test(p)));
+  assert.doesNotMatch(t.context(), /\[pb:build order-cancellation\] Build the spec/); // T1's conversation is gone
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  const cps = JSON.parse(t.read(".pi/pb/specs/order-cancellation/checkpoints.json"));
+  const t2 = cps.find((c: any) => c.id === "T2");
+  assert.equal(t.entry(t2.entry)!.type, "compaction"); // T2 starts at the reset
+  assert.ok(t.events("order-cancellation").some((e) => e.type === "reset" && e.task === "T2" && e.percent === 73));
 
-  const u = setup({ verify: "true" }); // off by default
+  await t.run("undo", "T2"); // back to the reset: the summary with T2 to do
+  assert.equal(t.navigations.at(-1)!.target, t2.entry);
+  const n = t.navigations.length;
+  await t.run("undo", "T1"); // before the reset: files only, with a note
+  assert.equal(t.navigations.length, n);
+  assert.ok(!fs.existsSync(path.join(t.repo, "T1.txt")));
+  assert.match(t.posts.at(-1)!, /The conversation wasn't rewound \(that point is before a context reset or compaction\)/);
+
+  const u = setup({ verify: "true", checkpointAt: 0 }); // off: Pi compacts when full, with pb's summary
   await written(u);
-  u.agent.script = t.agent.script;
+  u.agent.script = filling(u);
   await u.run("build");
-  assert.equal(u.edits.length, 0);
+  assert.equal(u.resets.length, 0);
 });
 
 /* ------------------------------------- undo -------------------------------------- */

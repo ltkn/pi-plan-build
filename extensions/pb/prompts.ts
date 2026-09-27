@@ -187,18 +187,43 @@ export function nudgePrompt(taskId: string): string {
   return `[pb:build] You stopped without finishing ${taskId === "final" ? "the final check" : taskId}. Carry on and finish with pb_task_done; if it can't be done properly, pb_task_done with status "blocked"; if you need a decision, pb_ask.`;
 }
 
-/** What survives a compaction of a build session: the build's state, from what the harness knows. */
-export function compactionSummary(p: Progress, markdown: string | undefined, previous?: string): string {
+/**
+ * What a build session is reset or compacted to: everything the build needs, from what the harness knows.
+ * At a task boundary (reset) nothing is half-done; mid-task (compaction) it adds what the task already
+ * touched, so the model picks up where it was instead of starting the task over.
+ */
+export function buildStateSummary(o: {
+  p: Progress;
+  markdown?: string;
+  mechanics: string;
+  /** the current task's full prompt (or the final check's failure) */
+  current: string;
+  reason: "reset" | "compaction";
+  /** files the current task has changed so far (mid-task only) */
+  changed?: string[];
+  /** files read in the part of the conversation that was summarized */
+  read?: string[];
+  previous?: string;
+}): string {
+  const { p } = o;
   const lines = [
-    `[pb build state: ${p.spec}] This conversation was compacted by pb. The build of ${P}/specs/${p.spec}/spec.md goes on from here; the spec (below) is the source of truth.`,
+    o.reason === "reset"
+      ? `[pb build state: ${p.spec}] The build session was reset between two tasks to free context: nothing is half-done. The finished tasks are in the code and summarized below; the spec is the source of truth.`
+      : `[pb build state: ${p.spec}] This conversation was compacted in the middle of ${p.current}. Carry on with it from where it was: its changes so far are in the files listed below.`,
+    "",
+    "How this build works:",
+    o.mechanics,
     "",
     "Tasks:",
-    ...p.tasks.map((t) => `- ${t.id} ${t.title}: ${t.status}${t.id === p.current ? " (current)" : ""}${t.summary ? ` — ${t.summary.replace(/\s+/g, " ")}` : ""}`),
+    ...p.tasks.map((t) => `- ${t.id} ${t.title}: ${t.status}${t.id === p.current ? " (current)" : ""}${t.summary && t.status === "done" ? ` — ${t.summary.replace(/\s+/g, " ")}` : ""}`),
   ];
-  if (p.pause) lines.push("", `Paused: ${p.pause}`);
+  if (p.assumptions?.length) lines.push("", "Assumptions made so far (in the spec's Decisions):", ...p.assumptions.map((a) => `- ${a}`));
+  if (o.changed?.length) lines.push("", `Files ${p.current} has changed so far:`, ...o.changed.map((f) => `- ${f}`));
+  if (o.read?.length) lines.push("", "Files read before this point (read again what you need):", ...o.read.slice(0, 40).map((f) => `- ${f}`));
   if (p.lastVerify && p.lastVerify.ok === false) lines.push("", `Last check (failed):\n${p.lastVerify.summary}`);
-  if (previous && !previous.startsWith("[pb build state")) lines.push("", "Earlier conversation, summarized before:", previous);
-  if (markdown) lines.push("", `--- spec ---`, markdown);
+  if (o.previous && !/^\[pb (build state|plan checkpoint)/.test(o.previous)) lines.push("", "Earlier conversation, summarized before:", o.previous);
+  if (o.markdown) lines.push("", "--- spec ---", o.markdown);
+  lines.push("", `--- ${o.reason === "reset" ? "next" : "current"} ---`, o.current);
   return lines.join("\n");
 }
 

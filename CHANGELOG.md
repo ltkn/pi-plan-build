@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0
+
+- **A full build session is reset between two tasks**: past `checkpointAt` (75%, always before Pi's compaction), right after a task passes, pb resets the session to a summary it writes itself: the build's rules, every task with its summary, the assumptions, the spec and the next task's full prompt. Nothing is half-done at that point, and there's no summarizing model call. Undo to the reset brings back exactly that point
+- **A compaction in the middle of a task keeps the task going**: pb's summary now also carries the build's rules (they were lost with the build's first message), the current task's full prompt and attempt, the files the task has changed so far (from git) and the files read before; a planning checkpoint in the previous summary is no longer repeated (the spec is there already)
+- **`/pb:undo` never reopens a pre-compaction conversation**: to a task from before a reset or compaction it restores the files, and the note says what was undone, instead of bringing the whole old context back
+- Removed: `pruneAbove` (the reset at task boundaries does its job better)
+
 ## 1.4.0
 
 - **Writing the spec is painless**: what the discussion left open, Pi settles itself and records as `Assumption: … because …` in Decisions (listed when the spec is shown, checked by the reviewer); it asks only about choices that change behaviour, an API or data that weren't settled, all at once. While `/pb:build` writes the spec, those questions count down too (`askTimeoutSec`), since you may have walked away
