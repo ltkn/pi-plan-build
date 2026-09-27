@@ -103,7 +103,9 @@ planning conversation stays lean. Pi decides when it's worth it; several can
 run at once. Each shows its question, its live steps (what it greps and reads)
 and then one summary line: time, files read, tokens, and the answer's first
 line; expand it for the whole answer and the files it read. Give it a cheaper model in the config
-(`"explorer": {"model": "provider/id"}`); its thinking level defaults to low.
+(`"explorer": {"model": "provider/id"}`); its thinking level defaults to max
+(clamped to what the model supports), `"explorer": {"thinking": "medium"}`
+lowers it.
 
 **Investigating is free, changing the project isn't.** Pi can read, search, run
 the build and tests, curl an API, and write and run one-off scripts or programs

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.2
+
+- The explorer and the project map now think at max by default (Pi clamps it to the model); before, pb passed `--thinking low`, which overrode the level set on the model. `explorer.thinking` in the config lowers it
+
 ## 1.10.1
 
 - Nothing cut short where you need to read it: the explorer's question and its live steps, the task summaries in `/pb:undo`'s list, and error notices (explorer, reviewer, map) are shown in full; ctrl+o still expands a collapsed result

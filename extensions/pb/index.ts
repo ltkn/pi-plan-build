@@ -382,7 +382,7 @@ export default function pb(pi: ExtensionAPI) {
         prompt: "Answer the question in the attached file.",
         tools: ["read", "grep", "find", "ls", "bash"],
         model: cfg.explorer.model ?? sessionModel(ctx),
-        thinking: cfg.explorer.thinking ?? "low",
+        thinking: cfg.explorer.thinking ?? "max",
         signal,
         onActivity: (line, call) => {
           steps.push(line);
@@ -1601,7 +1601,7 @@ export default function pb(pi: ExtensionAPI) {
         tools: ["read", "grep", "find", "ls", "bash", "report_map"],
         extensions: [REVIEW_TOOLS],
         model: cfg.explorer.model ?? sessionModel(ctx),
-        thinking: cfg.explorer.thinking ?? "low",
+        thinking: cfg.explorer.thinking ?? "max",
         signal: abort.signal,
         onActivity: (a) => render(phase, a),
       });

@@ -23,7 +23,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.10.1   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.10.2   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -177,7 +177,7 @@ the existing ones still run.
 | `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, the planning and reviewer guards |
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
-| `explorer` | `{}` | `{"model": "provider/id", "thinking": "low"}` for `pb_explore`; unset model = your session's, thinking defaults to low |
+| `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
 | `reviewer` | `{"verify": true, "security": "always"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "always"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the abuse pass joins (`always`; `auto`: when the change looks sensitive; `off`) |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |

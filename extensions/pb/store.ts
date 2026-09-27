@@ -39,7 +39,7 @@ export interface Config {
   freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
   baseline: boolean;
-  /** Model and thinking level of pb_explore; unset model = your session's, unset thinking = low. */
+  /** Model and thinking level of pb_explore and the project map; unset model = your session's, unset thinking = max (Pi clamps it to the model). */
   explorer: { model?: string; thinking?: string };
   /** Build on this model ("provider/id") instead of the planning session's; unset = the same model. */
   buildModel?: string;
