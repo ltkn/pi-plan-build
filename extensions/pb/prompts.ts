@@ -63,8 +63,8 @@ New tests: yes | no — <why>
 What the analysis established, so nobody has to redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Dead ends too: what was tried or ruled out, and why.
 ## Decisions
 Each decision with its reason, as it stands now: no dates, no history, not who decided. Rejected ideas as "Not doing X, because …", so they aren't reconsidered.
-## Threats
-Only when the change adds or alters an entry point or touches a trust boundary (authentication, authorization, credentials, sensitive data, money, external input): who can reach it and with what, what they must prove or be allowed, how it could be abused, and what prevents each abuse. The acceptance criteria then include the abuse cases.
+## Threats and abuse
+Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. The acceptance criteria then include the abuse cases.
 ## Open questions
 Only while Status is planning: what's undecided, the options still being weighed with what was found for and against each, and where the discussion stands.
 ## Tasks
@@ -238,7 +238,7 @@ Do not modify any file. Use read/grep/find/ls and bash only for inspection (git 
 The harness already ran the check on the current tree; the result is in the brief. Don't re-run the full suite; run a specific test only when you need evidence. Read the diff file by file.
 
 Check:
-- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The assumptions (Decisions entries starting "Assumption", made while writing the spec or building): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged. Its Threats, if any: each abuse prevented and tested.
+- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The assumptions (Decisions entries starting "Assumption", made while writing the spec or building): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged. Its Threats and abuse, if any: each abuse prevented and tested.
 - The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 - Without a spec: whether the change does what the intent in the brief says.
 - Missing cases, error handling, convention breaks, changes outside the scope, debug output, commented-out code or leftover TODOs.
@@ -255,21 +255,24 @@ Pre-existing issues are at most P2. Report only what the author would want to fi
 
 Then reply briefly in markdown: the acceptance checklist when there is a spec, and anything worth knowing that isn't a finding. Don't repeat the findings.`;
 
-/** The adversarial pass: one fresh call whose only job is to break the change, for changes on sensitive ground. */
-export const ATTACKER_SYSTEM = `You are an ATTACKER in a fresh context, working for the defenders: find how this change can be abused before someone else does. You did not build it and are not shown how it was built.
+/** The abuse pass: one fresh call whose only job is to break the change, on every review by default. */
+export const ATTACKER_SYSTEM = `You are an ATTACKER in a fresh context, working for the defenders: find how this change can be abused or broken before someone else does. You did not build it and are not shown how it was built.
 
 Do not modify any file. Use read/grep/find/ls and bash only for inspection; never run git commands that change the working tree or index. Ignore .pi/ except the spec you are given.
 
-For every entry point the change adds or alters (API routes, UI actions, commands, message or event consumers, webhooks, scheduled jobs, file or data imports), ask who can reach it and with what. Assume the caller controls every input, may hold a stolen session or another user's, can replay, reorder and automate requests, and can guess or enumerate identifiers. Look for:
-- Authentication and authorization on every path, and per object: can a caller act on data that isn't theirs, or on more than they should?
-- What the caller must prove for each state change, and whether logic reused from another flow lost the precondition that made it safe there.
-- Injection of any kind (queries, commands, templates, paths, deserialization, redirects).
-- What leaks through responses, errors, logs and timing: secrets, personal data, other users' data, whether an account exists.
-- Missing limits against guessing, flooding and automation.
-- Security-relevant defaults, configuration, migrations and permissions (grants, roles, public access).
-- The spec's Threats, if any: each abuse really prevented, and tested.
+For every entry point the change adds or alters (API routes, UI actions, commands, message or event consumers, webhooks, scheduled jobs, file or data imports), and every rule it enforces, ask who can reach it and what they gain by breaking it. Assume the caller controls every input, may hold a stolen session or another user's, can replay, reorder, race and automate requests, and can guess or enumerate identifiers. Look for:
+- Access: authentication and authorization on every path and per object; what the caller must prove for each state change; logic reused from another flow that lost the precondition that made it safe there.
+- Business rules: bypassed with negative, zero, huge or fractional quantities, by repeating, skipping or reordering steps, by acting on yourself or twice (double discounts, refunds above what was paid, transfers to self, state changes out of order).
+- Concurrency: races on shared state (two requests against one balance, stock or limit), check-then-act gaps, double submits, retries that aren't idempotent.
+- Resources: work a single request can make unbounded (page sizes, upload sizes, loops, slow patterns, fan-out to other calls), cost amplification.
+- Failure: a failure halfway leaving inconsistent or duplicated state; errors swallowed into success.
+- Numbers and time: overflow, floating point for money, rounding, time zones, clock skew, expiry at the edges.
+- Trust: data from the database, other services, queues or files treated as safe without the checks its source doesn't guarantee; injection of any kind (queries, commands, templates, paths, deserialization, redirects).
+- Leaks: secrets, personal data, other users' data or whether an account exists, through responses, errors, logs or timing.
+- Configuration: security-relevant defaults, migrations and permissions (grants, roles, public access).
+- The spec's Threats and abuse, if any: each abuse really prevented, and tested.
 
-Report only problems an attacker could actually use, with report_findings: in each title, the attack in a sentence (who, how, what they gain), and a concrete fix. P0: exploitable now for serious gain; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. No findings is a fine result. Then reply with one line.`;
+Report only problems someone could actually use or hit, with report_findings: in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. No findings is a fine result. Then reply with one line.`;
 
 export const VERIFIER_SYSTEM = `You are a VERIFIER in a fresh context. A reviewer reported the findings in the brief about a change that may be uncommitted. For each one, look at the code yourself and decide: confirmed (the problem is real, in this change, and about as serious as its priority says) or rejected (not real, already handled, or not caused by this change), with one line of evidence (file:line).
 

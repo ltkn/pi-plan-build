@@ -1496,8 +1496,8 @@ export default function pb(pi: ExtensionAPI) {
           previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since };
         }
 
-        // An attacker pass on sensitive ground (or always / never, per reviewer.security).
-        const mode = cfg.reviewer.security ?? "auto";
+        // The abuse pass: on every review by default (reviewer.security "always"), or on sensitive ground ("auto").
+        const mode = cfg.reviewer.security ?? "always";
         const diffText = mode === "auto" ? gitDiff(ctx.cwd, base) : "";
         const security =
           mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changed, diff: diffText + untrackedText(ctx.cwd, changed) });
@@ -1544,7 +1544,7 @@ export default function pb(pi: ExtensionAPI) {
         const tally = findings.length || outcome.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
         post(
           [
-            `**Review of ${label}**${previous ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${outcome.security ? ` · with an attacker pass (${security})` : ""}`,
+            `**Review of ${label}**${previous ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${outcome.security ? ` · with an abuse pass${security === "always" ? "" : ` (${security})`}` : ""}`,
             "",
             outcome.prose,
             ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),

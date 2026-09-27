@@ -23,7 +23,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.7.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.8.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -90,10 +90,13 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 - **Undo means undo.** `/pb:undo` restores the files and rewinds the
   conversation to before the task, so a discarded attempt doesn't anchor the
   next one, and everything before that point is still cached.
-- **Security by default.** The standards assume every entry point will be
-  abused; a spec states the Threats of a change that touches a trust boundary,
-  with abuse cases in its acceptance; and on sensitive ground an attacker pass
-  joins the review with one job: break the change.
+- **Security and robustness by default.** The standards assume every entry
+  point will be abused and every boundary gets hostile or broken input, with
+  invariants inside rather than checks everywhere; a spec states the threats
+  and abuse cases of a change that touches a trust boundary or rules someone
+  gains from breaking; and every review includes an abuse pass with one job:
+  break the change (access, business rules, races, resources, failure, numbers
+  and time, trust, leaks, configuration).
 - **Fresh eyes where they pay.** The reviewer never saw the build's reasoning,
   and judges the spec too: a faithful build of a wrong plan is still wrong. It
   reports findings through a tool; a second fresh call double-checks the
@@ -175,7 +178,7 @@ the existing ones still run.
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, the planning and reviewer guards |
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "low"}` for `pb_explore`; unset model = your session's, thinking defaults to low |
-| `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when an attacker pass joins (`auto`: on sensitive ground; `always`; `off`) |
+| `reviewer` | `{"verify": true, "security": "always"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "always"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the abuse pass joins (`always`; `auto`: when the change looks sensitive; `off`) |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build is reset to its state at the next task boundary; 0 = never |

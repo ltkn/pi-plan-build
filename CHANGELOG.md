@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.0
+
+- **The abuse pass, on every review.** The attacker pass is broadened beyond access control to abuse of the code in general: business rules bypassed by quantity, repetition, reordering or acting on yourself; races, double submits and non-idempotent retries; unbounded work per request; inconsistent state after a failure halfway; overflow, floats for money, rounding, time zones and expiry; data from databases, services, queues or files taken as safe; leaks; configuration and permissions. Fixes go at the boundary or as invariants, not checks scattered through the code. Its findings are marked "Abuse:". `reviewer.security` now defaults to `always`; `auto` also recognises entry points and money, quantity and state changes
+- **Robustness in the default standards**: at a boundary, input is assumed hostile or broken and business rules can't be bypassed by quantity, repetition, reordering or racing; work per request is bounded; failures leave consistent state; inside the boundary, invariants rather than repeated checks. Existing AGENTS.md sections aren't changed: add the line yourself
+- **`## Threats and abuse`** in the spec (was Threats): also for changes with rules someone gains from breaking (money, quantities, limits, quotas, state), with abuse by quantity, repetition, reordering or racing
+
 ## 1.7.0
 
 - **An attacker pass joins the review on sensitive ground**: when the spec has Threats, or the changed files or the diff touch authentication, sessions, permissions, credentials, crypto, payments, uploads, redirects and the like, a second fresh call tries to break the change: every entry point it adds or alters, as someone who controls the input, holds a stolen or another user's session, replays or automates requests and guesses ids; injection, leaks, missing limits, permissions in migrations; logic reused from another flow that lost the precondition that made it safe there. Its findings ("Security: …") get the same second look as the rest. `reviewer.security`: `auto` (default, deliberately broad), `always`, `off`

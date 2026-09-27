@@ -31,7 +31,8 @@ export interface Config {
   checkpoints: boolean;
   /**
    * The fresh reviewer: model and thinking level (unset = your session's), whether a second call double-checks
-   * P0/P1 findings, and when an adversarial pass tries to break the change ("auto": on sensitive ground).
+   * P0/P1 findings, and when an abuse pass tries to break the change ("always"; "auto": on ground that looks
+   * sensitive; "off").
    */
   reviewer: { model?: string; thinking?: string; verify?: boolean; security?: "auto" | "always" | "off" };
   /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
@@ -59,7 +60,7 @@ export const DEFAULT_CONFIG: Config = {
   askTimeoutSec: 300,
   testOutputCap: 4000,
   checkpoints: true,
-  reviewer: { verify: true, security: "auto" },
+  reviewer: { verify: true, security: "always" },
   freshAbove: 50,
   baseline: true,
   explorer: {},

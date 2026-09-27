@@ -1000,7 +1000,7 @@ test("stats: tasks, first try, checks, pauses, review, and the build session's t
   assert.match(card, /Review +pass/);
   assert.match(card, /prompt [\d.]+k \(90% from cache\)/);
   assert.match(card, /Context +peak 10\.0k \(10% of 100\.0k\)/);
-  assert.match(card, /Reviewer +prompt 6\.0k · output 800 · \$0\.04/); // the mock reviewer answers in two messages
+  assert.match(card, /Reviewer +prompt 12\.0k · output 1\.6k · \$0\.08/); // reviewer and abuse pass, two mock messages each
 
   await t.run("stats", "all");
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2 +50%/);
@@ -1619,22 +1619,28 @@ test("map: skipping writes nothing; unattended archives skip it; /pb:plan warns 
 test("security: the standards assume abuse; a spec states Threats for entry points and trust boundaries", async () => {
   const { DEFAULT_STANDARDS } = await import("../extensions/pb/standards.ts");
   assert.match(DEFAULT_STANDARDS, /- Security: assume every entry point \(API, UI action, command, message, file, webhook\) will be abused[\s\S]*logic reused from another flow keeps that flow's preconditions/);
+  assert.match(DEFAULT_STANDARDS, /- Robustness: at a boundary, assume input is hostile or broken[\s\S]*can't be bypassed by quantity, repetition, reordering or racing[\s\S]*Inside the boundary, rely on invariants \(types, constraints, transactions\), not repeated checks\./);
   const { specPrompt, REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
-  assert.match(specPrompt("", []), /## Threats\nOnly when the change adds or alters an entry point or touches a trust boundary[\s\S]*the acceptance criteria then include the abuse cases/i);
-  assert.match(REVIEWER_SYSTEM, /Its Threats, if any: each abuse prevented and tested/);
+  assert.match(specPrompt("", []), /## Threats and abuse\nOnly when the change adds or alters an entry point, touches a trust boundary[\s\S]*or has rules someone gains from breaking[\s\S]*by quantity, repetition, reordering or racing[\s\S]*the acceptance criteria then include the abuse cases/i);
+  assert.match(REVIEWER_SYSTEM, /Its Threats and abuse, if any: each abuse prevented and tested/);
+  const { ATTACKER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  for (const area of ["Access:", "Business rules:", "Concurrency:", "Resources:", "Failure:", "Numbers and time:", "Trust:", "Leaks:", "Configuration:"]) assert.ok(ATTACKER_SYSTEM.includes(area), area);
+  assert.match(ATTACKER_SYSTEM, /at the boundary or as an invariant \(a type, a constraint, a transaction, a lock\), not checks scattered through the code/);
 });
 
 test("security: sensitive ground is recognised from the spec's Threats, file names or the diff; deliberately broad", async () => {
   const { sensitiveGround } = await import("../extensions/pb/review.ts");
-  assert.equal(sensitiveGround({ spec: "# X\n## Threats\n- a", files: [], diff: "" }), "the spec has Threats");
+  assert.equal(sensitiveGround({ spec: "# X\n## Threats and abuse\n- a", files: [], diff: "" }), "the spec has Threats and abuse");
+  assert.equal(sensitiveGround({ files: ["src/cart.ts"], diff: "+  const total = price * quantity;" }), 'the diff mentions "price"'); // business rules, not only auth
   assert.equal(sensitiveGround({ files: ["src/auth/LoginController.java"], diff: "" }), "touches src/auth/LoginController.java");
   assert.equal(sensitiveGround({ files: ["src/a.ts"], diff: "+++ b/src/a.ts\n+  if (user.role === 'admin') {" }), 'the diff mentions "role"');
   assert.equal(sensitiveGround({ files: ["src/a.ts"], diff: "-  const token = 1;\n+  const total = 2;" }), undefined); // removed lines don't count
   assert.equal(sensitiveGround({ files: ["README.md"], diff: "+ fix a typo" }), undefined);
 });
 
-test("security: on sensitive ground an attacker pass joins the review; its findings are double-checked like the rest", async () => {
+test("security: the abuse pass joins every review by default; its findings are double-checked like the rest", async () => {
   const t = setup({ verify: "true" });
+  process.env.MOCK_ATTACK = "finding";
   await written(t, SPEC({ tasks: "### T1: account\nCreate src/account.ts.\n- Acceptance: it exists" }));
   t.agent.script = async (text, tool) => {
     if (text.includes("Task T1")) {
@@ -1646,35 +1652,36 @@ test("security: on sensitive ground an attacker pass joins the review; its findi
   await t.run("build");
   await t.run("review");
   const post = t.posts.at(-1)!;
-  assert.match(post, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 1 · with an attacker pass \(touches src\/account\.ts\)|with an attacker pass \(the diff mentions "(password|session)"\)/);
-  assert.match(post, /\[P1\] src\/account\.ts:7 — Security: a stolen session alone can set a password the owner never set\n   Fix: require proof for a first password/);
+  assert.match(post, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 1 · with an abuse pass\n/);
+  assert.match(post, /\[P1\] src\/account\.ts:7 — Abuse: a stolen session alone can set a password the owner never set\n   Fix: require proof for a first password/);
   assert.ok(t.events("order-cancellation").some((e) => e.type === "review" && e.security === true));
 
   process.env.MOCK_VERIFY = "reject"; // the verifier can dismiss an attacker's finding too
   await t.run("review", "--full");
   delete process.env.MOCK_VERIFY;
-  assert.match(t.posts.at(-1)!, /Dismissed after a second look:[\s\S]*Security: a stolen session alone/);
+  delete process.env.MOCK_ATTACK;
+  assert.match(t.posts.at(-1)!, /Dismissed after a second look:[\s\S]*Abuse: a stolen session alone/);
 });
 
-test("security: no attacker pass on ordinary ground, or with reviewer.security off; always runs it everywhere", async () => {
-  const t = setup({ verify: "true" });
+test("security: auto runs the abuse pass only on sensitive ground; off never; the default runs it everywhere", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "auto" } });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
   await t.run("review");
-  assert.doesNotMatch(t.posts.at(-1)!, /attacker pass/);
+  assert.doesNotMatch(t.posts.at(-1)!, /abuse pass/);
 
-  const u = setup({ verify: "true", reviewer: { security: "always" } });
+  const u = setup({ verify: "true" }); // default: always
   await written(u);
   u.agent.script = diligent;
   await u.run("build");
   await u.run("review");
-  assert.match(u.posts.at(-1)!, /with an attacker pass \(always\)/);
+  assert.match(u.posts.at(-1)!, /with an abuse pass/);
 
   const v = setup({ verify: "true", reviewer: { security: "off" } });
   await written(v, SPEC().replace("## Context", "## Threats\n- a stolen session\n## Context"));
   v.agent.script = diligent;
   await v.run("build");
   await v.run("review");
-  assert.doesNotMatch(v.posts.at(-1)!, /attacker pass/);
+  assert.doesNotMatch(v.posts.at(-1)!, /abuse pass/);
 });

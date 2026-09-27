@@ -11,7 +11,7 @@ const say = (content) => console.log(JSON.stringify({ type: "message_end", messa
 const call = (name, args) => ({ type: "toolCall", id: `call-${name}`, name, arguments: args });
 
 if (sys.includes("ATTACKER")) {
-  const findings = process.env.MOCK_ATTACK === "none" ? [] : [{ priority: "P1", file: "src/account.ts", line: 7, title: "a stolen session alone can set a password the owner never set", fix: "require proof for a first password" }];
+  const findings = process.env.MOCK_ATTACK !== "finding" ? [] : [{ priority: "P1", file: "src/account.ts", line: 7, title: "a stolen session alone can set a password the owner never set", fix: "require proof for a first password" }];
   say([call("report_findings", { findings })]);
   say([{ type: "text", text: "Done." }]);
 } else if (sys.includes("REVIEWER")) {

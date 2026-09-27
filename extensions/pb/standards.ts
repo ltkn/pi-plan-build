@@ -18,6 +18,7 @@ export const DEFAULT_STANDARDS = `${START}
 - Comments: explain the code as it is (why, intent, constraints), never its history: no dates, "decided", previous values or task ids. Decisions stay in the spec. Match the surrounding comment density.
 - Tests: test behaviour, in the project's existing style; never weaken an existing test.
 - Security: assume every entry point (API, UI action, command, message, file, webhook) will be abused by someone who controls its input, holds a stolen or another user's session, and replays or automates requests. Each operation checks who the caller is, what they may act on, and what they have proven; logic reused from another flow keeps that flow's preconditions. Security-relevant changes get tests for their abuse cases.
+- Robustness: at a boundary, assume input is hostile or broken (sizes, ranges, encodings, duplicates, order, concurrent calls); business rules can't be bypassed by quantity, repetition, reordering or racing; every request's work is bounded; a failure halfway leaves consistent state. Inside the boundary, rely on invariants (types, constraints, transactions), not repeated checks.
 ${END}
 `;
 

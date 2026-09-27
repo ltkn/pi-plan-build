@@ -66,6 +66,12 @@ default covers:
   operation checks who the caller is, what they may act on and what they have
   proven; logic reused from another flow keeps that flow's preconditions;
   security-relevant changes get abuse-case tests.
+- **Robustness**: at a boundary, input is assumed hostile or broken (sizes,
+  ranges, encodings, duplicates, order, concurrent calls); business rules can't
+  be bypassed by quantity, repetition, reordering or racing; every request's
+  work is bounded; a failure halfway leaves consistent state. Inside the
+  boundary: invariants (types, constraints, transactions), not repeated checks,
+  so the code stays clean where the data is already trusted.
 
 Make them yours: "Java 25: records, sealed types, pattern matching, virtual
 threads and scoped values; no Lombok", "every public
@@ -208,11 +214,13 @@ shown in the session for later. Shown first, you choose: build here, build in a
 fresh session, **edit the spec first** (in an editor; it's saved only when it
 still parses, and the build then gets your version), or not now.
 
-- **Threats.** When a change adds or alters an entry point or touches a trust
-  boundary (authentication, authorization, credentials, sensitive data, money,
-  external input), the spec gets a `## Threats` section: who can reach it and
-  with what, what they must prove or be allowed, how it could be abused, and
-  what prevents each abuse. Its acceptance criteria include the abuse cases.
+- **Threats and abuse.** When a change adds or alters an entry point, touches
+  a trust boundary (authentication, authorization, credentials, sensitive data,
+  external input) or has rules someone gains from breaking (money, quantities,
+  limits, quotas, state), the spec gets a `## Threats and abuse` section: who can
+  reach it and with what, what they must prove or be allowed, how it could be
+  abused (including by quantity, repetition, reordering or racing), and what
+  prevents each abuse. Its acceptance criteria include the abuse cases.
   That's the cheapest place to catch a design hole, before any code exists.
 - **Refactoring first.** When outdated code stands in the way (your standards
   ask for current practice), the spec starts with tasks titled `(refactor) …`
@@ -364,17 +372,30 @@ The next `/pb:review` is a **follow-up**: it checks the previous findings and
 looks only at what changed since (`--full` reviews everything again). If
 nothing changed, it says so and costs nothing.
 
-**An attacker pass on sensitive ground.** When the change stands on
-security-sensitive ground (the spec has Threats, or the files or the diff touch
-authentication, sessions, permissions, credentials, crypto, payments, uploads,
-redirects and the like), a second fresh call joins the review with a single
-job: break it. It checks every entry point the change adds or alters as an
-attacker would (another user's data, a stolen session, replayed or automated
-requests, guessed ids, injection, leaks, missing limits, permissions in
-migrations), and whether logic reused from another flow lost the precondition
-that made it safe there. Its findings, marked "Security:", get the same second
-look as the rest. The detection is deliberately broad: a missed pass costs far
-more than an unneeded one. `"reviewer": {"security": "always" | "auto" | "off"}`.
+**The abuse pass, on every review.** A second fresh call joins the review with
+a single job: break the change. For every entry point it adds or alters and
+every rule it enforces, it looks for:
+
+- **access**: another user's data, a stolen session, what each state change
+  requires the caller to prove, reused logic that lost its preconditions
+- **business rules** bypassed by negative, zero or huge quantities, repeated,
+  skipped or reordered steps, acting on yourself or twice
+- **concurrency**: races on shared state, check-then-act gaps, double submits,
+  retries that aren't idempotent
+- **resources**: unbounded work per request, cost amplification
+- **failure**: inconsistent or duplicated state after a failure halfway
+- **numbers and time**: overflow, floats for money, rounding, time zones, expiry
+- **trust**: data from the database, services, queues or files taken as safe;
+  injection of any kind
+- **leaks** through responses, errors, logs or timing
+- **configuration**: defaults, migrations and permissions
+- the spec's Threats and abuse: each one prevented and tested
+
+It proposes fixes at the boundary or as invariants, not checks scattered through
+the code. Its findings, marked "Abuse:", get the same second look as the rest.
+`"reviewer": {"security": "always" | "auto" | "off"}`: `always` is the default;
+`auto` runs it only when the spec has Threats and abuse or the change touches
+auth, entry points, money, quantities or state (a broad guess); `off` never.
 
 **Without a spec**, `/pb:review [what the change is meant to do]` reviews the
 uncommitted change against that intent and your standards: useful for any

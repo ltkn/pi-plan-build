@@ -21,7 +21,7 @@ export interface ReviewOutcome {
   findings: Finding[];
   dismissed: { finding: Finding; evidence: string }[];
   verdict: Verdict;
-  /** the adversarial pass ran */
+  /** the abuse pass ran */
   security?: boolean;
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
   cost: number;
@@ -31,12 +31,13 @@ export interface ReviewOutcome {
 const blocking = (f: Finding) => f.priority === "P0" || f.priority === "P1";
 
 /**
- * Whether a change stands on security-sensitive ground, from its spec and its diff: a reason, or undefined.
- * Deliberately broad: a missed attacker pass costs far more than an unneeded one.
+ * Whether a change stands on ground worth an abuse pass (security, entry points, money, quantities, state),
+ * from its spec and its diff: a reason, or undefined. Used with reviewer.security "auto"; deliberately broad.
  */
 export function sensitiveGround(o: { spec?: string; files: string[]; diff: string }): string | undefined {
-  if (o.spec && /^##\s+Threats\s*$/im.test(o.spec)) return "the spec has Threats";
-  const words = /\b(auth\w*|login|logout|sign-?in|session|token|jwt|oauth|saml|sso|password|passwd|credential|secret|api[_-]?key|permission|role|acl|polic(y|ies)|grant|privilege|admin|csrf|cors|cookie|crypt\w*|hash\w*|signature|upload|download|payment|billing|invoice|refund|webhook|redirect|sanitiz\w*|escape|exec|eval|deserializ\w*|security)\b/i;
+  if (o.spec && /^##\s+Threats(\s+and\s+abuse)?\s*$/im.test(o.spec)) return "the spec has Threats and abuse";
+  const words =
+    /\b(auth\w*|login|logout|sign-?in|session|token|jwt|oauth|saml|sso|password|passwd|credential|secret|api[_-]?key|permission|role|acl|polic(y|ies)|grant|privilege|admin|csrf|cors|cookie|crypt\w*|hash\w*|signature|upload|download|payment|billing|invoice|refund|webhook|redirect|sanitiz\w*|escape|exec|eval|deserializ\w*|security|route|router|controller|handler|endpoint|resolver|consumer|listener|job|cron|schedul\w*|amount|price|balance|quantity|stock|discount|coupon|credit|limit|quota|status|retry|transfer|withdraw\w*)\b/i;
   const file = o.files.find((f) => words.test(f.replace(/[/._-]/g, " ")));
   if (file) return `touches ${file}`;
   const line = o.diff.split("\n").find((l) => /^\+(?!\+\+)/.test(l) && words.test(l));
@@ -103,9 +104,9 @@ export async function runReview(o: {
   }
   out.findings = findings;
 
-  // Sensitive ground: a second fresh call whose only job is to break the change.
+  // The abuse pass: a second fresh call whose only job is to break the change.
   if (o.security) {
-    o.onPhase?.(`attacker pass (${o.security})`);
+    o.onPhase?.(`abuse pass (${o.security})`);
     const a = await runFresh({
       cwd: o.cwd,
       role: "attacker",
@@ -117,11 +118,11 @@ export async function runReview(o: {
       model: o.model,
       thinking: o.thinking,
       signal: o.signal,
-      onActivity: (x) => o.onPhase?.("attacker pass", x),
+      onActivity: (x) => o.onPhase?.("abuse pass", x),
     });
     add(a);
     if (a.aborted) return { ...out, aborted: true };
-    out.findings = [...out.findings, ...(reported(a) ?? []).map((f) => ({ ...f, title: `Security: ${f.title}` }))];
+    out.findings = [...out.findings, ...(reported(a) ?? []).map((f) => ({ ...f, title: `Abuse: ${f.title}` }))];
     out.security = true;
   }
 
