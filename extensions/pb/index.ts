@@ -308,6 +308,10 @@ export default function pb(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const { store, name, progress: p } = specOfSession(ctx);
       const building = !!name && !!p && p.phase === "building";
+      const session = ctx.sessionManager.getSessionFile() ?? "";
+      if (checkpointing.has(session)) return reply("Not now: this is a checkpoint. Write the question under Open questions in the spec instead.");
+      // Writing the spec for a build is unattended too: the human may have walked away after /pb:build.
+      const unattended = building || specWriting.has(session) || store.pendingBuild(session);
       if (!ctx.hasUI) {
         if (building) {
           pauseBuild(ctx, store, p!, `${p!.current} question: ${params.question}`, "build.paused", "question");
@@ -316,7 +320,7 @@ export default function pb(pi: ExtensionAPI) {
         return reply("No one can answer right now: take the sensible reading, say which one you took, and carry on.");
       }
       // During a build the human may be away: after askTimeoutSec it goes on with the recommendation.
-      const timeoutMs = building ? store.config().askTimeoutSec * 1000 : 0;
+      const timeoutMs = unattended ? store.config().askTimeoutSec * 1000 : 0;
       const opts = timeoutMs > 0 ? { timeout: timeoutMs } : undefined;
       const asked = Date.now();
       let answer: string | undefined;
@@ -338,7 +342,8 @@ export default function pb(pi: ExtensionAPI) {
           store.event(name!, { type: "ask", task: p!.current, timedOut: true });
           return reply(`No answer within ${minutes} min: go on with your recommendation (${params.recommended}); it's recorded as an assumption for the review.`);
         }
-        return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: take the sensible reading${building ? ", record it with pb_record_decision (assumption: true)" : ""} and carry on.`);
+        const record = building ? ", record it with pb_record_decision (assumption: true)" : unattended ? `, write it into the spec's Decisions as "Assumption: … because …"` : "";
+        return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: take the sensible reading${timedOut && params.recommended ? ` (your recommendation: ${params.recommended})` : ""}${record} and carry on.`);
       }
       if (building) {
         const md = store.readSpec(name!);
@@ -1177,9 +1182,16 @@ export default function pb(pi: ExtensionAPI) {
         ...loaded.spec.tasks.map((t) => `- ${t.id}: ${t.title}${t.test ? ` · \`${t.test}\`` : ""}`),
         "",
         `Verification: ${loaded.spec.gate}${loaded.spec.newTests ? "" : " · no new tests"}`,
+        ...assumptionsOf(loaded.md).map((a, i) => `${i ? "" : "\nSettled without asking you (the review checks them):\n"}- ${a}`),
       ].join("\n"),
     );
     pi.appendEntry("pb-spec", { name, markdown: loaded.md });
+  };
+
+  /** The spec's recorded assumptions (Decisions lines starting "Assumption"), as written while writing it. */
+  const assumptionsOf = (md: string) => {
+    const decisions = md.split(/^##\s+Decisions\s*$/im)[1]?.split(/^##\s+(?!#)/m)[0] ?? "";
+    return [...decisions.matchAll(/^\s*-\s*(Assumption(?! \(build)[^\n]*)/gm)].map((m) => m[1].trim());
   };
 
   const baselineQuestion = (b: { summary: string; at: string }) =>
@@ -1203,6 +1215,7 @@ export default function pb(pi: ExtensionAPI) {
    * itself: from a command, a fresh session can be opened too. Nothing waits on you after this point
    * except pb_ask questions, which go on with the recommendation after askTimeoutSec.
    */
+  const specWriting = new Set<string>();
   const specThenBuild = async (ctx: ExtensionCommandContext, store: Store, marker: string, prompt: string) => {
     const session = ctx.sessionManager.getSessionFile();
     const { cfg, testCmd } = commands(ctx.cwd, store);
@@ -1226,10 +1239,15 @@ export default function pb(pi: ExtensionAPI) {
     }
 
     const since = now();
+    if (session) specWriting.add(session);
     instruct(marker, `${prompt}\n\nAfter writing it, stop: the build starts by itself.`);
     // Wait for the spec here, in the command: the run starts right after this handler hands it over.
-    for (let i = 0; i < 40 && ctx.isIdle(); i++) await new Promise((r) => setTimeout(r, 50));
-    await ctx.waitForIdle();
+    try {
+      for (let i = 0; i < 40 && ctx.isIdle(); i++) await new Promise((r) => setTimeout(r, 50));
+      await ctx.waitForIdle();
+    } finally {
+      if (session) specWriting.delete(session);
+    }
     const ready = readySpecs(store, session, since);
     if (!ready.length) {
       // A question in chat, or the spec isn't ready yet: pb offers the build once it is.

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.0
+
+- **Writing the spec is painless**: what the discussion left open, Pi settles itself and records as `Assumption: … because …` in Decisions (listed when the spec is shown, checked by the reviewer); it asks only about choices that change behaviour, an API or data that weren't settled, all at once. While `/pb:build` writes the spec, those questions count down too (`askTimeoutSec`), since you may have walked away
+- **A checkpoint asks nothing**: what's undecided goes under Open questions; a `pb_ask` during a checkpoint is turned away
+
 ## 1.3.0
 
 - **`/pb:build` asks first, then builds by itself.** Everything that needs you is asked right away, while you're at the keyboard: files changed while planning, a red baseline, and how to go on once the spec is written (build here, build in a fresh session, or show me the spec first). Then Pi writes the spec and the build starts with no further dialog, so you can walk away. The command waits for the spec itself, so a fresh session now works too (before, it could only be prefilled for you to confirm)

@@ -1480,3 +1480,46 @@ test("build: Esc on the first dialog cancels; a spec that isn't written yet is o
   assert.match(t.selectTitles.at(-1)!, /Build order-cancellation now\? 2 tasks/);
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
+
+test("spec writing settles small things as assumptions; the checkpoint asks nothing; questions while writing count down", async () => {
+  const { specPrompt, checkpointPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
+  assert.match(specPrompt("", []), /Settle what the discussion left open yourself[\s\S]*"Assumption: … because …"[\s\S]*only about a choice that changes behaviour, an API or data/);
+  assert.match(finishSpecPrompt("x"), /settle its open questions yourself where you can/);
+  assert.match(checkpointPrompt(80, []), /Don't ask me anything now: what's undecided goes into Open questions/);
+
+  const t = setup({ verify: "true", askTimeoutSec: 0.001 });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  let answer: Result | undefined;
+  const withAssumption = SPEC().replace("- Not doing soft delete, because audit lives elsewhere.", "- Not doing soft delete, because audit lives elsewhere.\n- Assumption: cancelling twice is a no-op, because the API is idempotent elsewhere.");
+  t.agent.script = async (text, tool) => {
+    if (/pb_write_spec tool/.test(text)) {
+      answer = await tool("pb_ask", { question: "Which HTTP verb?", options: ["POST", "DELETE"], recommended: "POST" });
+      return void (await tool("pb_write_spec", { name: "order-cancellation", content: withAssumption }));
+    }
+    return diligent(text, tool);
+  };
+  t.selects.push("Build here as soon as the spec is written (keeps our discussion; the cache stays warm)", "<timeout>");
+  await t.run("build");
+  assert.equal(t.dialogTimeouts.at(-1), 1); // the question counted down, though no build was running yet
+  assert.match(answer!.content![0].text, /No answer in time: take the sensible reading \(your recommendation: POST\), write it into the spec's Decisions as "Assumption/);
+  assert.match(t.posts.find((p) => p.startsWith("**Spec written"))!, /Settled without asking you \(the review checks them\):\n- Assumption: cancelling twice is a no-op/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+
+  // During a checkpoint, a question is turned away.
+  const u = setup({ verify: "true" });
+  process.chdir(u.repo);
+  u.selects.push("No thanks");
+  await u.run("plan", "cancel orders");
+  let refused: Result | undefined;
+  u.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:checkpoint]")) {
+      refused = await tool("pb_ask", { question: "Mail or event?" });
+      await tool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+    }
+  };
+  await u.run("checkpoint");
+  assert.match(refused!.content![0].text, /Not now: this is a checkpoint\. Write the question under Open questions/);
+  assert.equal(u.resets.length, 1);
+});

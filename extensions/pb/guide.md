@@ -188,6 +188,14 @@ Before writing, Pi checks the spec against itself and the code (examples
 against rules, "unchanged" against "extended", every path and name), resolves
 what it finds, and tells you.
 
+**Writing it is painless.** The questions belong to planning. What the
+discussion left open, Pi settles itself and records in Decisions as
+`Assumption: … because …`. They're listed when the spec is shown, and the
+reviewer checks them. It asks you only about a choice that changes behaviour,
+an API or data that you didn't settle, all at once, and when `/pb:build` is
+writing the spec those questions count down too. A checkpoint asks nothing at
+all: what's undecided goes under Open questions.
+
 When `/pb:build` writes it, it asks first: **build here**, **build in a fresh
 session**, or **show me the spec first**. Built straight away, the spec is still
 shown in the session for later. Shown first, you choose: build here, build in a

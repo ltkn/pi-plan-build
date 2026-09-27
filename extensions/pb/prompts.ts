@@ -86,7 +86,8 @@ ${SPEC_FORMAT}
 - Refactoring that the standards call for (outdated code in the way) comes first, as tasks titled "(refactor) …" that keep behaviour; a large one is a spec of its own that this one depends on.
 - Before writing, check the spec for contradictions and against the code; fix them in the spec and tell me briefly what you changed.
 - The approach follows the engineering standards (AGENTS.md).
-- Status: ready, with no open questions left (ask me first if some are). Verification defaults to tests; "New tests: no" only if I said so.
+- Status: ready. Settle what the discussion left open yourself: take the sensible reading and write it into Decisions as "Assumption: … because …", so I see it and the reviewer checks it. Ask me (pb_ask, all independent questions at once) only about a choice that changes behaviour, an API or data and that we didn't settle.
+- Verification defaults to tests; "New tests: no" only if I said so.
 - Name: short kebab-case.${existing.length ? ` Existing: ${existing.join(", ")} (reusing a name rewrites it; read its spec.md first, it may differ from what you remember).` : ""}${current ? `\n\n--- current ${P}/specs/${current.name}/spec.md (revise this) ---\n\n${current.markdown}` : ""}
 
 Then tell me where it is. End your reply with this block, verbatim:
@@ -98,7 +99,7 @@ ${tip("spec.next")}`;
 export function checkpointPrompt(percent: number, specs: string[]): string {
   return `[pb:checkpoint] This planning conversation is at ${percent}% of its context. Write the plan as it stands to the spec now, while you still have the whole discussion: afterwards the conversation continues from the spec alone.
 
-${specs.length ? `Update ${specs.map((n) => `${P}/specs/${n}/spec.md`).join(", ")} with pb_update_spec, only the sections that changed (or pb_write_spec if most of it did).` : "Write it with pb_write_spec, Status: planning (Tasks and Verification can wait)."} Even if little is settled, the investigation isn't lost: record in Findings what was established and the dead ends (what was tried or ruled out, and why); in Decisions what is decided, with rejected ideas; in Open questions each option still being weighed, with what was found for and against it, and where the discussion stands. Leave out nothing the next step needs, and paste no code. Then reply with one line, nothing else.`;
+${specs.length ? `Update ${specs.map((n) => `${P}/specs/${n}/spec.md`).join(", ")} with pb_update_spec, only the sections that changed (or pb_write_spec if most of it did).` : "Write it with pb_write_spec, Status: planning (Tasks and Verification can wait)."} Even if little is settled, the investigation isn't lost: record in Findings what was established and the dead ends (what was tried or ruled out, and why); in Decisions what is decided, with rejected ideas; in Open questions each option still being weighed, with what was found for and against it, and where the discussion stands. Leave out nothing the next step needs, and paste no code. Don't ask me anything now: what's undecided goes into Open questions. Then reply with one line, nothing else.`;
 }
 
 /** What a planning session is reset to: its spec(s), the plan as it stands, and the last exchange word for word. */
@@ -130,7 +131,7 @@ ${tip("plan.next")}`;
 
 /** A spec still marked planning: finish it before building. */
 export function finishSpecPrompt(name: string): string {
-  return `[pb:spec ${name}] Finish the spec ${P}/specs/${name}/spec.md for building: settle its open questions with me first if any need me, add the Tasks and the Verification line, remove Open questions, and set Status: ready (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
+  return `[pb:spec ${name}] Finish the spec ${P}/specs/${name}/spec.md for building: settle its open questions yourself where you can (write each as "Assumption: … because …" in Decisions; ask me with pb_ask, all at once, only about a choice that changes behaviour, an API or data), add the Tasks and the Verification line, remove Open questions, and set Status: ready (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
 
 ${SPEC_FORMAT}`;
 }
@@ -210,7 +211,7 @@ Do not modify any file. Use read/grep/find/ls and bash only for inspection (git 
 The harness already ran the check on the current tree; the result is in the brief. Don't re-run the full suite; run a specific test only when you need evidence. Read the diff file by file.
 
 Check:
-- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The builder's assumptions (Decisions entries starting "Assumption (build"): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged.
+- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The assumptions (Decisions entries starting "Assumption", made while writing the spec or building): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged.
 - The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 - Without a spec: whether the change does what the intent in the brief says.
 - Missing cases, error handling, convention breaks, changes outside the scope, debug output, commented-out code or leftover TODOs.
