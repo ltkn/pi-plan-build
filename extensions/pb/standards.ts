@@ -17,6 +17,7 @@ export const DEFAULT_STANDARDS = `${START}
 - Dependencies: use current, non-deprecated APIs; never add a deprecated API or an outdated version. Upgrading dependencies is a change of its own, not part of a feature.
 - Comments: explain the code as it is (why, intent, constraints), never its history: no dates, "decided", previous values or task ids. Decisions stay in the spec. Match the surrounding comment density.
 - Tests: test behaviour, in the project's existing style; never weaken an existing test.
+- Security: assume every entry point (API, UI action, command, message, file, webhook) will be abused by someone who controls its input, holds a stolen or another user's session, and replays or automates requests. Each operation checks who the caller is, what they may act on, and what they have proven; logic reused from another flow keeps that flow's preconditions. Security-relevant changes get tests for their abuse cases.
 ${END}
 `;
 

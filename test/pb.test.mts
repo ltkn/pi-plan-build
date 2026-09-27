@@ -1613,3 +1613,68 @@ test("map: skipping writes nothing; unattended archives skip it; /pb:plan warns 
   await t.run("plan", "next feature");
   assert.ok(t.notes.some((n) => /The project map in AGENTS\.md names 1 path\(s\) that no longer exist \(src\/billing\/Invoice\.java\): \/pb:map refreshes it/.test(n)));
 });
+
+/* ------------------------------------ security ------------------------------------ */
+
+test("security: the standards assume abuse; a spec states Threats for entry points and trust boundaries", async () => {
+  const { DEFAULT_STANDARDS } = await import("../extensions/pb/standards.ts");
+  assert.match(DEFAULT_STANDARDS, /- Security: assume every entry point \(API, UI action, command, message, file, webhook\) will be abused[\s\S]*logic reused from another flow keeps that flow's preconditions/);
+  const { specPrompt, REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  assert.match(specPrompt("", []), /## Threats\nOnly when the change adds or alters an entry point or touches a trust boundary[\s\S]*the acceptance criteria then include the abuse cases/i);
+  assert.match(REVIEWER_SYSTEM, /Its Threats, if any: each abuse prevented and tested/);
+});
+
+test("security: sensitive ground is recognised from the spec's Threats, file names or the diff; deliberately broad", async () => {
+  const { sensitiveGround } = await import("../extensions/pb/review.ts");
+  assert.equal(sensitiveGround({ spec: "# X\n## Threats\n- a", files: [], diff: "" }), "the spec has Threats");
+  assert.equal(sensitiveGround({ files: ["src/auth/LoginController.java"], diff: "" }), "touches src/auth/LoginController.java");
+  assert.equal(sensitiveGround({ files: ["src/a.ts"], diff: "+++ b/src/a.ts\n+  if (user.role === 'admin') {" }), 'the diff mentions "role"');
+  assert.equal(sensitiveGround({ files: ["src/a.ts"], diff: "-  const token = 1;\n+  const total = 2;" }), undefined); // removed lines don't count
+  assert.equal(sensitiveGround({ files: ["README.md"], diff: "+ fix a typo" }), undefined);
+});
+
+test("security: on sensitive ground an attacker pass joins the review; its findings are double-checked like the rest", async () => {
+  const t = setup({ verify: "true" });
+  await written(t, SPEC({ tasks: "### T1: account\nCreate src/account.ts.\n- Acceptance: it exists" }));
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T1")) {
+      fs.mkdirSync("src", { recursive: true });
+      fs.writeFileSync("src/account.ts", "export function changePassword(session: string) {}\n");
+    }
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 1 · with an attacker pass \(touches src\/account\.ts\)|with an attacker pass \(the diff mentions "(password|session)"\)/);
+  assert.match(post, /\[P1\] src\/account\.ts:7 — Security: a stolen session alone can set a password the owner never set\n   Fix: require proof for a first password/);
+  assert.ok(t.events("order-cancellation").some((e) => e.type === "review" && e.security === true));
+
+  process.env.MOCK_VERIFY = "reject"; // the verifier can dismiss an attacker's finding too
+  await t.run("review", "--full");
+  delete process.env.MOCK_VERIFY;
+  assert.match(t.posts.at(-1)!, /Dismissed after a second look:[\s\S]*Security: a stolen session alone/);
+});
+
+test("security: no attacker pass on ordinary ground, or with reviewer.security off; always runs it everywhere", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  assert.doesNotMatch(t.posts.at(-1)!, /attacker pass/);
+
+  const u = setup({ verify: "true", reviewer: { security: "always" } });
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  await u.run("review");
+  assert.match(u.posts.at(-1)!, /with an attacker pass \(always\)/);
+
+  const v = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(v, SPEC().replace("## Context", "## Threats\n- a stolen session\n## Context"));
+  v.agent.script = diligent;
+  await v.run("build");
+  await v.run("review");
+  assert.doesNotMatch(v.posts.at(-1)!, /attacker pass/);
+});

@@ -45,12 +45,12 @@ import {
 } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_LINES, cartographerBrief, dropMissing, findingsOf, mapDiff, missingPaths, readMap, writeMap } from "./map.ts";
 import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
-import { REVIEW_TOOLS, runReview } from "./review.ts";
+import { REVIEW_TOOLS, runReview, sensitiveGround } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
 import { addStandards, agentDir, findStandards, isJavaProject, standardsLoaded } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type Checkpoint, type Finding, type Progress, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitHead, now } from "./store.ts";
+import { type Checkpoint, type Finding, type Progress, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, untrackedText } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -1496,6 +1496,11 @@ export default function pb(pi: ExtensionAPI) {
           previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since };
         }
 
+        // An attacker pass on sensitive ground (or always / never, per reviewer.security).
+        const mode = cfg.reviewer.security ?? "auto";
+        const diffText = mode === "auto" ? gitDiff(ctx.cwd, base) : "";
+        const security =
+          mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changed, diff: diffText + untrackedText(ctx.cwd, changed) });
         const outcome = await runReview({
           cwd: ctx.cwd,
           brief: reviewerBrief({
@@ -1514,6 +1519,7 @@ export default function pb(pi: ExtensionAPI) {
           model: cfg.reviewer.model ?? sessionModel(ctx),
           thinking: cfg.reviewer.thinking ?? (ctx.thinkingLevel as string | undefined),
           verify: cfg.reviewer.verify !== false,
+          security,
           signal: abort.signal,
           onPhase: render,
         });
@@ -1530,7 +1536,7 @@ export default function pb(pi: ExtensionAPI) {
         const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
         const { verdict } = outcome;
         if (name && p) {
-          store.event(name, { type: "review", verdict, p: counts, dismissed: outcome.dismissed.length, followUp: !!previous, ...outcome.tokens, cost: outcome.cost, ms: outcome.ms });
+          store.event(name, { type: "review", security: !!outcome.security, verdict, p: counts, dismissed: outcome.dismissed.length, followUp: !!previous, ...outcome.tokens, cost: outcome.cost, ms: outcome.ms });
           p.review = { at: now(), snapshot: before?.commit, verdict, findings: findings.filter((f) => f.priority === "P0" || f.priority === "P1" || f.priority === "P2") };
           if (verdict === "pass") p.phase = "reviewed";
           store.saveProgress(p);
@@ -1538,7 +1544,7 @@ export default function pb(pi: ExtensionAPI) {
         const tally = findings.length || outcome.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
         post(
           [
-            `**Review of ${label}**${previous ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}`,
+            `**Review of ${label}**${previous ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${outcome.security ? ` · with an attacker pass (${security})` : ""}`,
             "",
             outcome.prose,
             ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),

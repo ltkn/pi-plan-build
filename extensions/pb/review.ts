@@ -4,7 +4,7 @@
  * fix cycle. The verdict follows from the confirmed findings.
  */
 import { fileURLToPath } from "node:url";
-import { REVIEWER_SYSTEM, VERIFIER_SYSTEM, verifierBrief } from "./prompts.ts";
+import { ATTACKER_SYSTEM, REVIEWER_SYSTEM, VERIFIER_SYSTEM, verifierBrief } from "./prompts.ts";
 import { type RunResult, runFresh } from "./runner.ts";
 import type { Finding, Priority } from "./store.ts";
 
@@ -21,12 +21,27 @@ export interface ReviewOutcome {
   findings: Finding[];
   dismissed: { finding: Finding; evidence: string }[];
   verdict: Verdict;
+  /** the adversarial pass ran */
+  security?: boolean;
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
   cost: number;
   ms: number;
 }
 
 const blocking = (f: Finding) => f.priority === "P0" || f.priority === "P1";
+
+/**
+ * Whether a change stands on security-sensitive ground, from its spec and its diff: a reason, or undefined.
+ * Deliberately broad: a missed attacker pass costs far more than an unneeded one.
+ */
+export function sensitiveGround(o: { spec?: string; files: string[]; diff: string }): string | undefined {
+  if (o.spec && /^##\s+Threats\s*$/im.test(o.spec)) return "the spec has Threats";
+  const words = /\b(auth\w*|login|logout|sign-?in|session|token|jwt|oauth|saml|sso|password|passwd|credential|secret|api[_-]?key|permission|role|acl|polic(y|ies)|grant|privilege|admin|csrf|cors|cookie|crypt\w*|hash\w*|signature|upload|download|payment|billing|invoice|refund|webhook|redirect|sanitiz\w*|escape|exec|eval|deserializ\w*|security)\b/i;
+  const file = o.files.find((f) => words.test(f.replace(/[/._-]/g, " ")));
+  if (file) return `touches ${file}`;
+  const line = o.diff.split("\n").find((l) => /^\+(?!\+\+)/.test(l) && words.test(l));
+  return line ? `the diff mentions "${line.slice(1).trim().match(words)![0]}"` : undefined;
+}
 
 /** Findings from the report_findings calls; undefined when the reviewer never called it. */
 function reported(res: RunResult): Finding[] | undefined {
@@ -48,6 +63,8 @@ export async function runReview(o: {
   model?: string;
   thinking?: string;
   verify: boolean;
+  /** why the change gets an adversarial pass (sensitive ground), if it does */
+  security?: string;
   signal?: AbortSignal;
   onPhase?: (phase: string, activity?: string) => void;
 }): Promise<ReviewOutcome> {
@@ -86,7 +103,29 @@ export async function runReview(o: {
   }
   out.findings = findings;
 
-  const toCheck = findings.filter(blocking);
+  // Sensitive ground: a second fresh call whose only job is to break the change.
+  if (o.security) {
+    o.onPhase?.(`attacker pass (${o.security})`);
+    const a = await runFresh({
+      cwd: o.cwd,
+      role: "attacker",
+      systemPrompt: ATTACKER_SYSTEM,
+      brief: o.brief,
+      prompt: "Find how the change described in the attached file can be abused; report with report_findings.",
+      tools: [...INSPECT, "report_findings"],
+      extensions: [REVIEW_TOOLS],
+      model: o.model,
+      thinking: o.thinking,
+      signal: o.signal,
+      onActivity: (x) => o.onPhase?.("attacker pass", x),
+    });
+    add(a);
+    if (a.aborted) return { ...out, aborted: true };
+    out.findings = [...out.findings, ...(reported(a) ?? []).map((f) => ({ ...f, title: `Security: ${f.title}` }))];
+    out.security = true;
+  }
+
+  const toCheck = out.findings.filter(blocking);
   if (o.verify && toCheck.length) {
     o.onPhase?.("verifying P0/P1 findings");
     const v = await runFresh({
@@ -108,7 +147,7 @@ export async function runReview(o: {
     const rejected = new Map(verdicts.filter((x) => x.verdict === "rejected").map((x) => [toCheck[x.finding - 1], x.evidence ?? ""]));
     rejected.delete(undefined as unknown as Finding);
     // A finding the verifier didn't rule on stays: only an explicit rejection drops it.
-    out.findings = findings.filter((f) => !rejected.has(f));
+    out.findings = out.findings.filter((f) => !rejected.has(f));
     out.dismissed = [...rejected].map(([finding, evidence]) => ({ finding, evidence }));
   }
   out.verdict = out.findings.some(blocking) ? "changes_needed" : "pass";

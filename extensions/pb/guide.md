@@ -60,6 +60,12 @@ default covers:
 - **Comments**: explain the code as it is, never its history (no dates,
   "decided", previous values or task ids); decisions stay in the spec.
 - **Tests**: behaviour, in the project's style; never weaken an existing test.
+- **Security**: every entry point (API, UI action, command, message, file,
+  webhook) is assumed to be abused by someone who controls its input, holds a
+  stolen or another user's session, and replays or automates requests. Each
+  operation checks who the caller is, what they may act on and what they have
+  proven; logic reused from another flow keeps that flow's preconditions;
+  security-relevant changes get abuse-case tests.
 
 Make them yours: "Java 25: records, sealed types, pattern matching, virtual
 threads and scoped values; no Lombok", "every public
@@ -202,6 +208,12 @@ shown in the session for later. Shown first, you choose: build here, build in a
 fresh session, **edit the spec first** (in an editor; it's saved only when it
 still parses, and the build then gets your version), or not now.
 
+- **Threats.** When a change adds or alters an entry point or touches a trust
+  boundary (authentication, authorization, credentials, sensitive data, money,
+  external input), the spec gets a `## Threats` section: who can reach it and
+  with what, what they must prove or be allowed, how it could be abused, and
+  what prevents each abuse. Its acceptance criteria include the abuse cases.
+  That's the cheapest place to catch a design hole, before any code exists.
 - **Refactoring first.** When outdated code stands in the way (your standards
   ask for current practice), the spec starts with tasks titled `(refactor) …`
   that keep behaviour; the reviewer checks exactly that. A large refactor is a
@@ -351,6 +363,18 @@ session** and fix them right there: that session knows the code it just wrote.
 The next `/pb:review` is a **follow-up**: it checks the previous findings and
 looks only at what changed since (`--full` reviews everything again). If
 nothing changed, it says so and costs nothing.
+
+**An attacker pass on sensitive ground.** When the change stands on
+security-sensitive ground (the spec has Threats, or the files or the diff touch
+authentication, sessions, permissions, credentials, crypto, payments, uploads,
+redirects and the like), a second fresh call joins the review with a single
+job: break it. It checks every entry point the change adds or alters as an
+attacker would (another user's data, a stolen session, replayed or automated
+requests, guessed ids, injection, leaks, missing limits, permissions in
+migrations), and whether logic reused from another flow lost the precondition
+that made it safe there. Its findings, marked "Security:", get the same second
+look as the rest. The detection is deliberately broad: a missed pass costs far
+more than an unneeded one. `"reviewer": {"security": "always" | "auto" | "off"}`.
 
 **Without a spec**, `/pb:review [what the change is meant to do]` reviews the
 uncommitted change against that intent and your standards: useful for any

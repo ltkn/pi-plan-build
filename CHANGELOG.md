@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.0
+
+- **An attacker pass joins the review on sensitive ground**: when the spec has Threats, or the changed files or the diff touch authentication, sessions, permissions, credentials, crypto, payments, uploads, redirects and the like, a second fresh call tries to break the change: every entry point it adds or alters, as someone who controls the input, holds a stolen or another user's session, replays or automates requests and guesses ids; injection, leaks, missing limits, permissions in migrations; logic reused from another flow that lost the precondition that made it safe there. Its findings ("Security: …") get the same second look as the rest. `reviewer.security`: `auto` (default, deliberately broad), `always`, `off`
+- **Threats in the spec**: a change that adds or alters an entry point or touches a trust boundary gets a `## Threats` section (who can reach it and with what, what they must prove, how it could be abused, what prevents it), with the abuse cases in its acceptance criteria; the reviewer checks each is prevented and tested
+- **A security line in the default standards**: assume every entry point will be abused; each operation checks who the caller is, what they may act on and what they have proven; reused logic keeps its preconditions; abuse-case tests for security-relevant changes. Existing AGENTS.md sections aren't changed: add the line yourself (see the guide)
+
 ## 1.6.0
 
 - **The project map**: a short section of the project's AGENTS.md (`<!-- pb:map -->`) with what stays true across features: layout and module roles, patterns to follow by path, constraints the code doesn't make obvious, test and build quirks. Pi loads it into every session, so the next feature starts from it instead of re-exploring

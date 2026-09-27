@@ -10,7 +10,11 @@ const usage = { input: 3000, output: 400, cacheRead: 0, cacheWrite: 0, cost: { t
 const say = (content) => console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop", usage, content } }));
 const call = (name, args) => ({ type: "toolCall", id: `call-${name}`, name, arguments: args });
 
-if (sys.includes("REVIEWER")) {
+if (sys.includes("ATTACKER")) {
+  const findings = process.env.MOCK_ATTACK === "none" ? [] : [{ priority: "P1", file: "src/account.ts", line: 7, title: "a stolen session alone can set a password the owner never set", fix: "require proof for a first password" }];
+  say([call("report_findings", { findings })]);
+  say([{ type: "text", text: "Done." }]);
+} else if (sys.includes("REVIEWER")) {
   if (process.env.MOCK_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_BRIEF_OUT, brief);
   if (process.env.MOCK_REVIEW_WRITE) fs.writeFileSync(process.env.MOCK_REVIEW_WRITE, "reviewer was here");
   const verdict = process.env.MOCK_REVIEW ?? "pass";

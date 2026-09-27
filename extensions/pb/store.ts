@@ -29,8 +29,11 @@ export interface Config {
   testOutputCap: number;
   /** Shadow snapshots per task: real diffs, changed-test checks, /pb:undo. */
   checkpoints: boolean;
-  /** The fresh reviewer: model and thinking level (unset = your session's), and whether a second call double-checks P0/P1 findings. */
-  reviewer: { model?: string; thinking?: string; verify?: boolean };
+  /**
+   * The fresh reviewer: model and thinking level (unset = your session's), whether a second call double-checks
+   * P0/P1 findings, and when an adversarial pass tries to break the change ("auto": on sensitive ground).
+   */
+  reviewer: { model?: string; thinking?: string; verify?: boolean; security?: "auto" | "always" | "off" };
   /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
   freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
@@ -56,7 +59,7 @@ export const DEFAULT_CONFIG: Config = {
   askTimeoutSec: 300,
   testOutputCap: 4000,
   checkpoints: true,
-  reviewer: { verify: true },
+  reviewer: { verify: true, security: "auto" },
   freshAbove: 50,
   baseline: true,
   explorer: {},
@@ -410,6 +413,23 @@ export function changedSince(cwd: string, base?: string): string[] {
   const tracked = git(cwd, ["diff", "--name-only", base ?? "HEAD", "--", ".", ":(exclude).pi/pb"]) ?? "";
   const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).pi/pb"]) ?? "";
   return [...new Set(`${tracked}\n${untracked}`.split("\n").filter(Boolean))];
+}
+
+/** The change's diff against a commit (pb state excluded), capped: for spotting sensitive ground. */
+export const gitDiff = (cwd: string, base?: string) => (git(cwd, ["diff", "--no-color", "-U0", base ?? "HEAD", "--", ".", ":(exclude).pi"]) ?? "").slice(0, 2_000_000);
+
+/** New, untracked files as added diff lines (capped), so a brand-new file counts too. */
+export function untrackedText(cwd: string, files: string[]): string {
+  const untracked = new Set((git(cwd, ["ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).pi"]) ?? "").split("\n").filter(Boolean));
+  let out = "";
+  for (const f of files.filter((x) => untracked.has(x))) {
+    try {
+      out += `\n${fs.readFileSync(path.join(cwd, f), "utf8").slice(0, 200_000).split("\n").map((l) => `+${l}`).join("\n")}`;
+    } catch {
+      // unreadable: skip
+    }
+  }
+  return out;
 }
 
 export const diffStat = (cwd: string, base?: string) => git(cwd, ["diff", "--stat", base ?? "HEAD", "--", ".", ":(exclude).pi/pb"])?.trim() ?? "";
