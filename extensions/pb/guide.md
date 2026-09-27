@@ -57,9 +57,12 @@ default covers:
   pattern matching, virtual threads and scoped values; no Lombok.
 - **Dependencies**: current, non-deprecated APIs. Upgrading is a change of its
   own (`/pb:deps`), not part of every feature.
-- **Comments**: explain the code as it is, never its history (no dates,
-  "decided", previous values or task ids); decisions stay in the spec.
-- **Tests**: behaviour, in the project's style; never weaken an existing test.
+- **Comments**: concise, and only where they add what the code can't say;
+  the code as it is, never its history (no dates, "decided", previous values
+  or task ids); decisions stay in the spec.
+- **Tests**: behaviour, written to current best practice even where existing
+  tests aren't; new test tooling as a task of its own; never weaken an
+  existing test.
 - **Security**: every entry point (API, UI action, command, message, file,
   webhook) is assumed to be abused by someone who controls its input, holds a
   stolen or another user's session, and replays or automates requests. Each

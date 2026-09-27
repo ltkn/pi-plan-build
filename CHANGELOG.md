@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.0
+
+- **Default standards reworded**: comments are concise and only where they add what the code can't say (no longer "match the surrounding density"); tests follow current best practice for the stack even where existing tests don't (no longer "in the project's existing style"), with new test tooling proposed as a task of its own; Quality and Dependencies say the same, shorter. Existing AGENTS.md sections aren't changed: update them yourself
+
 ## 1.9.2
 
 - Fixed: relaunching a session with project-map entries from 1.6–1.8 showed "renderer failed"; those entries are no longer shown

@@ -1182,9 +1182,9 @@ test("standards: offered once into AGENTS.md; repeated in a message only when th
   process.chdir(t.repo);
   await t.run("plan", "x"); // default choice: this project's AGENTS.md
   const agents = path.join(t.repo, "AGENTS.md");
-  assert.match(fs.readFileSync(agents, "utf8"), /<!-- pb:standards -->[\s\S]*Dependencies: use current, non-deprecated APIs[\s\S]*<!-- \/pb:standards -->/);
+  assert.match(fs.readFileSync(agents, "utf8"), /<!-- pb:standards -->[\s\S]*Dependencies: current, non-deprecated APIs and versions only[\s\S]*Comments: concise, and only where they add what the code can't say[\s\S]*written to current best practice for this stack even where existing tests aren't[\s\S]*<!-- \/pb:standards -->/);
   assert.doesNotMatch(fs.readFileSync(agents, "utf8"), /even when it is more work|latest stable versions|inconsistent with its surroundings/);
-  assert.match(fs.readFileSync(agents, "utf8"), /even where the surrounding code doesn't[\s\S]*refactor it to current practice: when planning, propose it as a task of its own/);
+  assert.match(fs.readFileSync(agents, "utf8"), /even where the surrounding code doesn't[\s\S]*refactor it to current practice, planned as a task of its own/);
   assert.match(t.instructions.at(-1)!, /Engineering standards \(from AGENTS\.md\)[\s\S]*a proper fix, never a workaround/); // this session started before they existed
   fs.writeFileSync(agents, fs.readFileSync(agents, "utf8").replace("Tests: test behaviour", "Java 21: records, no Lombok. Tests: test behaviour"));
 
