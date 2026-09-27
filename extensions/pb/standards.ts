@@ -13,7 +13,7 @@ const END = "<!-- /pb:standards -->";
 export const DEFAULT_STANDARDS = `${START}
 ## Engineering standards
 
-- Quality: the best current practice for this stack; clean, maintainable and secure; a proper fix, never a workaround. Prefer modern idioms, unless that would make the code inconsistent with its surroundings; then stay consistent and say so.
+- Quality: the best current practice for this stack; clean, maintainable and secure; a proper fix, never a workaround. Use the modern idioms and the latest stable language and platform features, even where the surrounding code doesn't. Where outdated code stands in the way, refactor it to current practice: when planning, propose it as a task of its own.
 - Dependencies: use current, non-deprecated APIs; never add a deprecated API or an outdated version. Upgrading dependencies is a change of its own, not part of a feature.
 - Comments: explain the code as it is (why, intent, constraints), never its history: no dates, "decided", previous values or task ids. Decisions stay in the spec. Match the surrounding comment density.
 - Tests: test behaviour, in the project's existing style; never weaken an existing test.
@@ -56,11 +56,17 @@ export function findStandards(cwd: string): { file: string; text: string } | und
   return undefined;
 }
 
-/** Append the default section to a context file (created if missing). */
-export function addStandards(file: string): void {
+/** The stack-specific line added for a Java project (Maven or Gradle). */
+export const JAVA_STANDARDS = "- Java 25: records, sealed types, pattern matching, virtual threads and scoped values; no Lombok.";
+
+export const isJavaProject = (cwd: string) => ["pom.xml", "build.gradle", "build.gradle.kts"].some((f) => fs.existsSync(path.join(cwd, f)));
+
+/** Append the default section to a context file (created if missing), with the Java line when `java`. */
+export function addStandards(file: string, o: { java?: boolean } = {}): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const prev = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-  fs.writeFileSync(file, `${prev}${prev && !prev.endsWith("\n\n") ? (prev.endsWith("\n") ? "\n" : "\n\n") : ""}${DEFAULT_STANDARDS}`);
+  const section = o.java ? DEFAULT_STANDARDS.replace(END, `${JAVA_STANDARDS}\n${END}`) : DEFAULT_STANDARDS;
+  fs.writeFileSync(file, `${prev}${prev && !prev.endsWith("\n\n") ? (prev.endsWith("\n") ? "\n" : "\n\n") : ""}${section}`);
 }
 
 /** True when the session's loaded context files already contain the standards (so prompts needn't repeat them). */

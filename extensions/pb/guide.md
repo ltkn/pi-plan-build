@@ -16,8 +16,9 @@ step Pi shows a short **What now** block; `/pb:help <topic>` posts any section b
    This is the cheapest place to change your mind.
 2. **`/pb:build`**: Pi writes a short **spec** from the discussion (goal,
    decisions, tasks); you read it and choose: build here, build in a fresh
-   session, edit it first, or not now. The tasks then run one by one, each
-   behind a check the harness runs.
+   session, edit it first, or not now. The tasks then run one by one, and the
+   harness runs the full test suite after the last one; a failure goes back to
+   Pi to fix.
 3. **`/pb:review`**: a fresh reviewer compares the change with the spec and
    your standards; blocking findings get a second look before you see them.
    Fix them right there, `/pb:review` again (it looks only at what changed),
@@ -47,14 +48,19 @@ for all your projects), marked `<!-- pb:standards -->`. Edit it there. The
 default covers:
 
 - **Quality**: the best current practice for the stack, a proper fix rather
-  than a workaround; modern idioms unless they'd clash with the surrounding code.
+  than a workaround; modern idioms and the latest stable language and platform
+  features, even where the surrounding code is older. Outdated code in the way
+  gets refactored to current practice, planned as a task of its own.
+- **Java** (added for Maven or Gradle projects): Java 25, records, sealed types,
+  pattern matching, virtual threads and scoped values; no Lombok.
 - **Dependencies**: current, non-deprecated APIs. Upgrading is a change of its
   own (`/pb:deps`), not part of every feature.
 - **Comments**: explain the code as it is, never its history (no dates,
   "decided", previous values or task ids); decisions stay in the spec.
 - **Tests**: behaviour, in the project's style; never weaken an existing test.
 
-Make them yours: "Java 21: records and sealed types, no Lombok", "every public
+Make them yours: "Java 25: records, sealed types, pattern matching, virtual
+threads and scoped values; no Lombok", "every public
 API has a Javadoc contract", "no new dependencies without asking". Keep them
 short: every line is read in every session. A session that started before you
 added them gets them in pb's messages until it's restarted.
@@ -67,9 +73,10 @@ added them gets them in pb's messages until it's restarted.
 `/pb:plan let admins cancel an order while it is still pending, and notify the
 customer`.
 
-**The baseline.** When a test command is known, the harness runs the suite in
-the background as planning starts (no tokens) and posts the result into the
-session. A suite that already fails would fail the build's final check too, so
+**The baseline.** When a test command is known, the harness runs the suite on
+the last commit as planning starts, in a separate git worktree (so it can't
+collide with a build in your working copy, e.g. Maven's `target/`), in the
+background and without tokens, and posts the result into the session. A suite that already fails would fail the build's final check too, so
 `/pb:build` warns you. `"baseline": false` in the config turns it off.
 
 **The explorer.** For broad questions (where things live, how a similar feature
@@ -135,6 +142,10 @@ When `/pb:build` wrote it, you see the whole spec and choose: **build here**,
 **build in a fresh session**, **edit the spec first** (in an editor; it's saved
 only when it still parses, and the build then gets your version), or **not now**.
 
+- **Refactoring first.** When outdated code stands in the way (your standards
+  ask for current practice), the spec starts with tasks titled `(refactor) …`
+  that keep behaviour; the reviewer checks exactly that. A large refactor is a
+  spec of its own that the feature `Depends on:`.
 - **Several features from one conversation?** One spec each: each is built,
   reviewed and committed on its own. `Depends on:` orders them; building one
   before its dependency asks you first. Write them all while the discussion is
@@ -156,13 +167,19 @@ model, uncached); `/pb:build --fresh` asks for one directly: a new session
 named "build: <spec>", seeded with the spec, on your model and thinking level.
 
 1. **The tasks.** The build starts with T1 straight away. Pi finishes each task
-   with `pb_task_done`, and the harness runs the task's check **inside that
-   call**: a failure comes straight back to fix (up to `maxAttempts`, then the
-   build pauses for you), a pass comes back with the next task. The whole build
-   is one uninterrupted run, so the prompt cache stays warm even through long
-   test runs.
-2. **The end.** After the last task, the full test suite runs once (when the
-   verification is `tests`), and the build is complete.
+   with `pb_task_done`, which hands out the next one: the whole build is one
+   uninterrupted run, so the prompt cache stays warm. Pi checks its own work as
+   it goes (the task's `Test:` line tells it how).
+2. **The end.** After the last task, the harness runs the full test suite (a
+   compile for `Verification: build`) **inside that same call**. A failure
+   comes straight back to fix, up to `maxAttempts`, then the build pauses for
+   you. The agent's word never ends a build: the check does.
+
+**A check after every task** (`"taskChecks": "each"`): the harness also runs each
+task's `Test:` command (a compile when it has none) when the task is done. It
+catches a broken task earlier, but makes every task leave the build green on
+its own, which slices work unnaturally and costs a run per task; the eval's
+`pb-each` arm measures whether it pays for your projects.
 
 The build treats the spec as settled: it implements, it doesn't re-plan. Where
 the spec is ambiguous, contradicts itself or doesn't match the code, Pi takes
@@ -170,7 +187,10 @@ the sensible reading, records it in the spec's Decisions as an **assumption**,
 and carries on. The build summary lists these choices and the reviewer checks
 them, so you look once, at the end. When a choice would change behaviour, an
 API or data, Pi asks you in a dialog (`pb_ask`) and carries on with your
-answer, which goes into the spec. It leaves `.pi/` alone.
+answer, which goes into the spec; answering early often saves later questions.
+If you're away, the dialog counts down (`askTimeoutSec`, 5 minutes) and the
+build goes on with Pi's recommendation, recorded as an assumption. It leaves
+`.pi/` alone.
 
 A progress line above the editor shows the tasks while it runs. If Pi stops
 mid-task without finishing it, pb reminds it once; if it stops again, the build
@@ -192,9 +212,10 @@ things. **Decisions you make here** are written into the spec's Decisions
 `/pb:build <guidance>` resumes after any pause and records the guidance too;
 a pause that wasn't a failing check costs the task no attempt.
 
-The harness also watches the tests themselves: a task that deletes existing
-tests, cuts their number of cases, or skips them fails its check (when
-verification is `tests`).
+The harness also watches the existing tests: when a task deletes some, cuts
+their number of cases or adds skip markers, it doesn't stop the build (a
+refactor legitimately moves and merges tests); the changes are listed at the
+end and handed to the reviewer, who judges whether each was justified.
 <!-- /pb -->
 
 <!-- pb:topic verification -->
@@ -202,16 +223,15 @@ verification is `tests`).
 
 Two separate choices, both in the spec header:
 
-**Verification: what runs when a task is done.**
+**Verification: what the harness runs.**
 
-| | After each task | At the end | Use for |
+| | At the end | After each task (`taskChecks: "each"` only) | Use for |
 |---|---|---|---|
-| `tests` | the task's `Test:` command; without one, a compile | the whole suite | the default |
+| `tests` | the whole suite | the task's `Test:` command; without one, a compile | the default |
 | `build` | compile or typecheck only | the same | no tests wanted for this feature, or a suite you are deliberately ignoring |
 | `none` | nothing: Pi's word | nothing | docs, config, spikes |
 
-Give tasks a targeted `Test:` line: without one, a task is only compiled, and
-the whole suite runs once at the end rather than after every task.
+Give tasks a targeted `Test:` line: it's how Pi checks each task as it goes.
 
 The commands come from `.pi/pb/config.json` (`"verify"` and `"build"`, `"auto"`
 detects Maven, Gradle, npm/TypeScript, Cargo, Go and pytest).
@@ -222,13 +242,14 @@ and the reviewer won't flag the missing ones.
 <!-- /pb -->
 
 <!-- pb:topic stuck -->
-## A task keeps failing
+## A check keeps failing
 
-After `maxAttempts` failed checks the build pauses on that task. Read the
-failure (it's in the session), then:
+After `maxAttempts` failed checks (the final one, or a task's with
+`taskChecks: "each"`) the build pauses. Read the failure (it's in the session),
+then:
 
-- **A nudge**: `/pb:build <hint or different approach>`. The task gets a fresh
-  set of attempts, and the hint goes into the spec's Decisions.
+- **A nudge**: `/pb:build <hint or different approach>`. The check gets a
+  fresh set of attempts, and the hint goes into the spec's Decisions.
 - **Throw the attempt away**: `/pb:undo <task>` restores the files and rewinds
   the conversation to before it, then `/pb:build <what to do differently>`.
 - **The session is gone** (a crash, or you closed it): reopen it with `/resume`
@@ -248,8 +269,11 @@ failure (it's in the session), then:
 separate call that sees the spec, the diff and the check result, but not the
 build conversation, so it isn't anchored by the builder's reasoning. It checks
 every acceptance criterion with evidence, the decisions (including rejected
-alternatives and the build's assumptions), tests, comments, your standards and
+alternatives and the build's assumptions), `(refactor)` tasks for unchanged
+behaviour, the existing tests the build changed, comments, your standards and
 security, and reports each finding through a tool, not as prose to be parsed.
+It also judges **the spec itself**: a faithful build of a wrong plan is still
+wrong, so problems in the plan come back as findings on the spec file.
 `/pb:review <focus>` points it at something specific.
 
 Every finding carries a priority: **P0** must fix (broken, insecure, data
@@ -272,9 +296,11 @@ uncommitted change against that intent and your standards: useful for any
 change you made with Pi without the rest of the flow.
 
 The reviewer can't change your files: pb snapshots the tree before it starts
-and puts back anything it touched. Its model can be set in the config
-(`"reviewer": {"model": "provider/id"}`); a different model family than the one
-that built the change is a cheap way to get genuinely different eyes.
+and puts back anything it touched. By default it runs on your session's model,
+likely the one that built the change and shares its blind spots; the first
+review in a project offers to pick another (`"reviewer": {"model": "provider/id"}`
+in the config). A different model family is the cheapest way to get genuinely
+different eyes.
 <!-- /pb -->
 
 <!-- pb:topic undo -->
@@ -284,9 +310,10 @@ Before each task the harness snapshots the working tree (in git's object store,
 without touching your branch, commits or staging area). `/pb:undo` in the build
 session lists the tasks; pick one and the files and task list go back to how
 they were **before** it, and so does the **conversation**: the discarded attempt
-drops out of the context (a one-line note says what was undone), so it doesn't
-anchor the next try, and everything before that point is still in the prompt
-cache. `/pb:undo u1` reverses an undo, conversation included. If you committed
+drops out of the context (a short note says what was undone, and repeats what
+you said meanwhile so your guidance isn't lost), so it doesn't anchor the next
+try, and everything before that point is still in the prompt cache.
+`/pb:undo u1` reverses an undo, conversation included. If you committed
 in between, the undone work shows up as uncommitted changes (you're warned).
 <!-- /pb -->
 
@@ -310,7 +337,7 @@ in between, the undone work shows up as uncommitted changes (you're warned).
   all a fresh or compacted build session has, and what the reviewer checks.
 - **Write rejected ideas into the spec.** "Not doing X, because …" stops them
   from coming back.
-- **Give tasks a `Test:` line**: a targeted check per task, the full suite once.
+- **Give tasks a `Test:` line**: how Pi checks each task; the harness runs the full suite once.
 - **Read what the spec step resolved, and the build's assumptions**: that's
   where a wrong guess shows up cheapest.
 - **Nudge with `/pb:build <hint>`; undo when the code is wrong; rewrite the

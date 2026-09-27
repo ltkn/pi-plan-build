@@ -7,6 +7,7 @@
  */
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 const REF = "refs/pb/checkpoints";
@@ -65,6 +66,31 @@ export function snapshot(cwd: string, message: string): Snapshot | undefined {
     return { commit, tree };
   } catch {
     return undefined;
+  }
+}
+
+/** Untracked dependency folders a worktree borrows from the working copy, so the project builds there too. */
+const SHARED_DIRS = ["node_modules", ".venv", "venv"];
+
+/**
+ * Run `fn` in a temporary git worktree at HEAD, so a long build or test run doesn't collide with
+ * one in the working copy (Maven's target/, Gradle's build/). Outside git, `fn` runs in `cwd`.
+ */
+export async function inWorktree<T>(cwd: string, fn: (dir: string) => Promise<T>): Promise<T> {
+  if (!tryRun(cwd, ["rev-parse", "--verify", "-q", "HEAD"])) return fn(cwd);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pb-worktree-"));
+  const dir = path.join(parent, "tree");
+  if (tryRun(cwd, ["worktree", "add", "--detach", "-q", dir, "HEAD"]) === undefined) {
+    fs.rmSync(parent, { recursive: true, force: true });
+    return fn(cwd);
+  }
+  try {
+    for (const d of SHARED_DIRS) if (fs.existsSync(path.join(cwd, d)) && !fs.existsSync(path.join(dir, d))) fs.symlinkSync(path.join(cwd, d), path.join(dir, d));
+    return await fn(dir);
+  } finally {
+    tryRun(cwd, ["worktree", "remove", "--force", dir]);
+    tryRun(cwd, ["worktree", "prune"]);
+    fs.rmSync(parent, { recursive: true, force: true });
   }
 }
 

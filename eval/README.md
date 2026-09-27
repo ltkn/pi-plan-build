@@ -8,6 +8,7 @@ cost? `run.mjs` runs the same feature tasks in three arms and compares them:
 | `bare` | Pi alone: the task, "investigate, implement it with tests, and run the tests" |
 | `review` | the same, then `/pb:review` on the uncommitted change and one fix round |
 | `pb` | `/pb:plan`, `/pb:build`, `/pb:review` and one fix round |
+| `pb-each` | the same with a check after every task (`taskChecks: "each"`) |
 
 Every arm runs in a fresh copy of the task's repository, over Pi's RPC mode,
 with only pb loaded as an extension (none in `bare`). A scripted stand-in for
@@ -18,7 +19,8 @@ standards.
 ## Metrics
 
 - **Hidden tests**: acceptance tests the agent never sees, copied in after the
-  run (`pass`/`fail` counts are parsed from `node --test` output when present).
+  run (`pass`/`fail` counts are parsed from node --test, Maven/Gradle JUnit
+  summaries or pytest).
 - **Judge**: one fresh call per run on a fixed model (`--judge`, default the
   build model), counting P0/P1/P2 problems in the diff against the task.
 - **Cost and tokens**: every session file's assistant turns and usage entries,
@@ -58,3 +60,17 @@ Run each task several times (`--runs`): single runs of agents vary a lot.
 `"repo"` and `"commit"` clone a real repository. Good tasks are real features
 of the size you'd plan: several files, a decision or two, tests to extend. The
 bundled one is deliberately small, to check the setup.
+
+**From your own history** (the tasks that make the eval mean something):
+
+```bash
+node eval/from-commit.mjs --repo ~/code/shop --commit 3f2a91c --name order-cancellation \
+     --test-command "./mvnw -B -q -Dtest='OrderCancellationTest' test"
+```
+
+It makes the commit's parent the starting point, copies the commit's test files
+into `hidden/<name>/`, and drafts the prompt from the commit message: rewrite it
+the way you'd ask, without describing the tests. The hidden tests replace the
+agent's versions of the same files after the run, so commits whose tests are
+new files work best. Five to ten such features, `--runs 3`, tell you more than
+anything else here.

@@ -68,11 +68,12 @@ Each decision with its reason, as it stands now: no dates, no history, not who d
 ### T1: <title>
 What to change and where.
 - Acceptance: <checkable>
-- Test: \`<command for this task's tests>\`   (optional: without it the task is only compiled; the full suite runs after the last task)
+- Test: \`<command for this task's tests>\`   (optional; the full suite runs after the last task)
 
 Add "## Out of scope", "## Context" (files, conventions, test setup) or "## Acceptance criteria" only when they help.
 
 - One spec per change you would merge on its own; if the discussion covers several, say so and write one each.
+- Refactoring that the standards call for (outdated code in the way) comes first, as tasks titled "(refactor) …" that keep behaviour; a large one is a spec of its own that this one depends on.
 - Say each fact once: an example or the rule behind it, not both.
 - Before writing, check the spec for contradictions and against the code; fix them in the spec and tell me briefly what you changed.
 - The approach follows the engineering standards (AGENTS.md).
@@ -86,28 +87,29 @@ ${tip("spec.next")}`;
 
 /* ================================== build ================================== */
 
-function gateLine(spec: ParsedSpec, buildCmd: string | null): string {
-  if (spec.gate === "tests") return `it runs the task's Test: command (a compile when there is none), and the full suite after the last task`;
-  if (spec.gate === "build") return `it compiles${buildCmd ? ` (\`${buildCmd}\`)` : ""}; no tests run (${spec.gateReason})`;
-  return `no checks run (${spec.gateReason})`;
+function gateLine(spec: ParsedSpec, buildCmd: string | null, each: boolean): string {
+  if (spec.gate === "none") return `no checks run (${spec.gateReason})`;
+  const end = spec.gate === "tests" ? "the full suite" : `a compile${buildCmd ? ` (\`${buildCmd}\`)` : ""}, no tests (${spec.gateReason})`;
+  if (!each) return `after the last task the harness runs ${end}; check each task yourself`;
+  return spec.gate === "tests" ? "it runs the task's Test: command (a compile when there is none), and the full suite after the last task" : `it runs ${end}`;
 }
 
-/** How the build works: the mechanics only (the standards come separately). */
-export function buildMechanics(spec: ParsedSpec, buildCmd: string | null): string {
+/** How the build works: the mechanics only (the standards come separately). each: a check after every task. */
+export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each = false): string {
   return `- Where the spec is unclear or doesn't match the code, take the sensible reading, record it with pb_record_decision (assumption: true) and carry on. Ask with pb_ask only when a choice changes behaviour, an API or data.
-- Keep each change to its task. Tests: ${spec.newTests ? "add or extend tests for the behaviour each task introduces." : `add none for this feature (${spec.newTestsReason}).`} Never delete, skip or weaken a test.
+- Keep each change to its task. Tests: ${spec.newTests ? "add or extend tests for the behaviour each task introduces." : `add none for this feature (${spec.newTestsReason}).`} Change or remove an existing test only when what it covers changes; never skip or weaken one to get a check through.
 - Don't commit or discard changes with git, and leave .pi/ alone.
-- Finish each task with pb_task_done: ${gateLine(spec, buildCmd)}. It gives you the next task.`;
+- Finish each task with pb_task_done: ${gateLine(spec, buildCmd, each)}. It gives you the next task.`;
 }
 
 /**
  * The first build message. In the session that wrote the spec, the agent already knows it;
  * anywhere else (a fresh session, or a session that never saw it) the spec comes along.
  */
-export function buildIntro(name: string, spec: ParsedSpec, buildCmd: string | null, standards: string, markdown?: string): string {
+export function buildIntro(name: string, spec: ParsedSpec, buildCmd: string | null, each: boolean, standards: string, markdown?: string): string {
   return `[pb:build ${name}] ${markdown ? "Build this feature from the spec below." : `Build the spec you wrote (${P}/specs/${name}/spec.md).`} The planning is done: implement it as written.
 
-${buildMechanics(spec, buildCmd)}${standardsBlock(standards)}${markdown ? `\n\n--- spec: ${P}/specs/${name}/spec.md ---\n\n${markdown}` : ""}`;
+${buildMechanics(spec, buildCmd, each)}${standardsBlock(standards)}${markdown ? `\n\n--- spec: ${P}/specs/${name}/spec.md ---\n\n${markdown}` : ""}`;
 }
 
 /** check: the command pb_task_done will run for this task, if any. */
@@ -116,7 +118,7 @@ export function taskPrompt(task: SpecTask, attempt: number, max: number, check: 
 
 ${task.text}
 
-(Comments: the code as it is; no history, dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : ""}. If it can't be done properly, status "blocked" with why.`;
+(Comments: the code as it is; no history, dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""}. If it can't be done properly, status "blocked" with why.`;
 }
 
 export function continuePrompt(task: SpecTask): string {
@@ -158,10 +160,11 @@ Do not modify any file. Use read/grep/find/ls and bash only for inspection (git 
 The harness already ran the check on the current tree; the result is in the brief. Don't re-run the full suite; run a specific test only when you need evidence. Read the diff file by file.
 
 Check:
-- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The builder's assumptions (Decisions entries starting "Assumption (build"): flag any that look wrong or second-best.
+- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The builder's assumptions (Decisions entries starting "Assumption (build"): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged.
+- The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 - Without a spec: whether the change does what the intent in the brief says.
 - Missing cases, error handling, convention breaks, changes outside the scope, debug output, commented-out code or leftover TODOs.
-- Tests, according to the spec's "New tests" line when there is one: tests that don't really test the behaviour, and missing tests for new behaviour; either way, existing tests that were deleted, skipped, disabled or weakened.
+- Tests, according to the spec's "New tests" line when there is one: tests that don't really test the behaviour, and missing tests for new behaviour. Existing tests that were deleted, cut down, skipped or disabled (the brief lists what the harness saw): fine when what they covered changed or moved (e.g. a refactor), a finding when they were weakened to get a check through.
 - The engineering standards in your instructions (AGENTS.md), if any: quality, dependencies, comments (restating the code, history such as dates, "decided", previous values or task ids, or left wrong by the change), tests.
 - Workarounds (silenced errors, hardcoded values, special-cased test inputs, sleeps, disabled checks) and security problems (injection, secrets in code, missing validation or authorisation).
 
@@ -193,6 +196,8 @@ export interface ReviewBrief {
   focus: string;
   /** the previous review: only its findings and what changed since are reviewed */
   previous?: { snapshot: string; findings: Finding[]; changed: string[] };
+  /** existing tests the build deleted, cut down or skipped */
+  testChanges?: string[];
 }
 
 /** Static parts first (the spec), the parts that change between reviews last: a repeat review reuses the cached prefix. */
@@ -224,6 +229,8 @@ export function reviewerBrief(o: ReviewBrief): string {
     "",
     o.changed.join("\n") || "(none)",
     o.stat ? `\n${o.stat}` : "",
+    "",
+    ...(o.testChanges?.length ? ["", "## Existing tests the build changed", "", "Deleted, cut down or skipped; judge whether each was justified:", ...o.testChanges.map((c) => `- ${c}`)] : []),
     "",
     "## The check the harness ran",
     "",

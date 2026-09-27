@@ -19,7 +19,7 @@
 import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { changedPaths, dropCheckpoints, inspectChanges, restore, snapshot } from "./checkpoint.ts";
+import { changedPaths, dropCheckpoints, inWorktree, inspectChanges, restore, snapshot } from "./checkpoint.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import {
   EXPLORER_SYSTEM,
@@ -40,7 +40,7 @@ import { registerRenderers } from "./render.ts";
 import { runReview } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec } from "./spec.ts";
-import { addStandards, agentDir, findStandards, standardsLoaded } from "./standards.ts";
+import { addStandards, agentDir, findStandards, isJavaProject, standardsLoaded } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitHead, now } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
@@ -132,24 +132,32 @@ export default function pb(pi: ExtensionAPI) {
 
   /**
    * Where to rewind the conversation to for an entry: navigating to a user or custom message would
-   * move its text into the editor, so step back to the entry before it.
+   * move its text into the editor, so step back to the entry before it. keepUser: stop at your own
+   * message (going back to a branch, its text returns to the editor instead of being lost).
    */
-  const rewindPoint = (ctx: ExtensionContext, from: string | undefined): string | undefined => {
+  const rewindPoint = (ctx: ExtensionContext, from: string | undefined, keepUser = false): string | undefined => {
     const sm = tree(ctx);
     let id: string | undefined = from;
     while (id) {
       const e = sm.getEntry?.(id);
       if (!e) return undefined;
-      const userLike = e.type === "custom_message" || (e.type === "message" && e.message?.role === "user");
+      const userLike = e.type === "custom_message" || (!keepUser && e.type === "message" && e.message?.role === "user");
       if (!userLike) return id;
       id = e.parentId ?? undefined;
     }
     return undefined;
   };
 
-  /** The command that checks a task: its Test: line; without one a compile; the full suite for the final check. */
-  const checkCommand = (spec: ParsedSpec, task: SpecTask | undefined, testCmd: string | null, buildCmd: string | null, final: boolean) =>
-    spec.gate === "tests" ? (final ? testCmd : (task?.test ?? buildCmd)) : spec.gate === "build" ? buildCmd : null;
+  /**
+   * The command that checks a task. The final check: the full suite (a compile for the build gate). Per task,
+   * only with taskChecks "each": its Test: line, else a compile.
+   */
+  const checkCommand = (spec: ParsedSpec, task: SpecTask | undefined, testCmd: string | null, buildCmd: string | null, final: boolean, each: boolean) => {
+    if (spec.gate === "none") return null;
+    if (final) return spec.gate === "tests" ? testCmd : buildCmd;
+    if (!each) return null;
+    return spec.gate === "tests" ? (task?.test ?? buildCmd) : buildCmd;
+  };
 
   // Set while a check runs inside pb_task_done: the prompt cache is certain to be needed afterwards.
   let checking = false;
@@ -237,14 +245,31 @@ export default function pb(pi: ExtensionAPI) {
         }
         return reply("No one can answer right now: take the sensible reading, say which one you took, and carry on.");
       }
+      // During a build the human may be away: after askTimeoutSec it goes on with the recommendation.
+      const timeoutMs = building ? store.config().askTimeoutSec * 1000 : 0;
+      const opts = timeoutMs > 0 ? { timeout: timeoutMs } : undefined;
+      const asked = Date.now();
       let answer: string | undefined;
       const OTHER = "Something else (type it)";
       if (params.options?.length) {
         const labels = params.options.map((o) => (o === params.recommended ? `${o} (recommended)` : o));
-        const choice = await ctx.ui.select(params.question, [...labels, OTHER]);
-        answer = choice === OTHER ? await ctx.ui.input(params.question) : choice ? params.options[labels.indexOf(choice)] : undefined;
-      } else answer = await ctx.ui.input(params.question, params.recommended);
-      if (!answer?.trim()) return reply(`The human dismissed the question: take the sensible reading${building ? ", record it with pb_record_decision (assumption: true)" : ""} and carry on.`);
+        const choice = await ctx.ui.select(params.question, [...labels, OTHER], opts);
+        answer = choice === OTHER ? await ctx.ui.input(params.question, undefined, opts) : choice ? params.options[labels.indexOf(choice)] : undefined;
+      } else answer = await ctx.ui.input(params.question, params.recommended, opts);
+      if (!answer?.trim()) {
+        const timedOut = timeoutMs > 0 && Date.now() - asked >= timeoutMs - 1000;
+        if (timedOut && building && params.recommended) {
+          const minutes = Math.round(timeoutMs / 60_000);
+          const entry = `Assumption (build, ${p!.current}, no answer within ${minutes} min): ${params.question.replace(/\s+$/, "")} → ${params.recommended}`;
+          const md = store.readSpec(name!);
+          if (md) store.writeSpec(name!, addDecision(md, entry));
+          p!.assumptions = [...(p!.assumptions ?? []), entry];
+          store.saveProgress(p!);
+          store.event(name!, { type: "ask", task: p!.current, timedOut: true });
+          return reply(`No answer within ${minutes} min: go on with your recommendation (${params.recommended}); it's recorded as an assumption for the review.`);
+        }
+        return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: take the sensible reading${building ? ", record it with pb_record_decision (assumption: true)" : ""} and carry on.`);
+      }
       if (building) {
         const md = store.readSpec(name!);
         if (md) store.writeSpec(name!, addDecision(md, `${params.question.replace(/\s+$/, "")} → ${answer.trim()}`));
@@ -323,11 +348,12 @@ export default function pb(pi: ExtensionAPI) {
     if (baselineRunning) return;
     baselineRunning = true;
     const cfg = store.config();
-    void runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap)
+    // In a worktree at HEAD: the planner's own builds in the working copy can't collide with it (Maven's target/).
+    void inWorktree(ctx.cwd, (dir) => runVerify(command, dir, cfg.verifyTimeoutSec, cfg.testOutputCap))
       .then((r) => {
         store.saveBaseline({ ...r, head: gitHead(ctx.cwd) });
         try {
-          post(`**Baseline** (the test suite as planning began): ${r.ok ? r.summary : `${r.summary}\n\nThe final check runs the whole suite, so it fails until this is fixed.`}`);
+          post(`**Baseline** (the test suite on the last commit): ${r.ok ? r.summary : `${r.summary}\n\nThe final check runs the whole suite, so it fails until this is fixed.`}`);
         } catch {
           // the session was replaced meanwhile: baseline.json still has the result
         }
@@ -398,8 +424,9 @@ export default function pb(pi: ExtensionAPI) {
         const choice = await ctx.ui.select("Engineering standards (quality, dependencies, comments without history, tests)", [HERE, ALL, "No thanks"]);
         if (choice === HERE || choice === ALL) {
           const file = choice === HERE ? path.join(ctx.cwd, "AGENTS.md") : path.join(agentDir(), "AGENTS.md");
-          addStandards(file);
-          ctx.ui.notify(`Added to ${file}: edit them there. Pi loads them into every session from now on.`, "info");
+          const java = isJavaProject(ctx.cwd);
+          addStandards(file, { java });
+          ctx.ui.notify(`Added to ${file}${java ? " (with Java 25 defaults)" : ""}: edit them there. Pi loads them into every session from now on.`, "info");
         }
       }
 
@@ -508,7 +535,7 @@ export default function pb(pi: ExtensionAPI) {
     return {
       task,
       marker: `▶ ${taskId}: ${task.title}${tp.attempts > 1 ? ` (attempt ${tp.attempts})` : ""}`,
-      prompt: taskPrompt(task, tp.attempts, cfg.maxAttempts, checkCommand(loaded.spec, task, testCmd, buildCmd, false)),
+      prompt: taskPrompt(task, tp.attempts, cfg.maxAttempts, checkCommand(loaded.spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each")),
     };
   };
 
@@ -521,22 +548,24 @@ export default function pb(pi: ExtensionAPI) {
     post(`**⏸ Build paused** — ${reason}\n\n${tip(tipKey, { spec: p.spec, ...vars })}`);
   };
 
-  /** Test-integrity check around a task: deleted, cut down or skipped existing tests fail the task. */
-  const inspectTask = (ctx: ExtensionContext, store: Store, p: Progress, spec: ParsedSpec) => {
+  /**
+   * What a task did to existing tests (deleted, fewer cases, new skips) and to earlier tasks' files.
+   * Nothing here fails a task: a refactor legitimately moves and merges tests. Test changes are listed
+   * at the end of the build and handed to the reviewer, who judges whether each was justified.
+   */
+  const inspectTask = (ctx: ExtensionContext, store: Store, p: Progress): string[] => {
     const cps = store.checkpoints(p.spec);
     const entry = cps.find((c) => c.id === p.current);
     const start = cps[0];
     const after = entry && store.config().checkpoints ? snapshot(ctx.cwd, `pb: after ${p.spec} ${p.current}`) : undefined;
-    if (!entry || !start || !after) return { tampering: undefined as string | undefined, notices: [] as string[] };
+    if (!entry || !start || !after) return [];
     const others = new Set(cps.filter((c) => c.task && c.task !== p.current).flatMap((c) => c.files ?? []));
     const flags = inspectChanges(ctx.cwd, entry, after, start, others);
     entry.files = changedPaths(ctx.cwd, entry.commit, after.commit);
     store.saveCheckpoints(p.spec, cps);
-    const tamper = flags.find((f) => f.kind === "tampering");
-    return {
-      tampering: spec.gate === "tests" ? tamper?.detail : undefined,
-      notices: flags.filter((f) => f.kind === "lost-work" || (f.kind === "tampering" && spec.gate !== "tests")).map((f) => `${f.kind}: ${f.detail}`),
-    };
+    const tests = flags.filter((f) => f.kind === "tampering").map((f) => `${p.current}: ${f.detail}`);
+    if (tests.length) p.testChanges = [...(p.testChanges ?? []).filter((c) => !c.startsWith(`${p.current}: `)), ...tests];
+    return flags.map((f) => `${f.kind === "tampering" ? "existing tests changed (the review checks them)" : f.kind}: ${f.detail}`);
   };
 
   /**
@@ -553,38 +582,33 @@ export default function pb(pi: ExtensionAPI) {
   ): Promise<ReturnType<typeof reply> | ReturnType<typeof stop>> => {
     const final = p.current === "final";
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+    const each = cfg.taskChecks === "each";
     const task = spec.tasks.find((t) => t.id === p.current);
     const tp = p.tasks.find((t) => t.id === p.current);
-    const integrity = final ? { tampering: undefined, notices: [] as string[] } : inspectTask(ctx, store, p, spec);
+    const found = final ? [] : inspectTask(ctx, store, p);
 
     let failure: string | undefined;
     let what = "";
-    let ran: string | null = null;
-    if (integrity.tampering) {
-      failure = `existing tests were changed: ${integrity.tampering}`;
-      what = "existing tests were changed";
-    } else {
-      ran = checkCommand(spec, task, testCmd, buildCmd, final);
-      if (ran) {
-        showProgress(ctx, p, `checking ${final ? "everything" : p.current}: ${ran}`);
-        checking = true;
-        try {
-          p.lastVerify = await runVerify(ran, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal);
-        } finally {
-          checking = false;
-        }
-        store.saveProgress(p);
-        if (signal?.aborted) {
-          pauseBuild(ctx, store, p, `you stopped the check of ${p.current}.`, "build.paused", "stopped");
-          return stop("The check was stopped: the build is paused. Stop here.");
-        }
-        if (p.lastVerify.ok === false) {
-          failure = p.lastVerify.summary;
-          what = `\`${ran}\``;
-        }
+    const ran = checkCommand(spec, task, testCmd, buildCmd, final, each);
+    if (ran) {
+      showProgress(ctx, p, `checking ${final ? "everything" : p.current}: ${ran}`);
+      checking = true;
+      try {
+        p.lastVerify = await runVerify(ran, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal);
+      } finally {
+        checking = false;
+      }
+      store.saveProgress(p);
+      if (signal?.aborted) {
+        pauseBuild(ctx, store, p, `you stopped the check of ${p.current}.`, "build.paused", "stopped");
+        return stop("The check was stopped: the build is paused. Stop here.");
+      }
+      if (p.lastVerify.ok === false) {
+        failure = p.lastVerify.summary;
+        what = `\`${ran}\``;
       }
     }
-    store.event(p.spec, { type: "check", task: p.current, attempt: tp?.attempts ?? 1, ok: !failure, command: ran, notices: integrity.notices });
+    store.event(p.spec, { type: "check", task: p.current, attempt: tp?.attempts ?? 1, ok: !failure, command: ran, notices: found });
 
     if (failure) {
       const attempts = tp?.attempts ?? 1;
@@ -607,8 +631,8 @@ export default function pb(pi: ExtensionAPI) {
       cp.summary = `${p.current} ✓ · ${(cp.files ?? []).length} files · ${(tp?.summary ?? "").replace(/\s+/g, " ").slice(0, 70)}`;
       store.saveCheckpoints(p.spec, cps);
     }
-    const notices = integrity.notices.length ? `\n⚠ ${integrity.notices.join("\n⚠ ")}` : "";
-    const passed = `✓ ${p.current} ${ran ? `passed (\`${ran}\`)` : spec.gate === "none" ? "done (no checks for this feature)" : "done (no check for this task)"}${notices}`;
+    const notices = found.length ? `\n⚠ ${found.join("\n⚠ ")}` : "";
+    const passed = `✓ ${p.current} ${ran ? `passed (\`${ran}\`)` : spec.gate === "none" ? "done (no checks for this feature)" : each ? "done (no check for this task)" : "done (checked after the last task)"}${notices}`;
 
     const next = nextTodo(p);
     if (next) {
@@ -616,13 +640,14 @@ export default function pb(pi: ExtensionAPI) {
       boundary = true;
       return reply(`${passed}\n\n${t.prompt}`);
     }
-    // Every task passed: one full check, unless the last task's check was the full suite already.
-    if (!final && spec.gate === "tests" && testCmd && ran !== testCmd) {
+    // Every task done: one full check, unless the last task's check was that already.
+    const endCmd = checkCommand(spec, undefined, testCmd, buildCmd, true, each);
+    if (!final && endCmd && ran !== endCmd) {
       p.current = "final";
-      p.tasks.push({ id: "final", title: "Final check: full suite", status: "doing", attempts: 1 });
+      p.tasks.push({ id: "final", title: `Final check: ${spec.gate === "tests" ? "full suite" : "compile"}`, status: "doing", attempts: 1 });
       store.saveProgress(p);
       const r = await checkAndAdvance(ctx, store, p, spec, signal);
-      return { ...r, content: text(`${passed}\nRunning the full suite…\n\n${r.content[0].text}`) };
+      return { ...r, content: text(`${passed}\nRunning \`${endCmd}\`…\n\n${r.content[0].text}`) };
     }
     p.tasks = p.tasks.filter((t) => t.id !== "final");
     p.phase = "built";
@@ -640,6 +665,7 @@ export default function pb(pi: ExtensionAPI) {
         "```",
         `Check: ${p.lastVerify?.summary.split("\n")[0] ?? `none (verification ${spec.gate})`}`,
         p.assumptions?.length ? `\nChoices the build made where the spec was unclear (in the spec's Decisions; the review checks them):\n${p.assumptions.map((a) => `- ${a}`).join("\n")}` : "",
+        p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
         "",
         tip("build.done", { spec: p.spec }),
       ].join("\n"),
@@ -847,7 +873,7 @@ export default function pb(pi: ExtensionAPI) {
       const task = beginTask(ctx, store, p, first, { intro: true })!;
       instruct(
         `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${task.marker}`,
-        `${buildIntro(name, spec, buildCmd, standardsFor(ctx), knowsSpec ? undefined : md)}\n\n${task.prompt}`,
+        `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : md)}\n\n${task.prompt}`,
       );
       return;
     }
@@ -857,7 +883,7 @@ export default function pb(pi: ExtensionAPI) {
     const carried = { model: buildModel ? cfg.buildModel : sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined };
     store.setCarry({ ...carried, spec: name });
     // A new session loads AGENTS.md itself: the standards needn't come along.
-    const intro = buildIntro(name, spec, buildCmd, "", md);
+    const intro = buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", "", md);
     const result = await cctx.newSession({
       parentSession: session,
       setup: async (sm) => {
@@ -984,7 +1010,7 @@ export default function pb(pi: ExtensionAPI) {
         const t = beginTask(ctx, store, p, cur, { countAttempt: again, intro })!;
         const knowsSpec = !!session && p.writtenIn === session && !p.edited;
         const body = intro
-          ? `${buildIntro(p.spec, loaded.spec, buildCmd, standardsFor(ctx), knowsSpec ? undefined : loaded.md)}\n\n${t.prompt}`
+          ? `${buildIntro(p.spec, loaded.spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : loaded.md)}\n\n${t.prompt}`
           : again
             ? t.prompt
             : continuePrompt(t.task);
@@ -1050,6 +1076,23 @@ export default function pb(pi: ExtensionAPI) {
       if (!name && !changed.length) return ctx.ui.notify("Nothing to review: there are no uncommitted changes.", "info");
       const intent = name ? "" : rest || (ctx.hasUI ? ((await ctx.ui.input("What is the change meant to do? (optional)")) ?? "") : "");
 
+      // Once per project: the model that built the change shares its blind spots; offer a different one.
+      if (!cfg.reviewer.model && ctx.hasUI && !store.asked("reviewer-model")) {
+        store.markAsked("reviewer-model");
+        const current = sessionModel(ctx);
+        const registry = (ctx as { modelRegistry?: { getAvailable?(): { provider: string; id: string }[] } }).modelRegistry;
+        const others = (registry?.getAvailable?.() ?? []).map((m) => `${m.provider}/${m.id}`).filter((m) => m !== current);
+        if (others.length) {
+          const KEEP = `Keep ${current ?? "the session's model"}`;
+          const choice = await ctx.ui.select(`The reviewer runs on ${current ?? "the session's model"}, which likely built this too. A different model family catches different mistakes:`, [KEEP, ...others]);
+          if (choice && choice !== KEEP) {
+            store.updateConfig((raw) => ({ ...raw, reviewer: { ...(raw.reviewer ?? {}), model: choice } }));
+            cfg.reviewer.model = choice;
+            ctx.ui.notify(`The reviewer now runs on ${choice} (reviewer.model in ${store.rel("config.json")}).`, "info");
+          }
+        }
+      }
+
       const abort = new AbortController();
       const unsubEsc = ctx.mode === "tui" ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
       const label = name ?? "the uncommitted change";
@@ -1090,6 +1133,7 @@ export default function pb(pi: ExtensionAPI) {
             check,
             focus: name ? rest : "",
             previous,
+            testChanges: p?.testChanges,
           }),
           base,
           spec: loaded?.md,
@@ -1218,14 +1262,26 @@ export default function pb(pi: ExtensionAPI) {
       // The conversation goes back too, so the discarded attempt doesn't anchor the next one;
       // everything before that point is still in the prompt cache.
       const oldLeaf = tree(ctx).getLeafId?.() ?? undefined;
-      const point = rewindPoint(ctx, target.entry);
+      const reverting = target.id.startsWith("u");
+      const point = rewindPoint(ctx, target.entry, reverting);
       const nav = (ctx as Partial<ExtensionCommandContext>).navigateTree;
       let rewound = false;
       if (point && nav && point !== oldLeaf) {
-        const reverting = target.id.startsWith("u");
+        // What the human said in the part that's rewound would go with it: the note keeps it.
+        const said: string[] = [];
+        for (let id = oldLeaf; id && id !== point; ) {
+          const e = tree(ctx).getEntry?.(id);
+          if (!e) break;
+          if (e.type === "message" && e.message?.role === "user") {
+            const c = e.message.content;
+            const t = typeof c === "string" ? c : Array.isArray(c) ? c.map((x: { text?: string }) => x.text ?? "").join("") : "";
+            if (t.trim()) said.unshift(t.trim().replace(/\s+/g, " "));
+          }
+          id = e.parentId ?? undefined;
+        }
         undoSummary = reverting
           ? undefined
-          : `[pb] The human undid the work from ${target.id === "start" ? "the start of the build" : target.id} on (/pb:undo restored the files). What had been done: ${undoneCps.map((c) => c.summary ?? `${c.id} (unfinished)`).join("; ") || "nothing finished"}. Don't simply repeat it.`;
+          : `[pb] The human undid the work from ${target.id === "start" ? "the start of the build" : target.id} on (/pb:undo restored the files). What had been done: ${undoneCps.map((c) => c.summary ?? `${c.id} (unfinished)`).join("; ") || "nothing finished"}. Don't simply repeat it.${said.length ? ` What the human said meanwhile, still valid unless they say otherwise: ${said.map((x) => `"${x}"`).join("; ")}` : ""}`;
         try {
           const r = await nav(point, { summarize: !reverting, label: `pb: before ${target.id}` });
           rewound = !r.cancelled;

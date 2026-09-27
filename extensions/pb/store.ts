@@ -19,8 +19,12 @@ export interface Config {
   /** Compile/typecheck command: the check for a task without its own Test: line, and the "build" gate. "auto" detects; null disables. */
   build: string | null;
   verifyTimeoutSec: number;
-  /** Fix attempts per task before the build pauses for you. */
+  /** Fix attempts per task (or for the final check) before the build pauses for you. */
   maxAttempts: number;
+  /** "end": one check after the last task; "each": every task's own check (its Test: line, else a compile), then the final one. */
+  taskChecks: "end" | "each";
+  /** How long a pb_ask dialog in a build waits before the build goes on with the recommendation (seconds; 0 = forever). */
+  askTimeoutSec: number;
   /** Chars of test output shown to the agent and the reviewer. */
   testOutputCap: number;
   /** Shadow snapshots per task: real diffs, changed-test checks, /pb:undo. */
@@ -44,6 +48,8 @@ export const DEFAULT_CONFIG: Config = {
   build: "auto",
   verifyTimeoutSec: 900,
   maxAttempts: 3,
+  taskChecks: "end",
+  askTimeoutSec: 300,
   testOutputCap: 4000,
   checkpoints: true,
   reviewer: { verify: true },
@@ -109,6 +115,8 @@ export interface Progress {
   current?: string;
   /** choices the builder made where the spec was ambiguous or didn't match the code */
   assumptions?: string[];
+  /** existing tests the build deleted, cut down or skipped, per task: for the reviewer to judge */
+  testChanges?: string[];
   pause?: string;
   /** the conversation was rewound to before the build's first message: a resume sends it again */
   needsIntro?: boolean;
@@ -197,6 +205,12 @@ export class Store {
     if (!fs.existsSync(file)) writeFile(file, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
     const raw = readJson<Partial<Config>>(file) ?? {};
     return { ...DEFAULT_CONFIG, ...raw, reviewer: { ...DEFAULT_CONFIG.reviewer, ...(raw.reviewer ?? {}) }, explorer: { ...(raw.explorer ?? {}) } };
+  }
+  /** Change settings in config.json, keeping everything else in it as written. */
+  updateConfig(patch: (raw: Partial<Config>) => Partial<Config>): void {
+    const file = path.join(this.root, "config.json");
+    this.config(); // created with the defaults if missing
+    writeFile(file, `${JSON.stringify(patch(readJson<Partial<Config>>(file) ?? {}), null, 2)}\n`);
   }
 
   /* --------------------------------- specs --------------------------------- */

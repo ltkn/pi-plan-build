@@ -36,6 +36,7 @@ function setup(config: object = {}) {
   const selects: string[] = [];
   const selectTitles: string[] = [];
   const confirms: string[] = [];
+  const dialogTimeouts: (number | undefined)[] = [];
   const editors: (string | undefined)[] = [];
   const views: { customType: string; data: any }[] = [];
   const navigations: { target: string; summary?: string }[] = [];
@@ -152,7 +153,7 @@ function setup(config: object = {}) {
       get thinkingLevel() {
         return self.thinking;
       },
-      modelRegistry: { find: (prov: string, id: string) => MODELS.find((m) => m.provider === prov && m.id === id) },
+      modelRegistry: { find: (prov: string, id: string) => MODELS.find((m) => m.provider === prov && m.id === id), getAvailable: () => MODELS },
       isIdle: () => true,
       getContextUsage: () => ({ tokens: self.usage * 1000, contextWindow: 100000, percent: self.usage }),
       getSystemPromptOptions: () => ({ contextFiles: self.contextFiles }),
@@ -168,7 +169,13 @@ function setup(config: object = {}) {
         setWidget: () => {},
         setStatus: () => {},
         setEditorText: (t: string) => (stat.editorText = t),
-        select: async (title: string, opts: string[]) => (selectTitles.push(title), selects.shift() ?? opts[0]),
+        select: async (title: string, opts: string[], o?: { timeout?: number }) => {
+          selectTitles.push(title);
+          dialogTimeouts.push(o?.timeout);
+          const pick = selects.shift();
+          if (pick === "<timeout>") return undefined;
+          return pick ?? opts[0];
+        },
         confirm: async (title: string) => (confirms.push(title), true),
         input: async () => selects.shift() ?? "",
         editor: async () => editors.shift(),
@@ -284,6 +291,7 @@ function setup(config: object = {}) {
     selects,
     selectTitles,
     confirms,
+    dialogTimeouts,
     editors,
     views,
     navigations,
@@ -299,6 +307,8 @@ function setup(config: object = {}) {
     settle,
     fire: (event: string, e: object) => fire(event, e),
     entry: (id: string) => treeOf(rt.file()).entries.get(id),
+    /** The human types a message into the current session (no run). */
+    say: (text: string) => append(rt.file(), { type: "message", message: { role: "user", content: [{ type: "text", text }] } }),
     text: (id: string) => textOf(treeOf(rt.file()).entries.get(id)!),
     runtime: () => rt,
   };
@@ -396,7 +406,7 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   await t.run("plan");
   assert.match(t.notes.at(-1)!, /Describe what you want, in your own words/);
   await t.run("spec");
-  assert.match(t.instructions.at(-1)!, /with the pb_write_spec tool[\s\S]*Not doing X, because[\s\S]*without it the task is only compiled/);
+  assert.match(t.instructions.at(-1)!, /with the pb_write_spec tool[\s\S]*Not doing X, because[\s\S]*as tasks titled "\(refactor\) …" that keep behaviour/);
 });
 
 test("plan mode stays with its session, not with the build session", async () => {
@@ -453,6 +463,28 @@ test("plan: the baseline runs in the background (no tokens) and a red suite warn
   assert.ok(t.confirms.includes("The test suite already failed"));
 });
 
+test("standards: a Java project gets the Java 25 defaults with pb's section", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  fs.writeFileSync(path.join(t.repo, "pom.xml"), "<project/>");
+  await t.run("plan", "x");
+  const agents = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
+  assert.match(agents, /even where the surrounding code doesn't[\s\S]*- Java 25: records, sealed types, pattern matching, virtual threads and scoped values; no Lombok\.\n<!-- \/pb:standards -->/);
+  assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /with Java 25 defaults/);
+});
+
+test("plan: the baseline runs in a separate worktree, so it can't collide with builds in the working copy", async () => {
+  const where = path.join(os.tmpdir(), `pb-baseline-pwd-${process.pid}`);
+  const t = setup({ verify: `pwd > ${where}`, baseline: true });
+  process.chdir(t.repo);
+  await t.run("plan", "x");
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
+  const dir = fs.readFileSync(where, "utf8").trim();
+  assert.match(dir, /pb-worktree-[^/]+\/tree$/); // not the working copy
+  assert.ok(!fs.existsSync(dir)); // removed afterwards
+  assert.doesNotMatch(execSync("git worktree list", { cwd: t.repo, encoding: "utf8" }), /pb-worktree-/);
+});
+
 test("pb_explore answers from a separate context; its usage is reported and counted", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -478,7 +510,7 @@ test("/pb:deps investigates dependencies as a change of its own, in planning mod
 /* ------------------------------------- build ------------------------------------- */
 
 test("build --fresh: a new session seeded with the spec, tasks behind their tests, then the full suite", async () => {
-  const t = setup({ verify: "test -f T1.txt && test -f T2.txt" });
+  const t = setup({ taskChecks: "each",  verify: "test -f T1.txt && test -f T2.txt" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build", "--fresh");
@@ -493,8 +525,8 @@ test("build --fresh: a new session seeded with the spec, tasks behind their test
   assert.match(t.read(".pi/pb/specs/order-cancellation/events.jsonl"), /"type":"check","task":"final"/); // full suite after the task tests
 });
 
-test("build: the check runs inside pb_task_done: one agent run from the first task to the end", async () => {
-  const t = setup({ verify: "true" });
+test("build: with taskChecks each, the check runs inside pb_task_done: one agent run from the first task to the end", async () => {
+  const t = setup({ taskChecks: "each",  verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -502,11 +534,11 @@ test("build: the check runs inside pb_task_done: one agent run from the first ta
   const next = t.instructions.find((i) => i.startsWith("✓ T1 passed"))!;
   assert.match(next, /✓ T1 passed \(`test -f T1\.txt`\)\n\n\[pb:build\] Task T2\. Do only this task[\s\S]*it runs `test -f T2\.txt` itself, so don't run that just before/);
   assert.equal(t.instructions.length, 2); // the first message, then T2 as T1's tool result; the last result ends the run
-  assert.match(t.results.at(-1)!, /✓ T2 passed[\s\S]*Running the full suite…[\s\S]*Build complete: every check passed\. Stop here/);
+  assert.match(t.results.at(-1)!, /✓ T2 passed[\s\S]*Running `true`…[\s\S]*Build complete: every check passed\. Stop here/);
 });
 
-test("build: a task without a Test: line is compiled, not run against the full suite", async () => {
-  const t = setup({ verify: "true", build: "echo compiled" });
+test("build: with taskChecks each, a task without a Test: line is compiled, not run against the full suite", async () => {
+  const t = setup({ taskChecks: "each",  verify: "true", build: "echo compiled" });
   await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists" }));
   t.agent.script = diligent;
   await t.run("build");
@@ -515,7 +547,7 @@ test("build: a task without a Test: line is compiled, not run against the full s
 });
 
 test("build: a failing check goes back to the agent, and passes on the next attempt", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ taskChecks: "each",  verify: "true" });
   await written(t);
   let lazy = true;
   t.agent.script = async (text, tool) => {
@@ -531,7 +563,7 @@ test("build: a failing check goes back to the agent, and passes on the next atte
 });
 
 test("build: after the last attempt it pauses; /pb:build resumes with a fresh set", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ taskChecks: "each",  verify: "true" });
   await written(t);
   let give = false;
   t.agent.script = async (text, tool) => {
@@ -568,6 +600,22 @@ test("build: ambiguities become recorded assumptions; questions are asked withou
   assert.match(spec, /- Assumption \(build, T1\): Follow the layout rules over the mockup/);
   assert.match(spec, /- Which file name\? → T2\.txt/);
   assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Choices the build made where the spec was unclear[\s\S]*Assumption \(build, T1\): Follow the layout rules/);
+});
+
+test("build: an unanswered question goes on with the recommendation after askTimeoutSec, recorded as an assumption", async () => {
+  const t = setup({ verify: "true", askTimeoutSec: 0.001 });
+  await written(t);
+  let answer: Result | undefined;
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T2")) answer = await tool("pb_ask", { question: "Which file name?", options: ["t2.txt", "T2.txt"], recommended: "T2.txt" });
+    return diligent(text, tool);
+  };
+  t.selects.push("<timeout>");
+  await t.run("build");
+  assert.equal(t.dialogTimeouts.at(-1), 1);
+  assert.match(answer!.content![0].text, /No answer within 0 min: go on with your recommendation \(T2\.txt\)/);
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /- Assumption \(build, T2, no answer within 0 min\): Which file name\? → T2\.txt/);
+  assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*no answer within 0 min/);
 });
 
 test("build: without a UI, a question pauses the build; answering costs the task no attempt", async () => {
@@ -632,20 +680,51 @@ test("build: verification none runs no checks; no new tests reaches the agent", 
   assert.match(t.instructions[0], /Tests: add none for this feature \(the human said so\)[\s\S]*no checks run \(docs only\)/);
 });
 
-test("build: fewer test cases in an existing test fail the task (gate: tests)", async () => {
+test("build: existing tests cut down or skipped don't fail a task: they are listed and handed to the reviewer", async () => {
   const t = setup({ verify: "true" });
   fs.mkdirSync(path.join(t.repo, "tests"));
   fs.writeFileSync(path.join(t.repo, "tests/test_a.py"), "def test_a():\n    pass\ndef test_b():\n    pass\n");
   execSync("git add . && git commit -qm tests", { cwd: t.repo });
   await written(t);
   t.agent.script = async (text, tool) => {
-    if (text.includes("Task T1")) fs.writeFileSync("tests/test_a.py", "def test_a():\n    pass\n");
-    if (text.includes("check for T1")) fs.writeFileSync("tests/test_a.py", "def test_a():\n    pass\ndef test_b():\n    pass\n");
+    if (text.includes("Task T1")) fs.writeFileSync("tests/test_a.py", "def test_parametrized():\n    pass\n"); // a refactor merged them
     return diligent(text, tool);
   };
   await t.run("build");
-  assert.ok(t.instructions.some((i) => /The check for T1 failed[\s\S]*existing tests were changed[\s\S]*2 → 1 test cases/.test(i)));
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "built");
+  assert.equal(t.stat.runs, 1);
+  assert.deepEqual(p.testChanges, ["T1: tests/test_a.py: 2 → 1 test cases"]);
+  assert.match(t.results[0], /⚠ existing tests changed \(the review checks them\): tests\/test_a\.py: 2 → 1 test cases/);
+  assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Existing tests the build changed[\s\S]*- T1: tests\/test_a\.py: 2 → 1 test cases/);
+  const briefFile = path.join(os.tmpdir(), `pb-brief-tc-${process.pid}.md`);
+  process.env.MOCK_BRIEF_OUT = briefFile;
+  await t.run("review");
+  delete process.env.MOCK_BRIEF_OUT;
+  assert.match(fs.readFileSync(briefFile, "utf8"), /## Existing tests the build changed[\s\S]*judge whether each was justified:\n- T1: tests\/test_a\.py: 2 → 1 test cases/);
+});
+
+test("build: by default, tasks aren't checked one by one; the full suite runs after the last, and a failure goes back", async () => {
+  const t = setup({ verify: "test -f T1.txt && test -f T2.txt && test -f fixed.txt" });
+  await written(t);
+  t.agent.script = async (text, tool) => {
+    if (text.includes('task "final"')) fs.writeFileSync("fixed.txt", "x");
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  const checks = t.events("order-cancellation").filter((e) => e.type === "check");
+  assert.deepEqual(checks.map((c) => [c.task, c.command, c.ok]), [
+    ["T1", null, true],
+    ["T2", null, true],
+    ["final", "test -f T1.txt && test -f T2.txt && test -f fixed.txt", false],
+    ["final", "test -f T1.txt && test -f T2.txt && test -f fixed.txt", true],
+  ]);
+  assert.match(t.instructions[0], /after the last task the harness runs the full suite; check each task yourself/);
+  assert.match(t.instructions[0], /When done, call pb_task_done with task "T1" once `test -f T1\.txt` passes/);
+  assert.match(t.results[0], /✓ T1 done \(checked after the last task\)/);
+  assert.match(t.results[1], /The final check failed \(attempt 2 of 2\)/);
   assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.equal(t.stat.runs, 1);
 });
 
 test("build: a build session's compaction summary comes from pb's state, not another model call", async () => {
@@ -694,6 +773,7 @@ test("undo restores the files and tasks to before a task, rewinds the conversati
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
+  t.say("name files in lower case from now on");
   const leafBefore = t.runtime().ctx.sessionManager.getLeafId();
   t.agent.script = undefined;
   await t.run("undo", "T2");
@@ -702,8 +782,8 @@ test("undo restores the files and tasks to before a task, rewinds the conversati
   assert.match(t.posts.at(-1)!, /Undone to before T2\*\* — 1 file\(s\) restored, the conversation rewound/);
   // Back to where T2 was handed out, with pb's own summary of what was undone.
   const nav = t.navigations.at(-1)!;
-  assert.match(t.text(nav.target), /✓ T1 passed[\s\S]*Task T2\. Do only this task/);
-  assert.match(nav.summary!, /The human undid the work from T2 on[\s\S]*T2 ✓ · 1 files · did T2/);
+  assert.match(t.text(nav.target), /✓ T1 done[\s\S]*Task T2\. Do only this task/);
+  assert.match(nav.summary!, /The human undid the work from T2 on[\s\S]*T2 ✓ · 1 files · did T2[\s\S]*What the human said meanwhile, still valid unless they say otherwise: "name files in lower case from now on"/);
 
   await t.run("undo", "u1");
   assert.ok(fs.existsSync(path.join(t.repo, "T2.txt")));
@@ -798,6 +878,21 @@ test("review: findings carry priorities; P0/P1 are double-checked; only line-lea
   assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 0/); // "No [P0] or [P1] issues" isn't a finding
 });
 
+test("review: offers once to run the reviewer on another model than the one that built the change", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.selects.push("p/big");
+  await t.run("review");
+  assert.match(t.selectTitles.at(-1)!, /The reviewer runs on p\/m, which likely built this too/);
+  assert.equal(JSON.parse(t.read(".pi/pb/config.json")).reviewer.model, "p/big");
+  assert.equal(JSON.parse(t.read(".pi/pb/config.json")).maxAttempts, 2); // the rest kept as written
+  const n = t.selectTitles.length;
+  await t.run("review", "--full");
+  assert.equal(t.selectTitles.length, n); // asked once
+});
+
 test("review: works without a spec, on the uncommitted change and its intent", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -825,7 +920,7 @@ test("review: files the reviewer changes are put back", async () => {
 });
 
 test("stats: tasks, first try, checks, pauses, review, and the build session's tokens and cache", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ taskChecks: "each",  verify: "true" });
   await written(t);
   let lazy = true;
   t.agent.script = async (text, tool) => {
@@ -917,13 +1012,15 @@ test("an unfinished build (e.g. after a crash) can be restarted in a new session
 
 test("prompts: short mechanics plus your standards; a minimal spec is enough", async () => {
   const { buildMechanics } = await import("../extensions/pb/prompts.ts");
-  const mech = buildMechanics(parseSpec(SPEC()).spec!, null);
+  const mech = buildMechanics(parseSpec(SPEC()).spec!, null, true);
   assert.ok(mech.length < 900, `build mechanics grew to ${mech.length} chars`); // keep them short
   assert.match(mech, /take the sensible reading, record it with pb_record_decision \(assumption: true\)[\s\S]*Ask with pb_ask only/);
   assert.match(mech, /leave \.pi\/ alone/);
   assert.match(mech, /Finish each task with pb_task_done: it runs the task's Test: command \(a compile when there is none\)/);
+  assert.match(mech, /Change or remove an existing test only when what it covers changes; never skip or weaken one/);
+  assert.ok(buildMechanics(parseSpec(SPEC()).spec!, null).length < 900);
 
-  const t = setup({ verify: "true" });
+  const t = setup({ taskChecks: "each", verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -1026,7 +1123,8 @@ test("standards: offered once into AGENTS.md; repeated in a message only when th
   await t.run("plan", "x"); // default choice: this project's AGENTS.md
   const agents = path.join(t.repo, "AGENTS.md");
   assert.match(fs.readFileSync(agents, "utf8"), /<!-- pb:standards -->[\s\S]*Dependencies: use current, non-deprecated APIs[\s\S]*<!-- \/pb:standards -->/);
-  assert.doesNotMatch(fs.readFileSync(agents, "utf8"), /even when it is more work|latest stable versions/);
+  assert.doesNotMatch(fs.readFileSync(agents, "utf8"), /even when it is more work|latest stable versions|inconsistent with its surroundings/);
+  assert.match(fs.readFileSync(agents, "utf8"), /even where the surrounding code doesn't[\s\S]*refactor it to current practice: when planning, propose it as a task of its own/);
   assert.match(t.instructions.at(-1)!, /Engineering standards \(from AGENTS\.md\)[\s\S]*a proper fix, never a workaround/); // this session started before they existed
   fs.writeFileSync(agents, fs.readFileSync(agents, "utf8").replace("Tests: test behaviour", "Java 21: records, no Lombok. Tests: test behaviour"));
 

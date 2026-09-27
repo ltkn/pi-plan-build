@@ -6,9 +6,10 @@
  * needs a model and costs real money.
  *
  *   node eval/run.mjs --model provider/id [--thinking medium] [--judge provider/id]
- *                     [--arms bare,review,pb] [--runs 1] [--only task-name] [--out eval/results] [--keep]
+ *                     [--arms bare,review,pb,pb-each] [--runs 1] [--only task-name] [--out eval/results] [--keep]
  *
- * Arms: bare = Pi alone; review = Pi alone, then /pb:review and one fix round; pb = plan, build, review.
+ * Arms: bare = Pi alone; review = Pi alone, then /pb:review and one fix round; pb = plan, build, review;
+ * pb-each = the same with a check after every task (taskChecks "each") instead of once at the end.
  * --dry checks the wiring without a model call: it starts each arm's Pi, runs /pb:status, and scores the untouched fixture.
  */
 import { spawn, execSync } from "node:child_process";
@@ -25,7 +26,7 @@ const { values: opt } = parseArgs({
     model: { type: "string" },
     thinking: { type: "string" },
     judge: { type: "string" },
-    arms: { type: "string", default: "bare,review,pb" },
+    arms: { type: "string", default: "bare,review,pb,pb-each" },
     runs: { type: "string", default: "1" },
     tasks: { type: "string", default: path.join(HERE, "tasks") },
     only: { type: "string" },
@@ -132,15 +133,16 @@ const readJsonl = (file) =>
         })
     : [];
 
-function prepare(task) {
+function prepare(task, arm) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), `pb-eval-${task.name}-`));
   const sessions = fs.mkdtempSync(path.join(os.tmpdir(), `pb-eval-sessions-`));
   if (task.fixture) fs.cpSync(path.join(HERE, task.fixture), work, { recursive: true });
-  else execSync(`git clone -q ${task.repo} . && git checkout -q ${task.commit}`, { cwd: work });
+  else execSync(`git clone -q ${JSON.stringify(task.repo)} . && git checkout -q ${task.commit}`, { cwd: work });
   if (task.fixture) execSync("git init -q && git add -A && git -c user.name=eval -c user.email=eval@local commit -qm fixture", { cwd: work });
-  if (task.pbConfig) {
+  const pbConfig = { ...(task.pbConfig ?? {}), ...(arm === "pb-each" ? { taskChecks: "each" } : {}) };
+  if (Object.keys(pbConfig).length) {
     fs.mkdirSync(path.join(work, ".pi", "pb"), { recursive: true });
-    fs.writeFileSync(path.join(work, ".pi", "pb", "config.json"), JSON.stringify(task.pbConfig));
+    fs.writeFileSync(path.join(work, ".pi", "pb", "config.json"), JSON.stringify(pbConfig));
   }
   return { work, sessions };
 }
@@ -191,7 +193,19 @@ function hiddenTests(task, work) {
     return { ok: false, ...counts(`${e.stdout ?? ""}${e.stderr ?? ""}`) };
   }
 }
-const counts = (out) => ({ pass: Number(out.match(/^ℹ pass (\d+)/m)?.[1] ?? NaN), fail: Number(out.match(/^ℹ fail (\d+)/m)?.[1] ?? NaN) });
+/** Passed and failed tests from the output of node --test, Maven/Gradle (JUnit summary lines) or pytest. */
+function counts(out) {
+  const node = [out.match(/^ℹ pass (\d+)/m), out.match(/^ℹ fail (\d+)/m)];
+  if (node[0]) return { pass: Number(node[0][1]), fail: Number(node[1]?.[1] ?? 0) };
+  const junit = [...out.matchAll(/Tests run: (\d+), Failures: (\d+), Errors: (\d+)/g)].at(-1);
+  if (junit) {
+    const [run, failed] = [Number(junit[1]), Number(junit[2]) + Number(junit[3])];
+    return { pass: run - failed, fail: failed };
+  }
+  const py = out.match(/(?:(\d+) failed)?[, ]*(?:(\d+) passed)/);
+  if (py) return { pass: Number(py[2] ?? 0), fail: Number(py[1] ?? 0) };
+  return { pass: NaN, fail: NaN };
+}
 
 const JUDGE_SYSTEM = `You are a JUDGE in a fresh context, scoring a code change made for the task in the brief. Do not modify files, and never run git commands that change the working tree or index. Read the diff (git diff HEAD -- . ':(exclude).pi' and the untracked files from git status) and the code around it. Count real problems only: P0 = broken behaviour, security problem, data loss; P1 = the task not done as asked, a bug, missing tests for new behaviour, a weakened test, a workaround; P2 = worth fixing (clarity, conventions, comments). End your reply with a fenced json block: {"p0": n, "p1": n, "p2": n, "summary": "one line"}`;
 
@@ -233,7 +247,7 @@ async function judge(task, work) {
 /* ------------------------------------- arms ------------------------------------- */
 
 async function runArm(task, arm) {
-  const { work, sessions } = prepare(task);
+  const { work, sessions } = prepare(task, arm);
   const log = { dialogs: 0, chat: 0 };
   const answers = [...(task.answers ?? ["Go with your recommendation."])];
   // The stand-in human: pb's own recommendations, and "no" to anything that changes the setup.
@@ -264,7 +278,7 @@ async function runArm(task, arm) {
   try {
     if (opt.dry) {
       if (arm !== "bare") await pi.prompt("/pb:status");
-    } else if (arm === "pb") {
+    } else if (arm === "pb" || arm === "pb-each") {
       await pi.prompt(`/pb:plan ${task.prompt}`);
       await answerQuestions();
       await pi.prompt("/pb:build");
