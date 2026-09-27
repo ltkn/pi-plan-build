@@ -433,16 +433,21 @@ path), constraints the code doesn't make obvious, test and build quirks. Pi
 loads AGENTS.md into every session, so every plan, build, review and
 exploration starts with it instead of rediscovering it.
 
-- **When a feature is done**, `/pb:archive` offers to update it from what the
-  feature established (its spec's Findings, the files it changed).
+- **When a feature is done**, `/pb:archive` updates it from what the feature
+  established (its spec's Findings, the files it changed); `"mapOnArchive":
+  false` turns that off.
 - **Any time**, `/pb:map [focus]` refreshes it from the code as it is now.
+- **`/pb:map undo`** puts the previous map back (again: swaps them back).
 
 A fresh, read-only call proposes the whole new map (it revisits all of it, not
-only the new area) and your session doesn't grow. Lines naming a path that
-doesn't exist are dropped. You see the change as a diff and choose: accept,
-edit it first, or skip. Nothing is written without you, and an unattended
-archive leaves it alone. Aim for about 60 lines: it's read in every session;
-longer is flagged, never refused. `/pb:plan` warns when paths in the map no
+only the new area), in short bullet lines, about 1,500 tokens: it's read in
+every session. Your session doesn't grow. pb checks every path it names, from
+the project root, under the path a heading names, and as the end of a real file
+(`auth/Login` finds `…/auth/Login.java`); the ones that still don't resolve go
+back to it once to be corrected. Then the map is written and the change is shown.
+It asks you first only when something looks off: paths that still don't
+resolve, a large part of the existing map removed, or over twice the budget;
+unanswered, the current map stays. `/pb:plan` warns when paths in the map no
 longer exist (a cheap check, no model call).
 <!-- /pb -->
 

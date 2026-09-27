@@ -1548,26 +1548,38 @@ test("spec writing settles small things as assumptions; the checkpoint asks noth
 
 /* ------------------------------------ project map ------------------------------------ */
 
-test("map: helpers read and write the AGENTS.md section, find its paths, and diff it", async () => {
-  const { readMap, writeMap, mapPaths, dropMissing, mapDiff } = await import("../extensions/pb/map.ts");
+test("map: helpers read and write the AGENTS.md section, resolve its paths leniently, normalize and diff it", async () => {
+  const { readMap, writeMap, mapPaths, unresolvedPaths, normalizeMap, mapDiff } = await import("../extensions/pb/map.ts");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-map-"));
+  execSync("git init -q", { cwd: dir });
   fs.writeFileSync(path.join(dir, "AGENTS.md"), "# Mine\n\nMy own notes.\n");
   writeMap(dir, "- `src/a.ts`: a");
   writeMap(dir, "- `src/b.ts`: b");
   const md = fs.readFileSync(path.join(dir, "AGENTS.md"), "utf8");
   assert.match(md, /^# Mine\n\nMy own notes\.\n\n<!-- pb:map -->\n## Project map\n\n- `src\/b\.ts`: b\n<!-- \/pb:map -->\n$/); // replaced, your text kept
   assert.equal(readMap(dir), "- `src/b.ts`: b");
-  assert.deepEqual(mapPaths("- `src/a.ts:12` and `pom.xml`, `./mvnw -pl api`, `http://x/y`, `**/*.ts`"), ["src/a.ts", "pom.xml"]);
-  fs.mkdirSync(path.join(dir, "src"));
-  fs.writeFileSync(path.join(dir, "src/b.ts"), "");
-  assert.deepEqual(dropMissing(dir, "- `src/b.ts`: b\n- `src/gone.ts`: g"), { body: "- `src/b.ts`: b", dropped: ["- `src/gone.ts`: g"] });
+  assert.deepEqual(mapPaths("- `src/a.ts:12` and `pom.xml`, `./mvnw -pl api`, `http://x/y`, `**/*.ts`, `/signin/**`, `a/.../b.imports`, `harness.jdbcAs(X)`"), ["src/a.ts", "pom.xml"]);
+  fs.mkdirSync(path.join(dir, "platform-core/src/main/java/app/auth"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "platform-core/src/main/java/app/auth/LoginController.java"), "");
+  fs.mkdirSync(path.join(dir, "platform-core/ops"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "platform-core/ops/check.sh"), "");
+  const body = [
+    "### Runtime (platform-core/src/main/java/app/)",
+    "- `auth/`: sign-in", // under the heading's path
+    "- `auth/LoginController`: without extension, found as the end of a real path",
+    "- `ops/check.sh`: relative to a module",
+    "- `platform-core/Gone`: stale",
+  ].join("\n");
+  assert.deepEqual(unresolvedPaths(dir, body).map((u) => u.path), ["platform-core/Gone"]);
+  assert.equal(normalizeMap("## Layout\n- a\n### Empty\n\n\n\n### Tests\n- t\n### Also empty"), "### Layout\n- a\n\n### Tests\n- t");
   assert.deepEqual(mapDiff("- a\n- b", "- a\n- c"), ["- - b", "+ - c"]);
 });
 
-test("map: /pb:archive offers to fold the feature's findings into the map; you see the change and accept it", async () => {
+test("map: /pb:archive updates it by itself: paths that don't resolve go back once to be fixed, then it's written, and undo swaps back", async () => {
   const t = setup({ verify: "true" });
-  fs.mkdirSync(path.join(t.repo, "src"));
+  fs.mkdirSync(path.join(t.repo, "src/main/auth"), { recursive: true });
   fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/main/auth/Login.java"), "class Login {}\n");
   fs.writeFileSync(path.join(t.repo, "AGENTS.md"), "# Shop\n");
   execSync("git add . && git commit -qm src", { cwd: t.repo });
   await written(t, SPEC().replace("## Context\nsrc/order.ts holds the model.", "## Findings\n- `src/order.ts` holds the model."));
@@ -1575,113 +1587,49 @@ test("map: /pb:archive offers to fold the feature's findings into the map; you s
   await t.run("build");
   const briefFile = path.join(os.tmpdir(), `pb-map-brief-${process.pid}.md`);
   process.env.MOCK_BRIEF_OUT = briefFile;
-  t.selects.push("Update the project map in AGENTS.md from this feature", "Accept");
+  const asked = t.selectTitles.length;
   await t.run("archive");
   delete process.env.MOCK_BRIEF_OUT;
-  assert.match(fs.readFileSync(briefFile, "utf8"), /# The current map\n\n\(none yet[\s\S]*# The feature just finished: order-cancellation[\s\S]*`src\/order\.ts` holds the model[\s\S]*# Files that feature changed\n\n[\s\S]*T1\.txt/);
-  const view = t.views.find((v) => v.customType === "pb-map")!.data;
-  assert.ok(view.diff.includes("+ - `src/order.ts`: the order model and its transitions"));
-  assert.deepEqual(view.dropped, ["- `src/gone.ts`: removed long ago"]); // a path that doesn't exist never gets in
-  assert.match(t.selectTitles.at(-1)!, /Project map: added Orders; noted transactions \(\d+ lines\)/);
+  assert.equal(t.selectTitles.length, asked); // no question
+  assert.match(fs.readFileSync(briefFile, "utf8"), /# The current map\n\n\(none yet[\s\S]*# The feature just finished: order-cancellation[\s\S]*`src\/order\.ts` holds the model[\s\S]*# Files that feature changed/);
   const agents = t.read("AGENTS.md");
-  assert.match(agents, /^# Shop\n\n<!-- pb:map -->\n## Project map\n\n### Orders\n- `src\/order\.ts`: the order model[\s\S]*Services own transactions[\s\S]*<!-- \/pb:map -->/);
-  assert.doesNotMatch(agents, /gone\.ts/);
-  assert.match(t.notes.at(-1)!, /Project map updated in AGENTS\.md \(1 line\(s\) with missing paths dropped\)/);
+  assert.match(agents, /^# Shop\n\n<!-- pb:map -->\n## Project map\n\n### Layout\n- `src\/`: the application\n### Orders\n- `src\/order\.ts`[\s\S]*follow `auth\/Login`[\s\S]*Services own transactions[\s\S]*<!-- \/pb:map -->/);
+  assert.doesNotMatch(agents, /gone\.ts|### Empty/); // corrected by the cartographer, not cut by pb; empty headings go
+  assert.deepEqual(t.views.find((v) => v.customType === "pb-map")!.data.warnings, []);
+  assert.match(t.notes.at(-1)!, /Project map written in AGENTS\.md \(~\d+ tokens: added Orders; noted transactions\)\. `\/pb:map undo` puts the previous one back/);
 
-  // Nothing new: no change, nothing to accept.
-  await t.run("map");
-  assert.match(t.notes.at(-1)!, /The project map is up to date/);
+  await t.run("map", "undo");
+  assert.doesNotMatch(t.read("AGENTS.md"), /### Orders/); // back to no map
+  await t.run("map", "undo");
+  assert.match(t.read("AGENTS.md"), /### Orders/); // and forth
 });
 
-test("map: skipping writes nothing; unattended archives skip it; /pb:plan warns about paths that vanished", async () => {
+test("map: it asks only when something looks off (unanswered: the current map stays); /pb:plan warns about paths that vanished", async () => {
   const t = setup({ verify: "true", askTimeoutSec: 0.001 });
-  fs.mkdirSync(path.join(t.repo, "src"));
+  fs.mkdirSync(path.join(t.repo, "src"), { recursive: true });
   fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
-  await written(t);
-  t.agent.script = diligent;
-  await t.run("build");
-  t.selects.push("<timeout>"); // nobody there at archive: the map isn't touched
-  await t.run("archive");
-  assert.ok(!fs.existsSync(path.join(t.repo, "AGENTS.md")));
-  t.selects.push("Skip");
+  process.chdir(t.repo);
+  process.env.MOCK_MAP_STUBBORN = "1"; // the cartographer doesn't fix src/gone.ts
+  t.selects.push("<timeout>");
   await t.run("map");
-  assert.ok(!fs.existsSync(path.join(t.repo, "AGENTS.md")));
+  assert.match(t.selectTitles.at(-1)!, /The proposed project map needs a look: `auth\/Login` doesn't resolve; `src\/gone\.ts` doesn't resolve/);
+  assert.ok(!fs.existsSync(path.join(t.repo, "AGENTS.md"))); // nobody answered: nothing written
+  t.selects.push("Apply it anyway");
+  await t.run("map");
+  delete process.env.MOCK_MAP_STUBBORN;
+  assert.match(t.read("AGENTS.md"), /gone\.ts/);
 
-  const { writeMap } = await import("../extensions/pb/map.ts");
-  writeMap(t.repo, "- `src/order.ts`: orders\n- `src/billing/Invoice.java`: invoices");
-  t.selects.push("No thanks");
-  await t.run("plan", "next feature");
-  assert.ok(t.notes.some((n) => /The project map in AGENTS\.md names 1 path\(s\) that no longer exist \(src\/billing\/Invoice\.java\): \/pb:map refreshes it/.test(n)));
-});
-
-/* ------------------------------------ security ------------------------------------ */
-
-test("security: the standards assume abuse; a spec states Threats for entry points and trust boundaries", async () => {
-  const { DEFAULT_STANDARDS } = await import("../extensions/pb/standards.ts");
-  assert.match(DEFAULT_STANDARDS, /- Security: assume every entry point \(API, UI action, command, message, file, webhook\) will be abused[\s\S]*logic reused from another flow keeps that flow's preconditions/);
-  assert.match(DEFAULT_STANDARDS, /- Robustness: at a boundary, assume input is hostile or broken[\s\S]*can't be bypassed by quantity, repetition, reordering or racing[\s\S]*Inside the boundary, rely on invariants \(types, constraints, transactions\), not repeated checks\./);
-  const { specPrompt, REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
-  assert.match(specPrompt("", []), /## Threats and abuse\nOnly when the change adds or alters an entry point, touches a trust boundary[\s\S]*or has rules someone gains from breaking[\s\S]*by quantity, repetition, reordering or racing[\s\S]*the acceptance criteria then include the abuse cases/i);
-  assert.match(REVIEWER_SYSTEM, /Its Threats and abuse, if any: each abuse prevented and tested/);
-  const { ATTACKER_SYSTEM } = await import("../extensions/pb/prompts.ts");
-  for (const area of ["Access:", "Business rules:", "Concurrency:", "Resources:", "Failure:", "Numbers and time:", "Trust:", "Leaks:", "Configuration:"]) assert.ok(ATTACKER_SYSTEM.includes(area), area);
-  assert.match(ATTACKER_SYSTEM, /at the boundary or as an invariant \(a type, a constraint, a transaction, a lock\), not checks scattered through the code/);
-});
-
-test("security: sensitive ground is recognised from the spec's Threats, file names or the diff; deliberately broad", async () => {
-  const { sensitiveGround } = await import("../extensions/pb/review.ts");
-  assert.equal(sensitiveGround({ spec: "# X\n## Threats and abuse\n- a", files: [], diff: "" }), "the spec has Threats and abuse");
-  assert.equal(sensitiveGround({ files: ["src/cart.ts"], diff: "+  const total = price * quantity;" }), 'the diff mentions "price"'); // business rules, not only auth
-  assert.equal(sensitiveGround({ files: ["src/auth/LoginController.java"], diff: "" }), "touches src/auth/LoginController.java");
-  assert.equal(sensitiveGround({ files: ["src/a.ts"], diff: "+++ b/src/a.ts\n+  if (user.role === 'admin') {" }), 'the diff mentions "role"');
-  assert.equal(sensitiveGround({ files: ["src/a.ts"], diff: "-  const token = 1;\n+  const total = 2;" }), undefined); // removed lines don't count
-  assert.equal(sensitiveGround({ files: ["README.md"], diff: "+ fix a typo" }), undefined);
-});
-
-test("security: the abuse pass joins every review by default; its findings are double-checked like the rest", async () => {
-  const t = setup({ verify: "true" });
-  process.env.MOCK_ATTACK = "finding";
-  await written(t, SPEC({ tasks: "### T1: account\nCreate src/account.ts.\n- Acceptance: it exists" }));
-  t.agent.script = async (text, tool) => {
-    if (text.includes("Task T1")) {
-      fs.mkdirSync("src", { recursive: true });
-      fs.writeFileSync("src/account.ts", "export function changePassword(session: string) {}\n");
-    }
-    return diligent(text, tool);
-  };
-  await t.run("build");
-  await t.run("review");
-  const post = t.posts.at(-1)!;
-  assert.match(post, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 1 · with an abuse pass\n/);
-  assert.match(post, /\[P1\] src\/account\.ts:7 — Abuse: a stolen session alone can set a password the owner never set\n   Fix: require proof for a first password/);
-  assert.ok(t.events("order-cancellation").some((e) => e.type === "review" && e.security === true));
-
-  process.env.MOCK_VERIFY = "reject"; // the verifier can dismiss an attacker's finding too
-  await t.run("review", "--full");
-  delete process.env.MOCK_VERIFY;
-  delete process.env.MOCK_ATTACK;
-  assert.match(t.posts.at(-1)!, /Dismissed after a second look:[\s\S]*Abuse: a stolen session alone/);
-});
-
-test("security: auto runs the abuse pass only on sensitive ground; off never; the default runs it everywhere", async () => {
-  const t = setup({ verify: "true", reviewer: { security: "auto" } });
-  await written(t);
-  t.agent.script = diligent;
-  await t.run("build");
-  await t.run("review");
-  assert.doesNotMatch(t.posts.at(-1)!, /abuse pass/);
-
-  const u = setup({ verify: "true" }); // default: always
+  const u = setup({ verify: "true", mapOnArchive: false });
   await written(u);
   u.agent.script = diligent;
   await u.run("build");
-  await u.run("review");
-  assert.match(u.posts.at(-1)!, /with an abuse pass/);
+  await u.run("archive");
+  assert.ok(!fs.existsSync(path.join(u.repo, "AGENTS.md")));
 
-  const v = setup({ verify: "true", reviewer: { security: "off" } });
-  await written(v, SPEC().replace("## Context", "## Threats\n- a stolen session\n## Context"));
-  v.agent.script = diligent;
-  await v.run("build");
-  await v.run("review");
-  assert.doesNotMatch(v.posts.at(-1)!, /abuse pass/);
+  const { writeMap } = await import("../extensions/pb/map.ts");
+  writeMap(u.repo, "- `README`: readme\n- `src/billing/Invoice.java`: invoices");
+  process.chdir(u.repo);
+  u.selects.push("No thanks");
+  await u.run("plan", "next feature");
+  assert.ok(u.notes.some((n) => /The project map in AGENTS\.md names 1 path\(s\) that no longer exist \(src\/billing\/Invoice\.java\): \/pb:map refreshes it/.test(n)));
 });

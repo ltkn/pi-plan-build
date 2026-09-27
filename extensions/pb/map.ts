@@ -4,6 +4,7 @@
  * test and build quirks. Pi loads AGENTS.md into every session, so every plan, build, review and
  * exploration starts with it instead of rediscovering it. pb proposes updates; you accept them.
  */
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -11,8 +12,8 @@ const START = "<!-- pb:map -->";
 const END = "<!-- /pb:map -->";
 const HEADING = "## Project map";
 
-/** Above this many lines the map is flagged as long (never rejected): it's read in every session. */
-export const MAP_LINES = 60;
+/** The map's budget in tokens: it's read in every session. Past twice this, pb asks before writing it. */
+export const MAP_TOKENS = 1500;
 
 export const mapFile = (cwd: string) => path.join(cwd, "AGENTS.md");
 
@@ -48,27 +49,80 @@ export function writeMap(cwd: string, body: string): void {
   fs.writeFileSync(file, next.endsWith("\n") ? next : `${next}\n`);
 }
 
-/** Paths the map names (in backticks, with a slash or a file extension), for a cheap existence check. */
+/**
+ * Paths the map names: backticked tokens with a slash or a file extension, without spaces, wildcards,
+ * placeholders or calls. `module/Class` and package-relative paths count: they're resolved leniently.
+ */
 export function mapPaths(body: string): string[] {
   const found = [...body.matchAll(/`([^`\s]+)`/g)]
     .map((m) => m[1].replace(/[:#].*$/, "").replace(/\/+$/, ""))
-    .filter((p) => !p.startsWith("-") && !/^https?:/.test(p) && (p.includes("/") || /\.[a-z0-9]{1,6}$/i.test(p)) && !/[*?{}<>$]/.test(p));
+    .filter(
+      (p) =>
+        p &&
+        !p.startsWith("-") &&
+        !/^[a-z]+:\/\//i.test(p) &&
+        !p.includes("...") &&
+        !/[*?{}<>$()=,;@]/.test(p) &&
+        (p.includes("/") || /\.[a-z][a-z0-9]{0,5}$/i.test(p)) &&
+        !/^\//.test(p), // "/signin/**" style routes aren't files
+    );
   return [...new Set(found)];
 }
 
-/** The paths the map names that don't exist in the project. */
-export const missingPaths = (cwd: string, body: string) => mapPaths(body).filter((p) => !fs.existsSync(path.resolve(cwd, p)));
-
-/** Drop the lines that name a path that doesn't exist; returns the kept text and the dropped lines. */
-export function dropMissing(cwd: string, body: string): { body: string; dropped: string[] } {
-  const dropped: string[] = [];
-  const kept = body.split("\n").filter((line) => {
-    const bad = missingPaths(cwd, line).length > 0;
-    if (bad) dropped.push(line.trim());
-    return !bad;
-  });
-  return { body: kept.join("\n"), dropped };
+/** The project's tracked (and untracked, not ignored) files, for resolving the map's paths. */
+function projectFiles(cwd: string): string[] {
+  try {
+    return execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] })
+      .split("\n")
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
 }
+
+/**
+ * Whether a path the map names exists: from the project root, under the path the section's heading names,
+ * or as the end of a real path (with or without an extension: `auth/Login` finds `…/auth/Login.java`).
+ */
+function resolves(cwd: string, p: string, base: string | undefined, files: string[]): boolean {
+  if (fs.existsSync(path.resolve(cwd, p)) || (base && fs.existsSync(path.resolve(cwd, base, p)))) return true;
+  const tail = `/${p}`;
+  return files.some((f) => {
+    const g = `/${f}`;
+    return g.endsWith(tail) || g.includes(`${tail}/`) || new RegExp(`${tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.[a-z0-9]+$`, "i").test(g);
+  });
+}
+
+/** The paths in the map that don't resolve, with the line naming each. */
+export function unresolvedPaths(cwd: string, body: string, files = projectFiles(cwd)): { path: string; line: string }[] {
+  const out: { path: string; line: string }[] = [];
+  let base: string | undefined;
+  for (const line of body.split("\n")) {
+    if (/^#{1,6}\s/.test(line)) base = line.match(/\(([^()\s]+\/)\)/)?.[1];
+    for (const p of mapPaths(line)) if (!resolves(cwd, p, base, files)) out.push({ path: p, line: line.trim() });
+  }
+  return out;
+}
+
+/** The paths the map names that don't exist (a cheap staleness check, no model call). */
+export const missingPaths = (cwd: string, body: string) => [...new Set(unresolvedPaths(cwd, body).map((u) => u.path))];
+
+/** Headings one level below the map's own, no empty headings, no runs of blank lines. */
+export function normalizeMap(body: string): string {
+  const lines = body
+    .trim()
+    .split("\n")
+    .map((l) => l.replace(/^#{1,3}\s+/, "### ").trimEnd());
+  const kept = lines.filter((l, i) => {
+    if (!l.startsWith("### ")) return true;
+    const next = lines.slice(i + 1).find((x) => x.trim());
+    return !!next && !next.startsWith("### ");
+  });
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** Rough token count (4 characters a token). */
+export const mapTokens = (body: string) => Math.round(body.length / 4);
 
 /** A line diff: what's removed and added, in order. */
 export function mapDiff(before: string, after: string): string[] {
@@ -90,11 +144,25 @@ What belongs in the map: what stays true across features and saves exploration:
 - Test and build quirks (e.g. "integration tests need Docker").
 What doesn't: a feature's decisions or tasks, versions, history, anything one \`ls\` answers.
 
-Revisit the whole map, not only the area just worked on: check every path and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Terse lines grouped under a few "### " areas; about 60 lines at most: it is read in every session.
+Say where to look and what isn't obvious, not how things work in detail: the code and the project's own docs hold the detail. Start with the overview (the modules and what each is for).
+
+Revisit the whole map, not only the area just worked on: check every path and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings; about 1,500 tokens at most: it is read in every session.
 
 Report with the report_map tool: the whole new map (its body, without a top heading) and the list of changes, one line each.`;
 
-export function cartographerBrief(o: { current: string; spec?: { name: string; findings: string }; changed?: string[]; focus?: string }): string {
+export function cartographerBrief(o: { current: string; spec?: { name: string; findings: string }; changed?: string[]; focus?: string; unresolved?: { path: string; line: string }[]; proposed?: string }): string {
+  if (o.proposed)
+    return [
+      "# Your proposed map",
+      "",
+      o.proposed,
+      "",
+      "# Paths in it that don't resolve",
+      "",
+      "Each of these names nothing in the project (tried from the root, under the section's path, and as the end of a real path). Correct each one to a path that exists (from the project root), or remove it; keep everything else as it is. Report the whole map again with report_map.",
+      "",
+      ...(o.unresolved ?? []).map((u) => `- \`${u.path}\` in: ${u.line.slice(0, 200)}`),
+    ].join("\n");
   return [
     "# The current map",
     "",

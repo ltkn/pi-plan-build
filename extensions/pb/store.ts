@@ -49,6 +49,8 @@ export interface Config {
    * build's state at the next task boundary. 0 = never (Pi compacts; pb still writes the summary).
    */
   checkpointAt: number;
+  /** /pb:archive updates the project map in AGENTS.md from the finished feature. */
+  mapOnArchive: boolean;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -65,6 +67,7 @@ export const DEFAULT_CONFIG: Config = {
   baseline: true,
   explorer: {},
   checkpointAt: 75,
+  mapOnArchive: true,
 };
 
 export interface VerifyResult {
@@ -307,6 +310,18 @@ export class Store {
     if (!map[sessionFile]) return;
     map[sessionFile] = { ...map[sessionFile], checkpointFrom: entry };
     writeFile(path.join(this.root, "planning.json"), `${JSON.stringify(map, null, 2)}\n`);
+  }
+
+  /** The project map before its last update, for /pb:map undo. */
+  mapPrevious(): string | undefined {
+    try {
+      return fs.readFileSync(path.join(this.root, "map-previous.md"), "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+  saveMapPrevious(body: string): void {
+    writeFile(path.join(this.root, "map-previous.md"), body);
   }
 
   /** The test suite's result when planning began. */

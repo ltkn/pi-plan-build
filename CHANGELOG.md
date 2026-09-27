@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.0
+
+- **Fixed: the map's path check threw away good content.** It took every backticked path as relative to the project root and dropped the whole line when it didn't exist, so `module/Class` names, package-relative paths and paths inside a module wiped out whole sections (leaving empty headings). Paths now resolve from the root, under the path a section's heading names, and as the end of a real file with or without extension; the ones that still don't resolve go back to the cartographer once to be corrected or removed. pb never deletes map text itself
+- **The map is applied without a question**: written and shown as a diff, with `/pb:map undo` to put the previous one back. It asks only when something looks off (paths that still don't resolve, a large part of the existing map removed, over twice the budget); unanswered, the current map stays. `/pb:archive` updates it without asking first (`mapOnArchive: false` turns that off)
+- **A tighter map**: short bullet lines instead of paragraphs, the overview first, "where to look and what isn't obvious" rather than how things work; a budget of about 1,500 tokens instead of 60 lines (lines can be paragraphs); headings normalized, empty ones removed
+
 ## 1.8.0
 
 - **The abuse pass, on every review.** The attacker pass is broadened beyond access control to abuse of the code in general: business rules bypassed by quantity, repetition, reordering or acting on yourself; races, double submits and non-idempotent retries; unbounded work per request; inconsistent state after a failure halfway; overflow, floats for money, rounding, time zones and expiry; data from databases, services, queues or files taken as safe; leaks; configuration and permissions. Fixes go at the boundary or as invariants, not checks scattered through the code. Its findings are marked "Abuse:". `reviewer.security` now defaults to `always`; `auto` also recognises entry points and money, quantity and state changes

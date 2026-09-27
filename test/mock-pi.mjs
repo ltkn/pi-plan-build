@@ -33,8 +33,10 @@ if (sys.includes("ATTACKER")) {
   const verdict = process.env.MOCK_VERIFY === "reject" ? "rejected" : "confirmed";
   say([call("report_verdicts", { verdicts: Array.from({ length: n }, (_, i) => ({ finding: i + 1, verdict, evidence: "src/order.ts:11 already guards it" })) })]);
 } else if (sys.includes("CARTOGRAPHER")) {
-  if (process.env.MOCK_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_BRIEF_OUT, brief);
-  const map = "### Orders\n- `src/order.ts`: the order model and its transitions\n- `src/gone.ts`: removed long ago\n- Services own transactions; controllers never call repositories.";
+  const repairing = brief.includes("# Paths in it that don't resolve");
+  if (process.env.MOCK_BRIEF_OUT && !repairing) fs.writeFileSync(process.env.MOCK_BRIEF_OUT, brief);
+  const gone = !repairing || process.env.MOCK_MAP_STUBBORN ? "\n- `src/gone.ts`: removed long ago" : "";
+  const map = `## Layout\n- \`src/\`: the application\n### Orders\n- \`src/order.ts\`: the order model and its transitions\n- Sign-in: follow \`auth/Login\`.${gone}\n- Services own transactions; controllers never call repositories.\n### Empty`;
   say([call("report_map", { map, changes: ["added Orders", "noted transactions"] })]);
 } else if (sys.includes("EXPLORER")) {
   say([{ type: "text", text: `src/order/Order.java holds the model; OrderService applies transitions. (asked: ${brief.split("\n")[2]})` }]);

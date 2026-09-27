@@ -15,7 +15,7 @@ build. Your engineering standards live in AGENTS.md, written once.
                       double-checked; follow-ups look only at what changed (--full: everything)
                       no spec? reviews the uncommitted change against its intent
 /pb:deps [which]      check dependencies and propose upgrades, as a change of their own
-/pb:map [focus]       refresh the project map in AGENTS.md (also offered at /pb:archive)
+/pb:map [focus|undo]  refresh the project map in AGENTS.md (done at /pb:archive too); undo puts the previous back
 /pb:spec [which]      write or revise a spec without building (optional)
 /pb:undo · /pb:status · /pb:stats · /pb:archive · /pb:help
 ```
@@ -23,7 +23,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.8.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.9.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -104,12 +104,12 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   run it on another model family than the one that built the change. It can't
   change your files: anything it touches is put back.
 - **A project map, so the next feature doesn't start from zero.** When you
-  archive a feature, pb offers to fold what it established about the project
-  (layout, patterns to follow, constraints, test quirks) into a short map in
-  AGENTS.md. A fresh call proposes the update against the code as it is now,
-  lines naming paths that don't exist are dropped, and you see the change and
-  accept it. Every later session, plan, build, review and exploration starts
-  with it; `/pb:plan` warns when paths in it vanished.
+  archive a feature, pb folds what it established about the project (layout,
+  patterns to follow, constraints, test quirks) into a short map in AGENTS.md.
+  A fresh call writes it against the code as it is now; pb checks every path it
+  names and has it correct the ones that don't resolve; it asks you only when
+  something looks off, and `/pb:map undo` goes back. Every later session, plan,
+  build, review and exploration starts with it.
 - **Your standards, once, where Pi already looks.** Engineering standards
   live in AGENTS.md, which Pi loads into every session. pb offers once to add
   its default section (with Java 25 defaults in a Maven or Gradle project).
@@ -181,6 +181,7 @@ the existing ones still run.
 | `reviewer` | `{"verify": true, "security": "always"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "always"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the abuse pass joins (`always`; `auto`: when the change looks sensitive; `off`) |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
+| `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |
 | `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build is reset to its state at the next task boundary; 0 = never |
 
 ## On disk

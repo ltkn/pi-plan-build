@@ -16,15 +16,15 @@ export function registerRenderers(pi: ExtensionAPI) {
     return box;
   });
 
-  // A proposed change to the project map: shown to you, not sent to the model.
-  pi.registerEntryRenderer<{ diff: string[]; dropped: string[]; lines: number }>("pb-map", (entry, _opts, theme) => {
+  // A change to the project map: shown to you, not sent to the model.
+  pi.registerEntryRenderer<{ diff: string[]; warnings: string[]; tokens: number }>("pb-map", (entry, _opts, theme) => {
     const d = entry.data;
     if (!d) return undefined;
     const box = new Box(1, 1, (s) => theme.bg("customMessageBg", s));
-    const head = theme.fg("accent", "project map (AGENTS.md)") + theme.fg(d.lines > 60 ? "warning" : "dim", `  ${d.lines} lines${d.lines > 60 ? ", over the ~60-line budget" : ""}`);
-    const body = d.diff.length ? d.diff.map((l) => theme.fg(l.startsWith("+") ? "toolDiffAdded" : "toolDiffRemoved", l)) : [theme.fg("dim", "no changes")];
-    const dropped = d.dropped.map((l) => theme.fg("warning", `dropped (path doesn't exist): ${l}`));
-    box.addChild(new Text([head, ...body, ...dropped].join("\n"), 0, 0));
+    const head = theme.fg("accent", "project map (AGENTS.md)") + theme.fg(d.tokens > 1500 ? "warning" : "dim", `  ~${d.tokens} tokens${d.tokens > 1500 ? ", over the ~1,500 budget" : ""}`);
+    const body = d.diff.map((l) => theme.fg(l.startsWith("+") ? "toolDiffAdded" : "toolDiffRemoved", l));
+    const warnings = (d.warnings ?? []).map((w) => theme.fg("warning", `⚠ ${w}`));
+    box.addChild(new Text([head, ...body, ...warnings].join("\n"), 0, 0));
     return box;
   });
 }
