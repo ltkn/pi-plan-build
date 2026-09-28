@@ -12,8 +12,8 @@ const START = "<!-- pb:map -->";
 const END = "<!-- /pb:map -->";
 const HEADING = "## Project map";
 
-/** The map's budget in tokens: it's read in every session. Past twice this, pb asks before writing it. */
-export const MAP_TOKENS = 1500;
+/** The map's soft ceiling in tokens: it's read in every session, so it stays as short as the project allows. */
+export const MAP_TOKENS = 8000;
 
 export const mapFile = (cwd: string) => path.join(cwd, "AGENTS.md");
 
@@ -146,7 +146,7 @@ What doesn't: a feature's decisions or tasks, versions, history, anything one \`
 
 Say where to look and what isn't obvious, not how things work in detail: the code and the project's own docs hold the detail. Start with the overview (the modules and what each is for).
 
-Revisit the whole map, not only the area just worked on: check every path and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings; about 1,500 tokens at most: it is read in every session.
+Revisit the whole map, not only the area just worked on: check every path and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings. It is read in every session: keep each line only if it saves a later feature a search or a mistake, and cut what the code, a file name or one \`ls\` already says. As long as the project needs, as short as it allows; about 8,000 tokens at most.
 
 Report with the report_map tool: the whole new map (its body, without a top heading) and the list of changes, one line each.`;
 

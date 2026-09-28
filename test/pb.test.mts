@@ -1755,7 +1755,7 @@ test("map: its entry reads well: collapsed, what changed; expanded, the map as m
   const expanded = mapView(d, true);
   assert.equal(expanded.markdown, "### Orders\n- `src/order.ts`: orders");
   assert.deepEqual(expanded.removed, ["- `old.ts`: gone"]);
-  assert.match(mapView({ ...d, tokens: 3200, warnings: ["`x/y` doesn't resolve"] }, false).head, /over the ~1,500 budget/);
+  assert.match(mapView({ ...d, tokens: 9000, warnings: ["`x/y` doesn't resolve"] }, false).head, /over the ~8,000 budget/);
 });
 
 test("pb_ask counts down while planning too: unanswered, the recommendation is taken as an assumption to confirm", async () => {

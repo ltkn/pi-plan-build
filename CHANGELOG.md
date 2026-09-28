@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.15.1
+
+- **Room for complex projects in the map**: its ceiling is ~8,000 tokens (was ~1,500), and its size no longer makes pb ask before writing it; the cartographer keeps a line only if it saves a later feature a search or a mistake
+
 ## 1.15.0
 
 - **Stronger default standards**: new lines for one source of truth (use the rule or canonical form that already exists, never a second copy), consistency and concurrency from the database (one transaction per request, atomic statements or row locks, no check-then-write), and a last re-read of the diff as an attacker and as a race; tests must fail without the fix; stored, compared or sent values are validated strictly. They're added only where pb adds its section: an AGENTS.md that already has one keeps its own

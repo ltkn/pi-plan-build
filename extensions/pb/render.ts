@@ -4,6 +4,7 @@
  */
 import { type ExtensionAPI, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
+import { MAP_TOKENS } from "./map.ts";
 
 export function registerRenderers(pi: ExtensionAPI) {
   pi.registerEntryRenderer<{ name: string; markdown: string }>("pb-spec", (entry, { expanded }, theme) => {
@@ -47,8 +48,8 @@ export interface MapView {
 export function mapView(d: MapView, expanded: boolean) {
   const added = d.diff.filter((l) => l.startsWith("+")).length;
   const removedLines = d.diff.filter((l) => l.startsWith("-")).map((l) => l.slice(2));
-  const over = d.tokens > 1500;
-  const head = `~${d.tokens} tokens${over ? ", over the ~1,500 budget" : ""} · ${added} line${added === 1 ? "" : "s"} added, ${removedLines.length} removed`;
+  const over = d.tokens > MAP_TOKENS;
+  const head = `~${d.tokens} tokens${over ? `, over the ~${MAP_TOKENS.toLocaleString("en-US")} budget` : ""} · ${added} line${added === 1 ? "" : "s"} added, ${removedLines.length} removed`;
   const lines: { text: string; kind: "change" | "warning" | "hint" }[] = [
     ...(d.changes ?? []).map((c) => ({ text: `• ${c}`, kind: "change" as const })),
     ...d.warnings.map((w) => ({ text: `⚠ ${w}`, kind: "warning" as const })),

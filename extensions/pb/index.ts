@@ -45,7 +45,7 @@ import {
   specPrompt,
   taskPrompt,
 } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, cartographerBrief, findingsOf, mapDiff, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
@@ -1886,8 +1886,8 @@ export default function pb(pi: ExtensionAPI) {
   /**
    * Update the project map in a fresh, read-only call (the session doesn't grow). Paths that don't resolve
    * go back to it once to be corrected; then the map is written, with the change shown and /pb:map undo to
-   * go back. It asks first only when something looks off: paths that still don't resolve, a large part of
-   * the existing map removed, or far over budget (unanswered: the current map stays).
+   * go back. It asks first only when something looks off: paths that still don't resolve, or a large part of
+   * the existing map removed (unanswered: the current map stays).
    */
   const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string } = {}) => {
     const cfg = store.config();
@@ -1962,7 +1962,6 @@ export default function pb(pi: ExtensionAPI) {
     const warnings = [
       ...unresolved.map((u) => `\`${u.path}\` doesn't resolve`),
       ...(currentLines >= 6 && removed / currentLines > 0.3 ? [`it removes ${removed} of the map's ${currentLines} lines`] : []),
-      ...(tokens > 2 * MAP_TOKENS ? [`~${tokens} tokens, over twice the ~${MAP_TOKENS} budget`] : []),
     ];
     pi.appendEntry("pb-map", { diff, warnings, tokens, map: body, changes });
     if (warnings.length) {
