@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.13.0
+
+- The abuse pass is optional per review: when the review is done, pb asks whether to run it now; unanswered (`askTimeoutSec`, 5 minutes), it runs; skipped, the result says "abuse pass skipped"
+
 ## 1.12.0
 
 - **The review runs in sessions you're in.** `/pb:review` opens a fresh session, "review: <spec>", and takes you there: you watch the reviewer natively, and can interrupt it or ask it something. Then the abuse pass, "abuse: <spec>", the same way; then pb takes you back to your session with the result. The reviewer's model is read-only (no edit or write, and anything its commands change is put back); it reports with `pb_report_findings`, and a pass ends when it has reported and stopped, or at `/pb:review done`. The double-check of P0/P1 findings stays in the background

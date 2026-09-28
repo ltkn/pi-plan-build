@@ -1587,7 +1587,17 @@ export default function pb(pi: ExtensionAPI) {
       writeReview(store, run, true);
       return;
     }
-    const todo: "review" | "abuse" | undefined = !run.passes.length ? "review" : run.security && run.passes.length === 1 ? "abuse" : undefined;
+    let todo: "review" | "abuse" | undefined = !run.passes.length ? "review" : run.security && run.passes.length === 1 ? "abuse" : undefined;
+    if (todo === "abuse") {
+      // The abuse pass is optional: asked when the review is done; unanswered, it runs.
+      const RUN = "Run the abuse pass";
+      const choice = await choose(from, store, "The review is done. Run the abuse pass now (someone trying to break the change)?", [RUN, "Skip it"], RUN);
+      if (choice !== RUN) {
+        run.security = undefined;
+        run.abuseSkipped = true;
+        todo = undefined;
+      }
+    }
     if (!todo) return reviewFinish(from, store, run);
     store.saveReviewRun(run);
     store.setCarry({ model: run.model, thinking: run.thinking, spec: run.name ?? "", review: { role: todo, spec: run.name } });
@@ -1625,7 +1635,7 @@ export default function pb(pi: ExtensionAPI) {
     const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
     const sessions = run.passes.map((x) => `${x.role === "review" ? "reviewer" : "abuse pass"} \`pi --session ${path.relative(run.cwd, x.session)}\``);
     const text = [
-      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an abuse pass" : ""}`,
+      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an abuse pass" : run.abuseSkipped ? " · abuse pass skipped" : ""}`,
       ...(o.partial
         ? ["", `⚠ You left the review before it finished: the ${finished("review") ? "abuse pass" : "review"} didn't finish; this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),

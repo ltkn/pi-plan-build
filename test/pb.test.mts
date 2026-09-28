@@ -1000,6 +1000,27 @@ test("review: reopening an interrupted review session, /pb:review continue picks
   assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*with an abuse pass/);
 });
 
+test("review: the abuse pass is asked for when the review is done; skipped, the result says so; unanswered, it runs", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.selects.push("Keep p/m", "Skip it"); // the one-time reviewer-model offer comes first
+  await t.run("review");
+  assert.ok(t.selectTitles.includes("The review is done. Run the abuse pass now (someone trying to break the change)?"));
+  assert.ok(![...t.names.values()].includes("abuse: order-cancellation"));
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS · P0 0 · P1 0 · P2 1 · P3 1 · abuse pass skipped/);
+
+  const u = setup({ verify: "true", askTimeoutSec: 0.001 });
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  u.selects.push("<timeout>"); // nobody there: it runs
+  await u.run("review");
+  assert.ok([...u.names.values()].includes("abuse: order-cancellation"));
+  assert.match(u.posts.at(-1)!, /with an abuse pass/);
+});
+
 test("review: a follow-up looks at the previous findings and what changed since", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -1039,12 +1060,11 @@ test("review: offers once to run the reviewer on another model than the one that
   await t.run("build");
   t.selects.push("p/big");
   await t.run("review");
-  assert.match(t.selectTitles.at(-1)!, /The reviewer runs on p\/m, which likely built this too/);
+  assert.ok(t.selectTitles.some((x) => /The reviewer runs on p\/m, which likely built this too/.test(x)));
   assert.equal(JSON.parse(t.read(".pi/pb/config.json")).reviewer.model, "p/big");
   assert.equal(JSON.parse(t.read(".pi/pb/config.json")).maxAttempts, 2); // the rest kept as written
-  const n = t.selectTitles.length;
   await t.run("review", "--full");
-  assert.equal(t.selectTitles.length, n); // asked once
+  assert.equal(t.selectTitles.filter((x) => /The reviewer runs on/.test(x)).length, 1); // asked once
 });
 
 test("review: works without a spec, on the uncommitted change and its intent", async () => {

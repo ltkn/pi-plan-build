@@ -418,8 +418,9 @@ each run in a real Pi session you're in: you watch everything natively, and
 you can interrupt it or ask it something ("why is 3 a P1?"). Its model is
 read-only: it can't edit or write files, and anything its commands change is
 put back. A pass ends when it has reported its findings and stops, or at
-`/pb:review done`; then pb takes you to the next pass, and finally back to your
-session with the result. Asking questions is fine; arguing it out of a finding
+`/pb:review done`. When the review is done, pb asks whether to run the abuse
+pass now (unanswered, after `askTimeoutSec`, it runs; skipped, the result says
+so), and finally takes you back to your session with the result. Asking questions is fine; arguing it out of a finding
 makes it less independent. Both sessions stay in `/resume`, named, and the
 result names them too.
 

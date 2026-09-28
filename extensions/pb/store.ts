@@ -195,6 +195,8 @@ export interface ReviewRun {
   model?: string;
   thinking?: string;
   passes: { role: "review" | "abuse"; findings: Finding[]; prose: string; session: string; left: boolean }[];
+  /** you chose to skip the abuse pass when the review was done */
+  abuseSkipped?: boolean;
   /** the pass you left before it finished */
   interrupted?: { role: "review" | "abuse"; session: string };
 }
