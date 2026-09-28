@@ -12,7 +12,7 @@ build. Your engineering standards live in AGENTS.md, written once.
                       build, compact to the build's state
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
                       (--fresh: in a new session from the spec)
-/pb:review [focus]    independent review against the spec and your standards, P0–P3, blocking findings
+/pb:review [focus]    independent review, in fresh sessions you watch (reviewer, then abuse pass), P0–P3, blocking findings
                       double-checked; follow-ups look only at what changed (--full: everything)
                       no spec? reviews the uncommitted change against its intent
 /pb:deps [which]      check dependencies and propose upgrades, as a change of their own
@@ -24,7 +24,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.11.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.12.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -98,6 +98,10 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   gains from breaking; and every review includes an abuse pass with one job:
   break the change (access, business rules, races, resources, failure, numbers
   and time, trust, leaks, configuration).
+- **A review you can watch.** The reviewer and the abuse pass each run in a
+  fresh, read-only Pi session that pb takes you into: watch it, interrupt it,
+  ask it something; pb brings you back with the result, which is also kept in
+  the spec's `review.md`.
 - **Fresh eyes where they pay.** The reviewer never saw the build's reasoning,
   and judges the spec too: a faithful build of a wrong plan is still wrong. It
   reports findings through a tool; a second fresh call double-checks the
@@ -194,7 +198,8 @@ the existing ones still run.
 | `.pi/pb/specs/<name>/checkpoints.json`, `events.jsonl` | undo points (files and conversation) and stats |
 | `.pi/pb/baseline.json`, `planning.json` | the last test baseline; planning sessions and their snapshots |
 | `.pi/pb/explore.jsonl` | `pb_explore` usage per session |
-| `.pi/pb/specs/<name>/sessions/`, `.pi/pb/sessions/` | the whole runs of a spec's review passes, and of the explorer and cartographer, to open with `pi --session <file>`; removed by `/pb:archive` |
+| `.pi/pb/specs/<name>/review.md` | the last review's result (also posted in the session) |
+| `.pi/pb/specs/<name>/sessions/`, `.pi/pb/sessions/` | the saved runs of the verifier, the explorer and the cartographer, to open with `pi --session <file>`; removed by `/pb:archive` |
 | `.pi/pb-archive/` | archived specs (git-ignored by itself) |
 
 Snapshots live in git's object store under `refs/pb/checkpoints`; your branch,

@@ -27,7 +27,8 @@ function setup(config: object = {}) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pb-test-"));
   execSync("git init -q && git config user.email t@t && git config user.name t && echo hi > README && git add . && git commit -qm init", { cwd: repo });
   fs.mkdirSync(path.join(repo, ".pi/pb"), { recursive: true });
-  fs.writeFileSync(path.join(repo, ".pi/pb/config.json"), JSON.stringify({ build: null, maxAttempts: 2, baseline: false, ...config }));
+  const c = config as { reviewer?: object };
+  fs.writeFileSync(path.join(repo, ".pi/pb/config.json"), JSON.stringify({ build: null, maxAttempts: 2, baseline: false, ...config, reviewer: { idleSec: 0.2, ...(c.reviewer ?? {}) } }));
 
   const posts: string[] = [];
   const notes: string[] = [];
@@ -43,6 +44,15 @@ function setup(config: object = {}) {
   const resets: { summary: string; firstKeptEntryId: string | null }[] = [];
   const blocked: string[] = [];
   const agent: { script?: Script } = {};
+  /** What the stand-in reviewer and abuse pass report (in their review sessions). */
+  const reviewer: { review: object[]; abuse: object[]; prose: string; silent?: boolean; write?: string; script?: boolean } = {
+    review: [
+      { priority: "P3", file: "src/order.ts", line: 12, title: "consider a guard clause", fix: "return early" },
+      { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
+    ],
+    abuse: [],
+    prose: "Acceptance: all met.",
+  };
   const names = new Map<string, string>();
   const stat = { runs: 0, editorText: "" };
   let sessions = 0;
@@ -87,6 +97,7 @@ function setup(config: object = {}) {
     usage: number;
     hasUI: boolean;
     contextFiles: { path: string; content: string }[];
+    activeTools?: string[];
   };
   const MODELS = [
     { provider: "p", id: "m", contextWindow: 100000 },
@@ -126,12 +137,12 @@ function setup(config: object = {}) {
       registerEntryRenderer: (n: string) => self.renderers.push(n),
       registerMessageRenderer: (n: string) => self.renderers.push(n),
       on: (e: string, h: (e: object, ctx: object) => unknown) => (self.handlers[e] ??= []).push(h),
-      getActiveTools: () => ["read", "bash", "edit", "write"],
+      getActiveTools: () => self.activeTools ?? ["read", "bash", "edit", "write", ...Object.keys(self.tools)],
       setSessionName: (n: string) => names.set(file(), n),
       getThinkingLevel: () => self.thinking,
       setThinkingLevel: (l: string) => (self.thinking = l),
       setModel: async (m: Runtime["model"]) => ((self.model = m), true),
-      setActiveTools: () => {},
+      setActiveTools: (t: string[]) => (self.activeTools = t),
       appendEntry: (customType: string, data: unknown) => {
         views.push({ customType, data });
         append(file(), { type: "custom" });
@@ -205,17 +216,27 @@ function setup(config: object = {}) {
       newSession: async (opts: { setup?: (sm: object) => Promise<void>; withSession?: (c: object) => Promise<void> }) => {
         self.stale = true;
         const next = path.join(repo, `build-session-${++sessions}.jsonl`);
-        await opts.setup?.({ appendSessionInfo: (n: string) => names.set(next, n) });
         rt = makeRuntime(next);
         const fresh = rt;
-        await fire("session_start", { reason: "new" }, fresh.ctx); // before withSession, as in Pi
-        await opts.withSession?.({ ...fresh.ctx, ui: fresh.ctx.ui, sessionManager: fresh.ctx.sessionManager, sendMessage: async (m: any, o: any) => fresh.pi.sendMessage(m, o) });
+        await fire("session_start", { reason: "new" }, fresh.ctx); // as in Pi: the new runtime starts first,
+        await opts.setup?.({ appendSessionInfo: (n: string) => names.set(next, n), getSessionFile: () => next }); // then setup,
+        await opts.withSession?.(handover(fresh)); // then withSession
+        return { cancelled: false };
+      },
+      switchSession: async (file: string, opts: { withSession?: (c: object) => Promise<void> } = {}) => {
+        self.stale = true;
+        rt = makeRuntime(file);
+        const back = rt;
+        await fire("session_start", { reason: "resume" }, back.ctx);
+        await opts.withSession?.(handover(back));
         return { cancelled: false };
       },
     });
     pb(self.pi);
     return self;
   };
+  /** The context Pi hands to withSession: the new runtime's, with sendMessage. */
+  const handover = (r: Runtime) => guard(() => r, { ...r.ctx, ui: r.ctx.ui, sessionManager: r.ctx.sessionManager, sendMessage: async (m: any, o: any) => r.pi.sendMessage(m, o) });
   rt = makeRuntime(path.join(repo, "planning-session.jsonl"));
 
   // A tool result that asks for more (pb_task_done without terminate) continues the run, as in Pi.
@@ -262,12 +283,21 @@ function setup(config: object = {}) {
     stat.runs++;
     queued++;
     running = running.then(async () => {
+     try {
       let input: string | undefined = first;
       while (input !== undefined) {
         continuation = undefined;
         // As in Pi: the assistant message (with its tool calls) first, then the tool results.
         append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } });
-        await agent.script?.(input, callTool);
+        // In a review session, every message goes to the stand-in reviewer (its first one, and pb's reminder).
+        const pass = names.get(rt.file())?.match(/^(review|abuse): /)?.[1];
+        if (pass && !reviewer.script) {
+          // The stand-in reviewer and abuse pass: report the configured findings, then a short reply.
+          if (reviewer.write && pass === "review") fs.writeFileSync(reviewer.write, "reviewer was here");
+          const findings = pass === "review" ? reviewer.review : reviewer.abuse;
+          if (!reviewer.silent) await callTool("pb_report_findings", { findings });
+          append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: pass === "review" ? reviewer.prose : "Done." }] } });
+        } else await agent.script?.(input, callTool);
         const usage = { input: 1000, output: 100, cacheRead: 9000, cacheWrite: 0, cost: { total: 0.001 } };
         await fire("message_end", { message: { role: "assistant", usage } });
         for (const r of (await fire("turn_end", {})) as { entries?: Draft[] }[]) applyDrafts(r?.entries);
@@ -285,7 +315,9 @@ function setup(config: object = {}) {
         }
       }
       await fire("agent_settled", {});
+     } finally {
       queued--;
+     }
     });
   };
 
@@ -324,6 +356,7 @@ function setup(config: object = {}) {
     resets,
     blocked,
     agent,
+    reviewer,
     stat,
     run,
     read,
@@ -735,11 +768,8 @@ test("build: existing tests cut down or skipped don't fail a task: they are list
   assert.deepEqual(p.testChanges, ["T1: tests/test_a.py: 2 → 1 test cases"]);
   assert.match(t.results[0], /⚠ existing tests changed \(the review checks them\): tests\/test_a\.py: 2 → 1 test cases/);
   assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Existing tests the build changed[\s\S]*- T1: tests\/test_a\.py: 2 → 1 test cases/);
-  const briefFile = path.join(os.tmpdir(), `pb-brief-tc-${process.pid}.md`);
-  process.env.MOCK_BRIEF_OUT = briefFile;
   await t.run("review");
-  delete process.env.MOCK_BRIEF_OUT;
-  assert.match(fs.readFileSync(briefFile, "utf8"), /## Existing tests the build changed[\s\S]*judge whether each was justified:\n- T1: tests\/test_a\.py: 2 → 1 test cases/);
+  assert.match(t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!, /## Existing tests the build changed[\s\S]*judge whether each was justified:\n- T1: tests\/test_a\.py: 2 → 1 test cases/);
 });
 
 test("build: by default, tasks aren't checked one by one; the full suite runs after the last, and a failure goes back", async () => {
@@ -873,27 +903,101 @@ test("status lists every spec with its state and tasks", async () => {
 
 /* ------------------------------ review, stats, archive ------------------------------ */
 
-test("review: fresh check, then a fresh reviewer with the spec first and the diff; pass marks it reviewed", async () => {
+/** The review session's first message: the reviewer's brief. */
+const briefOf = (t: ReturnType<typeof setup>) => t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!;
+const CHANGES = [
+  { priority: "P1", file: "src/order.ts", line: 12, title: "consider a guard clause", fix: "return early" },
+  { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
+];
+
+test("review: a fresh review session with the spec first and the diff; you're brought back with the result", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  const briefFile = path.join(os.tmpdir(), `pb-brief-${process.pid}.md`);
-  process.env.MOCK_BRIEF_OUT = briefFile;
+  const home = t.runtime().ctx.sessionManager.getSessionFile();
   await t.run("review");
-  delete process.env.MOCK_BRIEF_OUT;
-  const brief = fs.readFileSync(briefFile, "utf8");
-  assert.match(brief, /^# The spec[\s\S]*Not doing soft delete[\s\S]*## Changed files\n\n(T1\.txt\n)?[\s\S]*T2\.txt/);
+  const brief = briefOf(t);
+  assert.match(brief, /^\[pb:review\] You are an independent REVIEWER in a fresh session[\s\S]*read-only for you[\s\S]*--- brief ---\n\n# The spec[\s\S]*Not doing soft delete[\s\S]*## Changed files\n\n(T1\.txt\n)?[\s\S]*T2\.txt/);
   assert.match(brief, /## The check the harness ran\n\n`true` → PASS/);
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early/);
+  assert.ok([...t.names.values()].includes("review: order-cancellation") && [...t.names.values()].includes("abuse: order-cancellation"));
+  assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // back where you were
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: reviewer `pi --session build-session-\d+\.jsonl` · abuse pass `pi --session build-session-\d+\.jsonl`/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
+  assert.equal(t.progress("order-cancellation").reviewUnshown, undefined);
+  assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /Review of order-cancellation\*\* — ✅ PASS/); // kept with the spec
 
   await t.run("review");
   assert.match(t.notes.at(-1)!, /Nothing changed since the last review \(pass\)/);
-  process.env.MOCK_REVIEW = "changes_needed";
+  t.reviewer.review = CHANGES;
   await t.run("review", "--full");
-  delete process.env.MOCK_REVIEW;
   assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED/);
+});
+
+test("review: the review session is read-only for its model; /pb:review done ends a pass; a pass you leave can be continued", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  const home = t.runtime().ctx.sessionManager.getSessionFile();
+  t.reviewer.script = true; // drive the review session by hand
+  let blocked: string | undefined;
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:review]")) {
+      assert.deepEqual(t.runtime().pi.getActiveTools(), ["read", "grep", "find", "ls", "bash", "pb_report_findings"]);
+      blocked = (await tool("write", { path: "x.ts", content: "x" })).error;
+      await tool("pb_report_findings", { findings: CHANGES });
+      await t.runtime().cmds["pb:review"].handler("done", t.runtime().ctx);
+    }
+    if (text.startsWith("[pb:abuse]")) {
+      // You go elsewhere mid-pass (like /resume): the review can't take you back; its result waits in review.md.
+      await t.runtime().ctx.switchSession(home);
+      return;
+    }
+    return diligent(text, tool);
+  };
+  await t.run("review");
+  assert.match(blocked!, /This is a review session: read-only/);
+  assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // you went home by yourself
+  const md = t.read(".pi/pb/specs/order-cancellation/review.md");
+  assert.match(md, /✗ CHANGES NEEDED[\s\S]*You left the review before it finished: the abuse pass didn't finish[\s\S]*`\/pb:review` continues it/);
+
+  // /pb:review offers to continue: back into the abuse session, which carries on where it was.
+  t.reviewer.script = false;
+  t.reviewer.abuse = [{ priority: "P2", file: "src/order.ts", line: 3, title: "cap the page size" }];
+  await t.run("review");
+  assert.match(t.selectTitles.at(-1)!, /A review was interrupted/);
+  assert.ok(t.instructions.some((i) => i.startsWith("[pb] You were interrupted. Carry on where you were")));
+  assert.ok(!t.notes.some((n) => /This review was interrupted/.test(n))); // pb was continuing it: no hint needed
+  assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // and back home at the end
+  assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 2 · P3 0 · with an abuse pass[\s\S]*Abuse: cap the page size/);
+  assert.equal(JSON.parse(t.read(".pi/pb/config.json")).maxAttempts, 2);
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-run.json"))); // finished: nothing left to continue
+});
+
+test("review: reopening an interrupted review session, /pb:review continue picks it up there", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  const home = t.runtime().ctx.sessionManager.getSessionFile();
+  let reviewSession = "";
+  t.reviewer.script = true;
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:review]")) {
+      reviewSession = t.runtime().ctx.sessionManager.getSessionFile();
+      await t.runtime().ctx.switchSession(home); // you leave mid-review
+      return;
+    }
+    return diligent(text, tool);
+  };
+  await t.run("review");
+  await t.runtime().ctx.switchSession(reviewSession); // later, /resume into it
+  assert.match(t.notes.at(-1)!, /This review was interrupted: `\/pb:review continue` picks it up/);
+  t.reviewer.script = false;
+  await t.run("review", "continue");
+  assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home);
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*with an abuse pass/);
 });
 
 test("review: a follow-up looks at the previous findings and what changed since", async () => {
@@ -901,16 +1005,12 @@ test("review: a follow-up looks at the previous findings and what changed since"
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  process.env.MOCK_REVIEW = "changes_needed";
+  t.reviewer.review = CHANGES;
   await t.run("review");
   fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
-  const briefFile = path.join(os.tmpdir(), `pb-brief2-${process.pid}.md`);
-  process.env.MOCK_BRIEF_OUT = briefFile;
-  delete process.env.MOCK_REVIEW;
+  t.reviewer.review = [];
   await t.run("review");
-  delete process.env.MOCK_BRIEF_OUT;
-  const brief = fs.readFileSync(briefFile, "utf8");
-  assert.match(brief, /## This is a follow-up review[\s\S]*1\. \[P1\] src\/order\.ts:12 — consider a guard clause[\s\S]*Changed since the previous review[\s\S]*T1\.txt/);
+  assert.match(briefOf(t), /## This is a follow-up review[\s\S]*1\. \[P1\] src\/order\.ts:12 — consider a guard clause[\s\S]*Changed since the previous review[\s\S]*T1\.txt/);
   assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* \(follow-up\) — ✅ PASS/);
 });
 
@@ -919,22 +1019,16 @@ test("review: findings carry priorities; P0/P1 are double-checked; only line-lea
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  process.env.MOCK_REVIEW = "changes_needed";
+  t.reviewer.review = CHANGES;
   await t.run("review");
   assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 0/);
   process.env.MOCK_VERIFY = "reject"; // the verifier finds the P1 isn't real
   await t.run("review", "--full");
   delete process.env.MOCK_VERIFY;
   assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 0[\s\S]*Dismissed after a second look:\n- \[P1\] consider a guard clause — src\/order\.ts:11 already guards it/);
-  process.env.MOCK_REVIEW = "pass";
+  t.reviewer.silent = true; // no tool call: the prose's line-leading tags are the findings
+  t.reviewer.prose = "No [P0] or [P1] issues found.\n\n1. [P2] src/order.ts:30 — name the constant.";
   await t.run("review", "--full");
-  assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 1/);
-  process.env.MOCK_REVIEW = "untagged";
-  await t.run("review", "--full");
-  assert.match(t.posts.at(-1)!, /✅ PASS\n/); // no tool call, no tags: the VERDICT line decides
-  process.env.MOCK_REVIEW = "prose";
-  await t.run("review", "--full");
-  delete process.env.MOCK_REVIEW;
   assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 0/); // "No [P0] or [P1] issues" isn't a finding
 });
 
@@ -959,24 +1053,20 @@ test("review: works without a spec, on the uncommitted change and its intent", a
   await t.run("review");
   assert.match(t.notes.at(-1)!, /Nothing to review: there are no uncommitted changes/);
   fs.writeFileSync(path.join(t.repo, "README"), "hello\n");
-  const briefFile = path.join(os.tmpdir(), `pb-brief3-${process.pid}.md`);
-  process.env.MOCK_BRIEF_OUT = briefFile;
   await t.run("review", "greet more warmly");
-  delete process.env.MOCK_BRIEF_OUT;
-  assert.match(fs.readFileSync(briefFile, "utf8"), /^# No spec[\s\S]*Intent: greet more warmly[\s\S]*## Changed files\n\nREADME/);
+  assert.match(briefOf(t), /--- brief ---\n\n# No spec[\s\S]*Intent: greet more warmly[\s\S]*## Changed files\n\nREADME/);
   assert.match(t.posts.at(-1)!, /Review of the uncommitted change\*\* — ✅ PASS/);
 });
 
-test("review: files the reviewer changes are put back", async () => {
+test("review: files changed during the review are put back", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  process.env.MOCK_REVIEW_WRITE = path.join(t.repo, "T1.txt");
+  t.reviewer.write = path.join(t.repo, "T1.txt");
   await t.run("review");
-  delete process.env.MOCK_REVIEW_WRITE;
   assert.equal(t.read("T1.txt"), "x");
-  assert.ok(t.notes.some((n) => /The reviewer changed T1\.txt; put back as it was/.test(n)));
+  assert.match(t.posts.at(-1)!, /⚠ Files changed during the review were put back: T1\.txt/);
 });
 
 test("stats: tasks, first try, checks, pauses, review, and the build session's tokens and cache", async () => {
@@ -1000,7 +1090,7 @@ test("stats: tasks, first try, checks, pauses, review, and the build session's t
   assert.match(card, /Review +pass/);
   assert.match(card, /prompt [\d.]+k \(90% from cache\)/);
   assert.match(card, /Context +peak 10\.0k \(10% of 100\.0k\)/);
-  assert.match(card, /Reviewer +prompt 12\.0k · output 1\.6k · \$0\.08/); // reviewer and abuse pass, two mock messages each
+  assert.match(card, /Reviewer +prompt 20\.0k · output 200/); // the review and abuse sessions' own turns
 
   await t.run("stats", "all");
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2 +50%/);
@@ -1672,7 +1762,7 @@ test("fresh calls are saved as sessions to open afterwards, and stream their tex
   t.agent.script = diligent;
   await t.run("build");
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /The whole runs: reviewer `pi --session \.pi\/pb\/specs\/order-cancellation\/sessions\/reviewer\/[^`]+\.jsonl` · abuse pass `pi --session \.pi\/pb\/specs\/order-cancellation\/sessions\/abuse\/[^`]+\.jsonl`/);
+  assert.match(t.posts.at(-1)!, /The review sessions: reviewer `pi --session build-session-\d+\.jsonl` · abuse pass `pi --session build-session-\d+\.jsonl`/);
   const e = await t.callTool("pb_explore", { question: "where?" });
   assert.match((e as any).details.session, /^\.pi\/pb\/sessions\/explorer\/.+\.jsonl$/);
 

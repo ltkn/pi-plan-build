@@ -18,6 +18,7 @@
  * outranks the model's own "done", and fresh eyes against anchoring. pb has since
  * deviated far from it; see the README's credits.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -36,6 +37,7 @@ import {
   explorerBrief,
   findingLine,
   finishSpecPrompt,
+  reviewSessionPrompt,
   fixText,
   nudgePrompt,
   planPrompt,
@@ -45,12 +47,12 @@ import {
 } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
-import { REVIEW_TOOLS, runReview, sensitiveGround } from "./review.ts";
+import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
 import { addStandards, agentDir, findStandards, isJavaProject, standardsLoaded } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type Checkpoint, type Finding, type Progress, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, untrackedText } from "./store.ts";
+import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, untrackedText } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -86,6 +88,23 @@ const tail = (t: string, n = 3) =>
     .map((l) => l.trimEnd())
     .filter((l) => l.trim())
     .slice(-n);
+
+/** A UI update from a callback that may outlive its session (you switched away): skipped instead of crashing Pi. */
+const safely = (f: () => void) => {
+  try {
+    f();
+  } catch {
+    // the session was replaced: there's nothing to draw on any more
+  }
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The context Pi hands over after a session switch (newSession/switchSession's withSession). */
+type ReplacedSessionContext = Parameters<NonNullable<Parameters<ExtensionCommandContext["newSession"]>[0]>["withSession"] & {}>[0];
+
+/** The tools a review session's model gets: read-only, plus the one it reports with. */
+const REVIEW_SESSION_TOOLS = ["read", "grep", "find", "ls", "bash", "pb_report_findings"];
 
 /** A tool result that ends the agent's run: the build paused or finished. */
 const stop = (t: string) => ({ content: text(t), details: undefined, terminate: true });
@@ -422,6 +441,33 @@ export default function pb(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "pb_report_findings",
+    label: "Report findings",
+    description:
+      "In a pb review session: report the review's findings, one call with all of them (an empty list when there are none). Call it again if they change.",
+    parameters: Type.Object({
+      findings: Type.Array(
+        Type.Object({
+          priority: StringEnum(["P0", "P1", "P2", "P3"]),
+          file: Type.Optional(Type.String({ description: "path relative to the repository root" })),
+          line: Type.Optional(Type.Number()),
+          title: Type.String({ description: "the problem, in one sentence" }),
+          fix: Type.Optional(Type.String({ description: "a concrete fix" })),
+        }),
+      ),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const store = new Store(ctx.cwd);
+      const session = ctx.sessionManager.getSessionFile();
+      const state = store.reviewSession(session);
+      if (!session || !state) throw new Error("This is not a pb review session.");
+      const findings = (params.findings as Finding[]).filter((f) => /^P[0-3]$/.test(f.priority) && f.title);
+      store.saveReviewSession(session, { ...state, findings });
+      return reply(`Recorded ${findings.length} finding(s). Now reply briefly${state.role === "review" ? " (the acceptance checklist, and anything worth knowing that isn't a finding)" : ""}, then stop.`);
+    },
+  });
+
+  pi.registerTool({
     name: "pb_task_done",
     label: "Task done",
     description:
@@ -606,7 +652,9 @@ export default function pb(pi: ExtensionAPI) {
     const ev = e as { toolName: string; input: { path?: string } };
     if (ev.toolName !== "edit" && ev.toolName !== "write") return;
     const session = ctx.sessionManager.getSessionFile();
-    if (!session || !new Store(ctx.cwd).planningSessions().includes(session)) return;
+    const store = new Store(ctx.cwd);
+    if (session && store.reviewSession(session)) return { block: true, reason: "This is a review session: read-only. Report what should change with pb_report_findings." };
+    if (!session || !store.planningSessions().includes(session)) return;
     const rel = path.relative(ctx.cwd, path.resolve(ctx.cwd, ev.input.path ?? ""));
     if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return;
     return {
@@ -851,8 +899,17 @@ export default function pb(pi: ExtensionAPI) {
 
   // The build session's own instance applies the carried-over model and thinking level before its first turn.
   pi.on("session_start", async (e, ctx) => {
-    if ((e as { reason?: string }).reason !== "new") return;
-    const carry = new Store(ctx.cwd).takeCarry();
+    const store = new Store(ctx.cwd);
+    const session = ctx.sessionManager.getSessionFile();
+    const carry = (e as { reason?: string }).reason === "new" ? store.takeCarry() : undefined;
+    if (carry?.review && session) store.saveReviewSession(session, carry.review);
+    // A review session's model reads and reports only; everywhere else pb_report_findings isn't offered.
+    const active = pi.getActiveTools();
+    if (store.reviewSession(session)) {
+      pi.setActiveTools(REVIEW_SESSION_TOOLS);
+      if (store.reviewRun()?.interrupted?.session === session) ctx.ui.notify(`This review was interrupted: \`/${cmd("review")} continue\` picks it up where it was.`, "info");
+    }
+    else if (active.includes("pb_report_findings")) pi.setActiveTools(active.filter((t) => t !== "pb_report_findings"));
     if (!carry) return;
     if (carry.model) {
       const model = findModel(ctx, carry.model);
@@ -1042,6 +1099,13 @@ export default function pb(pi: ExtensionAPI) {
   pi.on("message_end", (e, ctx) => {
     const m = (e as { message?: { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } } }).message;
     if (m?.role !== "assistant" || !m.usage) return;
+    const review = new Store(ctx.cwd).reviewSession(ctx.sessionManager.getSessionFile());
+    if (review) {
+      // A review session's turns count as the review's cost, for the spec it reviews.
+      const u = m.usage;
+      if (review.spec) new Store(ctx.cwd).event(review.spec, { type: "review-usage", role: review.role, input: u.input ?? 0, output: u.output ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0, cost: u.cost?.total ?? 0 });
+      return;
+    }
     const { store, name, progress } = specOfSession(ctx);
     if (!name || !progress) return;
     const u = m.usage;
@@ -1453,12 +1517,236 @@ export default function pb(pi: ExtensionAPI) {
 
   const P_ORDER = ["P0", "P1", "P2", "P3"] as const;
 
+  /**
+   * One review pass in its own, real Pi session ("review: <spec>" or "abuse: <spec>"): you're moved into it
+   * and watch it natively; its model is read-only and reports with pb_report_findings. It ends when the model
+   * has reported and stopped, or at /pb:review done. Returns what it found, and whether you left meanwhile.
+   */
+  const drivePass = async (
+    c: Pick<ExtensionContext, "isIdle" | "sessionManager">,
+    send: ReplacedSessionContext["sendMessage"],
+    store: Store,
+    o: { role: "review" | "abuse"; label: string; brief: string; resume?: boolean },
+  ) => {
+    const idleMs = (store.config().reviewer.idleSec ?? 20) * 1000;
+    const session = c.sessionManager.getSessionFile() ?? "";
+    try {
+      await send(
+        {
+          customType: "pb",
+          content: o.resume
+            ? `▶ Continuing the ${o.role === "review" ? "review" : "abuse pass"} of **${o.label}** where it was interrupted.`
+            : `▶ ${o.role === "review" ? "Review" : "Abuse pass"} of **${o.label}**, in a fresh session. The model can't change files; you can watch, interrupt and ask it anything. It ends when it has reported its findings and stops (\`/${cmd("review")} done\` ends it now); then pb takes you back.`,
+          display: true,
+        },
+        { triggerTurn: false },
+      );
+      const first = o.resume
+        ? "[pb] You were interrupted. Carry on where you were, then report all your findings with pb_report_findings (including any you reported before) and stop."
+        : reviewSessionPrompt(o.role, o.brief);
+      void send({ customType: "pb-instruction", content: first, display: false }, { triggerTurn: true });
+      let idle = 0;
+      let nudged = false;
+      for (;;) {
+        await sleep(200);
+        const state = store.reviewSession(session);
+        if (state?.done) break;
+        if (!c.isIdle()) {
+          idle = 0;
+          continue;
+        }
+        idle += 200;
+        if (state?.findings && idle >= 400) break; // reported, and stopped
+        if (!state?.findings && idle >= idleMs) {
+          if (nudged) break;
+          nudged = true;
+          idle = 0;
+          void send({ customType: "pb-instruction", content: "[pb] Report your findings with pb_report_findings (an empty list if there are none), then stop.", display: false }, { triggerTurn: true });
+        }
+      }
+      const branch = tree(c as ExtensionContext).getBranch?.() ?? [];
+      const prose = [...branch].reverse().find((e) => e.type === "message" && e.message?.role === "assistant" && contentText(e.message.content).trim());
+      const text = prose ? contentText(prose.message!.content).trim() : "";
+      const state = store.reviewSession(session);
+      if (state?.done) store.saveReviewSession(session, { ...state, done: undefined });
+      return { findings: state?.findings ?? fromProse(text), prose: text, left: false, session };
+    } catch {
+      // You switched to another session: this one can't be driven any more.
+      return { findings: store.reviewSession(session)?.findings ?? [], prose: "", left: true, session };
+    }
+  };
+
+  /**
+   * The rest of a review from its saved state: the next pass in a new session, or the finish. When you leave
+   * mid-pass, the state is kept (with the interrupted pass) so /pb:review can continue it instead of starting over.
+   */
+  const reviewNext = async (from: ExtensionCommandContext, store: Store, run: ReviewRun, left = false): Promise<void> => {
+    if (left) {
+      const cut = run.passes.at(-1);
+      store.saveReviewRun({ ...run, interrupted: cut ? { role: cut.role, session: cut.session } : undefined });
+      writeReview(store, run, true);
+      return;
+    }
+    const todo: "review" | "abuse" | undefined = !run.passes.length ? "review" : run.security && run.passes.length === 1 ? "abuse" : undefined;
+    if (!todo) return reviewFinish(from, store, run);
+    store.saveReviewRun(run);
+    store.setCarry({ model: run.model, thinking: run.thinking, spec: run.name ?? "", review: { role: todo, spec: run.name } });
+    const result = await from.newSession({
+      parentSession: run.home,
+      setup: async (sm) => {
+        sm.appendSessionInfo(`${todo}: ${run.label}`);
+      },
+      withSession: async (c) => {
+        const r = await drivePass(c, c.sendMessage, store, { role: todo, label: run.label, brief: run.brief });
+        run.passes.push({ role: todo, ...r });
+        await reviewNext(c, store, run, r.left);
+      },
+    });
+    if (result.cancelled) return reviewNext(from, store, run, true);
+  };
+
+  /** Continue an interrupted pass in its own session (`c` is that session), then the rest of the review. */
+  const reviewContinue = async (c: ExtensionCommandContext, send: ReplacedSessionContext["sendMessage"], store: Store, run: ReviewRun, cut: NonNullable<ReviewRun["interrupted"]>) => {
+    const role = cut.role;
+    run.passes = run.passes.filter((x) => x.session !== cut.session);
+    run.interrupted = undefined;
+    store.saveReviewRun(run);
+    const r = await drivePass(c, send, store, { role, label: run.label, brief: run.brief, resume: true });
+    run.passes.push({ role, ...r });
+    await reviewNext(c, store, run, r.left);
+  };
+
+  /** The review's message: verdict, findings, what was dismissed or put back, and the sessions. */
+  const reviewMessage = (run: ReviewRun, o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; restored: string[]; partial: boolean }) => {
+    const findings = [...o.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
+    const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
+    const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left);
+    const verdict = run.passes.length ? verdictOf(findings) : "none";
+    const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
+    const sessions = run.passes.map((x) => `${x.role === "review" ? "reviewer" : "abuse pass"} \`pi --session ${path.relative(run.cwd, x.session)}\``);
+    const text = [
+      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an abuse pass" : ""}`,
+      ...(o.partial
+        ? ["", `⚠ You left the review before it finished: the ${finished("review") ? "abuse pass" : "review"} didn't finish; this is what had been reported. \`/${cmd("review")}\` continues it.`]
+        : []),
+      "",
+      run.passes.find((x) => x.role === "review")?.prose ?? "",
+      ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),
+      ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
+      ...(o.restored.length ? ["", `⚠ Files changed during the review were put back: ${o.restored.join(", ")}`] : []),
+      ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
+      "",
+      tip(verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : "review.other", { spec: run.label }),
+    ].join("\n");
+    return { text, verdict, counts, findings, complete: finished("review") && (!run.security || finished("abuse")), abuse: finished("abuse") };
+  };
+
+  const allFindings = (run: ReviewRun) => run.passes.flatMap((x) => (x.role === "abuse" ? x.findings.map((f) => ({ ...f, title: `Abuse: ${f.title}` })) : x.findings));
+
+  /** Never lost: the result (or what was reported so far) is kept with the spec. */
+  const writeReview = (store: Store, run: ReviewRun, partial: boolean) => {
+    const m = reviewMessage(run, { findings: allFindings(run), dismissed: [], restored: [], partial });
+    fs.mkdirSync(path.dirname(store.reviewFile(run.name)), { recursive: true });
+    fs.writeFileSync(store.reviewFile(run.name), `${m.text}\n`);
+    return m;
+  };
+
+  /** Double-check, put back anything changed, record the result, and take you home with it. */
+  const reviewFinish = async (from: ExtensionCommandContext, store: Store, run: ReviewRun): Promise<void> => {
+    const cfg = store.config();
+    const widget = (t?: string[]) => safely(() => from.ui.setWidget("pb-review", t));
+    let textNow = "";
+    const all = allFindings(run);
+    const checked =
+      cfg.reviewer.verify === false
+        ? { findings: all, dismissed: [], tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 }
+        : await verifyFindings({
+            cwd: run.cwd,
+            findings: all,
+            base: run.base,
+            spec: run.name ? store.readSpec(run.name) : undefined,
+            model: run.model,
+            thinking: run.thinking,
+            sessionDir: run.name ? store.specSessionsDir(run.name, "verifier") : store.sessionsDir("verifier"),
+            onActivity: (a) => widget([`pb review ${run.label} — verifying P0/P1 findings`, `  ↳ ${a}`, ...tail(textNow).map((l) => `  │ ${l}`)]),
+            onText: (t) => {
+              textNow = t;
+            },
+          });
+    widget(undefined);
+    const after = run.before ? snapshot(run.cwd, `pb: after review ${run.label}`) : undefined;
+    const restored = run.before && after && run.before.tree !== after.tree ? restore(run.cwd, after.commit, run.before.commit) : [];
+    const m = reviewMessage(run, { findings: checked.findings, dismissed: checked.dismissed, restored, partial: false });
+    const p = run.name ? store.progress(run.name) : undefined;
+    if (run.name && p) {
+      store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ...checked.tokens, cost: checked.cost });
+      if (m.complete) {
+        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings.filter((f) => f.priority !== "P3") };
+        if (m.verdict === "pass") p.phase = "reviewed";
+      }
+      p.reviewUnshown = true;
+      store.saveProgress(p);
+    }
+    fs.mkdirSync(path.dirname(store.reviewFile(run.name)), { recursive: true });
+    fs.writeFileSync(store.reviewFile(run.name), `${m.text}\n`);
+    store.saveReviewRun(undefined);
+    if (!run.home) return;
+    try {
+      await from.switchSession(run.home, {
+        withSession: async (c) => {
+          await c.sendMessage({ customType: "pb", content: m.text, display: true }, { triggerTurn: false });
+          const q = run.name ? store.progress(run.name) : undefined;
+          if (q) {
+            q.reviewUnshown = undefined;
+            store.saveProgress(q);
+          }
+        },
+      });
+    } catch {
+      // you went elsewhere meanwhile: review.md has it, and the next /pb:review shows it
+    }
+  };
+
   pi.registerCommand(cmd("review"), {
-    description: "Independent review by a reviewer who never saw the build: against the spec, or any uncommitted change against its intent. Follow-ups look only at what changed (--full: everything again)",
+    description:
+      "Independent review in fresh sessions you watch: a reviewer who never saw the build, then an abuse pass, against the spec or any uncommitted change's intent; pb brings you back with the result. Follow-ups look only at what changed (--full: everything). /pb:review done ends a review session now",
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
-      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
+      // Inside a review session: /pb:review done ends it.
+      const session = ctx.sessionManager.getSessionFile();
+      const here = store.reviewSession(session);
+      const saved = store.reviewRun();
+      if (here) {
+        // Inside a review session: done ends the pass; continue picks up an interrupted one.
+        const cut = saved?.interrupted;
+        if (args.trim() === "continue" && saved && cut && cut.session === session) {
+          if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+          return reviewContinue(ctx, async (m, o) => pi.sendMessage(m, o), store, saved, cut);
+        }
+        if (args.trim() !== "done") return ctx.ui.notify(`This is a review session: \`/${cmd("review")} done\` ends it${saved?.interrupted?.session === session ? `; \`/${cmd("review")} continue\` picks it up where it was interrupted` : ""}.`, "info");
+        store.saveReviewSession(session!, { ...here, done: true });
+        return ctx.ui.notify("Ending this review pass…", "info");
+      }
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      // An interrupted review: continue it rather than start over.
+      if (saved?.interrupted) {
+        const CONTINUE = `Continue the interrupted review of ${saved.label} (the ${saved.interrupted.role === "review" ? "review" : "abuse pass"} didn't finish)`;
+        const SHOW = "Show what it had reported";
+        const NEW = "Start a new review";
+        const choice = ctx.hasUI ? await ctx.ui.select("A review was interrupted", [CONTINUE, SHOW, NEW]) : CONTINUE;
+        if (!choice) return;
+        if (choice === SHOW) return post(fs.readFileSync(store.reviewFile(saved.name), "utf8"));
+        if (choice === CONTINUE) {
+          // Not "interrupted" any more as you arrive: pb is continuing it, no need to say how.
+          const cut = saved.interrupted;
+          const run = { ...saved, interrupted: undefined };
+          store.saveReviewRun(run);
+          await ctx.switchSession(cut.session, { withSession: (c) => reviewContinue(c, c.sendMessage, store, run, cut) });
+          return;
+        }
+        store.saveReviewRun(undefined);
+      }
       const full = /(^|\s)--full(\s|$)/.test(args);
       const rest = args.replace(/(^|\s)--full(?=\s|$)/g, " ").trim();
       const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
@@ -1477,6 +1765,12 @@ export default function pb(pi: ExtensionAPI) {
       const loaded = name ? loadSpec(store, name) : undefined;
       const p = name ? store.progress(name) : undefined;
       if (name && (!loaded || !p)) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse.`, "error");
+      // A review that finished while you were elsewhere: show it first.
+      if (name && p?.reviewUnshown) {
+        p.reviewUnshown = undefined;
+        store.saveProgress(p);
+        return post(fs.readFileSync(store.reviewFile(name), "utf8"));
+      }
       const base = p?.baseCommit;
       const changed = changedSince(ctx.cwd, base);
       if (!name && !changed.length) return ctx.ui.notify("Nothing to review: there are no uncommitted changes.", "info");
@@ -1499,115 +1793,63 @@ export default function pb(pi: ExtensionAPI) {
         }
       }
 
-      const abort = new AbortController();
-      const unsubEsc = ctx.mode === "tui" ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
       const label = name ?? "the uncommitted change";
-      // The progress line, the current step, and the last lines of what the pass is writing (or thinking).
-      let phaseNow = "";
-      let activityNow: string | undefined;
-      let textNow = "";
-      const draw = () =>
-        ctx.ui.setWidget("pb-review", [`pb review ${label} — ${phaseNow}   (Esc to stop)`, ...(activityNow ? [`  ↳ ${activityNow}`] : []), ...tail(textNow).map((l) => `  │ ${l}`)]);
-      const render = (phase: string, activity?: string) => {
-        if (phase !== phaseNow) textNow = "";
-        phaseNow = phase;
-        activityNow = activity;
-        draw();
-      };
-      try {
-        // Fresh ground truth first: the reviewer should judge what's on disk now.
-        const command = loaded ? (loaded.spec.gate === "tests" ? testCmd : loaded.spec.gate === "build" ? buildCmd : null) : (testCmd ?? buildCmd);
-        let check = "(not run)";
-        if (command) {
-          render(`checking: ${command}`);
-          const v = await runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, abort.signal);
-          check = v.summary;
-          if (p) {
-            p.lastVerify = v;
-            store.saveProgress(p);
-          }
-        }
-        if (abort.signal.aborted) return ctx.ui.notify("Review stopped.", "info");
-
-        // The tree as the reviewer sees it: the next review's delta starts here, and anything the reviewer changes is put back.
-        const before = cfg.checkpoints ? snapshot(ctx.cwd, `pb: review ${label}`) : undefined;
-        const prevReview = p?.review;
-        let previous: { snapshot: string; findings: Finding[]; changed: string[] } | undefined;
-        if (!full && prevReview?.snapshot && before) {
-          const since = changedPaths(ctx.cwd, prevReview.snapshot, before.commit);
-          if (!since.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
-          previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since };
-        }
-
-        // The abuse pass: on every review by default (reviewer.security "always"), or on sensitive ground ("auto").
-        const mode = cfg.reviewer.security ?? "always";
-        const diffText = mode === "auto" ? gitDiff(ctx.cwd, base) : "";
-        const security =
-          mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changed, diff: diffText + untrackedText(ctx.cwd, changed) });
-        const outcome = await runReview({
-          cwd: ctx.cwd,
-          brief: reviewerBrief({
-            spec: loaded && name ? { name, markdown: loaded.md, parsed: loaded.spec } : undefined,
-            intent,
-            base,
-            changed,
-            stat: diffStat(ctx.cwd, base),
-            check,
-            focus: name ? rest : "",
-            previous,
-            testChanges: p?.testChanges,
-          }),
-          base,
-          spec: loaded?.md,
-          model: cfg.reviewer.model ?? sessionModel(ctx),
-          thinking: cfg.reviewer.thinking ?? (ctx.thinkingLevel as string | undefined),
-          verify: cfg.reviewer.verify !== false,
-          security,
-          signal: abort.signal,
-          onPhase: render,
-          sessionDir: (role) => (name ? store.specSessionsDir(name, role) : store.sessionsDir(role)),
-          onText: (_pass, t) => {
-            textNow = t;
-            draw();
-          },
-        });
-
-        const after = before ? snapshot(ctx.cwd, `pb: after review ${label}`) : undefined;
-        if (before && after && before.tree !== after.tree) {
-          const files = restore(ctx.cwd, after.commit, before.commit);
-          ctx.ui.notify(`The reviewer changed ${files.join(", ")}; put back as it was.`, "warning");
-        }
-        if (outcome.aborted) return ctx.ui.notify("Review stopped.", "info");
-        if (outcome.error) return ctx.ui.notify(`The reviewer produced no output: ${outcome.error}`, "error");
-
-        const findings = [...outcome.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
-        const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
-        const { verdict } = outcome;
-        if (name && p) {
-          store.event(name, { type: "review", security: !!outcome.security, verdict, p: counts, dismissed: outcome.dismissed.length, followUp: !!previous, ...outcome.tokens, cost: outcome.cost, ms: outcome.ms });
-          p.review = { at: now(), snapshot: before?.commit, verdict, findings: findings.filter((f) => f.priority === "P0" || f.priority === "P1" || f.priority === "P2") };
-          if (verdict === "pass") p.phase = "reviewed";
+      // Fresh ground truth first: the reviewer should judge what's on disk now.
+      const command = loaded ? (loaded.spec.gate === "tests" ? testCmd : loaded.spec.gate === "build" ? buildCmd : null) : (testCmd ?? buildCmd);
+      let check = "(not run)";
+      if (command) {
+        safely(() => ctx.ui.setWidget("pb-review", [`pb review ${label} — checking: ${command}`]));
+        const v = await runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap);
+        safely(() => ctx.ui.setWidget("pb-review", undefined));
+        check = v.summary;
+        if (p) {
+          p.lastVerify = v;
           store.saveProgress(p);
         }
-        const tally = findings.length || outcome.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
-        post(
-          [
-            `**Review of ${label}**${previous ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${outcome.security ? ` · with an abuse pass${security === "always" ? "" : ` (${security})`}` : ""}`,
-            "",
-            outcome.prose,
-            ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),
-            ...(outcome.dismissed.length ? ["", "Dismissed after a second look:", ...outcome.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
-            ...(outcome.transcripts.length
-              ? ["", `The whole runs: ${outcome.transcripts.map((x) => `${x.pass} \`pi --session ${path.relative(ctx.cwd, x.file)}\``).join(" · ")}`]
-              : []),
-            "",
-            tip(verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : "review.other", { spec: label }),
-          ].join("\n"),
-        );
-      } finally {
-        unsubEsc?.();
-        ctx.ui.setWidget("pb-review", undefined);
       }
+
+      // The tree as the reviewer sees it: the next review's delta starts here, and anything changed during it is put back.
+      const before = cfg.checkpoints ? snapshot(ctx.cwd, `pb: review ${label}`) : undefined;
+      const prevReview = p?.review;
+      let previous: { snapshot: string; findings: Finding[]; changed: string[] } | undefined;
+      if (!full && prevReview?.snapshot && before) {
+        const since = changedPaths(ctx.cwd, prevReview.snapshot, before.commit);
+        if (!since.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
+        previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since };
+      }
+
+      // The abuse pass: on every review by default (reviewer.security "always"), or on sensitive ground ("auto").
+      const mode = cfg.reviewer.security ?? "always";
+      const diffText = mode === "auto" ? gitDiff(ctx.cwd, base) : "";
+      const security =
+        mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changed, diff: diffText + untrackedText(ctx.cwd, changed) });
+      const brief = reviewerBrief({
+        spec: loaded && name ? { name, markdown: loaded.md, parsed: loaded.spec } : undefined,
+        intent,
+        base,
+        changed,
+        stat: diffStat(ctx.cwd, base),
+        check,
+        focus: name ? rest : "",
+        previous,
+        testChanges: p?.testChanges,
+      });
+      // Only plain values from here on: `ctx` belongs to this session, which the first pass replaces.
+      const run: ReviewRun = {
+        cwd: ctx.cwd,
+        name,
+        label,
+        brief,
+        base,
+        security,
+        followUp: !!previous,
+        home: ctx.sessionManager.getSessionFile(),
+        before: before ? { commit: before.commit, tree: before.tree } : undefined,
+        model: cfg.reviewer.model ?? sessionModel(ctx),
+        thinking: cfg.reviewer.thinking ?? (pi.getThinkingLevel() as string | undefined),
+        passes: [],
+      };
+      await reviewNext(ctx, store, run);
     },
   });
 
@@ -1643,7 +1885,7 @@ export default function pb(pi: ExtensionAPI) {
     const unsubEsc = ctx.mode === "tui" ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
     let textNow = "";
     const render = (phase: string, activity?: string) =>
-      ctx.ui.setWidget("pb-map", [`pb map — ${phase}   (Esc to stop)`, ...(activity ? [`  ↳ ${activity}`] : []), ...tail(textNow).map((l) => `  │ ${l}`)]);
+      safely(() => ctx.ui.setWidget("pb-map", [`pb map — ${phase}   (Esc to stop)`, ...(activity ? [`  ↳ ${activity}`] : []), ...tail(textNow).map((l) => `  │ ${l}`)]));
     let mapSession: string | undefined;
     const cartographer = (brief: string, phase: string) =>
       runFresh({

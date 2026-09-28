@@ -111,7 +111,7 @@ export function summarize(s: SpecStats): Summary {
   }
   const reviews = e.filter((x) => x.type === "review");
   const review = { prompt: 0, output: 0, cost: 0 };
-  for (const r of reviews) {
+  for (const r of [...reviews, ...e.filter((x) => x.type === "review-usage")]) {
     review.prompt += num(r.input) + num(r.cacheRead) + num(r.cacheWrite);
     review.output += num(r.output);
     review.cost += num(r.cost);

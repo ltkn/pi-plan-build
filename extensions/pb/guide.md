@@ -357,9 +357,10 @@ then:
 <!-- pb:topic review -->
 ## Review
 
-`/pb:review` runs the check once more, then starts a **fresh** reviewer: a
-separate call that sees the spec, the diff and the check result, but not the
-build conversation, so it isn't anchored by the builder's reasoning. It checks
+`/pb:review` runs the check once more, then opens a **fresh session**, "review:
+<spec>", and takes you there: the reviewer sees the spec, the diff and the check
+result, but not the build conversation, so it isn't anchored by the builder's
+reasoning. It checks
 every acceptance criterion with evidence, the decisions (including rejected
 alternatives and the build's assumptions), `(refactor)` tasks for unchanged
 behaviour, the existing tests the build changed, comments, your standards and
@@ -412,12 +413,27 @@ auth, entry points, money, quantities or state (a broad guess); `off` never.
 uncommitted change against that intent and your standards: useful for any
 change you made with Pi without the rest of the flow.
 
-**Watching it.** While a pass runs, the line above the editor shows its phase,
-its current step, and the last lines it's writing or thinking. When the review
-is done, its message ends with each pass's whole run, to open with
-`pi --session <file>`: every file it read, every command, its reasoning. The
-explorer and the project map work the same way. A review's runs are kept with
-its spec; `/pb:archive` removes them, and the explorer and map runs so far.
+**Inside the review.** The reviewer, and then the abuse pass ("abuse: <spec>"),
+each run in a real Pi session you're in: you watch everything natively, and
+you can interrupt it or ask it something ("why is 3 a P1?"). Its model is
+read-only: it can't edit or write files, and anything its commands change is
+put back. A pass ends when it has reported its findings and stops, or at
+`/pb:review done`; then pb takes you to the next pass, and finally back to your
+session with the result. Asking questions is fine; arguing it out of a finding
+makes it less independent. Both sessions stay in `/resume`, named, and the
+result names them too.
+
+**If you leave** (say `/resume` elsewhere) before it's done, the pass you left
+stops, and pb keeps where the review stood. The next `/pb:review` offers to
+**continue it**: back into that session, where the model carries on from where
+it was, then the rest of the review. Reopening that session yourself works too:
+`/pb:review continue` there. What had been reported is also in the spec's
+`review.md`, where every result is saved.
+
+The double-check of P0/P1 findings runs in the background, with its last lines
+shown above the editor; its whole run, like the explorer's and the project
+map's, is saved to open with `pi --session <file>`. `/pb:archive` removes those
+saved runs.
 
 The reviewer can't change your files: pb snapshots the tree before it starts
 and puts back anything it touched. By default it runs on your session's model,

@@ -34,7 +34,7 @@ export interface Config {
    * P0/P1 findings, and when an abuse pass tries to break the change ("always"; "auto": on ground that looks
    * sensitive; "off").
    */
-  reviewer: { model?: string; thinking?: string; verify?: boolean; security?: "auto" | "always" | "off" };
+  reviewer: { model?: string; thinking?: string; verify?: boolean; security?: "auto" | "always" | "off"; idleSec?: number };
   /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
   freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
@@ -130,6 +130,8 @@ export interface Progress {
   assumptions?: string[];
   /** choices pb made because nobody answered a dialog in time (askTimeoutSec) */
   unattended?: string[];
+  /** the last review's result was written to review.md while you were elsewhere: shown by the next /pb:review */
+  reviewUnshown?: boolean;
   /** existing tests the build deleted, cut down or skipped, per task: for the reviewer to judge */
   testChanges?: string[];
   pause?: string;
@@ -164,6 +166,37 @@ export interface Checkpoint {
 
 export interface Baseline extends VerifyResult {
   head?: string;
+}
+
+export interface ReviewSessionState {
+  role: "review" | "abuse";
+  /** the spec under review, if any */
+  spec?: string;
+  /** what the pass reported with pb_report_findings */
+  findings?: Finding[];
+  /** /pb:review done: finish now */
+  done?: boolean;
+}
+
+/** A review in progress, kept on disk so it can be continued after an interruption. */
+export interface ReviewRun {
+  cwd: string;
+  name?: string;
+  label: string;
+  brief: string;
+  base?: string;
+  /** why an abuse pass runs, if it does */
+  security?: string;
+  followUp: boolean;
+  /** the session to come back to */
+  home?: string;
+  /** the tree the review saw: anything changed during it is put back to this */
+  before?: { commit: string; tree: string };
+  model?: string;
+  thinking?: string;
+  passes: { role: "review" | "abuse"; findings: Finding[]; prose: string; session: string; left: boolean }[];
+  /** the pass you left before it finished */
+  interrupted?: { role: "review" | "abuse"; session: string };
 }
 
 export const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -312,6 +345,35 @@ export class Store {
     writeFile(path.join(this.root, "planning.json"), `${JSON.stringify(map, null, 2)}\n`);
   }
 
+  /**
+   * Review sessions: a real Pi session per pass (reviewer, abuse pass), read-only for the model. The file
+   * records which session plays which role for which spec, and what its pass reported.
+   */
+  reviewSession(sessionFile: string | undefined): ReviewSessionState | undefined {
+    if (!sessionFile) return undefined;
+    return readJson<Record<string, ReviewSessionState>>(path.join(this.root, "review-sessions.json"))?.[sessionFile];
+  }
+  saveReviewSession(sessionFile: string, state: ReviewSessionState): void {
+    const file = path.join(this.root, "review-sessions.json");
+    const all = readJson<Record<string, ReviewSessionState>>(file) ?? {};
+    all[sessionFile] = state;
+    writeFile(file, `${JSON.stringify(all, null, 2)}\n`);
+  }
+
+  reviewRun(): ReviewRun | undefined {
+    return readJson<ReviewRun>(path.join(this.root, "review-run.json"));
+  }
+  saveReviewRun(run: ReviewRun | undefined): void {
+    const file = path.join(this.root, "review-run.json");
+    if (run) writeFile(file, `${JSON.stringify(run, null, 2)}\n`);
+    else fs.rmSync(file, { force: true });
+  }
+
+  /** The last review's result, kept with the spec (or in .pi/pb/ without one) so it's never lost. */
+  reviewFile(name: string | undefined): string {
+    return name ? path.join(this.specDir(name), "review.md") : path.join(this.root, "review.md");
+  }
+
   /** Where the fresh calls (reviewer, abuse pass, verifier, explorer, cartographer) save their sessions. */
   sessionsDir(role: string): string {
     const dir = path.join(this.root, "sessions", role);
@@ -356,12 +418,12 @@ export class Store {
    * Hand-over to the next build session: the planning session's model and thinking level,
    * applied by pb's fresh instance at session_start (the old pi is stale by then).
    */
-  setCarry(c: { model?: string; thinking?: string; spec: string }): void {
+  setCarry(c: { model?: string; thinking?: string; spec: string; review?: ReviewSessionState }): void {
     writeFile(path.join(this.root, "carry.json"), `${JSON.stringify({ ...c, at: Date.now() })}\n`);
   }
-  takeCarry(): { model?: string; thinking?: string; spec: string } | undefined {
+  takeCarry(): { model?: string; thinking?: string; spec: string; review?: ReviewSessionState } | undefined {
     const file = path.join(this.root, "carry.json");
-    const c = readJson<{ model?: string; thinking?: string; spec: string; at: number }>(file);
+    const c = readJson<{ model?: string; thinking?: string; spec: string; review?: ReviewSessionState; at: number }>(file);
     fs.rmSync(file, { force: true });
     return c && Date.now() - c.at < 5 * 60_000 ? c : undefined;
   }

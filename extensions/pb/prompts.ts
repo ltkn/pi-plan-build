@@ -231,7 +231,7 @@ export function buildStateSummary(o: {
 
 /* ================================== review ================================== */
 
-export const REVIEWER_SYSTEM = `You are an independent REVIEWER in a fresh context. You did not take part in planning or building, and you are deliberately not shown the build conversation: judge the actual code.
+export const REVIEWER_SYSTEM = `You are an independent REVIEWER in a fresh session. You did not take part in planning or building, and you are deliberately not shown the build conversation: judge the actual code.
 
 Do not modify any file. Use read/grep/find/ls and bash only for inspection (git diff, git status, running a test is fine). Never run git commands that change the working tree or index (checkout, restore, reset, stash, clean, add, commit): the change under review may be uncommitted. Ignore .pi/ except the spec you are given.
 
@@ -246,7 +246,7 @@ Check:
 - The engineering standards in your instructions (AGENTS.md), if any: quality, dependencies, comments (restating the code, history such as dates, "decided", previous values or task ids, or left wrong by the change), tests.
 - Workarounds (silenced errors, hardcoded values, special-cased test inputs, sleeps, disabled checks) and security problems (injection, secrets in code, missing validation or authorisation).
 
-Report the findings with the report_findings tool: one call with all of them (an empty list when there are none), each with its priority:
+Report the findings with the pb_report_findings tool: one call with all of them (an empty list when there are none), each with its priority:
 - P0 must fix: broken behaviour, a security problem, data loss.
 - P1 fix before merging: an unmet acceptance criterion or decision, a bug, missing tests for new behaviour (unless the spec says no new tests), a weakened test, a risky change outside scope, a workaround where a proper fix belongs.
 - P2 worth fixing: conventions, clarity, comments, a second-best choice.
@@ -256,7 +256,7 @@ Pre-existing issues are at most P2. Report only what the author would want to fi
 Then reply briefly in markdown: the acceptance checklist when there is a spec, and anything worth knowing that isn't a finding. Don't repeat the findings.`;
 
 /** The abuse pass: one fresh call whose only job is to break the change, on every review by default. */
-export const ATTACKER_SYSTEM = `You are an ATTACKER in a fresh context, working for the defenders: find how this change can be abused or broken before someone else does. You did not build it and are not shown how it was built.
+export const ATTACKER_SYSTEM = `You are an ATTACKER in a fresh session, working for the defenders: find how this change can be abused or broken before someone else does. You did not build it and are not shown how it was built.
 
 Do not modify any file. Use read/grep/find/ls and bash only for inspection; never run git commands that change the working tree or index. Ignore .pi/ except the spec you are given.
 
@@ -272,7 +272,18 @@ For every entry point the change adds or alters (API routes, UI actions, command
 - Configuration: security-relevant defaults, migrations and permissions (grants, roles, public access).
 - The spec's Threats and abuse, if any: each abuse really prevented, and tested.
 
-Report only problems someone could actually use or hit, with report_findings: in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. No findings is a fine result. Then reply with one line.`;
+Report only problems someone could actually use or hit, with pb_report_findings: in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. No findings is a fine result. Then reply with one line.`;
+
+/** The first message of a review session: its role, the brief, and how the session works. */
+export function reviewSessionPrompt(role: "review" | "abuse", brief: string): string {
+  return `[pb:${role}] ${role === "review" ? REVIEWER_SYSTEM : ATTACKER_SYSTEM}
+
+This session is read-only for you: you can't edit or write files. The human can watch it and may ask you something; answer, and report again with pb_report_findings if your findings change.
+
+--- brief ---
+
+${brief}`;
+}
 
 export const VERIFIER_SYSTEM = `You are a VERIFIER in a fresh context. A reviewer reported the findings in the brief about a change that may be uncommitted. For each one, look at the code yourself and decide: confirmed (the problem is real, in this change, and about as serious as its priority says) or rejected (not real, already handled, or not caused by this change), with one line of evidence (file:line).
 

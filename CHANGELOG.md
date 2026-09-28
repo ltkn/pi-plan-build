@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.12.0
+
+- **The review runs in sessions you're in.** `/pb:review` opens a fresh session, "review: <spec>", and takes you there: you watch the reviewer natively, and can interrupt it or ask it something. Then the abuse pass, "abuse: <spec>", the same way; then pb takes you back to your session with the result. The reviewer's model is read-only (no edit or write, and anything its commands change is put back); it reports with `pb_report_findings`, and a pass ends when it has reported and stopped, or at `/pb:review done`. The double-check of P0/P1 findings stays in the background
+- **An interrupted review continues where it stopped**: leave mid-review (say with `/resume`) and pb keeps where it stood; the next `/pb:review` offers to continue it, back in the pass's own session, where the model carries on, then the rest of the review. Reopening that session yourself works too: `/pb:review continue`
+- **The result is never lost**: every review's result (or what was reported so far) is kept in the spec's `review.md`
+- **Fixed: switching sessions during a review crashed Pi** (a progress update used the session you'd left); background updates are now skipped once their session is gone
+
 ## 1.11.0
 
 - **`/pb:checkpoint` is now `/pb:compact`**, and works in build sessions too: there it compacts to the build's state (tasks, the current task and what it changed, the spec), written by pb, with no summarizing model call. In planning it still writes the spec and resets to it; `/pb:compact undo` brings the discussion back

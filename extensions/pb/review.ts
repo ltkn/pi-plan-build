@@ -1,11 +1,11 @@
 /**
- * The review: a fresh reviewer reports findings through a tool; a second fresh call double-checks
- * the blocking ones (P0/P1) against the code before they reach you, since a false P1 costs a whole
- * fix cycle. The verdict follows from the confirmed findings.
+ * The review: a reviewer and an abuse pass, each in a real Pi session you can watch (see /pb:review), report
+ * findings through pb_report_findings; a fresh background call double-checks the blocking ones (P0/P1)
+ * against the code before they reach you, since a false P1 costs a whole fix cycle.
  */
 import { fileURLToPath } from "node:url";
-import { ATTACKER_SYSTEM, REVIEWER_SYSTEM, VERIFIER_SYSTEM, verifierBrief } from "./prompts.ts";
-import { type RunResult, runFresh } from "./runner.ts";
+import { VERIFIER_SYSTEM, verifierBrief } from "./prompts.ts";
+import { runFresh } from "./runner.ts";
 import type { Finding, Priority } from "./store.ts";
 
 export const REVIEW_TOOLS = fileURLToPath(new URL("./review-tools.ts", import.meta.url));
@@ -13,24 +13,58 @@ const INSPECT = ["read", "grep", "find", "ls", "bash"];
 
 export type Verdict = "pass" | "changes_needed" | "none";
 
-export interface ReviewOutcome {
-  aborted: boolean;
-  error?: string;
-  /** the reviewer's reply besides the findings (e.g. the acceptance checklist) */
-  prose: string;
-  findings: Finding[];
-  dismissed: { finding: Finding; evidence: string }[];
-  verdict: Verdict;
-  /** the abuse pass ran */
-  security?: boolean;
-  /** each pass's saved session, to open with `pi --session <file>` */
-  transcripts: { pass: string; file: string }[];
-  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
-  cost: number;
-  ms: number;
+export const blocking = (f: Finding) => f.priority === "P0" || f.priority === "P1";
+
+/** Any P0 or P1 means changes needed. */
+export const verdictOf = (findings: Finding[]): Verdict => (findings.some(blocking) ? "changes_needed" : "pass");
+
+/** A pass that answered in prose only: findings are the lines that start with a priority tag. */
+export function fromProse(text: string): Finding[] {
+  return [...text.matchAll(/^\s*(?:\d+[.)]\s*|[-*]\s*)?\[(P[0-3])\]\s*(.+)$/gm)].map((m) => ({ priority: m[1] as Priority, title: m[2].trim() }));
 }
 
-const blocking = (f: Finding) => f.priority === "P0" || f.priority === "P1";
+/**
+ * The double-check: a fresh background call looks at each P0/P1 finding in the code and confirms or rejects
+ * it. Only an explicit rejection drops a finding.
+ */
+export async function verifyFindings(o: {
+  cwd: string;
+  findings: Finding[];
+  base?: string;
+  spec?: string;
+  model?: string;
+  thinking?: string;
+  signal?: AbortSignal;
+  sessionDir?: string;
+  onActivity?: (line: string) => void;
+  onText?: (text: string) => void;
+}): Promise<{ findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; aborted: boolean; sessionFile?: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: number }> {
+  const toCheck = o.findings.filter(blocking);
+  const none = { findings: o.findings, dismissed: [], aborted: false, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 };
+  if (!toCheck.length) return none;
+  const v = await runFresh({
+    cwd: o.cwd,
+    role: "verifier",
+    systemPrompt: VERIFIER_SYSTEM,
+    brief: verifierBrief(toCheck, o.base, o.spec),
+    prompt: "Verify each finding in the attached file; report with report_verdicts.",
+    tools: [...INSPECT, "report_verdicts"],
+    extensions: [REVIEW_TOOLS],
+    model: o.model,
+    thinking: o.thinking,
+    signal: o.signal,
+    sessionDir: o.sessionDir,
+    onActivity: o.onActivity,
+    onText: o.onText,
+  });
+  const t = v.tokens;
+  const usage = { tokens: { input: t.input, output: t.output, cacheRead: t.cacheRead, cacheWrite: t.cacheWrite }, cost: v.cost, sessionFile: v.sessionFile };
+  if (v.aborted) return { ...none, ...usage, aborted: true };
+  const verdicts = v.toolCalls.filter((c) => c.name === "report_verdicts").flatMap((c) => (Array.isArray(c.arguments.verdicts) ? (c.arguments.verdicts as { finding: number; verdict: string; evidence: string }[]) : []));
+  const rejected = new Map<Finding, string>();
+  for (const x of verdicts) if (x.verdict === "rejected" && toCheck[x.finding - 1]) rejected.set(toCheck[x.finding - 1], x.evidence ?? "");
+  return { ...usage, aborted: false, findings: o.findings.filter((f) => !rejected.has(f)), dismissed: [...rejected].map(([finding, evidence]) => ({ finding, evidence })) };
+}
 
 /**
  * Whether a change stands on ground worth an abuse pass (security, entry points, money, quantities, state),
@@ -46,126 +80,3 @@ export function sensitiveGround(o: { spec?: string; files: string[]; diff: strin
   return line ? `the diff mentions "${line.slice(1).trim().match(words)![0]}"` : undefined;
 }
 
-/** Findings from the report_findings calls; undefined when the reviewer never called it. */
-function reported(res: RunResult): Finding[] | undefined {
-  const calls = res.toolCalls.filter((c) => c.name === "report_findings");
-  if (!calls.length) return undefined;
-  return calls.flatMap((c) => (Array.isArray(c.arguments.findings) ? (c.arguments.findings as Finding[]) : [])).filter((f) => /^P[0-3]$/.test(f.priority) && f.title);
-}
-
-/** A reviewer that answered in prose only: findings are the lines that start with a priority tag. */
-function fromProse(text: string): Finding[] {
-  return [...text.matchAll(/^\s*(?:\d+[.)]\s*|[-*]\s*)?\[(P[0-3])\]\s*(.+)$/gm)].map((m) => ({ priority: m[1] as Priority, title: m[2].trim() }));
-}
-
-export async function runReview(o: {
-  cwd: string;
-  brief: string;
-  base?: string;
-  spec?: string;
-  model?: string;
-  thinking?: string;
-  verify: boolean;
-  /** where each pass saves its session (by role) */
-  sessionDir?: (role: string) => string;
-  /** a pass's current text (and thinking) as it's written */
-  onText?: (pass: string, text: string) => void;
-  /** why the change gets an abuse pass, if it does */
-  security?: string;
-  signal?: AbortSignal;
-  onPhase?: (phase: string, activity?: string) => void;
-}): Promise<ReviewOutcome> {
-  const out: ReviewOutcome = { aborted: false, prose: "", findings: [], dismissed: [], verdict: "none", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0, transcripts: [] };
-  // Each pass: its session saved (to open afterwards), its text streamed (to watch now).
-  const watched = (pass: string, role: string) => ({
-    sessionDir: o.sessionDir?.(role),
-    onText: (t: string) => o.onText?.(pass, t),
-  });
-  const add = (r: RunResult, pass?: string) => {
-    if (pass && r.sessionFile) out.transcripts.push({ pass, file: r.sessionFile });
-    for (const k of ["input", "output", "cacheRead", "cacheWrite"] as const) out.tokens[k] += r.tokens[k];
-    out.cost += r.cost;
-    out.ms += r.ms;
-  };
-
-  o.onPhase?.("fresh reviewer");
-  const res = await runFresh({
-    cwd: o.cwd,
-    role: "reviewer",
-    systemPrompt: REVIEWER_SYSTEM,
-    brief: o.brief,
-    prompt: "Review the change described in the attached file; report the findings with report_findings.",
-    tools: [...INSPECT, "report_findings"],
-    extensions: [REVIEW_TOOLS],
-    model: o.model,
-    thinking: o.thinking,
-    signal: o.signal,
-    onActivity: (a) => o.onPhase?.("fresh reviewer", a),
-    ...watched("reviewer", "reviewer"),
-  });
-  add(res, "reviewer");
-  if (res.aborted) return { ...out, aborted: true };
-  const findings = reported(res);
-  out.prose = res.text.replace(/^\s*VERDICT:.*$/gim, "").trim();
-  if (!findings) {
-    if (!res.text.trim()) return { ...out, error: res.error ?? "the reviewer produced no output" };
-    out.findings = fromProse(res.text);
-    // Neither tool call nor tags: an old-style VERDICT line is all there is.
-    const line = [...res.text.matchAll(/^\s*VERDICT:\s*(pass|changes_needed)\b/gim)].at(-1)?.[1].toLowerCase() as Verdict | undefined;
-    out.verdict = out.findings.length ? (out.findings.some(blocking) ? "changes_needed" : "pass") : (line ?? "none");
-    return out;
-  }
-  out.findings = findings;
-
-  // The abuse pass: a second fresh call whose only job is to break the change.
-  if (o.security) {
-    o.onPhase?.(`abuse pass (${o.security})`);
-    const a = await runFresh({
-      cwd: o.cwd,
-      role: "attacker",
-      systemPrompt: ATTACKER_SYSTEM,
-      brief: o.brief,
-      prompt: "Find how the change described in the attached file can be abused; report with report_findings.",
-      tools: [...INSPECT, "report_findings"],
-      extensions: [REVIEW_TOOLS],
-      model: o.model,
-      thinking: o.thinking,
-      signal: o.signal,
-      onActivity: (x) => o.onPhase?.("abuse pass", x),
-      ...watched("abuse pass", "abuse"),
-    });
-    add(a, "abuse pass");
-    if (a.aborted) return { ...out, aborted: true };
-    out.findings = [...out.findings, ...(reported(a) ?? []).map((f) => ({ ...f, title: `Abuse: ${f.title}` }))];
-    out.security = true;
-  }
-
-  const toCheck = out.findings.filter(blocking);
-  if (o.verify && toCheck.length) {
-    o.onPhase?.("verifying P0/P1 findings");
-    const v = await runFresh({
-      cwd: o.cwd,
-      role: "verifier",
-      systemPrompt: VERIFIER_SYSTEM,
-      brief: verifierBrief(toCheck, o.base, o.spec),
-      prompt: "Verify each finding in the attached file; report with report_verdicts.",
-      tools: [...INSPECT, "report_verdicts"],
-      extensions: [REVIEW_TOOLS],
-      model: o.model,
-      thinking: o.thinking,
-      signal: o.signal,
-      onActivity: (a) => o.onPhase?.("verifying P0/P1 findings", a),
-      ...watched("verifier", "verifier"),
-    });
-    add(v, "verifier");
-    if (v.aborted) return { ...out, aborted: true };
-    const verdicts = v.toolCalls.filter((c) => c.name === "report_verdicts").flatMap((c) => (Array.isArray(c.arguments.verdicts) ? (c.arguments.verdicts as { finding: number; verdict: string; evidence: string }[]) : []));
-    const rejected = new Map(verdicts.filter((x) => x.verdict === "rejected").map((x) => [toCheck[x.finding - 1], x.evidence ?? ""]));
-    rejected.delete(undefined as unknown as Finding);
-    // A finding the verifier didn't rule on stays: only an explicit rejection drops it.
-    out.findings = out.findings.filter((f) => !rejected.has(f));
-    out.dismissed = [...rejected].map(([finding, evidence]) => ({ finding, evidence }));
-  }
-  out.verdict = out.findings.some(blocking) ? "changes_needed" : "pass";
-  return out;
-}
