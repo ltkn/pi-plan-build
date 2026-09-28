@@ -590,6 +590,15 @@ test("build --fresh: a new session seeded with the spec, tasks behind their test
   assert.match(t.read(".pi/pb/specs/order-cancellation/events.jsonl"), /"type":"check","task":"final"/); // full suite after the task tests
 });
 
+test("build complete: the other specs from the same plan are listed as still to build", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  await t.callTool("pb_write_spec", { name: "refunds", content: SPEC() });
+  t.agent.script = diligent;
+  await t.run("build", "order-cancellation");
+  assert.match(t.posts.at(-1)!, /BUILD COMPLETE — order-cancellation[\s\S]*Still to build, from the same plan:\n- refunds: `\/pb:build refunds`/);
+});
+
 test("build: with taskChecks each, the check runs inside pb_task_done: one agent run from the first task to the end", async () => {
   const t = setup({ taskChecks: "each",  verify: "true" });
   await written(t);

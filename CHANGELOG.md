@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.15.2
+
+- **A plan split into several specs**: when a build completes, the other specs its plan wrote and that aren't built yet are listed, each with its `/pb:build <name>`
+
 ## 1.15.1
 
 - **Room for complex projects in the map**: its ceiling is ~8,000 tokens (was ~1,500), and its size no longer makes pb ask before writing it; the cartographer keeps a line only if it saves a later feature a search or a mistake

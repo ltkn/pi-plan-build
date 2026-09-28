@@ -879,6 +879,8 @@ export default function pb(pi: ExtensionAPI) {
     store.saveProgress(p);
     store.event(p.spec, { type: "built" });
     showProgress(ctx, p);
+    // The plan may have been split into several specs: the others are still waiting.
+    const rest = p.writtenIn ? store.specsOfPlanning(p.writtenIn) : [];
     post(
       [
         `**✅ BUILD COMPLETE — ${p.spec}**${notices}`,
@@ -892,6 +894,7 @@ export default function pb(pi: ExtensionAPI) {
         p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
         "",
         tip("build.done", { spec: p.spec }),
+        ...rest.map((n, i) => `${i ? "" : "\nStill to build, from the same plan:\n"}- ${n}: \`/${cmd("build")} ${n}\``),
       ].join("\n"),
     );
     return stop(`${passed}\n\nBuild complete: every check passed. Stop here; the harness shows the summary.`);
