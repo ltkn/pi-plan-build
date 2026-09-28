@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.15.0
+
+- **Stronger default standards**: new lines for one source of truth (use the rule or canonical form that already exists, never a second copy), consistency and concurrency from the database (one transaction per request, atomic statements or row locks, no check-then-write), and a last re-read of the diff as an attacker and as a race; tests must fail without the fix; stored, compared or sent values are validated strictly. They're added only where pb adds its section: an AGENTS.md that already has one keeps its own
+
 ## 1.14.0
 
 - **The review's two passes are named as one review**: the sessions are "review: <spec> · spec" and "review: <spec> · adversarial" (without a spec, "· intent"), so they sort together in `/resume`; the "abuse pass" is now the **adversarial pass** everywhere you see it (its question, the result, the guide), and its findings are marked "Adversarial:". The `## Threats and abuse` section and the `reviewer.security` setting keep their names

@@ -35,8 +35,9 @@ that itself when the session is over half full or the build runs on another mode
 For a small change, you don't need the whole flow: work with Pi as usual and
 run `/pb:review` on the uncommitted change.
 
-Your engineering standards (quality, dependencies, comments, tests) live in
-AGENTS.md, written once and loaded by Pi everywhere: see `/pb:help standards`.
+Your engineering standards (quality, dependencies, comments, tests, security,
+concurrency) live in AGENTS.md, written once and loaded by Pi everywhere: see
+`/pb:help standards`.
 <!-- /pb -->
 
 <!-- pb:topic standards -->
@@ -62,19 +63,29 @@ default covers:
   or task ids); decisions stay in the spec.
 - **Tests**: behaviour, written to current best practice even where existing
   tests aren't; new test tooling as a task of its own; never weaken an
-  existing test.
+  existing test; a test proves a fix only if it fails without it.
 - **Security**: every entry point (API, UI action, command, message, file,
   webhook) is assumed to be abused by someone who controls its input, holds a
   stolen or another user's session, and replays or automates requests. Each
   operation checks who the caller is, what they may act on and what they have
   proven; logic reused from another flow keeps that flow's preconditions;
-  security-relevant changes get abuse-case tests.
+  security-relevant changes get abuse-case tests, written from the attacker's
+  side.
+- **One source of truth**: a rule or canonical form that already exists (in
+  the database or a shared helper) is used, never re-implemented; a second copy
+  drifts, and the gap between copies is a bypass.
 - **Robustness**: at a boundary, input is assumed hostile or broken (sizes,
   ranges, encodings, duplicates, order, concurrent calls); business rules can't
   be bypassed by quantity, repetition, reordering or racing; every request's
-  work is bounded; a failure halfway leaves consistent state. Inside the
-  boundary: invariants (types, constraints, transactions), not repeated checks,
-  so the code stays clean where the data is already trusted.
+  work is bounded; a failure halfway leaves consistent state. Values that are
+  stored, compared or sent are validated strictly. Inside the boundary:
+  invariants (types, constraints, transactions), not repeated checks, so the
+  code stays clean where the data is already trusted.
+- **Consistency and concurrency** come from the database: one transaction per
+  request, constraints, atomic statements or row locks, not check-then-write in
+  application code.
+- **Before calling it done**: the diff re-read as an attacker and as a race,
+  and existing copies of any touched rule searched for.
 
 Make them yours: "Java 25: records, sealed types, pattern matching, virtual
 threads and scoped values; no Lombok", "every public

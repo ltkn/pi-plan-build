@@ -1,6 +1,6 @@
 {
   "name": "pi-plan-build",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "description": "Plan → spec → build → review for the Pi coding agent: plan together, build each feature task by task behind checks the harness runs, then an independent, double-checked review.",
   "type": "module",
   "license": "MIT",

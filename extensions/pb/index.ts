@@ -612,7 +612,7 @@ export default function pb(pi: ExtensionAPI) {
         store.markAsked("standards");
         const HERE = "Add pb's engineering standards to this project's AGENTS.md";
         const ALL = `Add them to ${path.join(agentDir(), "AGENTS.md")} (all projects)`;
-        const choice = await ctx.ui.select("Engineering standards (quality, dependencies, comments without history, tests)", [HERE, ALL, "No thanks"]);
+        const choice = await ctx.ui.select("Engineering standards (quality, dependencies, comments without history, tests, security, concurrency)", [HERE, ALL, "No thanks"]);
         if (choice === HERE || choice === ALL) {
           const file = choice === HERE ? path.join(ctx.cwd, "AGENTS.md") : path.join(agentDir(), "AGENTS.md");
           const java = isJavaProject(ctx.cwd);
