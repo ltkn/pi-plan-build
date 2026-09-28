@@ -135,8 +135,8 @@ plus your last message and the reply to it, word for word. The discussion goes
 on from the plan as it stands, with room to spare. Later checkpoints update only
 the sections that changed.
 
-**On demand**: `/pb:checkpoint` writes and resets now, e.g. before you quit.
-**Changed your mind?** `/pb:checkpoint undo` brings the whole discussion back
+**On demand**: `/pb:compact` writes and resets now, e.g. before you quit.
+**Changed your mind?** `/pb:compact undo` brings the whole discussion back
 (the reset only changed what the model sees; the session file keeps
 everything). The spec keeps what the checkpoint wrote.
 
@@ -150,7 +150,7 @@ summary lists what was decided without you.
 starts small, from the spec as it was at that checkpoint plus what followed.
 Or start clean from the spec as it is on disk now (including your own edits):
 `/pb:plan <spec>` continues planning in a fresh session, open questions first.
-Quitting a big session that never reached the checkpoint? `/pb:checkpoint`
+Quitting a big session that never reached the checkpoint? `/pb:compact`
 first, or it comes back at full size.
 
 `/pb:plan off` lifts the block for this session without building anything.
@@ -282,6 +282,10 @@ A progress line above the editor shows the tasks while it runs. If Pi stops
 mid-task without finishing it, pb reminds it once; if it stops again, the build
 pauses.
 
+**Compacting a build on demand.** `/pb:compact` in a build session (while it's
+paused, or between your messages) compacts it the same way: the summary is the
+build's state, written by pb, not by a model.
+
 **A full build session.** When a task finishes and the session is past
 `checkpointAt` (75% of its window, always before Pi would compact), pb resets it
 right there, between two tasks, where nothing is half-done. The build goes on
@@ -407,6 +411,13 @@ auth, entry points, money, quantities or state (a broad guess); `off` never.
 **Without a spec**, `/pb:review [what the change is meant to do]` reviews the
 uncommitted change against that intent and your standards: useful for any
 change you made with Pi without the rest of the flow.
+
+**Watching it.** While a pass runs, the line above the editor shows its phase,
+its current step, and the last lines it's writing or thinking. When the review
+is done, its message ends with each pass's whole run, to open with
+`pi --session <file>`: every file it read, every command, its reasoning. The
+explorer and the project map work the same way. A review's runs are kept with
+its spec; `/pb:archive` removes them, and the explorer and map runs so far.
 
 The reviewer can't change your files: pb snapshots the tree before it starts
 and puts back anything it touched. By default it runs on your session's model,

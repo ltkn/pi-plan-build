@@ -1273,7 +1273,7 @@ test("checkpoint: a planning session past checkpointAt writes its spec, then is 
   await t.run("plan", "cancel orders");
   let checkpointAsked = "";
   t.agent.script = async (text, tool) => {
-    if (text.startsWith("[pb:checkpoint]")) {
+    if (text.startsWith("[pb:compact]")) {
       checkpointAsked = text;
       await tool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
     }
@@ -1314,10 +1314,10 @@ test("checkpoint: when the plan isn't written, the conversation goes on as it is
   await t.settle();
   assert.equal(t.resets.length, 0);
   assert.match(t.posts.at(-1)!, /the plan wasn't written to a spec, so the conversation goes on as it is/);
-  const asked = t.instructions.filter((i) => i.startsWith("[pb:checkpoint]")).length;
+  const asked = t.instructions.filter((i) => i.startsWith("[pb:compact]")).length;
   t.runtime().pi.sendUserMessage("again");
   await t.settle();
-  assert.equal(t.instructions.filter((i) => i.startsWith("[pb:checkpoint]")).length, asked);
+  assert.equal(t.instructions.filter((i) => i.startsWith("[pb:compact]")).length, asked);
 });
 
 test("checkpoint: sessions that aren't planning are left to Pi; checkpointAt 0 turns it off", async () => {
@@ -1328,7 +1328,7 @@ test("checkpoint: sessions that aren't planning are left to Pi; checkpointAt 0 t
   t.runtime().usage = 90;
   t.runtime().pi.sendUserMessage("go on");
   await t.settle();
-  assert.ok(!t.instructions.some((i) => i.startsWith("[pb:checkpoint]")));
+  assert.ok(!t.instructions.some((i) => i.startsWith("[pb:compact]")));
 });
 
 test("compaction: a planning session's summary is its spec; elsewhere a compacted session gets the spec sent along at build", async () => {
@@ -1394,38 +1394,38 @@ test("/pb:spec <name> revises the spec from the file, not from memory", async ()
   assert.match(t.instructions.at(-1)!, /Existing: order-cancellation \(reusing a name rewrites it; read its spec\.md first/);
 });
 
-test("/pb:checkpoint writes and resets on demand (e.g. before quitting); undo brings the whole discussion back", async () => {
+test("/pb:compact writes and resets on demand (e.g. before quitting); undo brings the whole discussion back", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   t.selects.push("No thanks");
   await t.run("plan", "cancel orders");
   t.agent.script = async (text, tool) => {
-    if (text.startsWith("[pb:checkpoint]")) await tool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+    if (text.startsWith("[pb:compact]")) await tool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
   };
   t.runtime().pi.sendUserMessage("refunds are out of scope");
   await t.settle();
   assert.equal(t.resets.length, 0); // 10%: far below the checkpoint
-  await t.run("checkpoint");
+  await t.run("compact");
   assert.equal(t.resets.length, 1);
   assert.match(t.context(), /^\[pb plan checkpoint\][\s\S]*Only PENDING orders[\s\S]*Human: refunds are out of scope/);
   assert.doesNotMatch(t.context(), /\[pb:plan\] cancel orders/);
 
   t.runtime().usage = 73; // the whole discussion, back
-  await t.run("checkpoint", "undo");
-  assert.match(t.posts.at(-1)!, /Checkpoint undone\*\*: the whole discussion is back/);
+  await t.run("compact", "undo");
+  assert.match(t.posts.at(-1)!, /Reset undone\*\*: the whole discussion is back/);
   assert.match(t.context(), /\[pb:plan\] cancel orders[\s\S]*refunds are out of scope/);
   assert.doesNotMatch(t.context(), /\[pb plan checkpoint\]/);
   t.runtime().usage = 76; // past the threshold, but just undone: no new checkpoint before it grows another 5%
   t.runtime().pi.sendUserMessage("go on");
   await t.settle();
   assert.equal(t.resets.length, 1);
-  await t.run("checkpoint", "undo");
-  assert.match(t.notes.at(-1)!, /No checkpoint to undo/);
+  await t.run("compact", "undo");
+  assert.match(t.notes.at(-1)!, /Nothing to undo: no planning reset in this session/);
 
   const u = setup();
   process.chdir(u.repo);
-  await u.run("checkpoint");
-  assert.match(u.notes.at(-1)!, /Checkpoints are for planning sessions/);
+  await u.run("compact");
+  assert.match(u.notes.at(-1)!, /\/pb:compact is for planning and build sessions; elsewhere, Pi's \/compact/);
 });
 
 test("pb_explore shows what it's doing: the question, its live steps, then a one-line summary (all of it expanded)", async () => {
@@ -1536,12 +1536,12 @@ test("spec writing settles small things as assumptions; the checkpoint asks noth
   await u.run("plan", "cancel orders");
   let refused: Result | undefined;
   u.agent.script = async (text, tool) => {
-    if (text.startsWith("[pb:checkpoint]")) {
+    if (text.startsWith("[pb:compact]")) {
       refused = await tool("pb_ask", { question: "Mail or event?" });
       await tool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
     }
   };
-  await u.run("checkpoint");
+  await u.run("compact");
   assert.match(refused!.content![0].text, /Not now: this is a checkpoint\. Write the question under Open questions/);
   assert.equal(u.resets.length, 1);
 });
@@ -1656,4 +1656,48 @@ test("pb_ask counts down while planning too: unanswered, the recommendation is t
   const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
   assert.equal(t.dialogTimeouts.at(-1), 1);
   assert.match(r.content![0].text, /No answer in time: take the sensible reading \(your recommendation: event\), and tell the human it's an assumption to confirm/);
+});
+
+test("fresh calls are saved as sessions to open afterwards, and stream their text while they run", async () => {
+  const { runFresh } = await import("../extensions/pb/runner.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-sessions-"));
+  const seen: string[] = [];
+  const r = await runFresh({ cwd: dir, role: "explorer", systemPrompt: "You are an EXPLORER", brief: "# Question\n\nwhere?", prompt: "go", tools: ["read"], sessionDir: dir, onText: (t) => seen.push(t) });
+  assert.match(r.sessionFile!, /_mock-\d+-\d+\.jsonl$/);
+  assert.ok(seen.length > 2 && r.text.startsWith(seen.at(-1)!.slice(0, 20))); // grows piece by piece
+  assert.equal(seen.at(-1), r.text);
+
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /The whole runs: reviewer `pi --session \.pi\/pb\/specs\/order-cancellation\/sessions\/reviewer\/[^`]+\.jsonl` · abuse pass `pi --session \.pi\/pb\/specs\/order-cancellation\/sessions\/abuse\/[^`]+\.jsonl`/);
+  const e = await t.callTool("pb_explore", { question: "where?" });
+  assert.match((e as any).details.session, /^\.pi\/pb\/sessions\/explorer\/.+\.jsonl$/);
+
+  // The feature is done: its review runs and the explorer runs go with /pb:archive.
+  t.selects.push("<timeout>");
+  await t.run("archive");
+  const archived = fs.readdirSync(path.join(t.repo, ".pi/pb-archive")).find((d) => d.endsWith("order-cancellation"))!;
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb-archive", archived, "sessions")));
+  assert.deepEqual(fs.existsSync(path.join(t.repo, ".pi/pb/sessions/explorer")), false);
+});
+
+test("/pb:compact in a build session compacts to the build's state (Pi's compaction, pb's summary)", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  let compacted: unknown;
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T2")) return; // stops mid-build: paused
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  t.runtime().ctx.compact = (o: any) => {
+    compacted = o;
+    o.onComplete?.({});
+  };
+  await t.run("compact");
+  assert.ok(compacted);
+  assert.match(t.notes.at(-1)!, /Compacted to the build's state/);
 });

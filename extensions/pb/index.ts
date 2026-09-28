@@ -3,7 +3,7 @@
  * behind checks the harness runs, and have it reviewed with fresh eyes.
  *
  *   /pb:plan <what you want> plan together; the project's files stay untouched (/pb:plan <spec>: continue one)
- *   /pb:checkpoint [undo]  write the plan to its spec and reset the planning session to it
+ *   /pb:compact [undo]     planning: write the plan to its spec and reset to it; build: compact to the build's state
  *   /pb:spec [which]       write or revise the spec(s) from the discussion
  *   /pb:build [name]       build a spec here (--fresh: in a new session); resumes after a pause
  *   /pb:review [focus]     fresh, independent review against the spec, or of any uncommitted change
@@ -79,6 +79,14 @@ const tree = (ctx: ExtensionContext) => ctx.sessionManager as unknown as Tree;
 const text = (t: string) => [{ type: "text" as const, text: t }];
 /** A tool result the agent carries on from. */
 const reply = (t: string) => ({ content: text(t), details: undefined });
+/** The last few non-empty lines of a text being written, for a live view. */
+const tail = (t: string, n = 3) =>
+  t
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim())
+    .slice(-n);
+
 /** A tool result that ends the agent's run: the build paused or finished. */
 const stop = (t: string) => ({ content: text(t), details: undefined, terminate: true });
 
@@ -380,7 +388,8 @@ export default function pb(pi: ExtensionAPI) {
       const started = Date.now();
       const steps: string[] = [];
       const files = new Set<string>();
-      const details = (): ExploreDetails => ({ steps: steps.slice(-3), count: steps.length, files: [...files], started });
+      let writing = "";
+      const details = (): ExploreDetails => ({ steps: steps.slice(-3), count: steps.length, files: [...files], started, writing: tail(writing, 2) });
       const res = await runFresh({
         cwd: ctx.cwd,
         role: "explorer",
@@ -397,12 +406,18 @@ export default function pb(pi: ExtensionAPI) {
           if (call.name === "read" && typeof p === "string") files.add(p);
           onUpdate?.({ content: text(`↳ ${line}`), details: details() });
         },
+        onText: (t) => {
+          writing = t;
+          onUpdate?.({ content: text(""), details: details() });
+        },
+        sessionDir: store.sessionsDir("explorer"),
       });
       store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
       if (res.aborted) throw new Error("Exploration stopped.");
       if (!res.text.trim()) throw new Error(`The explorer produced no answer${res.error ? `: ${res.error}` : ""}`);
       const t = res.tokens;
-      return { content: text(res.text.trim()), details: { ...details(), ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite }, usage: usageOf(res) };
+      const session = res.sessionFile ? path.relative(ctx.cwd, res.sessionFile) : undefined;
+      return { content: text(res.text.trim()), details: { ...details(), writing: [], ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite, session }, usage: usageOf(res) };
     },
   });
 
@@ -893,27 +908,37 @@ export default function pb(pi: ExtensionAPI) {
     return checkpointPrompt(percent, store.specsOfPlanning(session));
   };
 
-  pi.registerCommand(cmd("checkpoint"), {
-    description: "Write the plan to its spec now and reset this planning session to it (e.g. before quitting). /pb:checkpoint undo brings the whole discussion back",
+  pi.registerCommand(cmd("compact"), {
+    description:
+      "pb's compaction. Planning: write the plan to its spec, then reset the session to it (e.g. before quitting); /pb:compact undo brings the whole discussion back. Build: compact to the build's state, no summarizing model call",
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
-      if (!session || !store.planningSessions().includes(session)) return ctx.ui.notify(`Checkpoints are for planning sessions (/${cmd("plan")}).`, "warning");
-      if (args.trim() !== "undo") return instruct(`▶ /${cmd("checkpoint")} — writing the plan to its spec, then resetting to it`, requestCheckpoint(ctx, store, session));
+      const build = specOfSession(ctx).progress;
+      if (session && build && unfinishedPhase(build.phase) && args.trim() !== "undo") {
+        // A build: Pi compacts, with the summary pb writes from the build's state (session_before_compact).
+        return ctx.compact({
+          onComplete: () => ctx.ui.notify("Compacted to the build's state: tasks, the current task and what it changed, the spec.", "info"),
+          onError: (e) => ctx.ui.notify(`Compaction failed: ${e.message}`, "error"),
+        });
+      }
+      if (!session || !store.planningSessions().includes(session))
+        return ctx.ui.notify(`/${cmd("compact")} is for planning and build sessions; elsewhere, Pi's /compact.`, "warning");
+      if (args.trim() !== "undo") return instruct(`▶ /${cmd("compact")} — writing the plan to its spec, then resetting to it`, requestCheckpoint(ctx, store, session));
 
       const from = store.planning(session)?.checkpointFrom;
       const nav = (ctx as Partial<ExtensionCommandContext>).navigateTree;
-      if (!from || !nav || !tree(ctx).getEntry?.(from)) return ctx.ui.notify("No checkpoint to undo in this session.", "info");
+      if (!from || !nav || !tree(ctx).getEntry?.(from)) return ctx.ui.notify("Nothing to undo: no planning reset in this session.", "info");
       const branch = tree(ctx).getBranch?.() ?? [];
       const reset = branch.map((e) => e.type).lastIndexOf("compaction");
       const since = reset < 0 ? 0 : branch.slice(reset + 1).filter((e) => e.type === "message").length;
-      if (since && ctx.hasUI && !(await ctx.ui.confirm("Undo the checkpoint?", `The ${since} message(s) since it stay on the other branch (reachable with /tree).`))) return;
-      const r = await nav(from, { summarize: false, label: "pb: checkpoint undone" });
+      if (since && ctx.hasUI && !(await ctx.ui.confirm("Undo the reset?", `The ${since} message(s) since it stay on the other branch (reachable with /tree).`))) return;
+      const r = await nav(from, { summarize: false, label: "pb: compact undone" });
       if (r.cancelled) return;
       store.setCheckpointFrom(session, undefined);
       checkpointQuiet.set(session, ctx.getContextUsage()?.tokens ?? Number.MAX_SAFE_INTEGER);
-      post(`**↺ Checkpoint undone**: the whole discussion is back in the context. The spec keeps what the checkpoint wrote; \`/${cmd("checkpoint")}\` writes and resets again when you want.`);
+      post(`**↺ Reset undone**: the whole discussion is back in the context. The spec keeps what was written to it; \`/${cmd("compact")}\` writes and resets again when you want.`);
     },
   });
 
@@ -946,7 +971,7 @@ export default function pb(pi: ExtensionAPI) {
           {
             type: "custom_message" as const,
             customType: "pb",
-            content: `**Plan checkpointed** to ${planned.map((n) => store.rel("specs", n, "spec.md")).join(", ")}: the conversation was reset to it (it was ${pending.percent}% full). Carry on; \`/${cmd("build")}\` when ready · \`/${cmd("checkpoint")} undo\` brings the whole discussion back.`,
+            content: `**Plan checkpointed** to ${planned.map((n) => store.rel("specs", n, "spec.md")).join(", ")}: the conversation was reset to it (it was ${pending.percent}% full). Carry on; \`/${cmd("build")}\` when ready · \`/${cmd("compact")} undo\` brings the whole discussion back.`,
             display: true,
           },
         ],
@@ -1477,7 +1502,18 @@ export default function pb(pi: ExtensionAPI) {
       const abort = new AbortController();
       const unsubEsc = ctx.mode === "tui" ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
       const label = name ?? "the uncommitted change";
-      const render = (phase: string, activity?: string) => ctx.ui.setWidget("pb-review", [`pb review ${label} — ${phase}   (Esc to stop)`, ...(activity ? [`  ↳ ${activity}`] : [])]);
+      // The progress line, the current step, and the last lines of what the pass is writing (or thinking).
+      let phaseNow = "";
+      let activityNow: string | undefined;
+      let textNow = "";
+      const draw = () =>
+        ctx.ui.setWidget("pb-review", [`pb review ${label} — ${phaseNow}   (Esc to stop)`, ...(activityNow ? [`  ↳ ${activityNow}`] : []), ...tail(textNow).map((l) => `  │ ${l}`)]);
+      const render = (phase: string, activity?: string) => {
+        if (phase !== phaseNow) textNow = "";
+        phaseNow = phase;
+        activityNow = activity;
+        draw();
+      };
       try {
         // Fresh ground truth first: the reviewer should judge what's on disk now.
         const command = loaded ? (loaded.spec.gate === "tests" ? testCmd : loaded.spec.gate === "build" ? buildCmd : null) : (testCmd ?? buildCmd);
@@ -1529,6 +1565,11 @@ export default function pb(pi: ExtensionAPI) {
           security,
           signal: abort.signal,
           onPhase: render,
+          sessionDir: (role) => (name ? store.specSessionsDir(name, role) : store.sessionsDir(role)),
+          onText: (_pass, t) => {
+            textNow = t;
+            draw();
+          },
         });
 
         const after = before ? snapshot(ctx.cwd, `pb: after review ${label}`) : undefined;
@@ -1556,6 +1597,9 @@ export default function pb(pi: ExtensionAPI) {
             outcome.prose,
             ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),
             ...(outcome.dismissed.length ? ["", "Dismissed after a second look:", ...outcome.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
+            ...(outcome.transcripts.length
+              ? ["", `The whole runs: ${outcome.transcripts.map((x) => `${x.pass} \`pi --session ${path.relative(ctx.cwd, x.file)}\``).join(" · ")}`]
+              : []),
             "",
             tip(verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : "review.other", { spec: label }),
           ].join("\n"),
@@ -1597,7 +1641,10 @@ export default function pb(pi: ExtensionAPI) {
     const current = readMap(ctx.cwd);
     const abort = new AbortController();
     const unsubEsc = ctx.mode === "tui" ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
-    const render = (phase: string, activity?: string) => ctx.ui.setWidget("pb-map", [`pb map — ${phase}   (Esc to stop)`, ...(activity ? [`  ↳ ${activity}`] : [])]);
+    let textNow = "";
+    const render = (phase: string, activity?: string) =>
+      ctx.ui.setWidget("pb-map", [`pb map — ${phase}   (Esc to stop)`, ...(activity ? [`  ↳ ${activity}`] : []), ...tail(textNow).map((l) => `  │ ${l}`)]);
+    let mapSession: string | undefined;
     const cartographer = (brief: string, phase: string) =>
       runFresh({
         cwd: ctx.cwd,
@@ -1611,6 +1658,14 @@ export default function pb(pi: ExtensionAPI) {
         thinking: cfg.explorer.thinking ?? "max",
         signal: abort.signal,
         onActivity: (a) => render(phase, a),
+        onText: (t) => {
+          textNow = t;
+          render(phase);
+        },
+        sessionDir: store.sessionsDir("cartographer"),
+      }).then((r) => {
+        mapSession = r.sessionFile ?? mapSession;
+        return r;
       });
     const mapOf = (r: Awaited<ReturnType<typeof runFresh>>) => {
       const call = r.toolCalls.filter((c) => c.name === "report_map").at(-1);
@@ -1671,7 +1726,7 @@ export default function pb(pi: ExtensionAPI) {
     store.saveMapPrevious(current);
     writeMap(ctx.cwd, body);
     ctx.ui.notify(
-      `Project map ${current ? "updated" : "written"} in AGENTS.md (~${tokens} tokens${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}). \`/${cmd("map")} undo\` puts the previous one back.`,
+      `Project map ${current ? "updated" : "written"} in AGENTS.md (~${tokens} tokens${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}). \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
       "info",
     );
   };
@@ -1711,6 +1766,8 @@ export default function pb(pi: ExtensionAPI) {
       if (!candidates.includes(name) && ctx.hasUI && !(await ctx.ui.confirm(`${name} isn't finished`, "Archive it anyway?"))) return;
       const markdown = store.readSpec(name) ?? "";
       const changed = changedSince(ctx.cwd, store.progress(name)?.baseCommit);
+      // The feature is finished: its review runs and the explorer and map runs so far aren't needed any more.
+      store.dropSessions(name);
       const dest = store.archive(name);
       if (!store.specNames().length) dropCheckpoints(ctx.cwd); // no live spec left to undo: let git reclaim the snapshots
       ctx.ui.notify(`Archived ${name} to ${path.relative(ctx.cwd, dest)}.`, "info");

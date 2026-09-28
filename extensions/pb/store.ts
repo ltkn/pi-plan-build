@@ -286,7 +286,7 @@ export class Store {
 
   /**
    * Planning sessions (project files read-only, see the tool_call guard), with a snapshot of the tree when
-   * planning began and the entry the last checkpoint reset from (what /pb:checkpoint undo goes back to).
+   * planning began and the entry the last checkpoint reset from (what /pb:compact undo goes back to).
    */
   private planningMap(): Record<string, { snapshot?: string; checkpointFrom?: string }> {
     const raw = readJson<string[] | Record<string, { snapshot?: string; checkpointFrom?: string }>>(path.join(this.root, "planning.json"));
@@ -310,6 +310,26 @@ export class Store {
     if (!map[sessionFile]) return;
     map[sessionFile] = { ...map[sessionFile], checkpointFrom: entry };
     writeFile(path.join(this.root, "planning.json"), `${JSON.stringify(map, null, 2)}\n`);
+  }
+
+  /** Where the fresh calls (reviewer, abuse pass, verifier, explorer, cartographer) save their sessions. */
+  sessionsDir(role: string): string {
+    const dir = path.join(this.root, "sessions", role);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  /** Where a spec's review passes save their sessions: with the spec, removed when it's archived. */
+  specSessionsDir(name: string, role: string): string {
+    const dir = path.join(this.specDir(name), "sessions", role);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  /** At /pb:archive: the archived spec's review runs, and the explorer and map runs so far. */
+  dropSessions(name: string): void {
+    fs.rmSync(path.join(this.specDir(name), "sessions"), { recursive: true, force: true });
+    fs.rmSync(path.join(this.root, "sessions"), { recursive: true, force: true });
   }
 
   /** The project map before its last update, for /pb:map undo. */

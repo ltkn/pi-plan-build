@@ -1,6 +1,7 @@
 /**
- * Fresh-context runner: the explorer, the reviewer and the verifier each run as a separate
- * `pi` process with no session history. It only knows what the brief and the repo tell it.
+ * Fresh-context runner: the explorer, the reviewer, the abuse pass, the verifier and the cartographer
+ * each run as a separate `pi` process with no history. It only knows what the brief and the repo tell it.
+ * Its session is saved (when a directory is given), so you can open the whole run afterwards.
  */
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -23,6 +24,10 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Each tool call the fresh model makes, as it happens: a one-line preview and the call itself. */
   onActivity?: (line: string, call: ToolCall) => void;
+  /** The model's current message (text and thinking) as it's written. */
+  onText?: (text: string) => void;
+  /** Save the run's session here, to open it later with `pi --session <file>`; unset = not saved. */
+  sessionDir?: string;
 }
 
 export interface ToolCall {
@@ -44,6 +49,8 @@ export interface RunResult {
   /** wall-clock duration of the call */
   ms: number;
   aborted: boolean;
+  /** the saved session file (with sessionDir) */
+  sessionFile?: string;
 }
 
 function piInvocation(args: string[]): { command: string; args: string[] } {
@@ -72,7 +79,7 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
   await fs.promises.writeFile(sysFile, o.systemPrompt, { mode: 0o600 });
   await fs.promises.writeFile(briefFile, o.brief, { mode: 0o600 });
 
-  const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
+  const args = ["--mode", "json", "-p", ...(o.sessionDir ? ["--session-dir", o.sessionDir] : ["--no-session"]), "--no-extensions"];
   for (const e of o.extensions ?? []) args.push("-e", e);
   if (o.model) args.push("--model", o.model);
   if (o.thinking) args.push("--thinking", o.thinking);
@@ -80,6 +87,8 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
   args.push("--append-system-prompt", sysFile, `@${briefFile}`, o.prompt);
 
   const started = Date.now();
+  let sessionId: string | undefined;
+  let streaming = "";
   const res: RunResult = {
     text: "",
     toolCalls: [],
@@ -106,7 +115,17 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
         } catch {
           return;
         }
+        if (ev.type === "session") sessionId = ev.id;
+        if (ev.type === "message_update") {
+          const d = ev.assistantMessageEvent;
+          if ((d?.type === "text_delta" || d?.type === "thinking_delta") && typeof d.delta === "string") {
+            streaming += d.delta;
+            o.onText?.(streaming);
+          }
+          return;
+        }
         if (ev.type !== "message_end" || ev.message?.role !== "assistant") return;
+        streaming = "";
         const m = ev.message;
         res.turns++;
         res.cost += m.usage?.cost?.total ?? 0;
@@ -165,6 +184,10 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
     await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
   res.ms = Date.now() - started;
+  if (o.sessionDir && sessionId) {
+    const file = (await fs.promises.readdir(o.sessionDir).catch(() => [] as string[])).find((f) => f.includes(sessionId!) && f.endsWith(".jsonl"));
+    if (file) res.sessionFile = path.join(o.sessionDir, file);
+  }
   return res;
 }
 

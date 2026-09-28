@@ -99,7 +99,7 @@ ${tip("spec.next")}`;
 
 /** Past the checkpoint: write the plan down while the whole discussion is still in context; pb then resets to it. */
 export function checkpointPrompt(percent: number, specs: string[]): string {
-  return `[pb:checkpoint] This planning conversation is at ${percent}% of its context. Write the plan as it stands to the spec now, while you still have the whole discussion: afterwards the conversation continues from the spec alone.
+  return `[pb:compact] This planning conversation is at ${percent}% of its context. Write the plan as it stands to the spec now, while you still have the whole discussion: afterwards the conversation continues from the spec alone.
 
 ${specs.length ? `Update ${specs.map((n) => `${P}/specs/${n}/spec.md`).join(", ")} with pb_update_spec, only the sections that changed (or pb_write_spec if most of it did).` : "Write it with pb_write_spec, Status: planning (Tasks and Verification can wait)."} Even if little is settled, the investigation isn't lost: record in Findings what was established and the dead ends (what was tried or ruled out, and why); in Decisions what is decided, with rejected ideas; in Open questions each option still being weighed, with what was found for and against it, and where the discussion stands. Leave out nothing the next step needs, and paste no code. Don't ask me anything now: what's undecided goes into Open questions. Then reply with one line, nothing else.`;
 }

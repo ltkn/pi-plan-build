@@ -8,7 +8,8 @@ build. Your engineering standards live in AGENTS.md, written once.
 ```
 /pb:plan <what>       plan together; project files untouched; the test baseline runs in the background
 /pb:plan <spec>       continue planning a spec in a fresh session, from the spec
-/pb:checkpoint [undo] write the plan to its spec and reset the planning session to it (automatic at checkpointAt)
+/pb:compact [undo]    pb's compaction: planning, write the spec and reset to it (automatic at checkpointAt);
+                      build, compact to the build's state
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
                       (--fresh: in a new session from the spec)
 /pb:review [focus]    independent review against the spec and your standards, P0–P3, blocking findings
@@ -23,7 +24,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.10.3   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.11.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -40,7 +41,7 @@ in the repository.
      what only you can decide
 you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
    … a long discussion? at 75% of the window Pi writes the plan to its spec
-     and the session is reset to it (/pb:checkpoint does it on demand)
+     and the session is reset to it (/pb:compact does it on demand)
 /pb:build
    → asks now, while you're here: build here / in a fresh session / show me the spec first
    → Pi writes .pi/pb/specs/order-cancellation/spec.md (goal, findings,
@@ -193,6 +194,7 @@ the existing ones still run.
 | `.pi/pb/specs/<name>/checkpoints.json`, `events.jsonl` | undo points (files and conversation) and stats |
 | `.pi/pb/baseline.json`, `planning.json` | the last test baseline; planning sessions and their snapshots |
 | `.pi/pb/explore.jsonl` | `pb_explore` usage per session |
+| `.pi/pb/specs/<name>/sessions/`, `.pi/pb/sessions/` | the whole runs of a spec's review passes, and of the explorer and cartographer, to open with `pi --session <file>`; removed by `/pb:archive` |
 | `.pi/pb-archive/` | archived specs (git-ignored by itself) |
 
 Snapshots live in git's object store under `refs/pb/checkpoints`; your branch,

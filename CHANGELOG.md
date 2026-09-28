@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.11.0
+
+- **`/pb:checkpoint` is now `/pb:compact`**, and works in build sessions too: there it compacts to the build's state (tasks, the current task and what it changed, the spec), written by pb, with no summarizing model call. In planning it still writes the spec and resets to it; `/pb:compact undo` brings the discussion back
+- **Watch the fresh calls, and open them afterwards**: while the reviewer, abuse pass, verifier, explorer or project map runs, you see the last lines it's writing or thinking, live; each run is saved as a session (a review's with its spec, the explorer's and the map's in `.pi/pb/sessions/`; `/pb:archive` removes them), and the review (and the map update, and the explorer's expanded result) names it: `pi --session <file>` shows the whole run, every file read, every command, the reasoning
+
 ## 1.10.3
 
 - `pb_ask` counts down in planning too (`askTimeoutSec`, 5 minutes): unanswered, Pi goes on with its recommendation and tells you it's an assumption to confirm (under open questions once there's a spec)

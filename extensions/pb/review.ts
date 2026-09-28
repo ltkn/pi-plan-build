@@ -23,6 +23,8 @@ export interface ReviewOutcome {
   verdict: Verdict;
   /** the abuse pass ran */
   security?: boolean;
+  /** each pass's saved session, to open with `pi --session <file>` */
+  transcripts: { pass: string; file: string }[];
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
   cost: number;
   ms: number;
@@ -64,13 +66,23 @@ export async function runReview(o: {
   model?: string;
   thinking?: string;
   verify: boolean;
-  /** why the change gets an adversarial pass (sensitive ground), if it does */
+  /** where each pass saves its session (by role) */
+  sessionDir?: (role: string) => string;
+  /** a pass's current text (and thinking) as it's written */
+  onText?: (pass: string, text: string) => void;
+  /** why the change gets an abuse pass, if it does */
   security?: string;
   signal?: AbortSignal;
   onPhase?: (phase: string, activity?: string) => void;
 }): Promise<ReviewOutcome> {
-  const out: ReviewOutcome = { aborted: false, prose: "", findings: [], dismissed: [], verdict: "none", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0 };
-  const add = (r: RunResult) => {
+  const out: ReviewOutcome = { aborted: false, prose: "", findings: [], dismissed: [], verdict: "none", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0, transcripts: [] };
+  // Each pass: its session saved (to open afterwards), its text streamed (to watch now).
+  const watched = (pass: string, role: string) => ({
+    sessionDir: o.sessionDir?.(role),
+    onText: (t: string) => o.onText?.(pass, t),
+  });
+  const add = (r: RunResult, pass?: string) => {
+    if (pass && r.sessionFile) out.transcripts.push({ pass, file: r.sessionFile });
     for (const k of ["input", "output", "cacheRead", "cacheWrite"] as const) out.tokens[k] += r.tokens[k];
     out.cost += r.cost;
     out.ms += r.ms;
@@ -89,8 +101,9 @@ export async function runReview(o: {
     thinking: o.thinking,
     signal: o.signal,
     onActivity: (a) => o.onPhase?.("fresh reviewer", a),
+    ...watched("reviewer", "reviewer"),
   });
-  add(res);
+  add(res, "reviewer");
   if (res.aborted) return { ...out, aborted: true };
   const findings = reported(res);
   out.prose = res.text.replace(/^\s*VERDICT:.*$/gim, "").trim();
@@ -119,8 +132,9 @@ export async function runReview(o: {
       thinking: o.thinking,
       signal: o.signal,
       onActivity: (x) => o.onPhase?.("abuse pass", x),
+      ...watched("abuse pass", "abuse"),
     });
-    add(a);
+    add(a, "abuse pass");
     if (a.aborted) return { ...out, aborted: true };
     out.findings = [...out.findings, ...(reported(a) ?? []).map((f) => ({ ...f, title: `Abuse: ${f.title}` }))];
     out.security = true;
@@ -141,8 +155,9 @@ export async function runReview(o: {
       thinking: o.thinking,
       signal: o.signal,
       onActivity: (a) => o.onPhase?.("verifying P0/P1 findings", a),
+      ...watched("verifier", "verifier"),
     });
-    add(v);
+    add(v, "verifier");
     if (v.aborted) return { ...out, aborted: true };
     const verdicts = v.toolCalls.filter((c) => c.name === "report_verdicts").flatMap((c) => (Array.isArray(c.arguments.verdicts) ? (c.arguments.verdicts as { finding: number; verdict: string; evidence: string }[]) : []));
     const rejected = new Map(verdicts.filter((x) => x.verdict === "rejected").map((x) => [toCheck[x.finding - 1], x.evidence ?? ""]));

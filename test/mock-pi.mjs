@@ -7,7 +7,17 @@ const argv = process.argv.slice(2);
 const sys = fs.readFileSync(argv[argv.indexOf("--append-system-prompt") + 1], "utf8");
 const brief = fs.readFileSync(argv.find((a) => a.startsWith("@")).slice(1), "utf8");
 const usage = { input: 3000, output: 400, cacheRead: 0, cacheWrite: 0, cost: { total: 0.02 } };
-const say = (content) => console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop", usage, content } }));
+// Like pi: a session header first; with --session-dir, the session is saved there.
+const id = `mock-${process.pid}-${Date.now()}`;
+const dirAt = argv.indexOf("--session-dir");
+if (dirAt >= 0) fs.writeFileSync(`${argv[dirAt + 1]}/2026-01-01T00-00-00-000Z_${id}.jsonl`, "{}\n");
+console.log(JSON.stringify({ type: "session", version: 3, id }));
+const say = (content) => {
+  // The text is streamed in pieces before the message ends.
+  for (const part of content.filter((c) => c.type === "text"))
+    for (const piece of part.text.match(/[\s\S]{1,12}/g) ?? []) console.log(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: piece } }));
+  console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop", usage, content } }));
+};
 const call = (name, args) => ({ type: "toolCall", id: `call-${name}`, name, arguments: args });
 
 if (sys.includes("ATTACKER")) {
