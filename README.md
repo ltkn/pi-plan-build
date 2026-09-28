@@ -12,7 +12,7 @@ build. Your engineering standards live in AGENTS.md, written once.
                       build, compact to the build's state
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
                       (--fresh: in a new session from the spec)
-/pb:review [focus]    independent review, in fresh sessions you watch (reviewer, then abuse pass), P0–P3, blocking findings
+/pb:review [focus]    independent review, in fresh sessions you watch (spec pass, then adversarial pass), P0–P3, blocking findings
                       double-checked; follow-ups look only at what changed (--full: everything)
                       no spec? reviews the uncommitted change against its intent
 /pb:deps [which]      check dependencies and propose upgrades, as a change of their own
@@ -24,7 +24,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.13.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.14.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -49,8 +49,9 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
    → one run: T1 → T2 → … → full suite ✗ → fix → full suite ✓
    ✅ BUILD COMPLETE
 /pb:review
-   → a fresh reviewer: every acceptance criterion with evidence, decisions,
-     tests, comments, your standards, security; P0/P1 findings double-checked
+   → a spec pass in a fresh session: every acceptance criterion with evidence,
+     decisions, tests, comments, your standards; then an adversarial pass that
+     tries to break the change; P0/P1 findings double-checked
    → fix them right there, /pb:review again (only the findings and what changed)
 ```
 
@@ -95,10 +96,10 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   point will be abused and every boundary gets hostile or broken input, with
   invariants inside rather than checks everywhere; a spec states the threats
   and abuse cases of a change that touches a trust boundary or rules someone
-  gains from breaking; and every review includes an abuse pass with one job:
+  gains from breaking; and every review includes an adversarial pass with one job:
   break the change (access, business rules, races, resources, failure, numbers
   and time, trust, leaks, configuration).
-- **A review you can watch.** The reviewer and the abuse pass each run in a
+- **A review you can watch.** The spec pass and the adversarial pass each run in a
   fresh, read-only Pi session that pb takes you into: watch it, interrupt it,
   ask it something; pb brings you back with the result, which is also kept in
   the spec's `review.md`.
@@ -183,7 +184,7 @@ the existing ones still run.
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, the planning and reviewer guards |
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
-| `reviewer` | `{"verify": true, "security": "always"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "always"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the abuse pass joins (`always`; `auto`: when the change looks sensitive; `off`) |
+| `reviewer` | `{"verify": true, "security": "always"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "always"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`always`, asked for after the spec pass; `auto`: when the change looks sensitive; `off`) |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |

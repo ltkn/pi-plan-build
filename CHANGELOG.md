@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.14.0
+
+- **The review's two passes are named as one review**: the sessions are "review: <spec> · spec" and "review: <spec> · adversarial" (without a spec, "· intent"), so they sort together in `/resume`; the "abuse pass" is now the **adversarial pass** everywhere you see it (its question, the result, the guide), and its findings are marked "Adversarial:". The `## Threats and abuse` section and the `reviewer.security` setting keep their names
+
 ## 1.13.0
 
 - The abuse pass is optional per review: when the review is done, pb asks whether to run it now; unanswered (`askTimeoutSec`, 5 minutes), it runs; skipped, the result says "abuse pass skipped"

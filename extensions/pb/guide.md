@@ -358,7 +358,7 @@ then:
 ## Review
 
 `/pb:review` runs the check once more, then opens a **fresh session**, "review:
-<spec>", and takes you there: the reviewer sees the spec, the diff and the check
+<spec> · spec", and takes you there: the reviewer sees the spec, the diff and the check
 result, but not the build conversation, so it isn't anchored by the builder's
 reasoning. It checks
 every acceptance criterion with evidence, the decisions (including rejected
@@ -384,8 +384,8 @@ The next `/pb:review` is a **follow-up**: it checks the previous findings and
 looks only at what changed since (`--full` reviews everything again). If
 nothing changed, it says so and costs nothing.
 
-**The abuse pass, on every review.** A second fresh call joins the review with
-a single job: break the change. For every entry point it adds or alters and
+**The adversarial pass, on every review.** A second fresh session, "review:
+<spec> · adversarial", has a single job: break the change. For every entry point it adds or alters and
 every rule it enforces, it looks for:
 
 - **access**: another user's data, a stolen session, what each state change
@@ -404,7 +404,7 @@ every rule it enforces, it looks for:
 - the spec's Threats and abuse: each one prevented and tested
 
 It proposes fixes at the boundary or as invariants, not checks scattered through
-the code. Its findings, marked "Abuse:", get the same second look as the rest.
+the code. Its findings, marked "Adversarial:", get the same second look as the rest.
 `"reviewer": {"security": "always" | "auto" | "off"}`: `always` is the default;
 `auto` runs it only when the spec has Threats and abuse or the change touches
 auth, entry points, money, quantities or state (a broad guess); `off` never.
@@ -413,16 +413,17 @@ auth, entry points, money, quantities or state (a broad guess); `off` never.
 uncommitted change against that intent and your standards: useful for any
 change you made with Pi without the rest of the flow.
 
-**Inside the review.** The reviewer, and then the abuse pass ("abuse: <spec>"),
-each run in a real Pi session you're in: you watch everything natively, and
-you can interrupt it or ask it something ("why is 3 a P1?"). Its model is
-read-only: it can't edit or write files, and anything its commands change is
-put back. A pass ends when it has reported its findings and stops, or at
-`/pb:review done`. When the review is done, pb asks whether to run the abuse
-pass now (unanswered, after `askTimeoutSec`, it runs; skipped, the result says
-so), and finally takes you back to your session with the result. Asking questions is fine; arguing it out of a finding
-makes it less independent. Both sessions stay in `/resume`, named, and the
-result names them too.
+**Inside the review.** The spec pass, and then the adversarial pass, each run
+in a real Pi session you're in: you watch everything natively, and you can
+interrupt it or ask it something ("why is 3 a P1?"). Its model is read-only: it
+can't edit or write files, and anything its commands change is put back. A pass
+ends when it has reported its findings and stops, or at `/pb:review done`. When
+the spec pass is done, pb asks whether to run the adversarial pass now
+(unanswered, after `askTimeoutSec`, it runs; skipped, the result says so), and
+finally takes you back to your session with the result. Asking questions is
+fine; arguing it out of a finding makes it less independent. Both sessions stay
+in `/resume`, named "review: <spec> · spec" and "· adversarial" (without a spec,
+"· intent"), and the result names them too.
 
 **If you leave** (say `/resume` elsewhere) before it's done, the pass you left
 stops, and pb keeps where the review stood. The next `/pb:review` offers to

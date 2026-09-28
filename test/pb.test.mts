@@ -290,7 +290,8 @@ function setup(config: object = {}) {
         // As in Pi: the assistant message (with its tool calls) first, then the tool results.
         append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } });
         // In a review session, every message goes to the stand-in reviewer (its first one, and pb's reminder).
-        const pass = names.get(rt.file())?.match(/^(review|abuse): /)?.[1];
+        const kind = names.get(rt.file())?.match(/^review: .* · (spec|intent|adversarial)$/)?.[1];
+        const pass = kind && (kind === "adversarial" ? "abuse" : "review");
         if (pass && !reviewer.script) {
           // The stand-in reviewer and abuse pass: report the configured findings, then a short reply.
           if (reviewer.write && pass === "review") fs.writeFileSync(reviewer.write, "reviewer was here");
@@ -920,9 +921,9 @@ test("review: a fresh review session with the spec first and the diff; you're br
   const brief = briefOf(t);
   assert.match(brief, /^\[pb:review\] You are an independent REVIEWER in a fresh session[\s\S]*read-only for you[\s\S]*--- brief ---\n\n# The spec[\s\S]*Not doing soft delete[\s\S]*## Changed files\n\n(T1\.txt\n)?[\s\S]*T2\.txt/);
   assert.match(brief, /## The check the harness ran\n\n`true` → PASS/);
-  assert.ok([...t.names.values()].includes("review: order-cancellation") && [...t.names.values()].includes("abuse: order-cancellation"));
+  assert.ok([...t.names.values()].includes("review: order-cancellation · spec") && [...t.names.values()].includes("review: order-cancellation · adversarial"));
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // back where you were
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: reviewer `pi --session build-session-\d+\.jsonl` · abuse pass `pi --session build-session-\d+\.jsonl`/);
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+\.jsonl` · adversarial `pi --session build-session-\d+\.jsonl`/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
   assert.equal(t.progress("order-cancellation").reviewUnshown, undefined);
   assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /Review of order-cancellation\*\* — ✅ PASS/); // kept with the spec
@@ -960,7 +961,7 @@ test("review: the review session is read-only for its model; /pb:review done end
   assert.match(blocked!, /This is a review session: read-only/);
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // you went home by yourself
   const md = t.read(".pi/pb/specs/order-cancellation/review.md");
-  assert.match(md, /✗ CHANGES NEEDED[\s\S]*You left the review before it finished: the abuse pass didn't finish[\s\S]*`\/pb:review` continues it/);
+  assert.match(md, /✗ CHANGES NEEDED[\s\S]*You left the review before it finished: the adversarial pass didn't finish[\s\S]*`\/pb:review` continues it/);
 
   // /pb:review offers to continue: back into the abuse session, which carries on where it was.
   t.reviewer.script = false;
@@ -970,7 +971,7 @@ test("review: the review session is read-only for its model; /pb:review done end
   assert.ok(t.instructions.some((i) => i.startsWith("[pb] You were interrupted. Carry on where you were")));
   assert.ok(!t.notes.some((n) => /This review was interrupted/.test(n))); // pb was continuing it: no hint needed
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // and back home at the end
-  assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 2 · P3 0 · with an abuse pass[\s\S]*Abuse: cap the page size/);
+  assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 2 · P3 0 · with an adversarial pass[\s\S]*Adversarial: cap the page size/);
   assert.equal(JSON.parse(t.read(".pi/pb/config.json")).maxAttempts, 2);
   assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-run.json"))); // finished: nothing left to continue
 });
@@ -997,19 +998,19 @@ test("review: reopening an interrupted review session, /pb:review continue picks
   t.reviewer.script = false;
   await t.run("review", "continue");
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home);
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*with an abuse pass/);
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*with an adversarial pass/);
 });
 
-test("review: the abuse pass is asked for when the review is done; skipped, the result says so; unanswered, it runs", async () => {
+test("review: the adversarial pass is asked for when the review is done; skipped, the result says so; unanswered, it runs", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
   t.selects.push("Keep p/m", "Skip it"); // the one-time reviewer-model offer comes first
   await t.run("review");
-  assert.ok(t.selectTitles.includes("The review is done. Run the abuse pass now (someone trying to break the change)?"));
-  assert.ok(![...t.names.values()].includes("abuse: order-cancellation"));
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS · P0 0 · P1 0 · P2 1 · P3 1 · abuse pass skipped/);
+  assert.ok(t.selectTitles.includes("The review is done. Run the adversarial pass now (someone trying to break the change)?"));
+  assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS · P0 0 · P1 0 · P2 1 · P3 1 · adversarial pass skipped/);
 
   const u = setup({ verify: "true", askTimeoutSec: 0.001 });
   await written(u);
@@ -1017,8 +1018,8 @@ test("review: the abuse pass is asked for when the review is done; skipped, the 
   await u.run("build");
   u.selects.push("<timeout>"); // nobody there: it runs
   await u.run("review");
-  assert.ok([...u.names.values()].includes("abuse: order-cancellation"));
-  assert.match(u.posts.at(-1)!, /with an abuse pass/);
+  assert.ok([...u.names.values()].includes("review: order-cancellation · adversarial"));
+  assert.match(u.posts.at(-1)!, /with an adversarial pass/);
 });
 
 test("review: a follow-up looks at the previous findings and what changed since", async () => {
@@ -1782,7 +1783,7 @@ test("fresh calls are saved as sessions to open afterwards, and stream their tex
   t.agent.script = diligent;
   await t.run("build");
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /The review sessions: reviewer `pi --session build-session-\d+\.jsonl` · abuse pass `pi --session build-session-\d+\.jsonl`/);
+  assert.match(t.posts.at(-1)!, /The review sessions: spec `pi --session build-session-\d+\.jsonl` · adversarial `pi --session build-session-\d+\.jsonl`/);
   const e = await t.callTool("pb_explore", { question: "where?" });
   assert.match((e as any).details.session, /^\.pi\/pb\/sessions\/explorer\/.+\.jsonl$/);
 

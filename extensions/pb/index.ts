@@ -1518,7 +1518,7 @@ export default function pb(pi: ExtensionAPI) {
   const P_ORDER = ["P0", "P1", "P2", "P3"] as const;
 
   /**
-   * One review pass in its own, real Pi session ("review: <spec>" or "abuse: <spec>"): you're moved into it
+   * One review pass in its own, real Pi session ("review: <spec> · spec" or "· adversarial"): you're moved into it
    * and watch it natively; its model is read-only and reports with pb_report_findings. It ends when the model
    * has reported and stopped, or at /pb:review done. Returns what it found, and whether you left meanwhile.
    */
@@ -1535,8 +1535,8 @@ export default function pb(pi: ExtensionAPI) {
         {
           customType: "pb",
           content: o.resume
-            ? `▶ Continuing the ${o.role === "review" ? "review" : "abuse pass"} of **${o.label}** where it was interrupted.`
-            : `▶ ${o.role === "review" ? "Review" : "Abuse pass"} of **${o.label}**, in a fresh session. The model can't change files; you can watch, interrupt and ask it anything. It ends when it has reported its findings and stops (\`/${cmd("review")} done\` ends it now); then pb takes you back.`,
+            ? `▶ Continuing the ${o.role === "review" ? "review" : "adversarial pass"} of **${o.label}** where it was interrupted.`
+            : `▶ ${o.role === "review" ? "Review" : "Adversarial pass"} of **${o.label}**, in a fresh session. The model can't change files; you can watch, interrupt and ask it anything. It ends when it has reported its findings and stops (\`/${cmd("review")} done\` ends it now); then pb takes you back.`,
           display: true,
         },
         { triggerTurn: false },
@@ -1589,9 +1589,9 @@ export default function pb(pi: ExtensionAPI) {
     }
     let todo: "review" | "abuse" | undefined = !run.passes.length ? "review" : run.security && run.passes.length === 1 ? "abuse" : undefined;
     if (todo === "abuse") {
-      // The abuse pass is optional: asked when the review is done; unanswered, it runs.
-      const RUN = "Run the abuse pass";
-      const choice = await choose(from, store, "The review is done. Run the abuse pass now (someone trying to break the change)?", [RUN, "Skip it"], RUN);
+      // The adversarial pass is optional: asked when the review is done; unanswered, it runs.
+      const RUN = "Run the adversarial pass";
+      const choice = await choose(from, store, "The review is done. Run the adversarial pass now (someone trying to break the change)?", [RUN, "Skip it"], RUN);
       if (choice !== RUN) {
         run.security = undefined;
         run.abuseSkipped = true;
@@ -1604,7 +1604,8 @@ export default function pb(pi: ExtensionAPI) {
     const result = await from.newSession({
       parentSession: run.home,
       setup: async (sm) => {
-        sm.appendSessionInfo(`${todo}: ${run.label}`);
+        // Both passes are part of one review: named together, so they sort together in /resume.
+        sm.appendSessionInfo(`review: ${run.label} · ${todo === "abuse" ? "adversarial" : run.name ? "spec" : "intent"}`);
       },
       withSession: async (c) => {
         const r = await drivePass(c, c.sendMessage, store, { role: todo, label: run.label, brief: run.brief });
@@ -1633,11 +1634,11 @@ export default function pb(pi: ExtensionAPI) {
     const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left);
     const verdict = run.passes.length ? verdictOf(findings) : "none";
     const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
-    const sessions = run.passes.map((x) => `${x.role === "review" ? "reviewer" : "abuse pass"} \`pi --session ${path.relative(run.cwd, x.session)}\``);
+    const sessions = run.passes.map((x) => `${x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"} \`pi --session ${path.relative(run.cwd, x.session)}\``);
     const text = [
-      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an abuse pass" : run.abuseSkipped ? " · abuse pass skipped" : ""}`,
+      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : run.abuseSkipped ? " · adversarial pass skipped" : ""}`,
       ...(o.partial
-        ? ["", `⚠ You left the review before it finished: the ${finished("review") ? "abuse pass" : "review"} didn't finish; this is what had been reported. \`/${cmd("review")}\` continues it.`]
+        ? ["", `⚠ You left the review before it finished: the ${finished("review") ? "adversarial pass" : "review"} didn't finish; this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),
       "",
       run.passes.find((x) => x.role === "review")?.prose ?? "",
@@ -1651,7 +1652,7 @@ export default function pb(pi: ExtensionAPI) {
     return { text, verdict, counts, findings, complete: finished("review") && (!run.security || finished("abuse")), abuse: finished("abuse") };
   };
 
-  const allFindings = (run: ReviewRun) => run.passes.flatMap((x) => (x.role === "abuse" ? x.findings.map((f) => ({ ...f, title: `Abuse: ${f.title}` })) : x.findings));
+  const allFindings = (run: ReviewRun) => run.passes.flatMap((x) => (x.role === "abuse" ? x.findings.map((f) => ({ ...f, title: `Adversarial: ${f.title}` })) : x.findings));
 
   /** Never lost: the result (or what was reported so far) is kept with the spec. */
   const writeReview = (store: Store, run: ReviewRun, partial: boolean) => {
@@ -1719,7 +1720,7 @@ export default function pb(pi: ExtensionAPI) {
 
   pi.registerCommand(cmd("review"), {
     description:
-      "Independent review in fresh sessions you watch: a reviewer who never saw the build, then an abuse pass, against the spec or any uncommitted change's intent; pb brings you back with the result. Follow-ups look only at what changed (--full: everything). /pb:review done ends a review session now",
+      "Independent review in fresh sessions you watch: a spec pass by a reviewer who never saw the build, then an adversarial pass, against the spec or any uncommitted change's intent; pb brings you back with the result. Follow-ups look only at what changed (--full: everything). /pb:review done ends a review session now",
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
@@ -1741,7 +1742,7 @@ export default function pb(pi: ExtensionAPI) {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       // An interrupted review: continue it rather than start over.
       if (saved?.interrupted) {
-        const CONTINUE = `Continue the interrupted review of ${saved.label} (the ${saved.interrupted.role === "review" ? "review" : "abuse pass"} didn't finish)`;
+        const CONTINUE = `Continue the interrupted review of ${saved.label} (the ${saved.interrupted.role === "review" ? "spec pass" : "adversarial pass"} didn't finish)`;
         const SHOW = "Show what it had reported";
         const NEW = "Start a new review";
         const choice = ctx.hasUI ? await ctx.ui.select("A review was interrupted", [CONTINUE, SHOW, NEW]) : CONTINUE;
