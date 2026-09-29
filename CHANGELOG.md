@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.15.3
+
+- **Stronger default standards**: when something gains trust or changes hands (verified, accepted, promoted, transferred), what was set up before the proof is discarded or re-proven, not inherited; state transitions are guarded by the current state, so repeating one is a no-op and a fact recorded once is never overwritten; the last re-read of the diff also considers an attacker who acted before the victim. As before, only an AGENTS.md without pb's section gets them
+
 ## 1.15.2
 
 - **A plan split into several specs**: when a build completes, the other specs its plan wrote and that aren't built yet are listed, each with its `/pb:build <name>`
