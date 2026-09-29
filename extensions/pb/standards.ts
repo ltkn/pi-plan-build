@@ -104,12 +104,29 @@ export function projectStack(cwd: string): Stack | undefined {
   return undefined;
 }
 
-/** Append the section for the stack to a context file (created if missing). */
-export function addStandards(file: string, o: { stack?: Stack } = {}): void {
+const sectionFor = (stack?: Stack) =>
+  stack === "vue" ? FRONTEND_STANDARDS : stack === "java" ? DEFAULT_STANDARDS.replace(END, `${JAVA_STANDARDS}\n${END}`) : DEFAULT_STANDARDS;
+
+/**
+ * Put the stack's section in a context file: created if missing, pb's section replaced if it has one,
+ * else appended. Nothing else in the file changes. "broken": a start marker without its end, left alone.
+ */
+export function writeStandards(file: string, stack?: Stack): "created" | "added" | "replaced" | "unchanged" | "broken" {
+  const section = sectionFor(stack);
+  const prev = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : undefined;
+  const i = prev?.indexOf(START) ?? -1;
+  if (prev !== undefined && i >= 0) {
+    const j = prev.indexOf(END, i);
+    if (j < 0) return "broken";
+    const next = `${prev.slice(0, i)}${section.trimEnd()}${prev.slice(j + END.length)}`;
+    if (next === prev) return "unchanged";
+    fs.writeFileSync(file, next);
+    return "replaced";
+  }
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const prev = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-  const section = o.stack === "vue" ? FRONTEND_STANDARDS : o.stack === "java" ? DEFAULT_STANDARDS.replace(END, `${JAVA_STANDARDS}\n${END}`) : DEFAULT_STANDARDS;
-  fs.writeFileSync(file, `${prev}${prev && !prev.endsWith("\n\n") ? (prev.endsWith("\n") ? "\n" : "\n\n") : ""}${section}`);
+  const before = prev ?? "";
+  fs.writeFileSync(file, `${before}${before && !before.endsWith("\n\n") ? (before.endsWith("\n") ? "\n" : "\n\n") : ""}${section}`);
+  return prev === undefined ? "created" : "added";
 }
 
 /** True when the session's loaded context files already contain the standards (so prompts needn't repeat them). */

@@ -17,6 +17,8 @@ build. Your engineering standards live in AGENTS.md, written once.
                       no spec? reviews the uncommitted change against its intent
 /pb:deps [which]      check dependencies and propose upgrades, as a change of their own
 /pb:map [focus|undo]  refresh the project map in AGENTS.md (done at /pb:archive too); undo puts the previous back
+/pb:standards [stack] write pb's current standards into this project's AGENTS.md (created if missing; only pb's
+                      section is replaced); java, vue or plain, detected by default
 /pb:spec [which]      write or revise a spec without building (optional)
 /pb:undo · /pb:status · /pb:stats · /pb:archive · /pb:help
 ```
@@ -24,7 +26,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.16.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.17.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 

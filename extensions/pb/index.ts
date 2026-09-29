@@ -11,6 +11,7 @@
  *   /pb:undo [id]          restore the files, and rewind the conversation, to before a task
  *   /pb:stats [all]        tasks, attempts, checks, tokens and cache per spec
  *   /pb:archive [name]     move a finished spec out of the way
+ *   /pb:standards [stack]  write pb's current standards into this project's AGENTS.md (java | vue | plain)
  *   /pb:status             every spec and where it stands
  *   /pb:help [topic]       what to do next
  *
@@ -50,7 +51,7 @@ import { type ExploreDetails, registerRenderers, renderExploreCall, renderExplor
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
-import { addStandards, agentDir, findStandards, projectStack, standardsLoaded } from "./standards.ts";
+import { type Stack, agentDir, findStandards, projectStack, standardsLoaded, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, untrackedText } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
@@ -576,7 +577,7 @@ export default function pb(pi: ExtensionAPI) {
     const choice = await ctx.ui.select(title, stack ? [HERE, "No thanks"] : [HERE, ALL, "No thanks"]);
     if (choice !== HERE && choice !== ALL) return;
     const file = choice === HERE ? path.join(ctx.cwd, "AGENTS.md") : path.join(agentDir(), "AGENTS.md");
-    addStandards(file, { stack });
+    writeStandards(file, stack);
     const which = stack === "java" ? " (with Java 25 defaults)" : stack === "vue" ? " (the frontend ones, for a Vue project)" : "";
     ctx.ui.notify(`Added to ${file}${which}: edit them there. Pi loads them into every session from now on.`, "info");
   };
@@ -2003,6 +2004,27 @@ export default function pb(pi: ExtensionAPI) {
       "info",
     );
   };
+
+  pi.registerCommand(cmd("standards"), {
+    description: "Write pb's current engineering standards into this project's AGENTS.md: created if missing, pb's section replaced, the rest untouched. Optional: java, vue or plain (default: detected)",
+    getArgumentCompletions: (prefix: string) => ["java", "vue", "plain"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
+    handler: async (args, ctx) => {
+      const arg = args.trim().toLowerCase();
+      if (arg && !["java", "vue", "plain"].includes(arg)) return ctx.ui.notify(`/${cmd("standards")} takes java, vue or plain (default: detected from the project).`, "warning");
+      const stack = arg ? (arg === "plain" ? undefined : (arg as Stack)) : projectStack(ctx.cwd);
+      const file = path.join(ctx.cwd, "AGENTS.md");
+      const result = writeStandards(file, stack);
+      new Store(ctx.cwd).markAsked("standards");
+      if (result === "broken") return ctx.ui.notify(`${file} has "<!-- pb:standards -->" without its "<!-- /pb:standards -->": add the end marker where pb's section ends, then run /${cmd("standards")} again.`, "error");
+      const which = stack === "java" ? "the backend ones, with Java 25" : stack === "vue" ? "the frontend ones, for a Vue project" : "the plain ones";
+      const what = { created: "Created", added: "Added pb's standards to", replaced: "Replaced pb's standards in", unchanged: "pb's standards are already current in" }[result];
+      const shared = findStandards(path.dirname(ctx.cwd));
+      ctx.ui.notify(
+        `${what} ${file} (${which})${result === "created" ? ", with pb's standards" : ""}.${result === "replaced" || result === "added" ? " The rest of the file is untouched." : ""}${result === "unchanged" ? "" : " Sessions already running keep the ones they loaded until restarted."}${shared ? ` ${shared.file} also has a pb section: Pi loads both.` : ""}`,
+        "info",
+      );
+    },
+  });
 
   pi.registerCommand(cmd("map"), {
     description: "Refresh the project map in AGENTS.md (layout, patterns, constraints) from the code as it is now. Optional: what to focus on; /pb:map undo puts the previous map back",

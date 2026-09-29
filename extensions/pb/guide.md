@@ -120,6 +120,13 @@ threads and scoped values; no Lombok", "every public
 API has a Javadoc contract", "no new dependencies without asking". Keep them
 short: every line is read in every session. A session that started before you
 added them gets them in pb's messages until it's restarted.
+
+`/pb:standards [java|vue|plain]` writes pb's current section into this
+project's AGENTS.md at any time: after a pb update improved them, after you
+declined the offer, or when the file went missing. It creates the file if
+needed and replaces only pb's section, so your own lines and the project map
+stay as they are; your edits inside pb's section are replaced. Without an
+argument, the section is picked from the project.
 <!-- /pb -->
 
 <!-- pb:topic plan -->

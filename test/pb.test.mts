@@ -606,6 +606,44 @@ test("standards: a Vue project under shared standards is offered its frontend se
   }
 });
 
+test("/pb:standards: creates AGENTS.md, replaces only pb's section, and recovers from a missing file", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { DEFAULT_STANDARDS, FRONTEND_STANDARDS } = await import("../extensions/pb/standards.ts");
+  const agents = path.join(t.repo, "AGENTS.md");
+
+  await t.run("standards");
+  assert.equal(fs.readFileSync(agents, "utf8"), DEFAULT_STANDARDS); // created, plain: no stack detected
+  assert.match(t.notes.at(-1)!, /^Created .*AGENTS\.md \(the plain ones\), with pb's standards\./);
+  const asked = t.selectTitles.length;
+  await t.run("plan", "x");
+  assert.equal(t.selectTitles.length, asked); // the offer counts as answered
+
+  const before = "# Shop\n\nOur notes.\n\n";
+  const after = "\n<!-- pb:map -->\n## Project map\n- `src/`\n<!-- /pb:map -->\n";
+  fs.writeFileSync(agents, `${before}<!-- pb:standards -->\n## Engineering standards\n\n- Old rule.\n<!-- /pb:standards -->\n${after}`);
+  await t.run("standards", "vue");
+  assert.equal(fs.readFileSync(agents, "utf8"), `${before}${FRONTEND_STANDARDS}${after}`); // the rest, byte for byte
+  assert.match(t.notes.at(-1)!, /^Replaced pb's standards in .*\(the frontend ones, for a Vue project\)\. The rest of the file is untouched\./);
+  await t.run("standards", "vue");
+  assert.match(t.notes.at(-1)!, /^pb's standards are already current in/);
+
+  fs.writeFileSync(agents, "# Shop\n");
+  fs.writeFileSync(path.join(t.repo, "pom.xml"), "<project/>");
+  await t.run("standards");
+  assert.match(fs.readFileSync(agents, "utf8"), /^# Shop\n\n<!-- pb:standards -->[\s\S]*- Java 25: [^\n]*\n<!-- \/pb:standards -->\n$/);
+  assert.match(t.notes.at(-1)!, /^Added pb's standards to .*\(the backend ones, with Java 25\)/);
+
+  const broken = "# Shop\n<!-- pb:standards -->\n- mine\n";
+  fs.writeFileSync(agents, broken);
+  await t.run("standards");
+  assert.equal(fs.readFileSync(agents, "utf8"), broken); // left alone
+  assert.match(t.notes.at(-1)!, /without its "<!-- \/pb:standards -->"/);
+
+  await t.run("standards", "react");
+  assert.match(t.notes.at(-1)!, /takes java, vue or plain/);
+});
+
 test("plan: the baseline runs in a separate worktree, so it can't collide with builds in the working copy", async () => {
   const where = path.join(os.tmpdir(), `pb-baseline-pwd-${process.pid}`);
   const t = setup({ verify: `pwd > ${where}`, baseline: true });

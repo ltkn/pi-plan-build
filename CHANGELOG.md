@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.17.0
+
+- **`/pb:standards [java|vue|plain]`**: writes pb's current standards into this project's AGENTS.md at any time, whatever pb's saved state says. It creates the file if missing, and replaces only pb's section, leaving your own lines and the project map as they are. Use it to bring a project up to date after the standards improve, or to recover after declining the offer or losing the file. By default the section is picked from the project (Java, Vue or plain)
+
 ## 1.16.0
 
 - **Frontend standards for Vue projects**: a project with `vue` in its package.json (and no pom.xml or Gradle build) is offered a frontend section, in which the page renders what the backend decides. It keeps Quality, Dependencies, Tests and Security; puts every rule in the backend (input sent as typed); and adds the page's role, RFC 9457 backend refusals, browser security, the Vue stack and frontend tests. Its comments are dense, for backend developers. It leaves out the database rules and Java 25
