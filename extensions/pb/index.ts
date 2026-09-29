@@ -50,7 +50,7 @@ import { type ExploreDetails, registerRenderers, renderExploreCall, renderExplor
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
-import { addStandards, agentDir, findStandards, isJavaProject, standardsLoaded } from "./standards.ts";
+import { addStandards, agentDir, findStandards, projectStack, standardsLoaded } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, untrackedText } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
@@ -554,6 +554,33 @@ export default function pb(pi: ExtensionAPI) {
     return true;
   };
 
+  /**
+   * Standards live in AGENTS.md (Pi loads it everywhere); offer pb's section once per project, at the
+   * first /pb:plan or /pb:build. A stack's own section (Java, Vue) goes only in the project's AGENTS.md,
+   * so the shared one stays free of stack rules. A Vue project that only finds a shared section (a
+   * parent's or the agent directory's, e.g. the backend's) is offered its frontend one next to it.
+   */
+  const offerStandards = async (ctx: ExtensionContext, store: Store) => {
+    if (!ctx.hasUI || store.asked("standards")) return;
+    const found = findStandards(ctx.cwd);
+    const stack = projectStack(ctx.cwd);
+    const shared = !!found && path.dirname(found.file) !== path.resolve(ctx.cwd);
+    if (found && !(shared && stack === "vue" && !found.text.includes("- Frontend role:"))) return;
+    store.markAsked("standards");
+    const HERE = stack === "vue" ? "Add pb's frontend standards to this project's AGENTS.md" : "Add pb's engineering standards to this project's AGENTS.md";
+    const ALL = `Add them to ${path.join(agentDir(), "AGENTS.md")} (all projects)`;
+    const covers = stack === "vue" ? "the page's role, backend refusals, browser security, Vue" : "concurrency";
+    const title = found
+      ? `This Vue project only gets the standards in ${found.file}, not the frontend ones. Pi loads both files, so that section stays in force next to this project's: keep the shared AGENTS.md free of stack-specific rules`
+      : `Engineering standards (quality, dependencies, comments without history, tests, security, ${covers})`;
+    const choice = await ctx.ui.select(title, stack ? [HERE, "No thanks"] : [HERE, ALL, "No thanks"]);
+    if (choice !== HERE && choice !== ALL) return;
+    const file = choice === HERE ? path.join(ctx.cwd, "AGENTS.md") : path.join(agentDir(), "AGENTS.md");
+    addStandards(file, { stack });
+    const which = stack === "java" ? " (with Java 25 defaults)" : stack === "vue" ? " (the frontend ones, for a Vue project)" : "";
+    ctx.ui.notify(`Added to ${file}${which}: edit them there. Pi loads them into every session from now on.`, "info");
+  };
+
   /** Continue planning a spec in a fresh session, seeded from it: clean context, exact checkpoint. */
   const continuePlan = async (ctx: ExtensionCommandContext, store: Store, name: string) => {
     const md = store.readSpec(name)!;
@@ -607,19 +634,7 @@ export default function pb(pi: ExtensionAPI) {
       pi.setSessionName(`plan: ${title}`);
       const { cfg, testCmd } = commands(ctx.cwd, store);
 
-      // Standards live in AGENTS.md (Pi loads it everywhere); offer pb's default once per project.
-      if (!findStandards(ctx.cwd) && !store.asked("standards") && ctx.hasUI) {
-        store.markAsked("standards");
-        const HERE = "Add pb's engineering standards to this project's AGENTS.md";
-        const ALL = `Add them to ${path.join(agentDir(), "AGENTS.md")} (all projects)`;
-        const choice = await ctx.ui.select("Engineering standards (quality, dependencies, comments without history, tests, security, concurrency)", [HERE, ALL, "No thanks"]);
-        if (choice === HERE || choice === ALL) {
-          const file = choice === HERE ? path.join(ctx.cwd, "AGENTS.md") : path.join(agentDir(), "AGENTS.md");
-          const java = isJavaProject(ctx.cwd);
-          addStandards(file, { java });
-          ctx.ui.notify(`Added to ${file}${java ? " (with Java 25 defaults)" : ""}: edit them there. Pi loads them into every session from now on.`, "info");
-        }
-      }
+      await offerStandards(ctx, store);
 
       // After the standards offer: its AGENTS.md isn't a change made while planning.
       startPlanning(ctx, store);
@@ -1486,6 +1501,9 @@ export default function pb(pi: ExtensionAPI) {
             : continuePrompt(t.task);
         return instruct(t.marker, body + from);
       }
+
+      // Building without a /pb:plan first: the standards are offered here instead.
+      await offerStandards(ctx, store);
 
       // Which spec: a named one; else the ones this session wrote; else any ready one.
       const phaseOf = (n: string) => store.progress(n)?.phase ?? "written";

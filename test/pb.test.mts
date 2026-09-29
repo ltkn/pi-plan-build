@@ -36,6 +36,7 @@ function setup(config: object = {}) {
   const results: string[] = []; // every pb_task_done result, including the ones that end the run
   const selects: string[] = [];
   const selectTitles: string[] = [];
+  const selectOptions: string[][] = [];
   const confirms: string[] = [];
   const dialogTimeouts: (number | undefined)[] = [];
   const editors: (string | undefined)[] = [];
@@ -194,6 +195,7 @@ function setup(config: object = {}) {
         setEditorText: (t: string) => (stat.editorText = t),
         select: async (title: string, opts: string[], o?: { timeout?: number }) => {
           selectTitles.push(title);
+          selectOptions.push(opts);
           dialogTimeouts.push(o?.timeout);
           const pick = selects.shift();
           if (pick === "<timeout>") return undefined;
@@ -349,6 +351,7 @@ function setup(config: object = {}) {
     results,
     selects,
     selectTitles,
+    selectOptions,
     confirms,
     dialogTimeouts,
     editors,
@@ -418,8 +421,11 @@ const diligent: Script = async (text, tool) => {
   await tool("pb_task_done", { task, status: "done", summary: `did ${task}` });
 };
 
+/** A spec written as if a /pb:plan came first: its one-time standards offer is already answered. */
 async function written(t: ReturnType<typeof setup>, spec = SPEC()) {
   process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
   const r = await t.callTool("pb_write_spec", { name: "order-cancellation", content: spec });
   assert.equal(r.error, undefined, r.error ?? "");
 }
@@ -533,6 +539,71 @@ test("standards: a Java project gets the Java 25 defaults with pb's section", as
   const agents = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
   assert.match(agents, /even where the surrounding code doesn't[\s\S]*- Java 25: records, sealed types, pattern matching, virtual threads and scoped values; no Lombok\.\n<!-- \/pb:standards -->/);
   assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /with Java 25 defaults/);
+});
+
+test("standards: a Vue project gets the frontend section, without the database rules", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  fs.writeFileSync(path.join(t.repo, "package.json"), JSON.stringify({ dependencies: { vue: "^3.5.0" } }));
+  await t.run("plan", "x");
+  const agents = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
+  assert.match(agents, /- Quality: [\s\S]*- One source of truth: every rule lives in the backend[\s\S]*- Backend refusals: RFC 9457[\s\S]*- Vue: Vue 3\.5[\s\S]*a double click, a session that expires mid-edit, a URL from the query string\. Search for existing copies of any rule you touched\.\n<!-- \/pb:standards -->/);
+  assert.doesNotMatch(agents, /Consistency and concurrency|Java 25|Compare against the database/);
+  assert.ok(t.selectTitles.some((x) => /^Engineering standards \(.*browser security, Vue\)$/.test(x)));
+  assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /the frontend ones, for a Vue project/);
+});
+
+test("standards: a Java project that also has a Vue package.json keeps the backend section", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  fs.writeFileSync(path.join(t.repo, "pom.xml"), "<project/>");
+  fs.writeFileSync(path.join(t.repo, "package.json"), JSON.stringify({ devDependencies: { vue: "^3.5.0" } }));
+  await t.run("plan", "x");
+  const agents = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
+  assert.match(agents, /Consistency and concurrency[\s\S]*- Java 25/);
+  assert.doesNotMatch(agents, /Frontend role/);
+});
+
+test("standards: /pb:build without a /pb:plan first offers them too, once", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const r = await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  assert.equal(r.error, undefined);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.match(t.selectTitles[0], /^Engineering standards \(/);
+  assert.match(t.read("AGENTS.md"), /<!-- pb:standards -->/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  const asked = t.selectTitles.length;
+  await t.run("plan", "next");
+  assert.equal(t.selectTitles.length, asked); // not asked again
+});
+
+test("standards: a Vue project under shared standards is offered its frontend section; stack sections never go global", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { agentDir, DEFAULT_STANDARDS } = await import("../extensions/pb/standards.ts");
+  const global = path.join(agentDir(), "AGENTS.md");
+  fs.mkdirSync(agentDir(), { recursive: true });
+  fs.writeFileSync(global, DEFAULT_STANDARDS);
+  try {
+    fs.writeFileSync(path.join(t.repo, "package.json"), JSON.stringify({ dependencies: { vue: "^3.5.0" } }));
+    await t.run("plan", "x");
+    assert.match(t.selectTitles[0], /only gets the standards in .*AGENTS\.md, not the frontend ones[\s\S]*keep the shared AGENTS\.md free of stack-specific rules/);
+    assert.match(t.read("AGENTS.md"), /- Frontend role:/);
+    assert.equal(fs.readFileSync(global, "utf8"), DEFAULT_STANDARDS); // untouched
+
+    const u = setup({ verify: "true" });
+    process.chdir(u.repo);
+    fs.writeFileSync(path.join(u.repo, "pom.xml"), "<project/>");
+    fs.rmSync(global);
+    u.selects.push("<timeout>");
+    await u.run("plan", "x");
+    assert.deepEqual(u.selectOptions[0], ["Add pb's engineering standards to this project's AGENTS.md", "No thanks"]); // no "all projects" for a Java section
+    assert.ok(!fs.existsSync(global));
+  } finally {
+    fs.rmSync(global, { force: true });
+  }
 });
 
 test("plan: the baseline runs in a separate worktree, so it can't collide with builds in the working copy", async () => {

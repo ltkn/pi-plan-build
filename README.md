@@ -24,7 +24,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.15.3   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.16.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -118,7 +118,8 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   build, review and exploration starts with it.
 - **Your standards, once, where Pi already looks.** Engineering standards
   live in AGENTS.md, which Pi loads into every session. pb offers once to add
-  its default section (with Java 25 defaults in a Maven or Gradle project).
+  its default section: with Java 25 defaults in a Maven or Gradle project, and a
+  frontend section in a Vue project, where the page renders what the backend decides.
 - **Guarded planning.** Edits to the project are blocked while planning;
   commands can still write, so pb snapshots the project and shows you what
   changed before building.

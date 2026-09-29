@@ -45,9 +45,11 @@ concurrency) live in AGENTS.md, written once and loaded by Pi everywhere: see
 
 Your engineering standards belong in **AGENTS.md**, which Pi loads into every
 session by itself: planning, building, the reviewer's call, and your plain Pi
-sessions too. The first time you plan in a project, pb offers once to add its
-default section there (this project's `AGENTS.md`, or `~/.pi/agent/AGENTS.md`
-for all your projects), marked `<!-- pb:standards -->`. Edit it there. The
+sessions too. The first time you plan or build in a project, pb offers once to
+add its default section there (this project's `AGENTS.md`, or
+`~/.pi/agent/AGENTS.md` for all your projects), marked `<!-- pb:standards -->`.
+Edit it there. A Java or Vue project's section goes only in its own AGENTS.md:
+keep the shared one free of stack-specific rules, since Pi loads both. The
 default covers:
 
 - **Quality**: the best current practice for the stack, a proper fix rather
@@ -86,6 +88,32 @@ default covers:
   application code.
 - **Before calling it done**: the diff re-read as an attacker and as a race,
   and existing copies of any touched rule searched for.
+
+A Vue project (`vue` in package.json, and no pom.xml or Gradle build) gets a
+frontend section instead, offered even when a shared AGENTS.md (a parent
+folder's, or `~/.pi/agent/`) already has pb's section: the page renders what the backend decides. It keeps
+Quality, Dependencies, Tests and Security, and drops the database rules. Its
+other bullets:
+
+- **One source of truth**: every rule lives in the backend; input is sent as
+  typed, with no client-side validation, trimming or normalizing.
+- **Frontend role**: no business rules on the page; minimal state, with backend
+  data in the query cache. UI quality is still the page's job: loading and
+  disabled states, focus after errors, accessible messages.
+- **Backend refusals**: RFC 9457 problem details; the page branches only on
+  `type` and shows `detail` and `errors` as sent.
+- **Browser security**: an HttpOnly session cookie, CSRF tokens on writes, no
+  open redirects, no Referer from pages whose URL carries a token, no `v-html`
+  on backend or user data.
+- **Vue**: Vue 3.5 with `<script setup lang="ts">`, TypeScript 6, Vite, Vue
+  Router, TanStack Vue Query, Bootstrap 5.3 through Sass, Vitest with MSW,
+  pnpm; Pinia only for client-only state.
+- **Frontend tests**: each page through the real router against a scripted
+  backend, one test per response `type` plus an unknown one.
+- **Comments**: dense, because backend (Java) developers maintain these apps:
+  every platform-integration step says why. Still never history.
+- **Before calling it done**: as above, plus a double click, a session that
+  expires mid-edit, and a URL from the query string.
 
 Make them yours: "Java 25: records, sealed types, pattern matching, virtual
 threads and scoped values; no Lombok", "every public

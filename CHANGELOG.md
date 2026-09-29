@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.16.0
+
+- **Frontend standards for Vue projects**: a project with `vue` in its package.json (and no pom.xml or Gradle build) is offered a frontend section, in which the page renders what the backend decides. It keeps Quality, Dependencies, Tests and Security; puts every rule in the backend (input sent as typed); and adds the page's role, RFC 9457 backend refusals, browser security, the Vue stack and frontend tests. Its comments are dense, for backend developers. It leaves out the database rules and Java 25
+- **The standards are offered at `/pb:build` too**, when a project was never planned with pb; still once per project
+- **Stack sections stay out of the shared AGENTS.md**: a Java or Vue section is only offered for the project's own AGENTS.md; a Vue project that finds pb's section only in a shared AGENTS.md (a parent folder's or `~/.pi/agent/`) is offered its frontend one, with a note that Pi loads both
+
 ## 1.15.3
 
 - **Stronger default standards**: when something gains trust or changes hands (verified, accepted, promoted, transferred), what was set up before the proof is discarded or re-proven, not inherited; state transitions are guarded by the current state, so repeating one is a no-op and a fact recorded once is never overwritten; the last re-read of the diff also considers an attacker who acted before the victim. As before, only an AGENTS.md without pb's section gets them
