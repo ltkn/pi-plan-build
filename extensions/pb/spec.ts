@@ -146,3 +146,11 @@ export function addDecision(md: string, decision: string): string {
 }
 
 export const SPEC_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/** A commit message for the feature, from its spec: the title as subject, the goal, and what the tasks did. */
+export function commitMessage(md: string): string | undefined {
+  const spec = parseSpec(md).spec;
+  if (!spec) return undefined;
+  const goal = md.split(/^##\s+Goal\s*$/im)[1]?.split(/^##\s+(?!#)/m)[0]?.trim() ?? "";
+  return [spec.title, ...(goal ? ["", goal] : []), ...(spec.tasks.length ? ["", ...spec.tasks.map((t) => `- ${t.title}`)] : [])].join("\n");
+}

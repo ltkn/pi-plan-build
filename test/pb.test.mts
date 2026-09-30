@@ -1195,6 +1195,7 @@ test("review: works without a spec, on the uncommitted change and its intent", a
   await t.run("review", "greet more warmly");
   assert.match(briefOf(t), /--- brief ---\n\n# No spec[\s\S]*Intent: greet more warmly[\s\S]*## Changed files\n\nREADME/);
   assert.match(t.posts.at(-1)!, /Review of the uncommitted change\*\* — ✅ PASS/);
+  assert.doesNotMatch(t.posts.at(-1)!, /Commit message/); // no spec to write it from
 });
 
 test("review: files changed during the review are put back", async () => {
@@ -1246,6 +1247,46 @@ test("stats: after a new plan in the build's session, its turns stop counting fo
   const before = usage();
   await t.run("plan", "the next feature");
   assert.equal(usage(), before);
+});
+
+test("commit message: from the spec, after the build, the review and the archive, whichever you stop at", async () => {
+  const MESSAGE = "```text\nOrder cancellation\n\nCancel orders.\n\n- first file\n- second file\n```";
+  // The paths the mock cartographer's map names, so the map is written without asking.
+  const project = (repo: string) => {
+    fs.mkdirSync(path.join(repo, "src/auth"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "src/order.ts"), "export {}\n");
+    fs.writeFileSync(path.join(repo, "src/auth/Login.java"), "class Login {}\n");
+    execSync("git add . && git commit -qm src", { cwd: repo });
+  };
+  const t = setup({ verify: "true" });
+  project(t.repo);
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.ok(t.posts.at(-1)!.includes(`**Commit message**, to paste:\n\n${MESSAGE}`)); // no task ids: they mean nothing in git
+  await t.run("review");
+  assert.ok(t.posts.at(-1)!.includes(MESSAGE));
+
+  await t.run("archive"); // the feature isn't committed yet: its message, and the map it now includes
+  assert.ok(t.posts.at(-1)!.includes("```text\nOrder cancellation\n\nCancel orders.\n\n- first file\n- second file\n\nAlso updates the project map in AGENTS.md.\n```"));
+
+  const u = setup({ verify: "true" });
+  project(u.repo);
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  execSync("git add -A -- . ':(exclude).pi' && git commit -qm feature", { cwd: u.repo });
+  await u.run("archive"); // committed: only the map is left
+  assert.ok(u.posts.at(-1)!.includes("```text\nUpdate the project map in AGENTS.md after Order cancellation\n\n- added Orders\n- noted transactions\n```"));
+
+  const v = setup({ verify: "true", mapOnArchive: false });
+  await written(v);
+  v.agent.script = diligent;
+  await v.run("build");
+  execSync("git add -A -- . ':(exclude).pi' && git commit -qm feature", { cwd: v.repo });
+  const posted = v.posts.length;
+  await v.run("archive"); // nothing left to commit: no message
+  assert.equal(v.posts.length, posted);
 });
 
 test("archive moves a finished spec out of .pi/pb/, and stats still see it", async () => {
@@ -1912,6 +1953,7 @@ test("map: the cartographer is told the budget the view warns at", async () => {
   const { CARTOGRAPHER_SYSTEM, MAP_TOKENS } = await import("../extensions/pb/map.ts");
   assert.ok(CARTOGRAPHER_SYSTEM.includes(`about ${MAP_TOKENS.toLocaleString("en-US")} tokens at most`));
   assert.match(CARTOGRAPHER_SYSTEM, /### Security invariants[\s\S]*Known gaps[\s\S]*Never write a verdict/);
+  assert.match(CARTOGRAPHER_SYSTEM, /capable models that explore fast[\s\S]*Layout, only where exploring misleads[\s\S]*No module-by-module tour[\s\S]*Start with the security invariants/);
 });
 
 test("pb_ask counts down while planning too: unanswered, the recommendation is taken as an assumption to confirm", async () => {

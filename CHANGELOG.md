@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.19.0
+
+- **A commit message to paste** after the build, the review and the archive, whichever you stop at. It's written from the spec: the title, the goal, and what each task did. At the archive, it covers the feature if it isn't committed yet, and the project map pb just updated
+- **A map for capable models**: the cartographer leaves out what a listing, a file name, a manifest or one grep shows, and keeps only what exploring would miss. The security invariants come first; the layout covers only names that mislead and entry points a search won't find. The budget is unchanged: a large codebase can still fill it with what matters
+
 ## 1.18.0
 
 - **A map that doesn't spread mistakes**: the cartographer names as a pattern only code that meets the project's standards, and lists what departs from them under "Known gaps" so nobody copies it; says where each kind of new code goes; gives the invariants whose breach is a security or data bug their own section, each with the code that enforces it (where the caller, their tenant or their ownership is checked), the security-critical ones tagged; gives the exact commands the project defines and the package manager its lockfile shows; says which of a doc and the code is right when they disagree; and describes a behaviour only after reading the file that does it. Its ceiling is ~20,000 tokens (was ~8,000), and a map over it goes back once to the cartographer to be trimmed, in the same call that corrects paths that don't resolve, keeping every security invariant and known gap

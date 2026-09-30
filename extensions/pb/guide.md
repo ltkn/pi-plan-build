@@ -522,7 +522,11 @@ exploration starts with it instead of rediscovering it.
 - **`/pb:map undo`** puts the previous map back (again: swaps them back).
 
 A fresh, read-only call proposes the whole new map (it revisits all of it, not
-only the new area), in short bullet lines, as short as the project allows, up
+only the new area). Its readers are capable models that explore fast, so it
+holds only what exploring wouldn't show them: security and data invariants with
+the code that enforces them, where new code goes and what to copy, known gaps,
+commands and quirks, docs the code contradicts, and layout only where names
+mislead. It's written in short bullet lines, as short as the project allows, up
 to about 20,000 tokens: it's read in every session, so a line stays only if it
 saves a later feature a search or a mistake. Your session doesn't grow. pb
 checks every path it names, from the project root, under the path a heading
@@ -600,13 +604,13 @@ model call).
 <!-- pb:tip build.done -->
 **What now**
 - Next: `/pb:review`, here in this session, so you can fix findings right away.
-- Then commit, and `/pb:archive` · more: `/pb:help review`
+- Then commit (the message above is ready to paste), and `/pb:archive` · more: `/pb:help review`
 <!-- /pb -->
 
 ### Review passed
 <!-- pb:tip review.pass -->
 **What now**
-- Minor findings? Ask Pi to fix them here, then commit.
+- Minor findings? Ask Pi to fix them here, then commit with the message above.
 - `/pb:archive` when it's merged; the next spec: `/pb:build` from your planning session.
 <!-- /pb -->
 

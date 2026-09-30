@@ -50,7 +50,7 @@ import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff
 import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, commitMessage, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, projectStack, standardsLoaded, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, untrackedText } from "./store.ts";
@@ -909,6 +909,8 @@ export default function pb(pi: ExtensionAPI) {
         p.unattended?.length ? `\nDecided without you (no answer in time):\n${p.unattended.map((c) => `- ${c}`).join("\n")}` : "",
         p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
         "",
+        commitBlock(commitMessage(store.readSpec(p.spec) ?? "")),
+        "",
         tip("build.done", { spec: p.spec }),
         ...rest.map((n, i) => `${i ? "" : "\nStill to build, from the same plan:\n"}- ${n}: \`/${cmd("build")} ${n}\``),
       ].join("\n"),
@@ -1326,6 +1328,9 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   /** The spec that was just written: its tasks in the session, the whole of it as a view (not sent to the model: it wrote it). */
+  /** A commit message to paste, shown wherever the work may end: after the build, the review and the archive. */
+  const commitBlock = (message: string | undefined) => (message ? `**Commit message**, to paste:\n\n\`\`\`text\n${message}\n\`\`\`` : "");
+
   const showSpec = (store: Store, name: string, names: string[] = [name]) => {
     const loaded = loadSpec(store, name);
     if (!loaded) return;
@@ -1668,6 +1673,7 @@ export default function pb(pi: ExtensionAPI) {
       ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
       ...(o.restored.length ? ["", `⚠ Files changed during the review were put back: ${o.restored.join(", ")}`] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
+      ...(run.name && !o.partial ? ["", commitBlock(commitMessage(new Store(run.cwd).readSpec(run.name) ?? ""))] : []),
       "",
       tip(verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : "review.other", { spec: run.label }),
     ].join("\n");
@@ -1909,9 +1915,9 @@ export default function pb(pi: ExtensionAPI) {
    * Update the project map in a fresh, read-only call (the session doesn't grow). Paths that don't resolve,
    * and a map over the budget, go back to it once to be corrected; then the map is written, with the change shown and /pb:map undo to
    * go back. It asks first only when something looks off: paths that still don't resolve, or a large part of
-   * the existing map removed (unanswered: the current map stays).
+   * the existing map removed (unanswered: the current map stays). Returns the changes when it wrote the map.
    */
-  const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string } = {}) => {
+  const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string } = {}): Promise<string[] | undefined> => {
     const cfg = store.config();
     const current = readMap(ctx.cwd);
     const abort = new AbortController();
@@ -1956,9 +1962,9 @@ export default function pb(pi: ExtensionAPI) {
       render("reading the project");
       const first = await cartographer(cartographerBrief({ current, ...o }), "reading the project");
       store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...first.tokens, cost: first.cost, ms: first.ms });
-      if (first.aborted) return ctx.ui.notify("Map update stopped.", "info");
+      if (first.aborted) return void ctx.ui.notify("Map update stopped.", "info");
       ({ map: body, changes } = mapOf(first));
-      if (!body) return ctx.ui.notify(`No map came back${first.error ? `: ${first.error}` : ""}.`, "warning");
+      if (!body) return void ctx.ui.notify(`No map came back${first.error ? `: ${first.error}` : ""}.`, "warning");
       unresolved = unresolvedPaths(ctx.cwd, body);
       const overBy = mapTokens(body) - MAP_TOKENS;
       if (unresolved.length || overBy > 0) {
@@ -1967,7 +1973,7 @@ export default function pb(pi: ExtensionAPI) {
         const phase = unresolved.length ? (overBy > 0 ? "checking its paths and trimming it" : "checking its paths") : "trimming it to the budget";
         const second = await cartographer(cartographerBrief({ current, proposed: body, unresolved, overBy: overBy > 0 ? overBy : undefined }), phase);
         store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...second.tokens, cost: second.cost, ms: second.ms });
-        if (second.aborted) return ctx.ui.notify("Map update stopped.", "info");
+        if (second.aborted) return void ctx.ui.notify("Map update stopped.", "info");
         const fixed = mapOf(second).map;
         if (fixed) {
           body = fixed;
@@ -1980,7 +1986,7 @@ export default function pb(pi: ExtensionAPI) {
     }
 
     const diff = mapDiff(current, body);
-    if (!diff.length) return ctx.ui.notify("The project map is up to date: nothing to change.", "info");
+    if (!diff.length) return void ctx.ui.notify("The project map is up to date: nothing to change.", "info");
     const tokens = mapTokens(body);
     const currentLines = current.split("\n").filter((l) => l.trim()).length;
     const removed = diff.filter((l) => l.startsWith("-")).length;
@@ -1996,9 +2002,9 @@ export default function pb(pi: ExtensionAPI) {
       const choice = await choose(ctx, store, `The proposed project map needs a look: ${warnings.join("; ")}`, [KEEP, APPLY, EDIT], KEEP);
       if (choice === EDIT) {
         const edited = await ctx.ui.editor("Edit the project map", body);
-        if (edited === undefined) return ctx.ui.notify("Map not changed.", "info");
+        if (edited === undefined) return void ctx.ui.notify("Map not changed.", "info");
         body = normalizeMap(edited);
-      } else if (choice !== APPLY) return ctx.ui.notify("Map not changed.", "info");
+      } else if (choice !== APPLY) return void ctx.ui.notify("Map not changed.", "info");
     }
     store.saveMapPrevious(current);
     writeMap(ctx.cwd, body);
@@ -2006,6 +2012,7 @@ export default function pb(pi: ExtensionAPI) {
       `Project map ${current ? "updated" : "written"} in AGENTS.md (~${tokens} tokens${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}). \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
       "info",
     );
+    return changes;
   };
 
   pi.registerCommand(cmd("standards"), {
@@ -2070,10 +2077,21 @@ export default function pb(pi: ExtensionAPI) {
       if (!store.specNames().length) dropCheckpoints(ctx.cwd); // no live spec left to undo: let git reclaim the snapshots
       ctx.ui.notify(`Archived ${name} to ${path.relative(ctx.cwd, dest)}.`, "info");
       // The feature is done: what it established about the project goes into the map every session reads.
+      let mapChanges: string[] | undefined;
       if (store.config().mapOnArchive) {
         ctx.ui.notify(`Updating the project map from ${name} (mapOnArchive in ${store.rel("config.json")} turns this off)…`, "info");
-        await updateMap(ctx, store, { spec: { name, findings: findingsOf(markdown) }, changed });
+        mapChanges = await updateMap(ctx, store, { spec: { name, findings: findingsOf(markdown) }, changed });
       }
+      // What's left to commit: the feature itself if it wasn't committed yet, and the map.
+      const feature = changedSince(ctx.cwd).some((f) => f !== "AGENTS.md" && !f.startsWith(".pi/"));
+      const title = parseSpec(markdown).spec?.title ?? name;
+      const mapNote = mapChanges ? ["Update the project map in AGENTS.md", ...(mapChanges.length ? ["", ...mapChanges.map((c) => `- ${c}`)] : [])] : [];
+      const message = feature
+        ? [commitMessage(markdown) ?? title, ...(mapChanges ? ["", "Also updates the project map in AGENTS.md."] : [])].join("\n")
+        : mapChanges
+          ? [`${mapNote[0]} after ${title}`, ...mapNote.slice(1)].join("\n")
+          : undefined;
+      if (message) post(commitBlock(message));
     },
   });
 
