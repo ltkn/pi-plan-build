@@ -139,14 +139,18 @@ Do not modify any file. Use read/grep/find/ls and bash only for inspection.
 
 What belongs in the map: what stays true across features and saves exploration:
 - Layout: the main modules and packages, one line each on their role; the entry points.
-- Patterns to follow, by path (e.g. "a new endpoint: follow \`OrderController\` and \`OrderService\`").
-- Constraints the code doesn't make obvious (e.g. "services own transactions; controllers never call repositories").
-- Test and build quirks (e.g. "integration tests need Docker").
+- Where new code goes: for each kind of change the project keeps making (an endpoint, a page, a migration, a test), the files to touch and the existing one to copy (e.g. "a new endpoint: follow \`OrderController\` and \`OrderService\`").
+- Only code that meets the project's engineering standards (its AGENTS.md, when it has them) is named as a pattern: agents copy what the map points to. Code that departs from them goes under "Known gaps", one line each with its path, so nobody copies it; a gap stays listed until the code is fixed.
+- Invariants a change must keep that the code doesn't make obvious, those whose breach is a security or data bug first: where the caller, their tenant or their ownership is checked, which layer enforces it, what must stay in one transaction (e.g. "services own transactions; controllers never call repositories").
+- Test and build: the exact commands as the project defines them (its manifest's scripts, its wrapper), the package manager its lockfile shows, and the quirks (e.g. "integration tests need Docker").
+- A project doc the code contradicts: which one is right.
 What doesn't: a feature's decisions or tasks, versions, history, anything one \`ls\` answers.
 
 Say where to look and what isn't obvious, not how things work in detail: the code and the project's own docs hold the detail. Start with the overview (the modules and what each is for).
 
-Revisit the whole map, not only the area just worked on: check every path and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings. It is read in every session: keep each line only if it saves a later feature a search or a mistake, and cut what the code, a file name or one \`ls\` already says. As long as the project needs, as short as it allows; about 8,000 tokens at most.
+Every claim comes from reading the code, never from a name, a comment or a doc: before describing what something does, read the file that does it, and name that file. Leave out what you can't confirm.
+
+Revisit the whole map, not only the area just worked on: check every path, command and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings. It is read in every session: keep each line only if it saves a later feature a search or a mistake, and cut what the code, a file name or one \`ls\` already says. As long as the project needs, as short as it allows; about 20,000 tokens at most.
 
 Report with the report_map tool: the whole new map (its body, without a top heading) and the list of changes, one line each.`;
 

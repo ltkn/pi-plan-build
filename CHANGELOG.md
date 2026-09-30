@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A map that doesn't spread mistakes**: the cartographer names as a pattern only code that meets the project's standards, and lists what departs from them under "Known gaps" so nobody copies it; says where each kind of new code goes; puts first the invariants whose breach is a security or data bug (where the caller, their tenant or their ownership is checked); gives the exact commands the project defines and the package manager its lockfile shows; says which of a doc and the code is right when they disagree; and describes a behaviour only after reading the file that does it
+
 ## 1.17.0
 
 - **`/pb:standards [java|vue|plain]`**: writes pb's current standards into this project's AGENTS.md at any time, whatever pb's saved state says. It creates the file if missing, and replaces only pb's section, leaving your own lines and the project map as they are. Use it to bring a project up to date after the standards improve, or to recover after declining the offer or losing the file. By default the section is picked from the project (Java, Vue or plain)
