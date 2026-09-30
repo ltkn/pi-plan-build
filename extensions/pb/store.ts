@@ -52,6 +52,8 @@ export interface Config {
   checkpointAt: number;
   /** /pb:archive updates the project map in AGENTS.md from the finished feature. */
   mapOnArchive: boolean;
+  /** A desktop notification when pb asks you something (a question, or a dialog that goes on without you). */
+  notify: boolean;
   /** After the skeleton, show you its design before the tasks fill it in: always ("ask"), for a large change ("large"), never ("off"). */
   designReview: "off" | "ask" | "large";
   /**
@@ -80,6 +82,7 @@ export const DEFAULT_CONFIG: Config = {
   explorer: {},
   checkpointAt: 75,
   mapOnArchive: true,
+  notify: true,
   designReview: "large",
 };
 

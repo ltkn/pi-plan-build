@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.22.0
+
+- **Questions you missed stay in the chat**: when a `pb_ask` question goes unanswered (it timed out, or the dialog was closed), the question and its options, lettered, are posted in the chat with what Pi went on with. Answer any time, a letter being enough (while Pi works, it's read after its current step), and Pi is told to follow a later answer
+- **A desktop notification when pb asks you something**: a question, or a dialog that goes on without you, so it doesn't wait unseen in another window. Ghostty, iTerm2, WezTerm, Kitty, macOS Terminal and Windows Terminal; `"notify": false` turns it off
+
 ## 1.21.0
 
 - **Design in code**: the spec pins what the change must do and how we'll know (Goal, Decisions, Contracts, Acceptance), no longer how to build it; tasks are outcomes, one unless a slice is worth reviewing on its own. The build starts with a **skeleton**: the types, signatures and wiring as stubs, and the tests for every task's Acceptance lines. `pb_skeleton_done` reports its design; the harness requires the code to compile and every task's tests to fail, then writes the design into the spec's new `## Design`. The tasks fill it in

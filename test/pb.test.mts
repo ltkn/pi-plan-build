@@ -28,7 +28,7 @@ function setup(config: object = {}) {
   execSync("git init -q && git config user.email t@t && git config user.name t && echo hi > README && git add . && git commit -qm init", { cwd: repo });
   fs.mkdirSync(path.join(repo, ".pi/pb"), { recursive: true });
   const c = config as { reviewer?: object };
-  fs.writeFileSync(path.join(repo, ".pi/pb/config.json"), JSON.stringify({ build: null, maxAttempts: 2, baseline: false, ...config, reviewer: { idleSec: 0.2, ...(c.reviewer ?? {}) } }));
+  fs.writeFileSync(path.join(repo, ".pi/pb/config.json"), JSON.stringify({ build: null, maxAttempts: 2, baseline: false, notify: false, ...config, reviewer: { idleSec: 0.2, ...(c.reviewer ?? {}) } }));
 
   const posts: string[] = [];
   const notes: string[] = [];
@@ -2156,7 +2156,57 @@ test("pb_ask counts down while planning too: unanswered, the recommendation is t
   t.selects.push("<timeout>");
   const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
   assert.equal(t.dialogTimeouts.at(-1), 1);
-  assert.match(r.content![0].text, /No answer in time: take the sensible reading \(your recommendation: event\), and tell the human it's an assumption to confirm/);
+  assert.match(r.content![0].text, /No answer in time: take the sensible reading \(your recommendation: event\), and tell the human it's an assumption to confirm[\s\S]*The question stays in the chat, its options lettered \(A\. mail; B\. event\): if the human answers later, by letter or in words, follow their answer\./);
+  // The dialog is gone, the question isn't: it stays in the chat with its options, lettered for a short answer.
+  assert.equal(t.posts.at(-1), "**Unanswered question** (no answer within 1 min; Pi went on with its recommendation, event):\n\nMail or event?\n\nA. mail\nB. event (recommended)\n\nTo answer, type it here any time (a letter is enough): if Pi is working, it reads it after its current step.");
+});
+
+test("pb_ask: a dialog closed before its time is kept in the chat too; an answered one isn't", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  const posted = t.posts.length;
+  t.selects.push("mail");
+  assert.match((await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"] })).content![0].text, /^The human answered: mail$/);
+  assert.equal(t.posts.length, posted);
+  t.selects.push("<timeout>");
+  const r = await t.callTool("pb_ask", { question: "Which name?", options: ["a", "b"] });
+  assert.match(r.content![0].text, /^The human dismissed the question: take the sensible reading[\s\S]*The question stays in the chat/);
+  assert.match(t.posts.at(-1)!, /^\*\*Unanswered question\*\* \(the dialog was closed; Pi went on with the sensible reading\):\n\nWhich name\?\n\nA\. a\nB\. b\n/);
+});
+
+test("notify: a desktop notification when pb asks, and none when it's turned off", async () => {
+  const { setNotifySink } = await import("../extensions/pb/notify.ts");
+  const sent: string[][] = [];
+  setNotifySink((title, body) => sent.push([title, body]));
+  try {
+    const t = setup({ notify: true });
+    process.chdir(t.repo);
+    t.selects.push("No thanks");
+    await t.run("plan", "cancel orders");
+    t.selects.push("mail");
+    await t.callTool("pb_ask", { question: "Mail\nor event;\x07 now?", options: ["mail", "event"] });
+    assert.deepEqual(sent.at(-1), ["pb: a question for you", "Mail or event now?"]); // one line, nothing that ends the escape sequence
+    const v = setup({ verify: "true", notify: true }); // a dialog that goes on without you
+    await written(v);
+    v.runtime().usage = 72;
+    v.agent.script = diligent;
+    v.selects.push("Build here anyway");
+    await v.run("build");
+    assert.deepEqual(sent.at(-1), ["pb: your choice", "Build order-cancellation: this session is 72% full"]);
+
+    const u = setup();
+    process.chdir(u.repo);
+    u.selects.push("No thanks");
+    await u.run("plan", "x");
+    const before = sent.length;
+    u.selects.push("mail");
+    await u.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"] });
+    assert.equal(sent.length, before);
+  } finally {
+    setNotifySink(undefined);
+  }
 });
 
 test("fresh calls are saved as sessions to open afterwards, and stream their text while they run", async () => {

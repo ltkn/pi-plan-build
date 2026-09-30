@@ -24,6 +24,7 @@ import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { changedPaths, dropCheckpoints, inWorktree, inspectChanges, restore, snapshot } from "./checkpoint.ts";
+import { notifyDesktop } from "./notify.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import {
   EXPLORER_SYSTEM,
@@ -203,6 +204,8 @@ export default function pb(pi: ExtensionAPI) {
    */
   const choose = async (ctx: ExtensionContext, store: Store, title: string, options: string[], fallback: string, notes?: string[]): Promise<string | undefined> => {
     if (!ctx.hasUI) return fallback;
+    // It goes on without you: tell you, in case you're in another window.
+    if (store.config().notify) notifyDesktop("pb: your choice", title);
     const ms = store.config().askTimeoutSec * 1000;
     const asked = Date.now();
     const choice = await ctx.ui.select(title, options, ms > 0 ? { timeout: ms } : undefined);
@@ -375,6 +378,7 @@ export default function pb(pi: ExtensionAPI) {
       // During a build the human may be away: after askTimeoutSec it goes on with the recommendation.
       const timeoutMs = unattended ? store.config().askTimeoutSec * 1000 : 0;
       const opts = timeoutMs > 0 ? { timeout: timeoutMs } : undefined;
+      if (store.config().notify) notifyDesktop("pb: a question for you", params.question);
       const asked = Date.now();
       let answer: string | undefined;
       const OTHER = "Something else (type it)";
@@ -385,6 +389,21 @@ export default function pb(pi: ExtensionAPI) {
       } else answer = await ctx.ui.input(params.question, params.recommended, opts);
       if (!answer?.trim()) {
         const timedOut = timeoutMs > 0 && Date.now() - asked >= timeoutMs - 1000;
+        // The dialog is gone; the question stays in the chat, to answer whenever the human is back.
+        // Lettered, so "A and C" is a complete answer when it comes hours later.
+        const letter = (i: number) => String.fromCharCode(65 + i);
+        const lettered = (params.options ?? []).map((o, i) => `${letter(i)}. ${o}${o === params.recommended ? " (recommended)" : ""}`);
+        const KEPT = ` The question stays in the chat${lettered.length ? `, its options lettered (${lettered.map((o) => o.replace(/ \(recommended\)$/, "")).join("; ")})` : ""}: if the human answers later, by letter or in words, follow their answer.`;
+        post(
+          [
+            `**Unanswered question** (${timedOut ? `no answer within ${Math.max(1, Math.round(timeoutMs / 60_000))} min` : "the dialog was closed"}; Pi went on with ${params.recommended ? `its recommendation, ${params.recommended}` : "the sensible reading"}):`,
+            "",
+            params.question,
+            ...(lettered.length ? ["", ...lettered] : []),
+            "",
+            `To answer, type it here any time${lettered.length ? ` (a letter is enough)` : ""}: if Pi is working, it reads it after its current step.`,
+          ].join("\n"),
+        );
         if (timedOut && building && params.recommended) {
           const minutes = Math.round(timeoutMs / 60_000);
           const entry = `Assumption (build, ${p!.current}, no answer within ${minutes} min): ${params.question.replace(/\s+$/, "")} → ${params.recommended}`;
@@ -393,7 +412,7 @@ export default function pb(pi: ExtensionAPI) {
           p!.assumptions = [...(p!.assumptions ?? []), entry];
           store.saveProgress(p!);
           store.event(name!, { type: "ask", task: p!.current, timedOut: true });
-          return reply(`No answer within ${minutes} min: go on with your recommendation (${params.recommended}); it's recorded as an assumption for the review.`);
+          return reply(`No answer within ${minutes} min: go on with your recommendation (${params.recommended}); it's recorded as an assumption for the review.${KEPT}`);
         }
         const record = building
           ? ", record it with pb_record_decision (assumption: true)"
@@ -402,7 +421,7 @@ export default function pb(pi: ExtensionAPI) {
             : planning
               ? ", and tell the human it's an assumption to confirm (under open questions once there's a spec)"
               : "";
-        return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: take the sensible reading${timedOut && params.recommended ? ` (your recommendation: ${params.recommended})` : ""}${record} and carry on.`);
+        return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: take the sensible reading${timedOut && params.recommended ? ` (your recommendation: ${params.recommended})` : ""}${record} and carry on.${KEPT}`);
       }
       if (building) {
         const md = store.readSpec(name!);
