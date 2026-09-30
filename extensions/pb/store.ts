@@ -52,6 +52,8 @@ export interface Config {
   checkpointAt: number;
   /** /pb:archive updates the project map in AGENTS.md from the finished feature. */
   mapOnArchive: boolean;
+  /** After the skeleton, show you its design before the tasks fill it in: always ("ask"), for a large change ("large"), never ("off"). */
+  designReview: "off" | "ask" | "large";
   /**
    * Your own instructions, added to a role's prompt (never replacing pb's, which the harness relies on).
    * Also read from ~/.pi/agent/pb/config.json for every project; both apply, the global ones first.
@@ -78,6 +80,7 @@ export const DEFAULT_CONFIG: Config = {
   explorer: {},
   checkpointAt: 75,
   mapOnArchive: true,
+  designReview: "large",
 };
 
 export interface VerifyResult {

@@ -151,10 +151,26 @@ export const SPEC_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 export function commitMessage(md: string): string | undefined {
   const spec = parseSpec(md).spec;
   if (!spec) return undefined;
-  const goal = md.split(/^##\s+Goal\s*$/im)[1]?.split(/^##\s+(?!#)/m)[0]?.trim() ?? "";
+  const goal = sectionOf(md, "Goal");
   return [spec.title, ...(goal ? ["", goal] : []), ...(spec.tasks.length ? ["", ...spec.tasks.map((t) => `- ${t.title}`)] : [])].join("\n");
 }
 
 /** A task whose new tests must be seen failing before the change: it adds behaviour, and has a command for its tests. */
 export const needsRed = (spec: ParsedSpec, task: SpecTask | undefined) =>
   spec.gate === "tests" && spec.newTests && !!task?.test && !/^\(refactor\)/i.test(task.title);
+
+/** The build's first step when tasks need red: the design in code, with every task's tests failing. */
+export const SKELETON = "skeleton";
+
+/** A build starts with the skeleton when some task's new tests must be seen failing. */
+export const needsSkeleton = (spec: ParsedSpec) => spec.tasks.some((t) => needsRed(spec, t));
+
+/** The skeleton as a task, for the harness's bookkeeping (it isn't in the spec). */
+export const skeletonTask = (): SpecTask => ({ id: SKELETON, title: "Skeleton: the design in code, every task's tests failing", text: "" });
+
+/** A step of the build by id: a spec task, or the skeleton. */
+export const buildTask = (spec: ParsedSpec, id: string | undefined) => (id === SKELETON ? skeletonTask() : spec.tasks.find((t) => t.id === id));
+
+/** A section's body, trimmed ("" when missing). */
+export const sectionOf = (md: string, name: string) =>
+  md.split(new RegExp(`^##\\s+${name}\\s*$`, "im"))[1]?.split(/^##\s+(?!#)/m)[0]?.trim() ?? "";

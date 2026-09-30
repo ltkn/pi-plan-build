@@ -254,11 +254,20 @@ Then the sections:
   everything behind them is left to the build, which asks before changing one,
   and the reviewer checks each.
 - **Open questions**: only while `Status: planning`.
-- **Tasks**: each as `### T1: title` with its detail, `- Acceptance:` lines and,
-  when it adds behaviour, `- Test: \`command\``. Each Acceptance line is one
-  behaviour as a test would check it, abuse cases included: they are the tests
-  to write. Tasks are vertical slices: each leaves the code working and
-  tested, with no split by layer and no closing "add tests" task.
+- **Tasks**: each as `### T1: <outcome>`, what must be true when it's done
+  rather than how to build it, with `- Acceptance:` lines and, when it adds
+  behaviour, `- Test: \`command\``. Each Acceptance line is one behaviour as a
+  test would check it, abuse cases included: they are the tests to write. One
+  task, unless a slice is worth reviewing on its own; then vertical slices, each
+  working and tested, never a split by layer or a closing "add tests" task.
+- **Design**: written by the build, not the plan: the shape the skeleton
+  settled on and why. The reviewer checks the code against it, and `/pb:archive`
+  hands it to the project map.
+
+The spec pins what the change must do and how you'll know; how to build it is
+left to the build, where the compiler and the tests give feedback. When a
+decision rests on something only running code shows (a library's limits,
+performance), planning tries it in a scratch copy first.
 
 **Out of scope** and **Acceptance criteria** are optional. The aim: a fresh or
 reset session starts where the discussion ended, without re-analysing and
@@ -321,11 +330,22 @@ more than half full (`freshAbove`) or when `buildModel` names another model
 model, uncached); `/pb:build --fresh` asks for one directly: a new session
 named "build: <spec>", seeded with the spec, on your model and thinking level.
 
-1. **The tasks.** The build starts with T1 straight away. Pi finishes each task
+1. **The skeleton.** When tasks add behaviour (they have a `Test:` line, with
+   `Verification: tests` and `New tests: yes`), the build starts by designing the
+   change in code, without its behaviour: the types, signatures and wiring as
+   stubs, and the tests for every task's Acceptance lines. Pi reports the design
+   with `pb_skeleton_done`; the harness requires the code to compile and **every
+   task's tests to fail**, and writes the design into the spec's `## Design`.
+   For a large change (the spec has Contracts, or more than two such tasks) pb
+   shows you the design and asks: go on, edit it first, or stop to look at the
+   stubs and tests (`"designReview"`: `"large"` by default, `"ask"` always,
+   `"off"`); unanswered, it goes on. A design is cheaper to change as
+   signatures and failing tests than as finished code.
+2. **The tasks.** Each task then fills the design in until its tests pass. Pi finishes each task
    with `pb_task_done`, which hands out the next one: the whole build is one
    uninterrupted run, so the prompt cache stays warm. Pi checks its own work as
    it goes (the task's `Test:` line tells it how).
-2. **The end.** After the last task, the harness runs the full test suite (a
+3. **The end.** After the last task, the harness runs the full test suite (a
    compile for `Verification: build`) **inside that same call**. A failure
    comes straight back to fix, up to `maxAttempts`, then the build pauses for
    you. The agent's word never ends a build: the check does.
@@ -335,7 +355,9 @@ task's `Test:` command (a compile when it has none) when the task is done. It
 catches a broken task earlier, but makes every task leave the build green on
 its own, which slices work unnaturally and costs a run per task.
 
-The build treats the spec as settled: it implements, it doesn't re-plan. Where
+The spec's Goal, Decisions, Contracts and Acceptance bind the build: changing
+one takes a `pb_ask`. How to build it is the build's: a better way found while
+coding is taken, and a change to the Design is recorded. Where
 the spec is ambiguous, contradicts itself or doesn't match the code, Pi takes
 the sensible reading, records it in the spec's Decisions as an **assumption**,
 and carries on. The build summary lists these choices and the reviewer checks
@@ -394,11 +416,13 @@ Two separate choices, both in the spec header:
 Give tasks a targeted `Test:` line: it's how Pi checks each task as it goes.
 
 **Red, then green.** With `Verification: tests` and `New tests: yes`, a task
-with a `Test:` line (and not titled "(refactor) …") writes its tests first and
-calls `pb_tests_red`: the harness runs the task's command and requires it to
-**fail**, which shows the tests check the behaviour that is missing. Only then
-does `pb_task_done` take the task. Tests that pass without the change are sent
-back; the refusal costs no attempt, and `/pb:undo` resets it with the task.
+with a `Test:` line (and not titled "(refactor) …") must have its tests seen
+**failing** before its change exists: that shows they check the behaviour that
+is missing. The skeleton does it for every task at once, after a compile, so a
+test fails on its assertion rather than on a missing symbol. A task that
+wasn't covered (added to the spec later) proves its own with `pb_tests_red`
+before `pb_task_done` takes it; that refusal costs no attempt. Tests that pass
+too early are sent back, and `/pb:undo` takes the proof back with the files.
 
 The commands come from `.pi/pb/config.json` (`"verify"` and `"build"`, `"auto"`
 detects Maven, Gradle, npm/TypeScript, Cargo, Go and pytest).

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.21.0
+
+- **Design in code**: the spec pins what the change must do and how we'll know (Goal, Decisions, Contracts, Acceptance), no longer how to build it; tasks are outcomes, one unless a slice is worth reviewing on its own. The build starts with a **skeleton**: the types, signatures and wiring as stubs, and the tests for every task's Acceptance lines. `pb_skeleton_done` reports its design; the harness requires the code to compile and every task's tests to fail, then writes the design into the spec's new `## Design`. The tasks fill it in
+- **A look at the design while it's cheap**: for a large change (Contracts, or more than two tasks with tests), pb shows the design after the skeleton: go on, edit it, or stop to look (`designReview`: `"large"` by default, `"ask"`, `"off"`)
+- The build may take a better "how" than planning expected, recording it; the reviewer checks the code against the Design, and `/pb:archive` hands the Design to the project map. Planning tries what only running code can show in a scratch copy before deciding. A task's tests seen failing stay proven when a build is restarted; `pb_tests_red` remains for a task the skeleton didn't cover
+
 ## 1.20.0
 
 - **Tests proven to test (red, then green)**: in a spec with `Verification: tests` and `New tests: yes`, a task with a `Test:` line writes its tests first and calls the new `pb_tests_red`. The harness runs the task's command and requires it to fail before the change is written. `pb_task_done` takes the task only after that; tests that pass without the change are sent back. The refusal costs no attempt, "(refactor)" tasks are exempt, and `/pb:undo` resets it

@@ -33,7 +33,7 @@ function setup(config: object = {}) {
   const posts: string[] = [];
   const notes: string[] = [];
   const instructions: string[] = [];
-  const results: string[] = []; // every pb_task_done result, including the ones that end the run
+  const results: string[] = []; // every pb_task_done and pb_skeleton_done result, including the ones that end the run
   const selects: string[] = [];
   const selectTitles: string[] = [];
   const selectOptions: string[][] = [];
@@ -241,7 +241,7 @@ function setup(config: object = {}) {
   const handover = (r: Runtime) => guard(() => r, { ...r.ctx, ui: r.ctx.ui, sessionManager: r.ctx.sessionManager, sendMessage: async (m: any, o: any) => r.pi.sendMessage(m, o) });
   rt = makeRuntime(path.join(repo, "planning-session.jsonl"));
 
-  // A tool result that asks for more (pb_task_done without terminate) continues the run, as in Pi.
+  // A tool result that asks for more (pb_task_done or pb_skeleton_done without terminate) continues the run, as in Pi.
   let continuation: string | undefined;
   let running: Promise<void> = Promise.resolve();
   let queued = 0; // runs queued or going: Pi isn't idle
@@ -261,7 +261,7 @@ function setup(config: object = {}) {
     }
     const out = result.content?.map((c) => c.text).join("") ?? result.error ?? String((params as { output?: string }).output ?? "");
     append(rt.file(), { type: "message", message: { role: "toolResult", content: [{ type: "text", text: out }] } });
-    if (name === "pb_task_done" && !result.error) {
+    if ((name === "pb_task_done" || name === "pb_skeleton_done") && !result.error) {
       results.push(out);
       continuation = result.terminate ? undefined : out;
     }
@@ -413,8 +413,15 @@ Create T2.txt.
 /** The task an instruction or tool result is about. */
 const taskOf = (text: string) => text.match(/Task (T\d+)/)?.[1] ?? text.match(/task "(\w+)"/)?.[1];
 
-/** An agent that does each task by creating <task>.txt, its test (`test -f <task>.txt`) seen failing first. */
+/** The skeleton step (its prompt, or a failed check of it). */
+const isSkeleton = (text: string) => /^\[pb:build\] Skeleton|call pb_skeleton_done again/m.test(text);
+
+/**
+ * An agent that does each task by creating <task>.txt. Its skeleton writes no file, so every task's test
+ * (`test -f <task>.txt`) fails; without one, it sees its test fail first.
+ */
 const diligent: Script = async (text, tool) => {
+  if (isSkeleton(text)) return void (await tool("pb_skeleton_done", { design: "- One file per task." }));
   const task = taskOf(text);
   if (!task) return;
   if (task !== "final") {
@@ -516,7 +523,7 @@ test("pb_write_spec rejects a spec that doesn't parse, and a bad name", async ()
   assert.match((await t.callTool("pb_write_spec", { name: "x", content: "# only a title" })).error!, /doesn't parse[\s\S]*Verification/);
   assert.match((await t.callTool("pb_write_spec", { name: "Bad Name", content: SPEC() })).error!, /not a valid name/);
   await written(t);
-  assert.deepEqual(t.progress("order-cancellation").tasks.map((x: any) => [x.id, x.status]), [["T1", "todo"], ["T2", "todo"]]);
+  assert.deepEqual(t.progress("order-cancellation").tasks.map((x: any) => [x.id, x.status]), [["skeleton", "todo"], ["T1", "todo"], ["T2", "todo"]]); // tasks with tests start with the skeleton
 });
 
 test("plan: the baseline runs in the background (no tokens) and a red suite warns before building", async () => {
@@ -722,8 +729,9 @@ test("build --fresh: a new session seeded with the spec, tasks behind their test
   assert.match(p.session, /build-session-1\.jsonl$/);
   assert.equal(t.names.get(p.session), "build: order-cancellation");
   assert.ok(t.posts.some((x) => /This session: "build: order-cancellation" · back to it with \/resume, or `pi --session build-session-1`/.test(x)));
-  assert.deepEqual(p.tasks.map((x: any) => [x.id, x.status]), [["T1", "done"], ["T2", "done"]]);
-  assert.match(t.instructions[0], /Build this feature from the spec below[\s\S]*# Order cancellation[\s\S]*Task T1\. Do only this task/);
+  assert.deepEqual(p.tasks.map((x: any) => [x.id, x.status]), [["skeleton", "done"], ["T1", "done"], ["T2", "done"]]);
+  assert.match(t.instructions[0], /Build this feature from the spec below[\s\S]*# Order cancellation[\s\S]*\[pb:build\] Skeleton, before the tasks/);
+  assert.match(t.results[0], /^✓ Skeleton: every task's tests fail \(T1, T2\)[\s\S]*Task T1\. Do only this task/);
   assert.match(t.posts.at(-1)!, /BUILD COMPLETE — order-cancellation[\s\S]*PASS/);
   assert.match(t.read(".pi/pb/specs/order-cancellation/events.jsonl"), /"type":"check","task":"final"/); // full suite after the task tests
 });
@@ -745,7 +753,7 @@ test("build: with taskChecks each, the check runs inside pb_task_done: one agent
   assert.equal(t.stat.runs, 1); // no stop and restart between tasks
   const next = t.instructions.find((i) => i.startsWith("✓ T1 passed"))!;
   assert.match(next, /✓ T1 passed \(`test -f T1\.txt`\)\n\n\[pb:build\] Task T2\. Do only this task[\s\S]*it runs `test -f T2\.txt` itself, so don't run that just before/);
-  assert.equal(t.instructions.length, 2); // the first message, then T2 as T1's tool result; the last result ends the run
+  assert.equal(t.instructions.length, 3); // the first message (the skeleton), T1 as its tool result, then T2 as T1's; the last result ends the run
   assert.match(t.results.at(-1)!, /✓ T2 passed[\s\S]*Running `true`…[\s\S]*Build complete: every check passed\. Stop here/);
 });
 
@@ -758,15 +766,81 @@ test("build: with taskChecks each, a task without a Test: line is compiled, not 
   assert.deepEqual(checks.map((c) => [c.task, c.command]), [["T1", "echo compiled"], ["T2", "echo compiled"], ["final", "true"]]);
 });
 
-test("build: red then green: a task's new tests must be seen failing before pb_task_done takes it", async () => {
+test("skeleton: the design in code first; it must compile, every task's tests must fail, and its design goes into the spec", async () => {
+  const t = setup({ verify: "true", build: "test -f compiles.txt", maxAttempts: 3 });
+  await written(t, SPEC().replace("## Tasks", "## Contracts\n- `cancel(orderId)` returns the cancelled order.\n## Tasks"));
+  let skeletonCalls = 0;
+  t.agent.script = async (text, tool) => {
+    if (isSkeleton(text)) {
+      skeletonCalls++;
+      if (skeletonCalls === 2) fs.writeFileSync("compiles.txt", "x");
+      if (skeletonCalls === 2) fs.writeFileSync("T1.txt", "a stub that already does it"); // passes too early
+      if (skeletonCalls === 3) fs.rmSync("T1.txt");
+      return void (await tool("pb_skeleton_done", { design: `- Design, take ${skeletonCalls}.` }));
+    }
+    return diligent(text, tool);
+  };
+  t.selects.push("Edit the design first");
+  t.editors.push("- The human's design.");
+  await t.run("build");
+  assert.match(t.instructions[0], /\[pb:build\] Skeleton, before the tasks: design the change in code, without its behaviour[\s\S]*the spec's Contracts exactly as pinned/);
+  assert.match(t.instructions[0], /The tests for every task's Acceptance lines: T1 \(`test -f T1\.txt`\), T2 \(`test -f T2\.txt`\)[\s\S]*runs `test -f compiles\.txt` \(it must pass\), then runs each task's tests \(each must fail\)/);
+  assert.match(t.results[0], /The check for skeleton failed \(attempt 2 of 3\): `test -f compiles\.txt` \(the stubs and the tests must compile\)[\s\S]*call pb_skeleton_done again/);
+  assert.match(t.results[1], /these tests pass before the behaviour exists: T1 \(`test -f T1\.txt`\)[\s\S]*the stubs must not implement it/);
+  assert.match(t.results[2], /^✓ Skeleton: it compiles, and every task's tests fail \(T1, T2\)[\s\S]*The human edited the design; follow their version:\n\n- The human's design\.[\s\S]*Task T1\. Do only this task[\s\S]*Its tests are written and fail against the skeleton/);
+  assert.doesNotMatch(t.results[2], /Tests first/); // already proven by the skeleton
+  assert.ok(t.posts.some((x) => /\*\*Design of order-cancellation\*\*, after the skeleton[\s\S]*- Design, take 3\./.test(x)));
+  assert.ok(t.selectTitles.includes("The design of order-cancellation is ready. Go on?")); // Contracts: a large change
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /## Design\n- The human's design\.\n/);
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "built");
+  assert.deepEqual(p.tasks.map((x: any) => [x.id, x.status, x.attempts]), [["skeleton", "done", 3], ["T1", "done", 1], ["T2", "done", 1]]);
+  assert.deepEqual(t.events("order-cancellation").filter((e) => e.type === "red").map((e) => e.ok), [false, true]);
+  await t.run("stats");
+  assert.match(t.posts.at(-1)!, /Skeleton +done · 3 attempts\nTasks +2 of 2 done/);
+});
+
+test("skeleton: stop at the design to look at it; /pb:build goes on with the first task, not the skeleton", async () => {
+  const t = setup({ verify: "true", designReview: "ask" });
+  await written(t);
+  t.agent.script = diligent;
+  t.selects.push("Stop here: I'll look at the stubs and tests");
+  await t.run("build");
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "paused");
+  assert.match(t.posts.at(-1)!, /Build paused\*\* — stopped after the skeleton, to look at the design/);
+  assert.match(t.results.at(-1)!, /The human wants to look at the design first: the build is paused\. Stop here\./);
+  const n = t.instructions.length;
+  await t.run("build");
+  assert.match(t.instructions[n], /Task T1\. Do only this task/);
+  assert.doesNotMatch(t.instructions[n], /Skeleton, before the tasks/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+
+  const u = setup({ verify: "true" }); // "large" by default: two tasks and no Contracts isn't large
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  assert.ok(!u.selectTitles.some((x) => /The design of/.test(x)));
+});
+
+test("red then green without the skeleton: a task whose tests weren't seen failing proves them first; refactors and no-new-tests specs are exempt", async () => {
   const t = setup({ verify: "true" });
   await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged\n- Test: `true`" }));
-  const said: string[] = [];
-  let step = 0;
+  // The skeleton ran, then the proof for T1 was lost (e.g. T1 added to the spec after the skeleton).
   t.agent.script = async (text, tool) => {
-    const task = taskOf(text);
-    if (task === "T1" && step === 0) {
-      step = 1;
+    if (isSkeleton(text)) {
+      await tool("pb_skeleton_done", { design: "- One file." });
+      const file = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+      const p = JSON.parse(fs.readFileSync(file, "utf8"));
+      p.tasks.find((x: any) => x.id === "T1").red = undefined;
+      fs.writeFileSync(file, JSON.stringify(p));
+    }
+  };
+  await t.run("build");
+  const said: string[] = [];
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text) ?? (text.includes("Continue task T1") ? "T1" : undefined);
+    if (task === "T1" && !said.length) {
       fs.writeFileSync("T1.txt", "x"); // the change first
       said.push((await tool("pb_task_done", { task, status: "done", summary: "done" })).content![0].text);
       said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
@@ -780,8 +854,6 @@ test("build: red then green: a task's new tests must be seen failing before pb_t
     return diligent(text, tool);
   };
   await t.run("build");
-  assert.match(t.instructions[0], /Task T1\. Do only this task[\s\S]*Tests first: write the tests for its Acceptance lines, then call pb_tests_red\. The harness runs `test -f T1\.txt` and needs it to fail/);
-  assert.match(t.instructions[0], /pb_tests_red must see them fail before you change the code[\s\S]*Contracts, if any, are fixed: changing one needs pb_ask/);
   assert.match(said[0], /T1's new tests were never seen failing[\s\S]*set it aside first/);
   assert.match(said[1], /^`test -f T1\.txt` passes without the change, so these tests don't check it/);
   assert.match(said[2], /^Seen failing: `test -f T1\.txt`[\s\S]*fails for the reason you expect/);
@@ -789,8 +861,7 @@ test("build: red then green: a task's new tests must be seen failing before pb_t
   assert.match(said[4], /^T2 doesn't need this/); // a refactor adds no behaviour
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "built");
-  assert.equal(p.tasks.find((x: any) => x.id === "T1").attempts, 1); // the refusal cost no attempt
-  assert.deepEqual(t.events("order-cancellation").filter((e) => e.type === "red").map((e) => [e.task, e.ok]), [["T1", false], ["T1", true]]);
+  assert.deepEqual(p.tasks.map((x: any) => x.id), ["skeleton", "T1", "T2"]);
 
   const u = setup({ verify: "true" });
   await written(u, SPEC({ newTests: "no — a docs-only change" }));
@@ -800,8 +871,9 @@ test("build: red then green: a task's new tests must be seen failing before pb_t
     if (task) await tool("pb_task_done", { task, status: "done", summary: "done" });
   };
   await u.run("build");
-  assert.equal(u.progress("order-cancellation").phase, "built"); // no new tests: nothing to see failing
-  assert.doesNotMatch(u.instructions[0], /Tests first/);
+  assert.equal(u.progress("order-cancellation").phase, "built"); // no new tests: no skeleton, nothing to see failing
+  assert.deepEqual(u.progress("order-cancellation").tasks.map((x: any) => x.id), ["T1", "T2"]);
+  assert.doesNotMatch(u.instructions[0], /Skeleton|Tests first/);
 });
 
 test("build: a failing check goes back to the agent, and passes on the next attempt", async () => {
@@ -964,7 +1036,7 @@ test("build: existing tests cut down or skipped don't fail a task: they are list
   assert.equal(p.phase, "built");
   assert.equal(t.stat.runs, 1);
   assert.deepEqual(p.testChanges, ["T1: tests/test_a.py: 2 → 1 test cases"]);
-  assert.match(t.results[0], /⚠ existing tests changed \(the review checks them\): tests\/test_a\.py: 2 → 1 test cases/);
+  assert.match(t.results[1], /⚠ existing tests changed \(the review checks them\): tests\/test_a\.py: 2 → 1 test cases/); // T1's (0 is the skeleton's)
   assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Existing tests the build changed[\s\S]*- T1: tests\/test_a\.py: 2 → 1 test cases/);
   await t.run("review");
   assert.match(t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!, /## Existing tests the build changed[\s\S]*judge whether each was justified:\n- T1: tests\/test_a\.py: 2 → 1 test cases/);
@@ -986,9 +1058,9 @@ test("build: by default, tasks aren't checked one by one; the full suite runs af
     ["final", "test -f T1.txt && test -f T2.txt && test -f fixed.txt", true],
   ]);
   assert.match(t.instructions[0], /after the last task the harness runs the full suite; check each task yourself/);
-  assert.match(t.instructions[0], /When done, call pb_task_done with task "T1" once `test -f T1\.txt` passes/);
-  assert.match(t.results[0], /✓ T1 done \(checked after the last task\)/);
-  assert.match(t.results[1], /The final check failed \(attempt 2 of 2\)/);
+  assert.match(t.results[0], /When done, call pb_task_done with task "T1" once `test -f T1\.txt` passes/); // after the skeleton
+  assert.match(t.results[1], /✓ T1 done \(checked after the last task\)/);
+  assert.match(t.results[2], /The final check failed \(attempt 2 of 2\)/);
   assert.equal(t.progress("order-cancellation").phase, "built");
   assert.equal(t.stat.runs, 1);
 });
@@ -1067,7 +1139,7 @@ test("undo restores the files and tasks to before a task, rewinds the conversati
   t.agent.script = undefined;
   await t.run("undo", "T2");
   assert.ok(!fs.existsSync(path.join(t.repo, "T2.txt")) && fs.existsSync(path.join(t.repo, "T1.txt")));
-  assert.deepEqual(t.progress("order-cancellation").tasks.map((x: any) => [x.id, x.status]), [["T1", "done"], ["T2", "todo"]]);
+  assert.deepEqual(t.progress("order-cancellation").tasks.map((x: any) => [x.id, x.status]), [["skeleton", "done"], ["T1", "done"], ["T2", "todo"]]);
   assert.match(t.posts.at(-1)!, /Undone to before T2\*\* — 1 file\(s\) restored, the conversation rewound/);
   // Back to where T2 was handed out, with pb's own summary of what was undone.
   const nav = t.navigations.at(-1)!;
@@ -1089,7 +1161,7 @@ test("undo to the start of the build: a resume sends the build's instructions ag
   assert.equal(t.progress("order-cancellation").needsIntro, true);
   const n = t.instructions.length;
   await t.run("build");
-  assert.match(t.instructions[n], /^\[pb:build order-cancellation\] Build the spec you wrote[\s\S]*Task T1\. Do only this task/);
+  assert.match(t.instructions[n], /^\[pb:build order-cancellation\] Build the spec you wrote[\s\S]*\[pb:build\] Skeleton, before the tasks/); // from the start: the skeleton again
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
@@ -1480,7 +1552,7 @@ test("build: by default in this session: the planning protection lifts, the spec
   assert.equal(p.phase, "built");
   assert.match(p.session, /planning-session\.jsonl$/);
   assert.doesNotMatch(t.instructions.find((i) => /\[pb:build order-cancellation\]/.test(i))!, /# Order cancellation/); // it wrote it: no copy
-  assert.match(t.posts.find((x) => /Building \*\*order-cancellation\*\* here/.test(x))!, /▶ T1: first file/);
+  assert.match(t.posts.find((x) => /Building \*\*order-cancellation\*\* here/.test(x))!, /▶ skeleton: Skeleton: the design in code/);
 });
 
 test("build: when the session is getting full, it offers a fresh session", async () => {
@@ -1943,6 +2015,7 @@ test("map: /pb:archive updates it by itself: paths that don't resolve go back on
   delete process.env.MOCK_BRIEF_OUT;
   assert.equal(t.selectTitles.length, asked); // no question
   assert.match(fs.readFileSync(briefFile, "utf8"), /# The current map\n\n\(none yet[\s\S]*# The feature just finished: order-cancellation[\s\S]*`src\/order\.ts` holds the model[\s\S]*# Files that feature changed/);
+  assert.match(fs.readFileSync(briefFile, "utf8"), /The design as built \(its "## Design"\):\n- One file per task\./); // written by the skeleton
   const agents = t.read("AGENTS.md");
   assert.match(agents, /^# Shop\n\n<!-- pb:map -->\n## Project map\n\n### Layout\n- `src\/`: the application\n### Orders\n- `src\/order\.ts`[\s\S]*follow `auth\/Login`[\s\S]*Services own transactions[\s\S]*<!-- \/pb:map -->/);
   assert.doesNotMatch(agents, /gone\.ts|### Empty/); // corrected by the cartographer, not cut by pb; empty headings go

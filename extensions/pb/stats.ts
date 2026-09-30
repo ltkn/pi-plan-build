@@ -69,6 +69,8 @@ const ts = (at: string) => Date.parse(at.replace(" ", "T"));
 
 export interface Summary {
   tasks: number;
+  /** the build's skeleton step, when it had one */
+  skeleton?: { done: boolean; attempts: number };
   done: number;
   firstTry: [number, number];
   attempts: number;
@@ -87,10 +89,12 @@ export interface Summary {
 
 export function summarize(s: SpecStats): Summary {
   const e = s.events;
-  const checks = e.filter((x) => x.type === "check" && x.task !== "final");
+  // The spec's tasks: not the final check, nor the skeleton (the harness's own first step, shown apart).
+  const checks = e.filter((x) => x.type === "check" && x.task !== "final" && x.task !== "skeleton");
   const perTask = new Map<string, Ev[]>();
   for (const c of checks) perTask.set(String(c.task), [...(perTask.get(String(c.task)) ?? []), c]);
-  const tasks = (s.progress?.tasks ?? []).filter((t) => t.id !== "final");
+  const tasks = (s.progress?.tasks ?? []).filter((t) => t.id !== "final" && t.id !== "skeleton");
+  const sk = s.progress?.tasks.find((t) => t.id === "skeleton");
   const done = tasks.filter((t) => t.status === "done");
   const firstTry = done.filter((t) => (perTask.get(t.id)?.[0]?.ok ?? true) === true).length;
   const most = [...perTask].map(([id, cs]) => [id, cs.length] as [string, number]).sort((a, b) => b[1] - a[1])[0];
@@ -128,6 +132,7 @@ export function summarize(s: SpecStats): Summary {
   return {
     tasks: tasks.length,
     done: done.length,
+    skeleton: sk ? { done: sk.status === "done", attempts: sk.attempts } : undefined,
     firstTry: [firstTry, done.length],
     attempts: checks.length,
     most: most && most[1] > 1 ? most : undefined,
@@ -152,6 +157,7 @@ export function renderCard(s: SpecStats): string {
     "```",
     `pb stats — ${s.name} (${s.phase})`,
     "",
+    ...(x.skeleton ? [`Skeleton  ${x.skeleton.done ? "done" : "not done"} · ${x.skeleton.attempts} attempt${x.skeleton.attempts === 1 ? "" : "s"}`] : []),
     `Tasks     ${x.done} of ${x.tasks} done · first try ${x.firstTry[0]}/${x.firstTry[1]} (${pct(...x.firstTry)}) · ${x.attempts} task checks${x.most ? ` · most: ${x.most[0]} (${x.most[1]})` : ""}`,
     `Checks    ${x.checks} run, ${x.failed} failed`,
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,
