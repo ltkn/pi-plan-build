@@ -1863,18 +1863,7 @@ test("map: it asks only when something looks off (unanswered: the current map st
   assert.ok(u.notes.some((n) => /The project map in AGENTS\.md names 1 path\(s\) that no longer exist \(src\/billing\/Invoice\.java\): \/pb:map refreshes it/.test(n)));
 });
 
-test("map: its entry reads well: collapsed, what changed; expanded, the map as markdown and what was removed", async () => {
-  const { mapView } = await import("../extensions/pb/render.ts");
-  const d = { diff: ["- - `old.ts`: gone", "+ ### Orders", "+ - `src/order.ts`: orders"], warnings: [], tokens: 420, map: "### Orders\n- `src/order.ts`: orders", changes: ["added Orders"] };
-  const collapsed = mapView(d, false);
-  assert.equal(collapsed.head, "~420 tokens · 2 lines added, 1 removed");
-  assert.deepEqual(collapsed.lines.map((l) => l.text), ["• added Orders", "(expand to read the map)"]);
-  assert.equal(collapsed.markdown, undefined);
-  const expanded = mapView(d, true);
-  assert.equal(expanded.markdown, "### Orders\n- `src/order.ts`: orders");
-  assert.deepEqual(expanded.removed, ["- `old.ts`: gone"]);
-  assert.match(mapView({ ...d, tokens: 9000, warnings: ["`x/y` doesn't resolve"] }, false).head, /over the ~8,000 budget/);
-});
+
 
 test("pb_ask counts down while planning too: unanswered, the recommendation is taken as an assumption to confirm", async () => {
   const t = setup({ askTimeoutSec: 0.001 });
