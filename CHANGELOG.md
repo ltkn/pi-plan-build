@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.18.0
 
-- **A map that doesn't spread mistakes**: the cartographer names as a pattern only code that meets the project's standards, and lists what departs from them under "Known gaps" so nobody copies it; says where each kind of new code goes; puts first the invariants whose breach is a security or data bug (where the caller, their tenant or their ownership is checked); gives the exact commands the project defines and the package manager its lockfile shows; says which of a doc and the code is right when they disagree; and describes a behaviour only after reading the file that does it
+- **A map that doesn't spread mistakes**: the cartographer names as a pattern only code that meets the project's standards, and lists what departs from them under "Known gaps" so nobody copies it; says where each kind of new code goes; gives the invariants whose breach is a security or data bug their own section, each with the code that enforces it (where the caller, their tenant or their ownership is checked), the security-critical ones tagged; gives the exact commands the project defines and the package manager its lockfile shows; says which of a doc and the code is right when they disagree; and describes a behaviour only after reading the file that does it. Its ceiling is ~20,000 tokens (was ~8,000), and a map over it goes back once to the cartographer to be trimmed, in the same call that corrects paths that don't resolve, keeping every security invariant and known gap
 
 ## 1.17.0
 

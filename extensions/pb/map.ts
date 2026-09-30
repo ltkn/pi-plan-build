@@ -139,9 +139,9 @@ Do not modify any file. Use read/grep/find/ls and bash only for inspection.
 
 What belongs in the map: what stays true across features and saves exploration or prevents a mistake:
 - Layout: the main modules and packages, one line each on their role; the entry points.
-- Security and data invariants, in a "### Security invariants" section: for each, what must be true, and where it is actually enforced — the middleware, filter, helper, SQL, constraint, lock or transaction boundary that makes it true. Name the enforcement point, not the intent. Mark what is security-critical rather than merely conventional. Say what must stay in one transaction, and where a rule's single source of truth lives (don't reimplement it locally). Where a test proves the invariant, name the test (e.g. "Every request is tenant-scoped by \`TenantScopeFilter\` on \`/api/*\`; controllers must not query repositories directly — the filter, not the service, owns the check.").
+- Security and data invariants, in a "### Security invariants" section: for each, what must be true, and where it is actually enforced — the middleware, filter, helper, SQL, constraint, lock or transaction boundary that makes it true. Name the enforcement point, not the intent. Tag the security-critical ones "(security)", so they aren't read as mere conventions. Say what must stay in one transaction, and where a rule's single source of truth lives (don't reimplement it locally). Where a test proves the invariant, name the test (e.g. "Every request is tenant-scoped by \`TenantScopeFilter\` on \`/api/*\`; controllers must not query repositories directly — the filter, not the service, owns the check.").
 - Where new code goes: for each kind of change the project keeps making (an endpoint, a page, a migration, a test), the files to touch and the existing one to copy (e.g. "a new endpoint: follow \`OrderController\` and \`OrderService\`").
-- Only code that meets the project's engineering standards (its AGENTS.md, when it has them) is named as a pattern: agents copy what the map points to. Code that departs from them goes under "Known gaps", one line each with its path; a gap stays listed until the code is fixed.
+- Only code that meets the project's engineering standards (its AGENTS.md, when it has them) is named as a pattern: agents copy what the map points to. Code that departs from them goes under "### Known gaps", one line each with its path; a gap stays listed until the code is fixed.
 - Test and build: the exact commands as the project defines them (its manifest's scripts, its wrapper), the package manager its lockfile shows, and the quirks (e.g. "integration tests need Docker").
 - A project doc the code contradicts: which one is right.
 
@@ -151,22 +151,45 @@ Say where to look and what isn't obvious, not how things work in detail: the cod
 
 Every claim comes from reading the code, never from a name, a comment or a doc — and for security or data claims, follow the call far enough to see the mechanism: the callers, shared helpers, filters, SQL and constraints the invariant actually depends on. Never write a verdict ("secure", "tenant-safe", "atomic", "non-enumerating") without naming the code that makes it true; if it's enforced indirectly, name the indirect point. Otherwise leave the claim out.
 
-Revisit the whole map, not only the area just worked on: check every path, command and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings. It is read in every session: keep each line only if it saves a later feature a search or a mistake, and cut what the code, a file name or one \`ls\` already says. As long as the project needs, as short as it allows; about ${MAP_TOKENS} tokens at most.
+Revisit the whole map, not only the area just worked on: check every path, command and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings. It is read in every session: keep each line only if it saves a later feature a search or a mistake, and cut what the code, a file name or one \`ls\` already says. As long as the project needs, as short as it allows; about ${MAP_TOKENS.toLocaleString("en-US")} tokens at most.
 
 Report with the report_map tool: the whole new map (its body, without a top heading) and the list of changes, one line each.`;
 
-export function cartographerBrief(o: { current: string; spec?: { name: string; findings: string }; changed?: string[]; focus?: string; unresolved?: { path: string; line: string }[]; proposed?: string }): string {
+export function cartographerBrief(o: {
+  current: string;
+  spec?: { name: string; findings: string };
+  changed?: string[];
+  focus?: string;
+  unresolved?: { path: string; line: string }[];
+  /** tokens over MAP_TOKENS */
+  overBy?: number;
+  proposed?: string;
+}): string {
   if (o.proposed)
     return [
       "# Your proposed map",
       "",
       o.proposed,
+      ...(o.unresolved?.length
+        ? [
+            "",
+            "# Paths in it that don't resolve",
+            "",
+            "Each of these names nothing in the project (tried from the root, under the section's path, and as the end of a real path). Correct each one to a path that exists (from the project root), or remove it.",
+            "",
+            ...o.unresolved.map((u) => `- \`${u.path}\` in: ${u.line.slice(0, 200)}`),
+          ]
+        : []),
+      ...(o.overBy
+        ? [
+            "",
+            "# Over the budget",
+            "",
+            `It is about ${o.overBy.toLocaleString("en-US")} tokens over the ${MAP_TOKENS.toLocaleString("en-US")} budget. Cut the lines that save a later feature the least (what a file name or one \`ls\` says, detail the code holds); keep every security invariant with its enforcement point, and every known gap.`,
+          ]
+        : []),
       "",
-      "# Paths in it that don't resolve",
-      "",
-      "Each of these names nothing in the project (tried from the root, under the section's path, and as the end of a real path). Correct each one to a path that exists (from the project root), or remove it; keep everything else as it is. Report the whole map again with report_map.",
-      "",
-      ...(o.unresolved ?? []).map((u) => `- \`${u.path}\` in: ${u.line.slice(0, 200)}`),
+      "Change only what the above asks; keep everything else as it is. Report the whole map again with report_map.",
     ].join("\n");
   return [
     "# The current map",

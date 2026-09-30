@@ -46,7 +46,7 @@ import {
   specPrompt,
   taskPrompt,
 } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, cartographerBrief, findingsOf, mapDiff, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
@@ -1906,8 +1906,8 @@ export default function pb(pi: ExtensionAPI) {
   /* ------------------------------ project map ----------------------------- */
 
   /**
-   * Update the project map in a fresh, read-only call (the session doesn't grow). Paths that don't resolve
-   * go back to it once to be corrected; then the map is written, with the change shown and /pb:map undo to
+   * Update the project map in a fresh, read-only call (the session doesn't grow). Paths that don't resolve,
+   * and a map over the budget, go back to it once to be corrected; then the map is written, with the change shown and /pb:map undo to
    * go back. It asks first only when something looks off: paths that still don't resolve, or a large part of
    * the existing map removed (unanswered: the current map stays).
    */
@@ -1960,9 +1960,12 @@ export default function pb(pi: ExtensionAPI) {
       ({ map: body, changes } = mapOf(first));
       if (!body) return ctx.ui.notify(`No map came back${first.error ? `: ${first.error}` : ""}.`, "warning");
       unresolved = unresolvedPaths(ctx.cwd, body);
-      if (unresolved.length) {
-        // Once: the cartographer corrects or removes what doesn't resolve; nothing is deleted behind its back.
-        const second = await cartographer(cartographerBrief({ current, proposed: body, unresolved }), "checking its paths");
+      const overBy = mapTokens(body) - MAP_TOKENS;
+      if (unresolved.length || overBy > 0) {
+        // Once: the cartographer corrects or removes what doesn't resolve and trims to the budget, still able to
+        // read the code; nothing is deleted behind its back.
+        const phase = unresolved.length ? (overBy > 0 ? "checking its paths and trimming it" : "checking its paths") : "trimming it to the budget";
+        const second = await cartographer(cartographerBrief({ current, proposed: body, unresolved, overBy: overBy > 0 ? overBy : undefined }), phase);
         store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...second.tokens, cost: second.cost, ms: second.ms });
         if (second.aborted) return ctx.ui.notify("Map update stopped.", "info");
         const fixed = mapOf(second).map;

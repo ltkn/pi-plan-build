@@ -1863,7 +1863,56 @@ test("map: it asks only when something looks off (unanswered: the current map st
   assert.ok(u.notes.some((n) => /The project map in AGENTS\.md names 1 path\(s\) that no longer exist \(src\/billing\/Invoice\.java\): \/pb:map refreshes it/.test(n)));
 });
 
+test("map: a map over the budget goes back once to be trimmed, by the same cartographer that can read the code", async () => {
+  const t = setup({ verify: "true" });
+  fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/auth/Login.java"), "class Login {}\n");
+  process.chdir(t.repo);
+  const repair = path.join(os.tmpdir(), `pb-map-repair-${process.pid}.md`);
+  process.env.MOCK_MAP_BIG = "1";
+  process.env.MOCK_REPAIR_OUT = repair;
+  try {
+    await t.run("map");
+  } finally {
+    delete process.env.MOCK_MAP_BIG;
+    delete process.env.MOCK_REPAIR_OUT;
+  }
+  const { MAP_TOKENS } = await import("../extensions/pb/map.ts");
+  const brief = fs.readFileSync(repair, "utf8");
+  fs.rmSync(repair);
+  assert.match(brief, /^# Your proposed map[\s\S]*# Over the budget\n\nIt is about [\d,]+ tokens over the /);
+  assert.doesNotMatch(brief, /Paths in it that don't resolve/); // every path resolved: the budget alone sent it back
+  assert.ok(brief.includes(`the ${MAP_TOKENS.toLocaleString("en-US")} budget`));
+  assert.match(brief, /keep every security invariant with its enforcement point, and every known gap/);
+  const agents = t.read("AGENTS.md");
+  assert.doesNotMatch(agents, /### Filler/);
+  assert.match(agents, /### Orders/);
+  assert.equal(t.read(".pi/pb/explore.jsonl").trim().split("\n").length, 2); // both calls counted in the stats
+});
 
+test("map: its entry reads well: collapsed, what changed; expanded, the map as markdown and what was removed", async () => {
+  const { mapView } = await import("../extensions/pb/render.ts");
+  const { MAP_TOKENS } = await import("../extensions/pb/map.ts");
+  const d = { diff: ["- - `old.ts`: gone", "+ ### Orders", "+ - `src/order.ts`: orders"], warnings: [], tokens: 420, map: "### Orders\n- `src/order.ts`: orders", changes: ["added Orders"] };
+  const collapsed = mapView(d, false);
+  assert.equal(collapsed.head, "~420 tokens · 2 lines added, 1 removed");
+  assert.deepEqual(collapsed.lines.map((l) => l.text), ["• added Orders", "(expand to read the map)"]);
+  assert.equal(collapsed.markdown, undefined);
+  const expanded = mapView(d, true);
+  assert.equal(expanded.markdown, "### Orders\n- `src/order.ts`: orders");
+  assert.deepEqual(expanded.removed, ["- `old.ts`: gone"]);
+  const over = mapView({ ...d, tokens: MAP_TOKENS + 1, warnings: ["`x/y` doesn't resolve"] }, false);
+  assert.ok(over.over);
+  assert.match(over.head, new RegExp(`over the ~${MAP_TOKENS.toLocaleString("en-US")} budget`));
+  assert.equal(mapView({ ...d, tokens: MAP_TOKENS }, false).over, false);
+});
+
+test("map: the cartographer is told the budget the view warns at", async () => {
+  const { CARTOGRAPHER_SYSTEM, MAP_TOKENS } = await import("../extensions/pb/map.ts");
+  assert.ok(CARTOGRAPHER_SYSTEM.includes(`about ${MAP_TOKENS.toLocaleString("en-US")} tokens at most`));
+  assert.match(CARTOGRAPHER_SYSTEM, /### Security invariants[\s\S]*Known gaps[\s\S]*Never write a verdict/);
+});
 
 test("pb_ask counts down while planning too: unanswered, the recommendation is taken as an assumption to confirm", async () => {
   const t = setup({ askTimeoutSec: 0.001 });

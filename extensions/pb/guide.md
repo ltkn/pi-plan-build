@@ -523,12 +523,12 @@ exploration starts with it instead of rediscovering it.
 
 A fresh, read-only call proposes the whole new map (it revisits all of it, not
 only the new area), in short bullet lines, as short as the project allows, up
-to about 8,000 tokens: it's read in every session, so a line stays only if it
+to about 20,000 tokens: it's read in every session, so a line stays only if it
 saves a later feature a search or a mistake. Your session doesn't grow. pb
 checks every path it names, from the project root, under the path a heading
 names, and as the end of a real file (`auth/Login` finds
 `…/auth/Login.java`); the ones that still don't resolve go back to it once to
-be corrected. Then the map is written and the change is shown. It asks you
+be corrected, and so does a map over the budget, to be trimmed. Then the map is written and the change is shown. It asks you
 first only when something looks off: paths that still don't resolve, or a
 large part of the existing map removed; unanswered, the current map stays.
 `/pb:plan` warns when paths in the map no longer exist (a cheap check, no
