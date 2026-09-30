@@ -47,6 +47,7 @@ if (sys.includes("ATTACKER")) {
   const repairing = brief.startsWith("# Your proposed map");
   if (process.env.MOCK_BRIEF_OUT && !repairing) fs.writeFileSync(process.env.MOCK_BRIEF_OUT, brief);
   if (process.env.MOCK_REPAIR_OUT && repairing) fs.writeFileSync(process.env.MOCK_REPAIR_OUT, brief);
+  if (process.env.MOCK_SYSTEM_OUT) fs.writeFileSync(process.env.MOCK_SYSTEM_OUT, sys);
   const gone = (!repairing && !process.env.MOCK_MAP_BIG) || process.env.MOCK_MAP_STUBBORN ? "\n- `src/gone.ts`: removed long ago" : "";
   const big = process.env.MOCK_MAP_BIG && !repairing ? `\n### Filler\n${"- `src/order.ts`: a line that saves nobody anything at all.\n".repeat(2000)}` : "";
   const map = `## Layout\n- \`src/\`: the application\n### Orders\n- \`src/order.ts\`: the order model and its transitions\n- Sign-in: follow \`auth/Login\`.${gone}\n- Services own transactions; controllers never call repositories.\n### Empty${big}`;

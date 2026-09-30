@@ -90,22 +90,77 @@ export function findStandards(cwd: string): { file: string; text: string } | und
 /** The stack-specific line added for a Java project (Maven or Gradle). */
 export const JAVA_STANDARDS = "- Java 25: records, sealed types, pattern matching, virtual threads and scoped values; no Lombok.";
 
-export type Stack = "java" | "vue";
+/** A stack's name: "java" and "vue" are built in; a template in templatesDir() can add any other. */
+export type Stack = string;
 
-/** Java (Maven or Gradle) wins over Vue: a backend that also builds its pages keeps the backend's rules. */
-export function projectStack(cwd: string): Stack | undefined {
-  if (["pom.xml", "build.gradle", "build.gradle.kts"].some((f) => fs.existsSync(path.join(cwd, f)))) return "java";
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
-    if (pkg.dependencies?.vue || pkg.devDependencies?.vue) return "vue";
-  } catch {
-    // no package.json, or not JSON: not a Vue project
-  }
-  return undefined;
+/** Your own sections: <name>.md, optionally starting with "detect: go.mod, package.json:react". */
+export const templatesDir = () => path.join(agentDir(), "pb", "standards");
+
+interface Template {
+  /** files at the project root, or "package.json:<dependency>"; none = never detected, only named */
+  detect: string[];
+  section: string;
 }
 
-const sectionFor = (stack?: Stack) =>
-  stack === "vue" ? FRONTEND_STANDARDS : stack === "java" ? DEFAULT_STANDARDS.replace(END, `${JAVA_STANDARDS}\n${END}`) : DEFAULT_STANDARDS;
+const BUILT_IN: Record<string, Template> = {
+  java: { detect: ["pom.xml", "build.gradle", "build.gradle.kts"], section: DEFAULT_STANDARDS.replace(END, `${JAVA_STANDARDS}\n${END}`) },
+  vue: { detect: ["package.json:vue"], section: FRONTEND_STANDARDS },
+  plain: { detect: [], section: DEFAULT_STANDARDS },
+};
+
+/** Your templates: a file's section is wrapped in pb's markers (and given a heading) unless it has them. */
+function userTemplates(): Record<string, Template> {
+  const out: Record<string, Template> = {};
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(templatesDir()).filter((f) => /^[a-z0-9][a-z0-9-]*\.md$/.test(f));
+  } catch {
+    return out;
+  }
+  for (const f of files.sort()) {
+    const name = f.slice(0, -3);
+    let text = fs.readFileSync(path.join(templatesDir(), f), "utf8");
+    const detect = text.match(/^detect:\s*(.*)\n/i);
+    if (detect) text = text.slice(detect[0].length);
+    const body = text.trim();
+    const section = body.includes(START) ? `${body}\n` : `${START}\n${/^## /.test(body) ? "" : "## Engineering standards\n\n"}${body}\n${END}\n`;
+    out[name] = { detect: detect ? detect[1].split(",").map((d) => d.trim()).filter(Boolean) : (BUILT_IN[name]?.detect ?? []), section };
+  }
+  return out;
+}
+
+/** Every stack, yours first: yours replace a built-in of the same name. */
+function templates(): [string, Template][] {
+  const mine = userTemplates();
+  return [...Object.entries(mine), ...Object.entries(BUILT_IN).filter(([n]) => !(n in mine))];
+}
+
+export const stackNames = () => templates().map(([n]) => n);
+
+/** True when it's your template rather than pb's. */
+export const isUserTemplate = (stack: string) => stack in userTemplates();
+
+const detects = (cwd: string, d: string) => {
+  const [file, dep] = d.split(":");
+  if (!dep) return fs.existsSync(path.join(cwd, file));
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(cwd, file), "utf8"));
+    return !!(pkg.dependencies?.[dep] || pkg.devDependencies?.[dep]);
+  } catch {
+    return false; // missing or not JSON
+  }
+};
+
+/** The first stack whose detection matches, yours before pb's; Java before Vue: a backend that also builds its pages keeps the backend's rules. */
+export function projectStack(cwd: string): Stack | undefined {
+  return templates().find(([n, t]) => n !== "plain" && t.detect.some((d) => detects(cwd, d)))?.[0];
+}
+
+/** The section written for a stack; none = plain. */
+export const sectionFor = (stack?: Stack) => {
+  const all = Object.fromEntries(templates());
+  return (all[stack ?? "plain"] ?? all.plain).section;
+};
 
 /**
  * Put the stack's section in a context file: created if missing, pb's section replaced if it has one,

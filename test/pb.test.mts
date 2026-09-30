@@ -413,11 +413,14 @@ Create T2.txt.
 /** The task an instruction or tool result is about. */
 const taskOf = (text: string) => text.match(/Task (T\d+)/)?.[1] ?? text.match(/task "(\w+)"/)?.[1];
 
-/** An agent that does each task by creating <task>.txt. */
+/** An agent that does each task by creating <task>.txt, its test (`test -f <task>.txt`) seen failing first. */
 const diligent: Script = async (text, tool) => {
   const task = taskOf(text);
   if (!task) return;
-  if (task !== "final") fs.writeFileSync(`${task}.txt`, "x");
+  if (task !== "final") {
+    await tool("pb_tests_red", { task, tests: `${task}.txt exists` });
+    fs.writeFileSync(`${task}.txt`, "x");
+  }
   await tool("pb_task_done", { task, status: "done", summary: `did ${task}` });
 };
 
@@ -538,7 +541,7 @@ test("standards: a Java project gets the Java 25 defaults with pb's section", as
   await t.run("plan", "x");
   const agents = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
   assert.match(agents, /even where the surrounding code doesn't[\s\S]*- Java 25: records, sealed types, pattern matching, virtual threads and scoped values; no Lombok\.\n<!-- \/pb:standards -->/);
-  assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /with Java 25 defaults/);
+  assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /\(the backend ones, with Java 25\)/);
 });
 
 test("standards: a Vue project gets the frontend section, without the database rules", async () => {
@@ -589,7 +592,7 @@ test("standards: a Vue project under shared standards is offered its frontend se
   try {
     fs.writeFileSync(path.join(t.repo, "package.json"), JSON.stringify({ dependencies: { vue: "^3.5.0" } }));
     await t.run("plan", "x");
-    assert.match(t.selectTitles[0], /only gets the standards in .*AGENTS\.md, not the frontend ones[\s\S]*keep the shared AGENTS\.md free of stack-specific rules/);
+    assert.match(t.selectTitles[0], /only gets the standards in .*AGENTS\.md, not its own \(the frontend ones, for a Vue project\)[\s\S]*keep the shared AGENTS\.md free of stack-specific rules/);
     assert.match(t.read("AGENTS.md"), /- Frontend role:/);
     assert.equal(fs.readFileSync(global, "utf8"), DEFAULT_STANDARDS); // untouched
 
@@ -641,7 +644,33 @@ test("/pb:standards: creates AGENTS.md, replaces only pb's section, and recovers
   assert.match(t.notes.at(-1)!, /without its "<!-- \/pb:standards -->"/);
 
   await t.run("standards", "react");
-  assert.match(t.notes.at(-1)!, /takes java, vue or plain/);
+  assert.match(t.notes.at(-1)!, /takes java, vue, plain \(default: detected from the project\)/);
+});
+
+test("standards templates: yours are detected before pb's, replace a built-in of the same name, and /pb:standards takes them", async () => {
+  const { templatesDir, stackNames } = await import("../extensions/pb/standards.ts");
+  const dir = templatesDir();
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "go.md"), "detect: go.mod\n- Go 1.25: errors wrapped with %w; no panics across packages.\n");
+  fs.writeFileSync(path.join(dir, "java.md"), "## Our Java rules\n\n- Java 25 and Spring Boot 4.\n");
+  try {
+    assert.deepEqual(stackNames(), ["go", "java", "vue", "plain"]);
+    const t = setup({ verify: "true" });
+    process.chdir(t.repo);
+    fs.writeFileSync(path.join(t.repo, "go.mod"), "module x\n");
+    await t.run("plan", "x");
+    assert.equal(t.selectTitles[0], "Engineering standards (your go template)");
+    assert.equal(t.read("AGENTS.md"), "<!-- pb:standards -->\n## Engineering standards\n\n- Go 1.25: errors wrapped with %w; no panics across packages.\n<!-- /pb:standards -->\n");
+    assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /\(your go template\)/);
+
+    fs.writeFileSync(path.join(t.repo, "pom.xml"), "<project/>");
+    await t.run("standards", "java"); // yours replaces pb's java, and keeps its detection
+    assert.equal(t.read("AGENTS.md"), "<!-- pb:standards -->\n## Our Java rules\n\n- Java 25 and Spring Boot 4.\n<!-- /pb:standards -->\n");
+    await t.run("standards", "rust");
+    assert.match(t.notes.at(-1)!, /takes go, java, vue, plain[\s\S]*Your own go in .*pb\/standards/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("plan: the baseline runs in a separate worktree, so it can't collide with builds in the working copy", async () => {
@@ -729,6 +758,52 @@ test("build: with taskChecks each, a task without a Test: line is compiled, not 
   assert.deepEqual(checks.map((c) => [c.task, c.command]), [["T1", "echo compiled"], ["T2", "echo compiled"], ["final", "true"]]);
 });
 
+test("build: red then green: a task's new tests must be seen failing before pb_task_done takes it", async () => {
+  const t = setup({ verify: "true" });
+  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged\n- Test: `true`" }));
+  const said: string[] = [];
+  let step = 0;
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text);
+    if (task === "T1" && step === 0) {
+      step = 1;
+      fs.writeFileSync("T1.txt", "x"); // the change first
+      said.push((await tool("pb_task_done", { task, status: "done", summary: "done" })).content![0].text);
+      said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
+      fs.rmSync("T1.txt"); // set aside, as told
+      said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
+      said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
+      fs.writeFileSync("T1.txt", "x");
+      return void (await tool("pb_task_done", { task, status: "done", summary: "done" }));
+    }
+    if (task === "T2") said.push((await tool("pb_tests_red", { task, tests: "none" })).content![0].text);
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.match(t.instructions[0], /Task T1\. Do only this task[\s\S]*Tests first: write the tests for its Acceptance lines, then call pb_tests_red\. The harness runs `test -f T1\.txt` and needs it to fail/);
+  assert.match(t.instructions[0], /pb_tests_red must see them fail before you change the code[\s\S]*Contracts, if any, are fixed: changing one needs pb_ask/);
+  assert.match(said[0], /T1's new tests were never seen failing[\s\S]*set it aside first/);
+  assert.match(said[1], /^`test -f T1\.txt` passes without the change, so these tests don't check it/);
+  assert.match(said[2], /^Seen failing: `test -f T1\.txt`[\s\S]*fails for the reason you expect/);
+  assert.match(said[3], /^Already seen failing/);
+  assert.match(said[4], /^T2 doesn't need this/); // a refactor adds no behaviour
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "built");
+  assert.equal(p.tasks.find((x: any) => x.id === "T1").attempts, 1); // the refusal cost no attempt
+  assert.deepEqual(t.events("order-cancellation").filter((e) => e.type === "red").map((e) => [e.task, e.ok]), [["T1", false], ["T1", true]]);
+
+  const u = setup({ verify: "true" });
+  await written(u, SPEC({ newTests: "no — a docs-only change" }));
+  u.agent.script = async (text, tool) => {
+    const task = taskOf(text);
+    if (task && task !== "final") fs.writeFileSync(`${task}.txt`, "x");
+    if (task) await tool("pb_task_done", { task, status: "done", summary: "done" });
+  };
+  await u.run("build");
+  assert.equal(u.progress("order-cancellation").phase, "built"); // no new tests: nothing to see failing
+  assert.doesNotMatch(u.instructions[0], /Tests first/);
+});
+
 test("build: a failing check goes back to the agent, and passes on the next attempt", async () => {
   const t = setup({ taskChecks: "each",  verify: "true" });
   await written(t);
@@ -736,6 +811,7 @@ test("build: a failing check goes back to the agent, and passes on the next atte
   t.agent.script = async (text, tool) => {
     if (text.includes("Task T1") && lazy) {
       lazy = false; // first attempt forgets the file
+      await tool("pb_tests_red", { task: "T1", tests: "T1.txt exists" });
       return void (await tool("pb_task_done", { task: "T1", status: "done", summary: "claimed" }));
     }
     return diligent(text, tool);
@@ -751,7 +827,10 @@ test("build: after the last attempt it pauses; /pb:build resumes with a fresh se
   let give = false;
   t.agent.script = async (text, tool) => {
     const task = text.match(/(?:Task|check for) (T\d+)/)?.[1];
-    if (task === "T1" && !give) return void (await tool("pb_task_done", { task, status: "done", summary: "claimed" }));
+    if (task === "T1" && !give) {
+      await tool("pb_tests_red", { task, tests: "T1.txt exists" });
+      return void (await tool("pb_task_done", { task, status: "done", summary: "claimed" }));
+    }
     return diligent(text, tool);
   };
   await t.run("build");
@@ -919,6 +998,7 @@ test("build: a compaction in the middle of a task: pb's summary carries the rule
   await written(t);
   t.agent.script = async (text, tool) => {
     if (text.includes("Task T2")) {
+      await tool("pb_tests_red", { task: "T2", tests: "T2.txt exists" });
       fs.writeFileSync("T2.txt", "halfway");
       const prep = { firstKeptEntryId: "e9", tokensBefore: 90000, previousSummary: "We discussed audit.", fileOps: { read: new Set(["src/order.ts", "T2.txt"]), edited: new Set(), written: new Set() } };
       const [r] = (await t.fire("session_before_compact", { preparation: prep, reason: "threshold" })) as any[];
@@ -1216,6 +1296,7 @@ test("stats: tasks, first try, checks, pauses, review, and the build session's t
   t.agent.script = async (text, tool) => {
     if (text.includes("Task T1") && lazy) {
       lazy = false;
+      await tool("pb_tests_red", { task: "T1", tests: "T1.txt exists" });
       return void (await tool("pb_task_done", { task: "T1", status: "done", summary: "claimed" }));
     }
     return diligent(text, tool);
@@ -1954,6 +2035,44 @@ test("map: the cartographer is told the budget the view warns at", async () => {
   assert.ok(CARTOGRAPHER_SYSTEM.includes(`about ${MAP_TOKENS.toLocaleString("en-US")} tokens at most`));
   assert.match(CARTOGRAPHER_SYSTEM, /### Security invariants[\s\S]*Known gaps[\s\S]*Never write a verdict/);
   assert.match(CARTOGRAPHER_SYSTEM, /capable models that explore fast[\s\S]*Layout, only where exploring misleads[\s\S]*No module-by-module tour[\s\S]*Start with the security invariants/);
+});
+
+test("extra instructions: added to each role's prompt, global ones first, pb's own kept", async () => {
+  const { agentDir } = await import("../extensions/pb/standards.ts");
+  const global = path.join(agentDir(), "pb", "config.json");
+  fs.mkdirSync(path.dirname(global), { recursive: true });
+  fs.writeFileSync(global, JSON.stringify({ extra: { plan: "Global: think about rollout.", build: "Global: keep functions short." } }));
+  try {
+    const t = setup({ verify: "true", extra: { plan: "Project: mind the i18n keys.", spec: "Always include a rollout task.", review: "Check the i18n keys.", adversarial: "Try the admin API." } });
+    process.chdir(t.repo);
+    t.selects.push("No thanks");
+    await t.run("plan", "x");
+    assert.match(t.instructions.at(-1)!, /Keep it in proportion to the change\.\n\nAlso, from your pb config:\nGlobal: think about rollout\.\nProject: mind the i18n keys\./);
+    await t.run("spec");
+    assert.match(t.instructions.at(-1)!, /Name: short kebab-case\.[\s\S]*Also, from your pb config:\nAlways include a rollout task\./);
+    await written(t);
+    t.agent.script = diligent;
+    await t.run("build");
+    assert.match(t.instructions.find((i) => /\[pb:build order-cancellation\]/.test(i))!, /Finish each task with pb_task_done[^\n]*\n\nAlso, from your pb config:\nGlobal: keep functions short\./);
+    await t.run("review");
+    assert.match(briefOf(t), /You are an independent REVIEWER[\s\S]*Also, from your pb config:\nCheck the i18n keys\./);
+    assert.ok(t.instructions.some((i) => /You are an ATTACKER[\s\S]*Also, from your pb config:\nTry the admin API\./.test(i)));
+  } finally {
+    fs.rmSync(global, { force: true });
+  }
+  const u = setup({ verify: "true", extra: { map: "List the Kafka topics." } });
+  process.chdir(u.repo);
+  const sys = path.join(os.tmpdir(), `pb-map-system-${process.pid}.md`);
+  process.env.MOCK_SYSTEM_OUT = sys;
+  try {
+    await u.run("map");
+  } finally {
+    delete process.env.MOCK_SYSTEM_OUT;
+  }
+  assert.match(fs.readFileSync(sys, "utf8"), /^You are a CARTOGRAPHER[\s\S]*report_map tool[\s\S]*\n\nAlso, from your pb config:\nList the Kafka topics\.$/);
+  fs.rmSync(sys);
+  const { Store } = await import("../extensions/pb/store.ts");
+  assert.equal(new Store(u.repo).extra("plan"), ""); // nothing set: nothing added
 });
 
 test("pb_ask counts down while planning too: unanswered, the recommendation is taken as an assumption to confirm", async () => {

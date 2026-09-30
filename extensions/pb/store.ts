@@ -6,6 +6,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { agentDir } from "./standards.ts";
 
 export const PREFIX = "pb";
 export const PB_DIR = path.join(".pi", "pb");
@@ -51,7 +52,16 @@ export interface Config {
   checkpointAt: number;
   /** /pb:archive updates the project map in AGENTS.md from the finished feature. */
   mapOnArchive: boolean;
+  /**
+   * Your own instructions, added to a role's prompt (never replacing pb's, which the harness relies on).
+   * Also read from ~/.pi/agent/pb/config.json for every project; both apply, the global ones first.
+   */
+  extra?: Partial<Record<Role, string>>;
 }
+
+/** The roles whose prompts take extra instructions. */
+export const ROLES = ["plan", "spec", "build", "review", "adversarial", "map"] as const;
+export type Role = (typeof ROLES)[number];
 
 export const DEFAULT_CONFIG: Config = {
   verify: "auto",
@@ -86,6 +96,8 @@ export interface TaskProgress {
   attempts: number;
   /** what the agent reported when it finished the task */
   summary?: string;
+  /** the task's new tests, seen failing before the change (pb_tests_red): its first line */
+  red?: string;
 }
 
 export type Phase = "written" | "building" | "paused" | "built" | "reviewed";
@@ -257,6 +269,12 @@ export class Store {
     if (!fs.existsSync(file)) writeFile(file, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
     const raw = readJson<Partial<Config>>(file) ?? {};
     return { ...DEFAULT_CONFIG, ...raw, reviewer: { ...DEFAULT_CONFIG.reviewer, ...(raw.reviewer ?? {}) }, explorer: { ...(raw.explorer ?? {}) } };
+  }
+  /** Your extra instructions for a role: the global ones, then this project's. */
+  extra(role: Role): string {
+    const global = readJson<Partial<Config>>(path.join(agentDir(), "pb", "config.json"))?.extra?.[role];
+    const mine = this.config().extra?.[role];
+    return [global, mine].filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => x.trim()).join("\n");
   }
   /** Change settings in config.json, keeping everything else in it as written. */
   updateConfig(patch: (raw: Partial<Config>) => Partial<Config>): void {

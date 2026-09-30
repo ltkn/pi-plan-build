@@ -17,8 +17,8 @@ build. Your engineering standards live in AGENTS.md, written once.
                       no spec? reviews the uncommitted change against its intent
 /pb:deps [which]      check dependencies and propose upgrades, as a change of their own
 /pb:map [focus|undo]  refresh the project map in AGENTS.md (done at /pb:archive too); undo puts the previous back
-/pb:standards [stack] write pb's current standards into this project's AGENTS.md (created if missing; only pb's
-                      section is replaced); java, vue or plain, detected by default
+/pb:standards [stack] write the current standards into this project's AGENTS.md (created if missing; only pb's
+                      section is replaced); java, vue, plain or your own template, detected by default
 /pb:spec [which]      write or revise a spec without building (optional)
 /pb:undo · /pb:status · /pb:stats · /pb:archive · /pb:help
 ```
@@ -26,7 +26,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.19.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.20.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -73,6 +73,9 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   failure goes straight back to fix, and after `maxAttempts` the build pauses
   for you. The agent's word never ends a build. A check after every task is
   available (`taskChecks: "each"`).
+- **Tests that are proven to test.** A task that adds behaviour writes its
+  tests first, and the harness runs them and requires them to fail before the
+  change is written: a test that passes without the change tests nothing.
 - **Refactors are welcome, and reviewed.** Changed existing tests don't stop the
   build (refactors move and merge them); they're listed and the reviewer judges
   each. Refactoring the standards call for comes first, as `(refactor)` tasks.
@@ -151,13 +154,18 @@ New tests: yes                      # or: no — why
 ## Goal
 ## Findings                          # what the analysis established: files, code to imitate, constraints, baseline
 ## Decisions                         # each with its reason, as it stands now; rejected ideas too
+## Contracts                         # only what others depend on: signatures, API and errors, data, events
 ## Open questions                    # only while planning
 ## Tasks
 ### T1: Add CANCELLED to OrderStatus and the cancel() transition
 …what to change, where, which pattern to follow…
-- Acceptance: cancel() on PENDING sets CANCELLED; other states throw
-- Test: `mvn -B -q -Dtest=OrderTest test`
+- Acceptance: cancel() on PENDING sets CANCELLED
+- Acceptance: cancel() on any other state throws, and changes nothing
+- Test: `mvn -B -q -Dtest=OrderTest test`   # seen failing before the change, then passing
 ```
+
+Tasks are vertical slices, each working and tested; each Acceptance line is one
+behaviour, a test to write.
 
 `## Out of scope` and `## Acceptance criteria` are optional: a spec is as long
 as the change needs and no longer. Pi points to code instead of copying it;
@@ -191,6 +199,7 @@ the existing ones still run.
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |
+| `extra` | unset | your instructions added to a role's prompt: `{"plan", "spec", "build", "review", "adversarial", "map"}`; also read from `~/.pi/agent/pb/config.json`, applied first |
 | `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build is reset to its state at the next task boundary; 0 = never |
 
 ## On disk

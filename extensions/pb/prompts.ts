@@ -14,6 +14,9 @@ const P = PB_DIR.replace(/\\/g, "/");
 /** Standards to include in a message: empty when the session already has them from AGENTS.md. */
 const standardsBlock = (standards: string) => (standards ? `\n\nEngineering standards (from AGENTS.md):\n${standards.replace(/^#+.*\n+/, "")}` : "");
 
+/** Your extra instructions for a role (the "extra" setting): added, never replacing pb's. */
+export const extraBlock = (extra: string) => (extra ? `\n\nAlso, from your pb config:\n${extra}` : "");
+
 /* ================================ explorer ================================ */
 
 export const EXPLORER_SYSTEM = `You are an EXPLORER in a fresh context: you answer a question about the code so the conversation that asked doesn't have to read it all. Do not modify any file; use read-only commands, and run a build or tests only when the question needs it. Report facts with paths (file:line where it helps), not a design. Be compact: your answer is all that goes back.`;
@@ -25,7 +28,7 @@ export function explorerBrief(question: string, context?: string): string {
 /* ================================== plan ================================== */
 
 /** baseline: "running" while the harness runs the suite in the background, "none" when it doesn't. */
-export function planPrompt(feature: string, testCmd: string | null, standards: string, baseline: "running" | "none"): string {
+export function planPrompt(feature: string, testCmd: string | null, standards: string, baseline: "running" | "none", extra = ""): string {
   const tests =
     baseline === "running" && testCmd
       ? `The harness is running \`${testCmd}\` in the background; its result shows up here when it's done, so don't run the full suite for a baseline yourself.`
@@ -36,7 +39,7 @@ Let's plan this together. Investigate as you like (read the code, run the build 
 
 For a broad look (where things live, how a similar feature is built, the conventions), call pb_explore: it answers from a separate context, so this one stays lean. Read files yourself where our discussion needs exact lines. ${tests}
 
-Tell me what you found, the approach you recommend (and any alternative worth weighing), and the questions only I can answer (pb_ask for a choice between options). Keep it in proportion to the change.${standardsBlock(standards)}
+Tell me what you found, the approach you recommend (and any alternative worth weighing), and the questions only I can answer (pb_ask for a choice between options). Keep it in proportion to the change.${standardsBlock(standards)}${extraBlock(extra)}
 
 When I'm ready I'll run /pb:build (or /pb:spec to write the spec first). End your first reply with this block, verbatim:
 
@@ -63,6 +66,8 @@ New tests: yes | no — <why>
 What the analysis established, so nobody has to redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Dead ends too: what was tried or ruled out, and why.
 ## Decisions
 Each decision with its reason, as it stands now: no dates, no history, not who decided. Rejected ideas as "Not doing X, because …", so they aren't reconsidered.
+## Contracts
+Only when the change adds or alters something other code, clients or stored data depend on: the public signatures, API requests and responses with their error types, the data model and migrations, events. Pin exactly these, as they must end up; leave everything behind them to the build.
 ## Threats and abuse
 Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. The acceptance criteria then include the abuse cases.
 ## Open questions
@@ -70,14 +75,16 @@ Only while Status is planning: what's undecided, the options still being weighed
 ## Tasks
 ### T1: <title>
 What to change and where.
-- Acceptance: <checkable>
-- Test: \`<command for this task's tests>\`   (optional; the full suite runs after the last task)
+- Acceptance: <one behaviour, as a test would check it>   (one line each, abuse cases included: they are the tests to write)
+- Test: \`<command that runs this task's tests>\`   (for a task that adds behaviour: its tests are proven to fail before the change, then pass)
+
+Tasks are vertical slices: each leaves the code working and tested, and could be reviewed on its own. No split by layer, no closing "add tests" task; as few tasks as the change allows. A task that adds no behaviour (wiring, configuration, a "(refactor) …") has no Test: line.
 
 Add "## Out of scope" or "## Acceptance criteria" only when they help.
 
 - Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.`;
 
-export function specPrompt(which: string, existing: string[], current?: { name: string; markdown: string }): string {
+export function specPrompt(which: string, existing: string[], current?: { name: string; markdown: string }, extra = ""): string {
   return `[pb:spec]${which ? ` ${which}` : ""}
 
 Write the spec${which ? ` for: ${which}` : ""} from our discussion with the pb_write_spec tool (one call per spec; pb_update_spec changes single sections of an existing one). The build follows it, the reviewer checks against it, and a fresh or reset session starts from it alone: put in what it needs and nothing it doesn't.
@@ -90,7 +97,7 @@ ${SPEC_FORMAT}
 - The approach follows the engineering standards (AGENTS.md).
 - Status: ready. Settle what the discussion left open yourself: take the sensible reading and write it into Decisions as "Assumption: … because …", so I see it and the reviewer checks it. Ask me (pb_ask, all independent questions at once) only about a choice that changes behaviour, an API or data and that we didn't settle.
 - Verification defaults to tests; "New tests: no" only if I said so.
-- Name: short kebab-case.${existing.length ? ` Existing: ${existing.join(", ")} (reusing a name rewrites it; read its spec.md first, it may differ from what you remember).` : ""}${current ? `\n\n--- current ${P}/specs/${current.name}/spec.md (revise this) ---\n\n${current.markdown}` : ""}
+- Name: short kebab-case.${existing.length ? ` Existing: ${existing.join(", ")} (reusing a name rewrites it; read its spec.md first, it may differ from what you remember).` : ""}${extraBlock(extra)}${current ? `\n\n--- current ${P}/specs/${current.name}/spec.md (revise this) ---\n\n${current.markdown}` : ""}
 
 Then tell me where it is. End your reply with this block, verbatim:
 
@@ -117,10 +124,10 @@ export function checkpointSummary(specs: { name: string; markdown: string }[], l
 }
 
 /** Continue planning a spec in a fresh session. */
-export function continuePlanPrompt(name: string, markdown: string, standards: string): string {
+export function continuePlanPrompt(name: string, markdown: string, standards: string, extra = ""): string {
   return `[pb:plan ${name}] Let's continue planning this, from its spec below: it holds what was found and decided so far. Don't redo the analysis or reopen rejected ideas unless something new turns up. The project's files stay untouched until /pb:build.
 
-Start with the open questions: summarise where we are in a few lines, and ask what only I can answer.${standardsBlock(standards)}
+Start with the open questions: summarise where we are in a few lines, and ask what only I can answer.${standardsBlock(standards)}${extraBlock(extra)}
 
 --- ${P}/specs/${name}/spec.md ---
 
@@ -132,10 +139,10 @@ ${tip("plan.next")}`;
 }
 
 /** A spec still marked planning: finish it before building. */
-export function finishSpecPrompt(name: string): string {
+export function finishSpecPrompt(name: string, extra = ""): string {
   return `[pb:spec ${name}] Finish the spec ${P}/specs/${name}/spec.md for building: settle its open questions yourself where you can (write each as "Assumption: … because …" in Decisions; ask me with pb_ask, all at once, only about a choice that changes behaviour, an API or data), add the Tasks and the Verification line, remove Open questions, and set Status: ready (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
 
-${SPEC_FORMAT}`;
+${SPEC_FORMAT}${extraBlock(extra)}`;
 }
 
 /* ================================== build ================================== */
@@ -148,30 +155,31 @@ function gateLine(spec: ParsedSpec, buildCmd: string | null, each: boolean): str
 }
 
 /** How the build works: the mechanics only (the standards come separately). each: a check after every task. */
-export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each = false): string {
+export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each = false, extra = ""): string {
   return `- Where the spec is unclear or doesn't match the code, take the sensible reading, record it with pb_record_decision (assumption: true) and carry on. Ask with pb_ask only when a choice changes behaviour, an API or data.
-- Keep each change to its task. Tests: ${spec.newTests ? "add or extend tests for the behaviour each task introduces." : `add none for this feature (${spec.newTestsReason}).`} Change or remove an existing test only when what it covers changes; never skip or weaken one to get a check through.
+- Keep each change to its task. Tests: ${spec.newTests ? `add or extend tests for the behaviour each task introduces${spec.gate === "tests" ? "; a task with a Test: line writes them first, and pb_tests_red must see them fail before you change the code" : ""}.` : `add none for this feature (${spec.newTestsReason}).`} Change or remove an existing test only when what it covers changes; never skip or weaken one to get a check through.
+- The spec's Contracts, if any, are fixed: changing one needs pb_ask.
 - Don't commit or discard changes with git, and leave .pi/ alone.
-- Finish each task with pb_task_done: ${gateLine(spec, buildCmd, each)}. It gives you the next task.`;
+- Finish each task with pb_task_done: ${gateLine(spec, buildCmd, each)}. It gives you the next task.${extraBlock(extra)}`;
 }
 
 /**
  * The first build message. In the session that wrote the spec, the agent already knows it;
  * anywhere else (a fresh session, or a session that never saw it) the spec comes along.
  */
-export function buildIntro(name: string, spec: ParsedSpec, buildCmd: string | null, each: boolean, standards: string, markdown?: string): string {
+export function buildIntro(name: string, spec: ParsedSpec, buildCmd: string | null, each: boolean, standards: string, markdown?: string, extra = ""): string {
   return `[pb:build ${name}] ${markdown ? "Build this feature from the spec below." : `Build the spec you wrote (${P}/specs/${name}/spec.md).`} The planning is done: implement it as written.
 
-${buildMechanics(spec, buildCmd, each)}${standardsBlock(standards)}${markdown ? `\n\n--- spec: ${P}/specs/${name}/spec.md ---\n\n${markdown}` : ""}`;
+${buildMechanics(spec, buildCmd, each, extra)}${standardsBlock(standards)}${markdown ? `\n\n--- spec: ${P}/specs/${name}/spec.md ---\n\n${markdown}` : ""}`;
 }
 
-/** check: the command pb_task_done will run for this task, if any. */
-export function taskPrompt(task: SpecTask, attempt: number, max: number, check: string | null): string {
+/** check: the command pb_task_done will run for this task, if any. red: its new tests must be seen failing first. */
+export function taskPrompt(task: SpecTask, attempt: number, max: number, check: string | null, red = false): string {
   return `[pb:build] Task ${task.id}${attempt > 1 ? ` (attempt ${attempt} of ${max})` : ""}. Do only this task:
 
 ${task.text}
 
-(Comments: the code as it is; no history, dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""}. If it can't be done properly, status "blocked" with why.`;
+${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}(Comments: the code as it is; no history, dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""}. If it can't be done properly, status "blocked" with why.`;
 }
 
 export function continuePrompt(task: SpecTask): string {
@@ -238,7 +246,7 @@ Do not modify any file. Use read/grep/find/ls and bash only for inspection (git 
 The harness already ran the check on the current tree; the result is in the brief. Don't re-run the full suite; run a specific test only when you need evidence. Read the diff file by file.
 
 Check:
-- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The assumptions (Decisions entries starting "Assumption", made while writing the spec or building): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged. Its Threats and abuse, if any: each abuse prevented and tested.
+- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too, each with a test that checks it. Its Contracts, if any: each exactly as written, or changed with a recorded decision. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The assumptions (Decisions entries starting "Assumption", made while writing the spec or building): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged. Its Threats and abuse, if any: each abuse prevented and tested.
 - The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 - Without a spec: whether the change does what the intent in the brief says.
 - Missing cases, error handling, convention breaks, changes outside the scope, debug output, commented-out code or leftover TODOs.
@@ -275,8 +283,8 @@ For every entry point the change adds or alters (API routes, UI actions, command
 Report only problems someone could actually use or hit, with pb_report_findings: in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. No findings is a fine result. Then reply with one line.`;
 
 /** The first message of a review session: its role, the brief, and how the session works. */
-export function reviewSessionPrompt(role: "review" | "abuse", brief: string): string {
-  return `[pb:${role}] ${role === "review" ? REVIEWER_SYSTEM : ATTACKER_SYSTEM}
+export function reviewSessionPrompt(role: "review" | "abuse", brief: string, extra = ""): string {
+  return `[pb:${role}] ${role === "review" ? REVIEWER_SYSTEM : ATTACKER_SYSTEM}${extraBlock(extra)}
 
 This session is read-only for you: you can't edit or write files. The human can watch it and may ask you something; answer, and report again with pb_report_findings if your findings change.
 

@@ -11,7 +11,7 @@
  *   /pb:undo [id]          restore the files, and rewind the conversation, to before a task
  *   /pb:stats [all]        tasks, attempts, checks, tokens and cache per spec
  *   /pb:archive [name]     move a finished spec out of the way
- *   /pb:standards [stack]  write pb's current standards into this project's AGENTS.md (java | vue | plain)
+ *   /pb:standards [stack]  write the current standards into this project's AGENTS.md (java | vue | plain | yours)
  *   /pb:status             every spec and where it stands
  *   /pb:help [topic]       what to do next
  *
@@ -36,12 +36,13 @@ import {
   continuePrompt,
   depsPrompt,
   explorerBrief,
+  extraBlock,
   findingLine,
   finishSpecPrompt,
-  reviewSessionPrompt,
   fixText,
   nudgePrompt,
   planPrompt,
+  reviewSessionPrompt,
   reviewerBrief,
   specPrompt,
   taskPrompt,
@@ -50,8 +51,8 @@ import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff
 import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, commitMessage, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
-import { type Stack, agentDir, findStandards, projectStack, standardsLoaded, writeStandards } from "./standards.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, commitMessage, needsRed, parseSpec, setSection, setStatus, tokensOf } from "./spec.ts";
+import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, untrackedText } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
@@ -136,7 +137,7 @@ export default function pb(pi: ExtensionAPI) {
   const syncTasks = (spec: ParsedSpec, old: TaskProgress[] = []): TaskProgress[] =>
     spec.tasks.map((t) => {
       const prev = old.find((o) => o.id === t.id);
-      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary };
+      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, red: prev?.red };
     });
 
   const mark = (t: TaskProgress) => (t.status === "done" ? "✓" : t.status === "doing" ? "▸" : t.status === "blocked" ? "✗" : "·");
@@ -494,7 +495,54 @@ export default function pb(pi: ExtensionAPI) {
         pauseBuild(ctx, store, p, `${params.task} blocked: ${params.summary}`, "build.paused", "blocked");
         return stop("The build is paused: the human decides how to go on. Stop here.");
       }
+      const task = loaded.spec.tasks.find((t) => t.id === p.current);
+      if (tp && needsRed(loaded.spec, task) && !tp.red) {
+        // Not an attempt: nothing was checked yet.
+        store.saveProgress(p);
+        return reply(`${p.current}'s new tests were never seen failing, so nothing shows they test the change. Call pb_tests_red: if you already made the change, set it aside first (the tests must fail without it), then put it back.`);
+      }
       return await checkAndAdvance(ctx, store, p, loaded.spec, signal);
+    },
+  });
+
+  pi.registerTool({
+    name: "pb_tests_red",
+    label: "Tests fail first",
+    description:
+      "In a pb build, for a task with a Test: line: after writing its tests and before the change, the harness runs the task's test command and requires it to FAIL, proving the tests check the behaviour that is missing. pb_task_done for that task needs it.",
+    parameters: Type.Object({
+      task: Type.String({ description: 'the task id, e.g. "T2"' }),
+      tests: Type.String({ description: "the tests you wrote and the failure each should show" }),
+    }),
+    executionMode: "sequential",
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const { store, progress: p } = specOfSession(ctx);
+      if (!p || p.phase !== "building") throw new Error("No pb build is running in this session.");
+      if (params.task !== p.current) throw new Error(`The current task is ${p.current ?? "none"}, not ${params.task}.`);
+      const spec = loadSpec(store, p.spec)?.spec;
+      const task = spec?.tasks.find((t) => t.id === p.current);
+      const tp = p.tasks.find((t) => t.id === p.current);
+      if (!spec || !task?.test || !tp || !needsRed(spec, task)) return reply(`${params.task} doesn't need this: finish it with pb_task_done.`);
+      if (tp.red) return reply(`Already seen failing (${tp.red}). Make the change, then pb_task_done.`);
+      const cfg = store.config();
+      showProgress(ctx, p, `${p.current}: its tests must fail first: ${task.test}`);
+      checking = true;
+      let r: Awaited<ReturnType<typeof runVerify>>;
+      try {
+        r = await runVerify(task.test, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal);
+      } finally {
+        checking = false;
+      }
+      store.event(p.spec, { type: "red", task: p.current, ok: r.ok === false, command: task.test });
+      if (r.ok !== false)
+        return reply(
+          `\`${task.test}\` passes without the change, so these tests don't check it (or that command doesn't run them). Make them fail for the behaviour that is missing, then pb_tests_red again.\n\n${r.summary}`,
+        );
+      tp.red = r.summary.split("\n")[0];
+      store.saveProgress(p);
+      return reply(
+        `Seen failing: \`${task.test}\`\n\n${r.summary}\n\nCheck that each fails for the reason you expect (the missing behaviour, not a typo or an unrelated error); fix any that don't, without calling this again. Then make the change and finish with pb_task_done.`,
+      );
     },
   });
 
@@ -566,21 +614,41 @@ export default function pb(pi: ExtensionAPI) {
     const found = findStandards(ctx.cwd);
     const stack = projectStack(ctx.cwd);
     const shared = !!found && path.dirname(found.file) !== path.resolve(ctx.cwd);
-    if (found && !(shared && stack === "vue" && !found.text.includes("- Frontend role:"))) return;
+    // A shared section that this stack's own one merely extends (Java: pb's plus one line) is enough.
+    if (found && !(shared && stack && !sectionFor(stack).includes(found.text))) return;
     store.markAsked("standards");
-    const HERE = stack === "vue" ? "Add pb's frontend standards to this project's AGENTS.md" : "Add pb's engineering standards to this project's AGENTS.md";
+    const HERE =
+      stack === "vue"
+        ? "Add pb's frontend standards to this project's AGENTS.md"
+        : stack && isUserTemplate(stack)
+          ? `Add your ${stack} standards to this project's AGENTS.md`
+          : "Add pb's engineering standards to this project's AGENTS.md";
     const ALL = `Add them to ${path.join(agentDir(), "AGENTS.md")} (all projects)`;
-    const covers = stack === "vue" ? "the page's role, backend refusals, browser security, Vue" : "concurrency";
+    const covers =
+      stack && isUserTemplate(stack)
+        ? `your ${stack} template`
+        : `quality, dependencies, comments without history, tests, security, ${stack === "vue" ? "the page's role, backend refusals, browser security, Vue" : "concurrency"}`;
     const title = found
-      ? `This Vue project only gets the standards in ${found.file}, not the frontend ones. Pi loads both files, so that section stays in force next to this project's: keep the shared AGENTS.md free of stack-specific rules`
-      : `Engineering standards (quality, dependencies, comments without history, tests, security, ${covers})`;
+      ? `This project only gets the standards in ${found.file}, not its own (${stackLabel(stack)}). Pi loads both files, so that section stays in force next to this project's: keep the shared AGENTS.md free of stack-specific rules`
+      : `Engineering standards (${covers})`;
     const choice = await ctx.ui.select(title, stack ? [HERE, "No thanks"] : [HERE, ALL, "No thanks"]);
     if (choice !== HERE && choice !== ALL) return;
     const file = choice === HERE ? path.join(ctx.cwd, "AGENTS.md") : path.join(agentDir(), "AGENTS.md");
     writeStandards(file, stack);
-    const which = stack === "java" ? " (with Java 25 defaults)" : stack === "vue" ? " (the frontend ones, for a Vue project)" : "";
-    ctx.ui.notify(`Added to ${file}${which}: edit them there. Pi loads them into every session from now on.`, "info");
+    ctx.ui.notify(`Added to ${file}${stack ? ` (${stackLabel(stack)})` : ""}: edit them there. Pi loads them into every session from now on.`, "info");
   };
+
+  /** Which standards a stack gets, in words. */
+  const stackLabel = (stack?: Stack) =>
+    stack && isUserTemplate(stack)
+      ? `your ${stack} template`
+      : stack === "java"
+        ? "the backend ones, with Java 25"
+        : stack === "vue"
+          ? "the frontend ones, for a Vue project"
+          : stack && stack !== "plain"
+            ? stack
+            : "the plain ones";
 
   /** Continue planning a spec in a fresh session, seeded from it: clean context, exact checkpoint. */
   const continuePlan = async (ctx: ExtensionCommandContext, store: Store, name: string) => {
@@ -606,7 +674,7 @@ export default function pb(pi: ExtensionAPI) {
           },
           { triggerTurn: false },
         );
-        void c.sendMessage({ customType: "pb-instruction", content: continuePlanPrompt(name, md, ""), display: false }, { triggerTurn: true });
+        void c.sendMessage({ customType: "pb-instruction", content: continuePlanPrompt(name, md, "", store.extra("plan")), display: false }, { triggerTurn: true });
       },
     });
     if (result.cancelled) ctx.ui.notify("Cancelled.", "info");
@@ -648,7 +716,7 @@ export default function pb(pi: ExtensionAPI) {
       if (baseline) startBaseline(ctx, store, testCmd!);
       instruct(
         `▶ /${cmd("plan")} — ${arg} (the project's files stay untouched)${baseline ? ` · running \`${testCmd}\` in the background for a baseline` : ""}\nThis session: "plan: ${title}" · back to it any time with /resume, or \`pi --session ${ctx.sessionManager.getSessionId()}\``,
-        planPrompt(arg, testCmd, standardsFor(ctx), baseline ? "running" : "none"),
+        planPrompt(arg, testCmd, standardsFor(ctx), baseline ? "running" : "none", store.extra("plan")),
       );
     },
   });
@@ -687,7 +755,7 @@ export default function pb(pi: ExtensionAPI) {
       const store = new Store(ctx.cwd);
       const which = args.trim();
       const md = which && SPEC_NAME.test(which) ? store.readSpec(which) : undefined;
-      instruct(`▶ /${cmd("spec")}${which ? ` — ${which}` : ""}`, specPrompt(which, store.specNames(), md ? { name: which, markdown: md } : undefined));
+      instruct(`▶ /${cmd("spec")}${which ? ` — ${which}` : ""}`, specPrompt(which, store.specNames(), md ? { name: which, markdown: md } : undefined, store.extra("spec")));
     },
   });
 
@@ -749,7 +817,7 @@ export default function pb(pi: ExtensionAPI) {
     return {
       task,
       marker: `▶ ${taskId}: ${task.title}${tp.attempts > 1 ? ` (attempt ${tp.attempts})` : ""}`,
-      prompt: taskPrompt(task, tp.attempts, cfg.maxAttempts, checkCommand(loaded.spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each")),
+      prompt: taskPrompt(task, tp.attempts, cfg.maxAttempts, checkCommand(loaded.spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), needsRed(loaded.spec, task) && !tp.red),
     };
   };
 
@@ -764,9 +832,9 @@ export default function pb(pi: ExtensionAPI) {
       p.current === "final"
         ? fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", tp?.attempts ?? 1, cfg.maxAttempts, false)
         : task && loaded
-          ? taskPrompt(task, tp?.attempts ?? 1, cfg.maxAttempts, checkCommand(loaded.spec, task, testCmd, buildCmd, false, each))
+          ? taskPrompt(task, tp?.attempts ?? 1, cfg.maxAttempts, checkCommand(loaded.spec, task, testCmd, buildCmd, false, each), needsRed(loaded.spec, task) && !tp?.red)
           : `Carry on with ${p.current ?? "the build"}; finish it with pb_task_done.`;
-    return buildStateSummary({ p, markdown: loaded?.md, mechanics: loaded ? buildMechanics(loaded.spec, buildCmd, each) : "", current, reason, ...extra });
+    return buildStateSummary({ p, markdown: loaded?.md, mechanics: loaded ? buildMechanics(loaded.spec, buildCmd, each, store.extra("build")) : "", current, reason, ...extra });
   };
 
   /** When a build session should be reset at a task boundary: past checkpointAt, always before Pi would compact. */
@@ -1257,7 +1325,7 @@ export default function pb(pi: ExtensionAPI) {
       spec: name,
       phase: "building",
       baseCommit: restart ? (prev!.baseCommit ?? gitHead(ctx.cwd)) : gitHead(ctx.cwd),
-      tasks: syncTasks(spec, prev?.tasks).map((t) => (t.status === "done" ? t : { ...t, status: "todo" as const, attempts: 0 })),
+      tasks: syncTasks(spec, prev?.tasks).map((t) => (t.status === "done" ? t : { ...t, status: "todo" as const, attempts: 0, red: undefined })),
       current: undefined,
       pause: undefined,
       nudged: undefined,
@@ -1288,7 +1356,7 @@ export default function pb(pi: ExtensionAPI) {
       const task = beginTask(ctx, store, p, first, { intro: true })!;
       instruct(
         `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${task.marker}`,
-        `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : md)}\n\n${task.prompt}`,
+        `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : md, store.extra("build"))}\n\n${task.prompt}`,
       );
       return;
     }
@@ -1298,7 +1366,7 @@ export default function pb(pi: ExtensionAPI) {
     const carried = { model: buildModel ? cfg.buildModel : sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined };
     store.setCarry({ ...carried, spec: name });
     // A new session loads AGENTS.md itself: the standards needn't come along.
-    const intro = buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", "", md);
+    const intro = buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", "", md, store.extra("build"));
     const result = await cctx.newSession({
       parentSession: session,
       setup: async (sm) => {
@@ -1501,7 +1569,7 @@ export default function pb(pi: ExtensionAPI) {
         const t = beginTask(ctx, store, p, cur, { countAttempt: again, intro })!;
         const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
         const body = intro
-          ? `${buildIntro(p.spec, loaded.spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : loaded.md)}\n\n${t.prompt}`
+          ? `${buildIntro(p.spec, loaded.spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : loaded.md, store.extra("build"))}\n\n${t.prompt}`
           : again
             ? t.prompt
             : continuePrompt(t.task);
@@ -1520,7 +1588,7 @@ export default function pb(pi: ExtensionAPI) {
         const planning = !!session && store.planningSessions().includes(session);
         if (!mine.length && (planning || !offered.length)) {
           // No spec from this discussion yet: write it first, then build it.
-          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames()));
+          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec")));
         }
         const pool = mine.length ? mine : offered;
         const labelOf = (n: string) => (unfinishedPhase(phaseOf(n)) ? `${n} (restart the build, finished tasks stay done)` : n);
@@ -1534,7 +1602,7 @@ export default function pb(pi: ExtensionAPI) {
       }
       if (loadSpec(store, name)?.spec.status === "planning") {
         // A checkpoint of an unfinished discussion: finish it (tasks, verification), then build it.
-        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name).replace(/\s*After writing it, stop:[^\n]*/, ""));
+        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec")).replace(/\s*After writing it, stop:[^\n]*/, ""));
       }
       await startBuild(ctx, store, name, fresh);
     },
@@ -1570,7 +1638,7 @@ export default function pb(pi: ExtensionAPI) {
       );
       const first = o.resume
         ? "[pb] You were interrupted. Carry on where you were, then report all your findings with pb_report_findings (including any you reported before) and stop."
-        : reviewSessionPrompt(o.role, o.brief);
+        : reviewSessionPrompt(o.role, o.brief, store.extra(o.role === "review" ? "review" : "adversarial"));
       void send({ customType: "pb-instruction", content: first, display: false }, { triggerTurn: true });
       let idle = 0;
       let nudged = false;
@@ -1930,7 +1998,7 @@ export default function pb(pi: ExtensionAPI) {
       runFresh({
         cwd: ctx.cwd,
         role: "cartographer",
-        systemPrompt: CARTOGRAPHER_SYSTEM,
+        systemPrompt: CARTOGRAPHER_SYSTEM + extraBlock(store.extra("map")),
         brief,
         prompt: "Do what the attached file asks; report the whole map with report_map.",
         tools: ["read", "grep", "find", "ls", "bash", "report_map"],
@@ -2016,21 +2084,21 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   pi.registerCommand(cmd("standards"), {
-    description: "Write pb's current engineering standards into this project's AGENTS.md: created if missing, pb's section replaced, the rest untouched. Optional: java, vue or plain (default: detected)",
-    getArgumentCompletions: (prefix: string) => ["java", "vue", "plain"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
+    description: `Write the current engineering standards into this project's AGENTS.md: created if missing, pb's section replaced, the rest untouched. Optional: which stack (java, vue, plain, or a template of yours in ${templatesDir()}); default: detected`,
+    getArgumentCompletions: (prefix: string) => stackNames().filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
-      if (arg && !["java", "vue", "plain"].includes(arg)) return ctx.ui.notify(`/${cmd("standards")} takes java, vue or plain (default: detected from the project).`, "warning");
-      const stack = arg ? (arg === "plain" ? undefined : (arg as Stack)) : projectStack(ctx.cwd);
+      const names = stackNames();
+      if (arg && !names.includes(arg)) return ctx.ui.notify(`/${cmd("standards")} takes ${names.join(", ")} (default: detected from the project). Your own go in ${templatesDir()}.`, "warning");
+      const stack = arg ? (arg === "plain" ? undefined : arg) : projectStack(ctx.cwd);
       const file = path.join(ctx.cwd, "AGENTS.md");
       const result = writeStandards(file, stack);
       new Store(ctx.cwd).markAsked("standards");
       if (result === "broken") return ctx.ui.notify(`${file} has "<!-- pb:standards -->" without its "<!-- /pb:standards -->": add the end marker where pb's section ends, then run /${cmd("standards")} again.`, "error");
-      const which = stack === "java" ? "the backend ones, with Java 25" : stack === "vue" ? "the frontend ones, for a Vue project" : "the plain ones";
       const what = { created: "Created", added: "Added pb's standards to", replaced: "Replaced pb's standards in", unchanged: "pb's standards are already current in" }[result];
       const shared = findStandards(path.dirname(ctx.cwd));
       ctx.ui.notify(
-        `${what} ${file} (${which})${result === "created" ? ", with pb's standards" : ""}.${result === "replaced" || result === "added" ? " The rest of the file is untouched." : ""}${result === "unchanged" ? "" : " Sessions already running keep the ones they loaded until restarted."}${shared ? ` ${shared.file} also has a pb section: Pi loads both.` : ""}`,
+        `${what} ${file} (${stackLabel(stack)})${result === "created" ? ", with pb's standards" : ""}.${result === "replaced" || result === "added" ? " The rest of the file is untouched." : ""}${result === "unchanged" ? "" : " Sessions already running keep the ones they loaded until restarted."}${shared ? ` ${shared.file} also has a pb section: Pi loads both.` : ""}`,
         "info",
       );
     },

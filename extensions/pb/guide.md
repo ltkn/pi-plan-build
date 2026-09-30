@@ -121,12 +121,26 @@ API has a Javadoc contract", "no new dependencies without asking". Keep them
 short: every line is read in every session. A session that started before you
 added them gets them in pb's messages until it's restarted.
 
-`/pb:standards [java|vue|plain]` writes pb's current section into this
+**Your own templates.** Put a section in `~/.pi/agent/pb/standards/<name>.md`:
+a `java.md`, `vue.md` or `plain.md` there replaces pb's, and any other name adds
+a stack. An optional first line says when it applies, e.g.
+`detect: go.mod` or `detect: package.json:react` (files at the project root,
+or a dependency in one); yours are checked before pb's. pb adds its markers,
+and a heading when yours has none.
+
+`/pb:standards [stack]` writes the current section into this
 project's AGENTS.md at any time: after a pb update improved them, after you
 declined the offer, or when the file went missing. It creates the file if
 needed and replaces only pb's section, so your own lines and the project map
 stay as they are; your edits inside pb's section are replaced. Without an
 argument, the section is picked from the project.
+
+**Your own instructions for a role.** `"extra"` in `.pi/pb/config.json` (and
+in `~/.pi/agent/pb/config.json` for every project, applied first) adds your
+instructions to a role's prompt: `plan`, `spec`, `build`, `review`,
+`adversarial`, `map`, e.g. `{"extra": {"review": "Check every new message has an
+i18n key."}}`. They're added after pb's, never instead: pb's prompts carry the
+formats and tools the harness relies on.
 <!-- /pb -->
 
 <!-- pb:topic plan -->
@@ -234,9 +248,17 @@ Then the sections:
   not pasted), constraints, the test command and baseline.
 - **Decisions**: each with its reason as it stands now, no history; rejected
   ideas as "Not doing X, because …", so they aren't reconsidered.
+- **Contracts**: only when other code, clients or stored data depend on the
+  change: public signatures, API requests and responses with their error types,
+  the data model and migrations, events. They're pinned as they must end up;
+  everything behind them is left to the build, which asks before changing one,
+  and the reviewer checks each.
 - **Open questions**: only while `Status: planning`.
-- **Tasks**: each as `### T1: title` with its detail, an `- Acceptance:` line
-  and optionally `- Test: \`command\``.
+- **Tasks**: each as `### T1: title` with its detail, `- Acceptance:` lines and,
+  when it adds behaviour, `- Test: \`command\``. Each Acceptance line is one
+  behaviour as a test would check it, abuse cases included: they are the tests
+  to write. Tasks are vertical slices: each leaves the code working and
+  tested, with no split by layer and no closing "add tests" task.
 
 **Out of scope** and **Acceptance criteria** are optional. The aim: a fresh or
 reset session starts where the discussion ended, without re-analysing and
@@ -370,6 +392,13 @@ Two separate choices, both in the spec header:
 | `none` | nothing: Pi's word | nothing | docs, config, spikes |
 
 Give tasks a targeted `Test:` line: it's how Pi checks each task as it goes.
+
+**Red, then green.** With `Verification: tests` and `New tests: yes`, a task
+with a `Test:` line (and not titled "(refactor) …") writes its tests first and
+calls `pb_tests_red`: the harness runs the task's command and requires it to
+**fail**, which shows the tests check the behaviour that is missing. Only then
+does `pb_task_done` take the task. Tests that pass without the change are sent
+back; the refusal costs no attempt, and `/pb:undo` resets it with the task.
 
 The commands come from `.pi/pb/config.json` (`"verify"` and `"build"`, `"auto"`
 detects Maven, Gradle, npm/TypeScript, Cargo, Go and pytest).

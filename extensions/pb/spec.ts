@@ -154,3 +154,7 @@ export function commitMessage(md: string): string | undefined {
   const goal = md.split(/^##\s+Goal\s*$/im)[1]?.split(/^##\s+(?!#)/m)[0]?.trim() ?? "";
   return [spec.title, ...(goal ? ["", goal] : []), ...(spec.tasks.length ? ["", ...spec.tasks.map((t) => `- ${t.title}`)] : [])].join("\n");
 }
+
+/** A task whose new tests must be seen failing before the change: it adds behaviour, and has a command for its tests. */
+export const needsRed = (spec: ParsedSpec, task: SpecTask | undefined) =>
+  spec.gate === "tests" && spec.newTests && !!task?.test && !/^\(refactor\)/i.test(task.title);

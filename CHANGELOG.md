@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.20.0
+
+- **Tests proven to test (red, then green)**: in a spec with `Verification: tests` and `New tests: yes`, a task with a `Test:` line writes its tests first and calls the new `pb_tests_red`. The harness runs the task's command and requires it to fail before the change is written. `pb_task_done` takes the task only after that; tests that pass without the change are sent back. The refusal costs no attempt, "(refactor)" tasks are exempt, and `/pb:undo` resets it
+- **Specs that pin what matters**: an optional `## Contracts` section fixes what other code, clients or data depend on (signatures, API and error types, data model and migrations, events) and leaves the rest to the build; the build asks before changing one and the reviewer checks each. Tasks are vertical slices, each working and tested, and each Acceptance line is one behaviour, abuse cases included: the tests to write
+- **Your own standards templates**: `~/.pi/agent/pb/standards/<name>.md` replaces pb's java, vue or plain section, or adds a stack, with an optional `detect:` line (a file at the project root, or `package.json:<dependency>`); `/pb:standards <name>` writes any of them
+- **Your own instructions per role**: `"extra"` in the config (the project's, and `~/.pi/agent/pb/config.json` for all) adds to the plan, spec, build, review, adversarial or map prompt, never replacing pb's
+
 ## 1.19.0
 
 - **A commit message to paste** after the build, the review and the archive, whichever you stop at. It's written from the spec: the title, the goal, and what each task did. At the archive, it covers the feature if it isn't committed yet, and the project map pb just updated
