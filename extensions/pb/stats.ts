@@ -23,13 +23,29 @@ const readEvents = (dir: string) => readJsonl(path.join(dir, "events.jsonl")) as
 
 function readProgress(dir: string): Progress | undefined {
   try {
-    return JSON.parse(fs.readFileSync(path.join(dir, "progress.json"), "utf8"));
+    const p = JSON.parse(fs.readFileSync(path.join(dir, "progress.json"), "utf8")) as Progress;
+    if ((p.phase as string) === "checking") p.phase = "paused";
+    if ((p.tasks ?? []).some((t) => t.id === "skeleton")) {
+      p.tasks = p.tasks.filter((t) => t.id !== "skeleton");
+      if ((p as { current?: string }).current === "skeleton") p.current = p.tasks.find((t) => t.status === "doing" || t.status === "todo")?.id;
+    }
+    return p;
   } catch {
     return undefined;
   }
 }
 
-/** Archived specs (oldest first), then live ones; only those with events. */
+/** Session files can be reached via different cwd spellings (/tmp vs /private/tmp): compare realpaths. */
+const sameSession = (a: string, b: string): boolean => {
+  if (a === b) return true;
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return false;
+  }
+};
+
+/** Archived specs (oldest first), then live ones; specs with progress show even before their first event. */
 export function loadStats(store: Store): SpecStats[] {
   const archived = fs.existsSync(store.archiveRoot)
     ? fs
@@ -44,16 +60,16 @@ export function loadStats(store: Store): SpecStats[] {
   return dirs
     .map((dir) => {
       const progress = readProgress(dir);
-      const sessions = new Set([progress?.writtenIn, progress?.session].filter(Boolean));
+      const sessions = [progress?.writtenIn, progress?.session].filter((x): x is string => !!x);
       return {
-        name: progress?.spec ?? path.basename(dir),
+        name: progress?.spec ?? path.basename(dir).replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/, ""),
         phase: progress?.phase ?? "written",
         events: readEvents(dir),
-        explore: explore.filter((x) => sessions.has(x.session as string)),
+        explore: explore.filter((x) => typeof x.session === "string" && sessions.some((s) => sameSession(s, x.session as string))),
         progress,
       };
     })
-    .filter((s) => s.events.length);
+    .filter((s) => s.events.length || s.progress);
 }
 
 const human = (n: number) => (n < 1000 ? `${n}` : n < 1e6 ? `${(n / 1e3).toFixed(1)}k` : `${(n / 1e6).toFixed(2)}M`);
@@ -65,12 +81,11 @@ const dur = (ms: number) => {
   return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 };
 const num = (v: unknown) => (typeof v === "number" ? v : 0);
-const ts = (at: string) => Date.parse(at.replace(" ", "T"));
+/** Store.now() emits UTC without Z ("2026-… 12:00:00"): parse as UTC, not local, so durations survive TZ/DST. */
+const ts = (at: string) => Date.parse(`${at.replace(" ", "T")}Z`);
 
 export interface Summary {
   tasks: number;
-  /** the build's skeleton step, when it had one */
-  skeleton?: { done: boolean; attempts: number };
   done: number;
   firstTry: [number, number];
   attempts: number;
@@ -89,14 +104,15 @@ export interface Summary {
 
 export function summarize(s: SpecStats): Summary {
   const e = s.events;
-  // The spec's tasks: not the final check, nor the skeleton (the harness's own first step, shown apart).
+  // The spec's tasks: not the final check, nor the skeleton step earlier versions recorded.
   const checks = e.filter((x) => x.type === "check" && x.task !== "final" && x.task !== "skeleton");
   const perTask = new Map<string, Ev[]>();
   for (const c of checks) perTask.set(String(c.task), [...(perTask.get(String(c.task)) ?? []), c]);
   const tasks = (s.progress?.tasks ?? []).filter((t) => t.id !== "final" && t.id !== "skeleton");
-  const sk = s.progress?.tasks.find((t) => t.id === "skeleton");
   const done = tasks.filter((t) => t.status === "done");
-  const firstTry = done.filter((t) => (perTask.get(t.id)?.[0]?.ok ?? true) === true).length;
+  // First-try only over tasks with a check: gate "none" and unchecked middle tasks carry no signal.
+  const tried = done.filter((t) => perTask.has(t.id));
+  const firstTry = tried.filter((t) => perTask.get(t.id)?.[0]?.ok === true).length;
   const most = [...perTask].map(([id, cs]) => [id, cs.length] as [string, number]).sort((a, b) => b[1] - a[1])[0];
 
   const pauses: Record<string, number> = {};
@@ -110,8 +126,11 @@ export function summarize(s: SpecStats): Summary {
     build.cached += num(u.cacheRead);
     build.output += num(u.output);
     build.cost += num(u.cost);
-    build.peak = Math.max(build.peak, prompt);
-    if (typeof u.window === "number") build.window = u.window;
+    // The window shown with the peak is the window when the peak happened, not the last one seen.
+    if (prompt > build.peak) {
+      build.peak = prompt;
+      if (typeof u.window === "number") build.window = u.window;
+    } else if (build.window === undefined && typeof u.window === "number") build.window = u.window;
   }
   const reviews = e.filter((x) => x.type === "review");
   const review = { prompt: 0, output: 0, cost: 0 };
@@ -132,8 +151,7 @@ export function summarize(s: SpecStats): Summary {
   return {
     tasks: tasks.length,
     done: done.length,
-    skeleton: sk ? { done: sk.status === "done", attempts: sk.attempts } : undefined,
-    firstTry: [firstTry, done.length],
+    firstTry: [firstTry, tried.length],
     attempts: checks.length,
     most: most && most[1] > 1 ? most : undefined,
     checks: e.filter((x) => x.type === "check").length,
@@ -157,7 +175,6 @@ export function renderCard(s: SpecStats): string {
     "```",
     `pb stats — ${s.name} (${s.phase})`,
     "",
-    ...(x.skeleton ? [`Skeleton  ${x.skeleton.done ? "done" : "not done"} · ${x.skeleton.attempts} attempt${x.skeleton.attempts === 1 ? "" : "s"}`] : []),
     `Tasks     ${x.done} of ${x.tasks} done · first try ${x.firstTry[0]}/${x.firstTry[1]} (${pct(...x.firstTry)}) · ${x.attempts} task checks${x.most ? ` · most: ${x.most[0]} (${x.most[1]})` : ""}`,
     `Checks    ${x.checks} run, ${x.failed} failed`,
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,

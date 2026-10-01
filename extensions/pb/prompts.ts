@@ -67,7 +67,7 @@ What the analysis established, as short as a fresh session needs to not redo it:
 ## Decisions
 Each decision with its reason, as it stands now: no dates, no history, not who decided. Rejected ideas as "Not doing X, because …", so they aren't reconsidered.
 ## Contracts
-Only when the change adds or alters something other code, clients or stored data depend on: the public signatures, API requests and responses with their error types, the data model and migrations, events. Pin exactly these, as they must end up; leave everything behind them to the build.
+No later step sees the whole change at once: tasks are built one by one. So pin here every seam the tasks share — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. Pin exactly these, as they must end up; leave everything behind them to the build. When the change adds or alters nothing other code, clients or stored data depend on, leave this section out.
 ## Threats and abuse
 Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. The acceptance criteria then include the abuse cases.
 ## Open questions
@@ -78,7 +78,7 @@ What must be true when it's done, and anything the build must know; not how to b
 - Acceptance: <one behaviour, as a test would check it>   (one line each, abuse cases included: they are the tests to write)
 - Test: \`<command that runs this task's tests>\`   (for a task that adds behaviour)
 
-The spec pins what the change must do and how we'll know: Goal, Decisions, Contracts and Acceptance bind the build. How to build it is left to the build: it starts with a skeleton (the types, signatures and wiring as stubs, and every task's tests, which the harness requires to fail), writes the design it settled on into "## Design", then fills it in task by task. So don't write "## Design" yourself, and don't prescribe classes, methods or steps unless they are a Contract.
+The spec pins what the change must do and how we'll know: Goal, Decisions, Contracts and Acceptance bind the build. How to build it is left to the build, which settles the shape task by task — the compiler and the tests giving feedback — and records what it settles on in "## Design". So don't write "## Design" yourself, and don't prescribe classes, methods or steps unless they are a Contract. Put what tasks share in Contracts: that is the shape the build must not invent.
 
 One task, unless a slice is worth reviewing on its own; then vertical slices, each leaving the code working and tested, never a split by layer or a closing "add tests" task. A task that adds no behaviour (wiring, configuration, a "(refactor) …") has no Test: line.
 
@@ -158,9 +158,9 @@ function gateLine(spec: ParsedSpec, buildCmd: string | null, each: boolean): str
 
 /** How the build works: the mechanics only (the standards come separately). each: a check after every task. */
 export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each = false, extra = ""): string {
-  return `- Where the spec is unclear or doesn't match the code, take the sensible reading, record it with pb_record_decision (assumption: true) and carry on. Ask with pb_ask only when a choice changes behaviour, an API or data.
+  return `- Where the spec is unclear or doesn't match the code, take the sensible reading, record it with pb_record_decision (assumption: true). Ask with pb_ask only when a choice changes behaviour, an API or data.
 - Keep each change to its task. Tests: ${spec.newTests ? `add or extend tests for the behaviour each task introduces${spec.gate === "tests" ? ", seen failing before the code exists" : ""}.` : `add none for this feature (${spec.newTestsReason}).`} Change or remove an existing test only when what it covers changes; never skip or weaken one to get a check through.
-- Goal, Decisions, Contracts and Acceptance bind you (changing one needs pb_ask); the how is yours: record a change to the Design with pb_record_decision.
+- Goal, Decisions, Contracts and Acceptance bind you (changing one needs pb_ask); the how is yours: record a shape later tasks need in "## Design" (pb_update_spec); later changes in pb_record_decision.
 - Don't commit or discard changes with git, and leave .pi/ alone.
 - Finish each task with pb_task_done: ${gateLine(spec, buildCmd, each)}. It gives you the next task.${extraBlock(extra)}`;
 }
@@ -177,25 +177,13 @@ ${buildMechanics(spec, buildCmd, each, extra)}${standardsBlock(standards)}${mark
 
 /**
  * check: the command pb_task_done will run for this task, if any. red: its new tests must be seen failing first.
- * filled: its tests already fail against the skeleton; this task fills the behaviour in.
  */
-export function taskPrompt(task: SpecTask, attempt: number, max: number, check: string | null, red = false, filled = false): string {
+export function taskPrompt(task: SpecTask, attempt: number, max: number, check: string | null, red = false): string {
   return `[pb:build] Task ${task.id}${attempt > 1 ? ` (attempt ${attempt} of ${max})` : ""}. Do only this task:
 
 ${task.text}
 
-${filled && task.test ? `Its tests are written and fail against the skeleton (the spec's "## Design"): fill in the behaviour until \`${task.test}\` passes. ` : ""}${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}(Comments: the code as it is; no history, dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""}. If it can't be done properly, status "blocked" with why.`;
-}
-
-/** The first step of a build whose tasks add behaviour: the design in code, without the behaviour. */
-export function skeletonPrompt(tasks: SpecTask[], buildCmd: string | null, attempt: number, max: number): string {
-  return `[pb:build] Skeleton${attempt > 1 ? ` (attempt ${attempt} of ${max})` : ""}, before the tasks: design the change in code, without its behaviour.
-
-- The types, signatures and wiring the tasks need, as stubs; the spec's Contracts exactly as pinned.
-- The tests for every task's Acceptance lines: ${tasks.map((t) => `${t.id} (\`${t.test}\`)`).join(", ")}.
-- The stubs don't implement the behaviour: every one of these tests must compile and fail.
-
-Then call pb_skeleton_done with the design: the shape you settled on (the main types and the flow through them) and why, above all where it differs from what the spec's Findings or Decisions expected. The harness ${buildCmd ? `runs \`${buildCmd}\` (it must pass), then ` : ""}runs each task's tests (each must fail), and writes your design into the spec's "## Design". The tasks then fill it in.`;
+${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}(Comments: the code as it is; no history, dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""}. If it can't be done properly, status "blocked" with why.`;
 }
 
 export function continuePrompt(task: SpecTask): string {
@@ -206,7 +194,7 @@ export function fixText(taskId: string, what: string, output: string, attempt: n
   const head = `${taskId === "final" ? "The final check" : `The check for ${taskId}`} failed (attempt ${attempt} of ${max}): ${what}`;
   return last
     ? `${head}\n\n${output}\n\nThat was the last attempt: the build is paused. Stop here; the human decides how to go on.`
-    : `${head}\n\n${output}\n\nFix the cause, then call ${taskId === "skeleton" ? "pb_skeleton_done again" : `pb_task_done again with task "${taskId}"`}.`;
+    : `${head}\n\n${output}\n\nFix the cause, then call pb_task_done again with task "${taskId}".`;
 }
 
 export function nudgePrompt(taskId: string): string {
@@ -262,7 +250,7 @@ Do not modify any file. Use read/grep/find/ls and bash only for inspection (git 
 The harness already ran the check on the current tree; the result is in the brief. Don't re-run the full suite; run a specific test only when you need evidence. Read the diff file by file.
 
 Check:
-- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too, each with a test that checks it. Its Contracts, if any: each exactly as written, or changed with a recorded decision. Its Design (written by the build after the skeleton): consistent with the Contracts and Decisions, and the code matches it, or the change is recorded in Decisions. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The assumptions (Decisions entries starting "Assumption", made while writing the spec or building): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged. Its Threats and abuse, if any: each abuse prevented and tested.
+- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too, each with a test that checks it. Its Contracts, if any: each exactly as written, or changed with a recorded decision. No Contracts with more than one task: flag any seam the tasks share but nothing pins (P2). Its Design (the shape the build settled on, recorded as it went): consistent with the Contracts and Decisions, and the code matches it, or the change is recorded in Decisions. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The assumptions (Decisions entries starting "Assumption", made while writing the spec or building): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged. Its Threats and abuse, if any: each abuse prevented and tested.
 - The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 - Without a spec: whether the change does what the intent in the brief says.
 - Missing cases, error handling, convention breaks, changes outside the scope, debug output, commented-out code or leftover TODOs.
@@ -330,14 +318,41 @@ export interface ReviewBrief {
   previous?: { snapshot: string; findings: Finding[]; changed: string[] };
   /** existing tests the build deleted, cut down or skipped */
   testChanges?: string[];
+  /** tasks whose new tests were never seen failing (with why), and whose proof is shared with another task */
+  redNotes?: string[];
+  /** where the spec's Design comes from: how hard to look for drift between Design, Decisions and code */
+  designNote?: string;
+}
+
+/**
+ * Where the spec's Design comes from, from its events (each stamped when written): planner-origin when the
+ * build never wrote it, otherwise how often the build rewrote it and whether the first write came before
+ * any task proof, mid-build, or only after the last check (post-hoc: the shape was never a constraint).
+ * Undefined when the spec has no Design section. One line for the reviewer: how hard to look for drift.
+ */
+export function designProvenance(markdown: string, events: Array<Record<string, unknown>>): string | undefined {
+  if (!/^##\s+Design\s*$/im.test(markdown)) return undefined;
+  const at = (e: Record<string, unknown>) => (typeof e.at === "string" ? e.at : "");
+  const buildStart = events.find((e) => e.type === "build-start");
+  const writes = events.filter((e) => e.type === "spec" && typeof e.update === "string" && /^design$/i.test(e.update));
+  const buildWrites = buildStart ? writes.filter((e) => at(e) >= at(buildStart)) : [];
+  if (!buildWrites.length) return "Design provenance: from the plan, untouched by the build.";
+  const proof = events.filter((e) => (e.type === "red" || e.type === "check") && typeof e.task === "string" && e.task !== "final").map(at).sort();
+  const first = at(buildWrites[0]);
+  const where = !proof.length ? "during the build" : first < proof[0] ? "before any task proof" : "during the build";
+  const last = at(buildWrites[buildWrites.length - 1]);
+  const postHoc = proof.length > 0 && last > proof[proof.length - 1];
+  const times = buildWrites.length === 1 ? "recorded once" : `rewritten ${buildWrites.length} times`;
+  return `Design provenance: ${times}, first ${where}${postHoc ? ", last after the last check — every change should be in Decisions" : ""}.`;
 }
 
 /** Static parts first (the spec), the parts that change between reviews last: a repeat review reuses the cached prefix. */
 export function reviewerBrief(o: ReviewBrief): string {
   const lines: string[] = [];
+  const focus = o.focus.replace(/\s+/g, " ").trim();
   if (o.spec) lines.push(`# The spec (${P}/specs/${o.spec.name}/spec.md)`, "", o.spec.markdown, "");
   else lines.push("# No spec", "", `There is no spec: judge the change against its intent and the engineering standards.`, "", `Intent: ${o.intent || "(not given: infer it from the change, and say what you inferred)"}`, "");
-  lines.push(`# Review${o.spec ? `: ${o.spec.name}` : " of the uncommitted change"}${o.focus ? ` — focus: ${o.focus}` : ""}`, "");
+  lines.push(`# Review${o.spec ? `: ${o.spec.name}` : " of the uncommitted change"}${focus ? ` — focus: ${focus}` : ""}`, "");
   if (o.previous) {
     lines.push(
       "## This is a follow-up review",
@@ -363,12 +378,34 @@ export function reviewerBrief(o: ReviewBrief): string {
     o.stat ? `\n${o.stat}` : "",
     "",
     ...(o.testChanges?.length ? ["", "## Existing tests the build changed", "", "Deleted, cut down or skipped; judge whether each was justified:", ...o.testChanges.map((c) => `- ${c}`)] : []),
+    ...(o.redNotes?.length
+      ? ["", "## New tests never seen failing", "", "Judge each: does its acceptance still have a test that checks it?", ...o.redNotes.map((n) => `- ${n}`)]
+      : []),
+    ...(o.designNote ? ["", "## Design provenance", "", o.designNote] : []),
     "",
     "## The check the harness ran",
     "",
     o.spec?.parsed.gate === "none" ? `None: verification is "none" for this feature (${o.spec.parsed.gateReason}). Look harder at correctness yourself.` : o.check,
   );
   return lines.join("\n");
+}
+
+/**
+ * What a review session is reset to when Pi compacts it: its role, the brief verbatim (the complete
+ * baseline, as the spec is for a build), and the findings so far, so nothing decided is re-derived.
+ */
+export function reviewStateSummary(o: { label: string; role: "review" | "abuse"; brief: string; findings: Finding[] }): string {
+  return [
+    `[pb review state: ${o.label}] This ${o.role === "review" ? "review" : "abuse-pass"} session was compacted. The brief below is the complete baseline: re-read any files you need from it, and carry on where the findings leave off.`,
+    "",
+    "--- brief ---",
+    "",
+    o.brief,
+    "",
+    "--- findings so far ---",
+    "",
+    ...(o.findings.length ? o.findings.map((f) => findingLine(f)) : ["(none yet)"]),
+  ].join("\n");
 }
 
 export function verifierBrief(findings: Finding[], base: string | undefined, spec?: string): string {

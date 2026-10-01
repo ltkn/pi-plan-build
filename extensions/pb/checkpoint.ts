@@ -73,19 +73,32 @@ export function snapshot(cwd: string, message: string): Snapshot | undefined {
 const SHARED_DIRS = ["node_modules", ".venv", "venv"];
 
 /**
- * Run `fn` in a temporary git worktree at HEAD, so a long build or test run doesn't collide with
+ * Run `fn` in a temporary git worktree at HEAD (or `ref`), so a long build or test run doesn't collide with
  * one in the working copy (Maven's target/, Gradle's build/). Outside git, `fn` runs in `cwd`.
+ * Dependency dirs are borrowed via symlink best-effort (junction on Windows); a failed link falls back
+ * to the worktree without it rather than failing the baseline. Cleanup is best-effort: stale worktrees
+ * are pruned on the next success path, since a kill between add and remove can't run `finally`.
  */
-export async function inWorktree<T>(cwd: string, fn: (dir: string) => Promise<T>): Promise<T> {
-  if (!tryRun(cwd, ["rev-parse", "--verify", "-q", "HEAD"])) return fn(cwd);
+export async function inWorktree<T>(cwd: string, fn: (dir: string) => Promise<T>, ref = "HEAD"): Promise<T> {
+  if (!tryRun(cwd, ["rev-parse", "--verify", "-q", ref])) return fn(cwd);
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pb-worktree-"));
   const dir = path.join(parent, "tree");
-  if (tryRun(cwd, ["worktree", "add", "--detach", "-q", dir, "HEAD"]) === undefined) {
+  if (tryRun(cwd, ["worktree", "add", "--detach", "-q", dir, ref]) === undefined) {
     fs.rmSync(parent, { recursive: true, force: true });
+    tryRun(cwd, ["worktree", "prune"]);
     return fn(cwd);
   }
   try {
-    for (const d of SHARED_DIRS) if (fs.existsSync(path.join(cwd, d)) && !fs.existsSync(path.join(dir, d))) fs.symlinkSync(path.join(cwd, d), path.join(dir, d));
+    for (const d of SHARED_DIRS) {
+      try {
+        if (fs.existsSync(path.join(cwd, d)) && !fs.existsSync(path.join(dir, d))) {
+          const type = process.platform === "win32" ? "junction" : undefined;
+          fs.symlinkSync(path.join(cwd, d), path.join(dir, d), type);
+        }
+      } catch {
+        // Best-effort: the worktree still builds, just without the borrowed dir.
+      }
+    }
     return await fn(dir);
   } finally {
     tryRun(cwd, ["worktree", "remove", "--force", dir]);
@@ -137,10 +150,10 @@ export function restore(cwd: string, from: string, to: string, paths: string[] =
 /* ------------------------------- detection ------------------------------- */
 
 export const TEST_FILE =
-  /(^|\/)(tests?|__tests__|specs?)\/|(^|\/)test_[^/]*\.py$|[._-](test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rb|exs?)$|Tests?\.(java|kt|kts|scala|cs|groovy|swift)$|Spec\.(scala|groovy|kt)$/i;
+  /(^|\/)(tests?|__tests__|specs?)\/|(^|\/)test_[^/]*\.py$|[^/]*_test\.py$|[._-](test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rb|exs?)$|[^/]*(Test|TestCase|Tests|IT|Spec)\.(java|kt|kts|scala|cs|groovy|swift)$|Spec\.(scala|groovy|kt)$/i;
 const TEST_CASE =
-  /@Test\b|@ParameterizedTest\b|@RepeatedTest\b|@TestFactory\b|^\s*(?:async\s+)?def\s+test_|^\s*(?:it|test)(?:\.each\([^)]*\))?\s*\(|#\[(?:tokio::)?test\]|^func\s+Test\w*\s*\(/gm;
-const SKIP = /@Disabled\b|@Ignore\b|\.skip\s*\(|\b(?:xit|xdescribe|xtest)\s*\(|pytest\.mark\.skip|@unittest\.skip|\bt\.Skip(?:Now)?\(|#\[ignore\]|\.todo\s*\(/g;
+  /@Test\b|@ParameterizedTest\b|@RepeatedTest\b|@TestFactory\b|^\s*(?:async\s+)?def\s+test_|#\[test\]|#\[(?:tokio::)?test\]|^func\s+Test\w*\s*\(|^\s*(?:it|test|describe\.skip|it\.skip|test\.skip)(?:\.each\([^)]*\))?\s*\(/gm;
+const SKIP = /@Disabled\b|@Ignore\b|\.skip\s*\(|\b(?:xit|xdescribe|xtest|describe\.skip|it\.skip|test\.skip)\s*\(|pytest\.mark\.skip(?:if)?|@unittest\.skip|\bt\.Skip(?:Now|f)?\(|#\[ignore\]|\.todo\s*\(|\bAssume\b/g;
 
 const count = (s: string, re: RegExp) => (s.match(re) ?? []).length;
 

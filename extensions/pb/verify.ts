@@ -51,7 +51,7 @@ export function resolveBuild(setting: string | null, cwd: string): string | null
   return setting;
 }
 
-const SIGNAL = /(\[ERROR\]|FAIL|Tests run:.*(Failures|Errors): [1-9]|BUILD FAILURE|COMPILATION ERROR|Exception|AssertionError|expected|panicked|error\[|error:)/i;
+const SIGNAL = /(\[ERROR\]|FAIL|Tests run:.*(Failures|Errors): [1-9]|BUILD FAILURE|COMPILATION ERROR|Exception|AssertionError|expected|panicked|error\[|error:|timeout|timed out|killed|OOM|out of memory)/i;
 
 function summarize(output: string, limit: number): string {
   const lines = output.split(/\r?\n/);
@@ -68,39 +68,71 @@ export async function runVerify(
   limit: number,
   signal?: AbortSignal,
 ): Promise<VerifyResult> {
+  // shell:true is intentional: Test: lines are shell commands (`test -f`, `npm test --silent`,
+  // `go build ./... && go vet ./...`). They come from the spec you approved, and the build's
+  // agent can already run bash — this grants it no new privilege. Suspicious chaining (`;`, `|`,
+  // `$`, backticks, curl/wget) is flagged in specWarnings and skipped by the pre-approval dry-run.
   const started = Date.now();
+  const effectiveTimeoutSec = Math.max(1, Math.floor(timeoutSec || 0) || 1);
   let out = "";
+  const push = (d: string) => {
+    out += d;
+    if (out.length > 1_000_000) {
+      const dropped = out.length - 1_000_000;
+      out = `${out.slice(0, 200_000)}\n…[truncated ${dropped} chars while running]…\n${out.slice(-800_000)}`;
+    }
+  };
   let timedOut = false;
   const code = await new Promise<number>((resolve) => {
     const posix = process.platform !== "win32";
     const proc = spawn(command, { cwd, shell: true, detached: posix, stdio: ["ignore", "pipe", "pipe"] });
-    const kill = () => {
+    let closed = false;
+    const kill = (graceful = false) => {
+      if (closed) return;
       try {
-        if (posix && proc.pid) process.kill(-proc.pid, "SIGKILL");
+        if (graceful) {
+          if (posix && proc.pid) process.kill(-proc.pid, "SIGTERM");
+          else proc.kill("SIGTERM");
+          setTimeout(() => {
+            if (!closed) {
+              try {
+                if (posix && proc.pid) process.kill(-proc.pid, "SIGKILL");
+                else proc.kill("SIGKILL");
+              } catch {
+                /* ignore */
+              }
+            }
+          }, 5000);
+        } else if (posix && proc.pid) process.kill(-proc.pid, "SIGKILL");
         else proc.kill("SIGKILL");
       } catch {
         /* ignore */
       }
     };
+    const onAbort = () => kill();
     const timer = setTimeout(() => {
       timedOut = true;
-      kill();
-    }, timeoutSec * 1000);
-    signal?.addEventListener("abort", kill, { once: true });
-    proc.stdout.on("data", (d) => (out += d.toString()));
-    proc.stderr.on("data", (d) => (out += d.toString()));
+      kill(true);
+    }, effectiveTimeoutSec * 1000);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    proc.stdout.on("data", (d) => push(d.toString()));
+    proc.stderr.on("data", (d) => push(d.toString()));
     proc.on("close", (c) => {
+      closed = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       resolve(c ?? 1);
     });
     proc.on("error", (e) => {
-      out += `\n${e.message}`;
+      closed = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      push(`\n${e.message}`);
       resolve(1);
     });
   });
   const secs = Math.round((Date.now() - started) / 1000);
   const ok = code === 0 && !timedOut;
-  const head = `\`${command}\` → ${ok ? "PASS" : timedOut ? `TIMEOUT after ${timeoutSec}s` : `FAIL (exit ${code})`} in ${secs}s`;
+  const head = `\`${command}\` → ${ok ? "PASS" : timedOut ? `TIMEOUT after ${effectiveTimeoutSec}s` : `FAIL (exit ${code})`} in ${secs}s`;
   return { ok, command, summary: ok ? head : `${head}\n\n${summarize(out, limit)}`, at: now() };
 }

@@ -43,16 +43,44 @@ export interface ParsedSpec {
 /** The rest is optional: specs stay as short as the change allows. Tasks are required once the spec is ready. */
 export const REQUIRED_SECTIONS = ["Goal", "Decisions"];
 
-const header = (md: string, label: string) => md.match(new RegExp(`^${label}:\\s*(.+)$`, "mi"))?.[1].trim();
+/** Lines of markdown with fenced code blocks blanked for structure detection (headings inside fences aren't structure). */
+const FENCE = /^(\s*)```/;
+const blankFenced = (md: string): string[] => {
+  const out: string[] = [];
+  let inFence = false;
+  for (const line of md.split("\n")) {
+    if (FENCE.test(line)) {
+      inFence = !inFence;
+      out.push("");
+      continue;
+    }
+    out.push(inFence ? "" : line);
+  }
+  return out;
+};
+
+/** Text before the first ## heading outside fences: title + Status/Verification/New tests/Depends on live here. */
+const headerBlock = (md: string): string => {
+  const lines = md.split("\n");
+  const blanked = blankFenced(md);
+  const idx = blanked.findIndex((l) => /^##\s/.test(l));
+  return (idx < 0 ? lines : lines.slice(0, idx)).join("\n");
+};
+
+const escapeReg = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const header = (md: string, label: string) => headerBlock(md).match(new RegExp(`^\\s{0,3}${escapeReg(label)}:\\s*(.+)$`, "im"))?.[1].trim();
 const splitReason = (v: string) => {
-  const [head, ...rest] = v.split(/\s+[—–-]\s+/);
-  return { value: head.trim().toLowerCase(), reason: rest.join(" — ").trim() || undefined };
+  const m = v.match(/^(.*?)\s*[—–]\s*(.+)$/) ?? v.match(/^(.*?)\s+-\s+(.+)$/);
+  if (!m) return { value: v.trim().toLowerCase(), reason: undefined as string | undefined };
+  return { value: m[1].trim().toLowerCase(), reason: m[2].trim() || undefined };
 };
 
 /** Parse a spec; `errors` lists what's missing or malformed (empty = valid). */
 export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
   const errors: string[] = [];
-  const title = md.match(/^#\s+(.+)$/m)?.[1].trim();
+  const blanked = blankFenced(md);
+  const title = headerBlock(md).match(/^\s{0,3}#\s+(.+)$/m)?.[1].trim();
   if (!title) errors.push('missing the "# <title>" line');
 
   const statusLine = header(md, "Status")?.toLowerCase();
@@ -85,17 +113,44 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
   const dep = header(md, "Depends on");
   const dependsOn = dep && !/^none$/i.test(dep) ? dep : undefined;
 
-  for (const s of REQUIRED_SECTIONS) if (!new RegExp(`^##\\s+${s}\\s*$`, "mi").test(md)) errors.push(`missing the "## ${s}" section`);
+  for (const s of REQUIRED_SECTIONS) {
+    const found = blanked.filter((l) => new RegExp(`^##\\s+${escapeReg(s)}\\s*:?\\s*$`, "i").test(l));
+    if (!found.length) errors.push(`missing the "## ${s}" section`);
+    else if (found.length > 1) errors.push(`duplicate "## ${s}" section: keep one`);
+  }
+  if (status === "ready" && blanked.some((l) => /^##\s+Open questions\s*:?\s*$/i.test(l)))
+    errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions ("Assumption: … because …") or ask with pb_ask');
 
-  const tasksBody = md.split(/^##\s+Tasks\s*$/im)[1]?.split(/^##\s+(?!#)/m)[0] ?? "";
-  const heads = [...tasksBody.matchAll(/^###\s+(T\d+)\s*[:.—–-]?\s*(.*)$/gm)];
+  // Tasks: fence-aware, line-based. ## Tasks allows a trailing colon; ### T1 is case-insensitive
+  // and normalized to T1; a ### line that looks like a task but doesn't parse is an error, not silence.
+  const lines = md.split("\n");
+  const tasksIdx = blanked.findIndex((l) => /^##\s+Tasks\s*:?\s*$/i.test(l));
+  const tasksEndRel = tasksIdx < 0 ? -1 : blanked.slice(tasksIdx + 1).findIndex((l) => /^##\s+(?!#)/.test(l));
+  const tasksEnd = tasksIdx < 0 ? -1 : tasksEndRel < 0 ? lines.length : tasksIdx + 1 + tasksEndRel;
+  const tasksLines = tasksIdx < 0 ? [] : lines.slice(tasksIdx + 1, tasksEnd);
+  const tasksBlanked = tasksIdx < 0 ? [] : blanked.slice(tasksIdx + 1, tasksEnd);
+  const headAt: number[] = [];
+  tasksBlanked.forEach((l, i) => {
+    if (/^###\s/.test(l)) {
+      const m = l.match(/^###\s+[Tt](\d+)\s*[:.—–-]?\s*(.*)$/);
+      if (m) headAt.push(i);
+      else errors.push(`"${l.trim()}" didn't parse as a task: write each as "### T1: <title>" under "## Tasks"`);
+    }
+  });
   const ready = status === "ready";
-  if (ready && !heads.length) errors.push('no tasks: write each as "### T1: <title>" under "## Tasks"');
-  const tasks: SpecTask[] = heads.map((h, i) => {
-    const text = tasksBody.slice(h.index, heads[i + 1]?.index ?? tasksBody.length).trim();
-    const test = text.match(/^\s*-\s*Test:\s*`([^`]+)`/m)?.[1].trim();
-    if (ready && !/^\s*-\s*Acceptance:/m.test(text)) errors.push(`${h[1]} has no "- Acceptance:" line`);
-    return { id: h[1], title: h[2].trim() || h[1], text, test };
+  if (ready && tasksIdx < 0) errors.push('no tasks: write each as "### T1: <title>" under "## Tasks"');
+  else if (ready && !headAt.length && !errors.some((e) => e.includes("didn't parse as a task"))) errors.push('no tasks: write each as "### T1: <title>" under "## Tasks"');
+  const tasks: SpecTask[] = headAt.map((lineIdx, k) => {
+    const next = headAt[k + 1] ?? tasksLines.length;
+    const text = tasksLines.slice(lineIdx, next).join("\n").trim();
+    const idLine = tasksBlanked[lineIdx].match(/^###\s+[Tt](\d+)\s*[:.—–-]?\s*(.*)$/)!;
+    const id = `T${idLine[1]}`;
+    const title = (idLine[2] ?? "").trim() || id;
+    const hasTestLine = /^\s*[-*]\s*Test:/im.test(text);
+    const test = text.match(/^\s*[-*]\s*Test:\s*`([^`]+)`/m)?.[1].trim();
+    if (hasTestLine && !test) errors.push(`${id} has a Test: line without \`command\`: write it as "- Test: \`<command>\`"`);
+    if (ready && !/^\s*[-*]\s*Acceptance:/im.test(text)) errors.push(`${id} has no "- Acceptance:" line`);
+    return { id, title, text, test };
   });
   const ids = tasks.map((t) => t.id);
   const dup = ids.filter((id, i) => ids.indexOf(id) !== i);
@@ -107,28 +162,47 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
 /**
  * Replace (or append to) one "## <section>" of a spec; a missing section is added before Tasks, or
  * at the end. Lets a checkpoint change only what moved instead of rewriting the whole spec.
+ * Fence-aware: headings inside code fences aren't sections.
  */
 export function setSection(md: string, section: string, body: string, mode: "replace" | "append" = "replace"): string {
   const name = section.replace(/^#+\s*/, "").trim();
-  const m = md.match(new RegExp(`^##\\s+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "im"));
+  const lines = md.split("\n");
+  const blanked = blankFenced(md);
+  const idx = blanked.findIndex((l) => new RegExp(`^##\\s+${escapeReg(name)}\\s*:?\\s*$`, "i").test(l));
   const text = body.trim();
-  if (!m || m.index === undefined) {
-    const tasks = md.search(/^##\s+Tasks\s*$/im);
+  if (idx < 0) {
+    const tasksIdx = blanked.findIndex((l) => /^##\s+Tasks\s*:?\s*$/i.test(l));
     const block = `## ${name}\n${text}\n\n`;
-    return tasks < 0 || name.toLowerCase() === "tasks" ? `${md.trimEnd()}\n\n${block.trimEnd()}\n` : `${md.slice(0, tasks)}${block}${md.slice(tasks)}`;
+    if (tasksIdx < 0 || name.toLowerCase() === "tasks") return `${md.trimEnd()}\n\n${block.trimEnd()}\n`;
+    const at = lines.slice(0, tasksIdx).join("\n").length + (tasksIdx > 0 ? 1 : 0);
+    const head = md.slice(0, at).replace(/\s*$/, "\n\n");
+    return `${head}${block}${md.slice(at).replace(/^\s*/, "")}`;
   }
-  const start = m.index + m[0].length;
-  const next = md.slice(start).search(/^##\s+(?!#)/m);
-  const end = next < 0 ? md.length : start + next;
+  const startLine = idx + 1;
+  const rel = blanked.slice(startLine).findIndex((l) => /^##\s+(?!#)/.test(l));
+  const endLine = rel < 0 ? lines.length : startLine + rel;
+  const start = lines.slice(0, startLine).join("\n").length + (startLine > 0 ? 1 : 0);
+  const end = lines.slice(0, endLine).join("\n").length + (endLine < lines.length ? 1 : 0);
   const current = md.slice(start, end).trim();
   const merged = mode === "append" && current ? `${current}\n${text}` : text;
-  return `${md.slice(0, start)}\n${merged}\n${end < md.length ? "\n" : ""}${md.slice(end)}`;
+  return `${md.slice(0, start).replace(/\s*$/, "")}\n${merged}\n${end < md.length ? `\n${md.slice(end).replace(/^\s*/, "")}` : ""}`;
 }
 
-/** Set the "Status:" header line, added under the title when missing. */
+/** Set the "Status:" header line (header block only, so examples in Findings are untouched). */
 export function setStatus(md: string, status: "planning" | "ready"): string {
-  if (/^Status:.*$/im.test(md)) return md.replace(/^Status:.*$/im, `Status: ${status}`);
-  return md.replace(/^(#\s+.+)$/m, `$1\nStatus: ${status}`);
+  const block = headerBlock(md);
+  const m = block.match(/^\s{0,3}Status:.*$/im);
+  if (m && m.index !== undefined) {
+    const start = m.index;
+    const end = start + m[0].length;
+    // Only replace when the match is in the header block (it is, by construction).
+    void end;
+    return md.slice(0, start) + `Status: ${status}` + md.slice(start + m[0].length);
+  }
+  const title = block.match(/^\s{0,3}#\s+.+$/m);
+  if (!title || title.index === undefined) return md;
+  const at = title.index + title[0].length;
+  return `${md.slice(0, at)}\nStatus: ${status}${md.slice(at)}`;
 }
 
 /** Rough token count (4 characters a token): enough to tell a spec's size. */
@@ -155,22 +229,55 @@ export function commitMessage(md: string): string | undefined {
   return [spec.title, ...(goal ? ["", goal] : []), ...(spec.tasks.length ? ["", ...spec.tasks.map((t) => `- ${t.title}`)] : [])].join("\n");
 }
 
-/** A task whose new tests must be seen failing before the change: it adds behaviour, and has a command for its tests. */
-export const needsRed = (spec: ParsedSpec, task: SpecTask | undefined) =>
-  spec.gate === "tests" && spec.newTests && !!task?.test && !/^\(refactor\)/i.test(task.title);
+/**
+ * Why a task's new tests don't need to be seen failing, or undefined when they do: no `Test:` command to
+ * run, a refactor that keeps behaviour, a spec that asks for no new tests, or a gate that runs no tests.
+ * The single definition behind needsRed, and what the reviewer is told for each unproven task.
+ */
+export function redExemption(spec: ParsedSpec, task: SpecTask | undefined): string | undefined {
+  if (!task) return undefined;
+  if (!task.test) return "no Test: command, so nothing proves its new tests fail without the change";
+  if (/^\(refactor\)/i.test(task.title)) return "a refactor keeps behaviour, so there is nothing new to see failing";
+  if (!spec.newTests) return `the spec asks for no new tests${spec.newTestsReason ? ` (${spec.newTestsReason})` : ""}`;
+  if (spec.gate !== "tests") return `verification is "${spec.gate}", so no test runs`;
+  return undefined;
+}
 
-/** The build's first step when tasks need red: the design in code, with every task's tests failing. */
-export const SKELETON = "skeleton";
+/** A task whose new tests must be seen failing before the change: one with no exemption above. */
+export const needsRed = (spec: ParsedSpec, task: SpecTask | undefined) => !!task && !redExemption(spec, task);
 
-/** A build starts with the skeleton when some task's new tests must be seen failing. */
-export const needsSkeleton = (spec: ParsedSpec) => spec.tasks.some((t) => needsRed(spec, t));
+/**
+ * The `Test:` commands carried by more than one task that needs red, with their task ids in spec order.
+ * A later task's run then shows only that something is missing among them — or, once an earlier one is
+ * done and proven, that its own tests are already satisfied (pre-green).
+ */
+export function sharedTestCommands(spec: ParsedSpec): Array<{ command: string; ids: string[] }> {
+  const byCommand = new Map<string, string[]>();
+  for (const t of spec.tasks) if (needsRed(spec, t) && t.test) byCommand.set(t.test, [...(byCommand.get(t.test) ?? []), t.id]);
+  return [...byCommand].filter(([, ids]) => ids.length > 1).map(([command, ids]) => ({ command, ids }));
+}
 
-/** The skeleton as a task, for the harness's bookkeeping (it isn't in the spec). */
-export const skeletonTask = (): SpecTask => ({ id: SKELETON, title: "Skeleton: the design in code, every task's tests failing", text: "" });
+/**
+ * The other tasks that need red and run the very same `Test:` command: one run then shows only that
+ * something is missing among them, not each task's own tests. Grouped by command, so it survives a
+ * spec being rewritten.
+ */
+export function redSharing(spec: ParsedSpec): Map<string, string> {
+  return new Map(
+    sharedTestCommands(spec).flatMap(({ ids }) => ids.map((id) => [id, ids.filter((other) => other !== id).join(", ")] as [string, string])),
+  );
+}
 
-/** A step of the build by id: a spec task, or the skeleton. */
-export const buildTask = (spec: ParsedSpec, id: string | undefined) => (id === SKELETON ? skeletonTask() : spec.tasks.find((t) => t.id === id));
+/** A step of the build by id: a spec task. */
+export const buildTask = (spec: ParsedSpec, id: string | undefined) => spec.tasks.find((t) => t.id === id);
 
-/** A section's body, trimmed ("" when missing). */
-export const sectionOf = (md: string, name: string) =>
-  md.split(new RegExp(`^##\\s+${name}\\s*$`, "im"))[1]?.split(/^##\s+(?!#)/m)[0]?.trim() ?? "";
+/** A section's body, trimmed ("" when missing). Fence-aware; name is literal. */
+export const sectionOf = (md: string, name: string): string => {
+  const lines = md.split("\n");
+  const blanked = blankFenced(md);
+  const idx = blanked.findIndex((l) => new RegExp(`^##\\s+${escapeReg(name)}\\s*:?\\s*$`, "i").test(l));
+  if (idx < 0) return "";
+  const rel = blanked.slice(idx + 1).findIndex((l) => /^##\s+(?!#)/.test(l));
+  const end = rel < 0 ? lines.length : idx + 1 + rel;
+  return lines.slice(idx + 1, end).join("\n").trim();
+};

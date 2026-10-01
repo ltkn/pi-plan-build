@@ -2,3 +2,5 @@ node_modules/
 .pi/wf/
 *.tgz
 .DS_Store
+.pi/
+.opencode/

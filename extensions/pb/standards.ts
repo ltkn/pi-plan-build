@@ -70,7 +70,7 @@ function candidates(cwd: string): string[] {
   return out;
 }
 
-/** Where pb's standards section is, and its text; undefined if none of the context files has it. */
+/** Where pb's standards section is, and its text; undefined if none of the context files has it. Broken markers are skipped. */
 export function findStandards(cwd: string): { file: string; text: string } | undefined {
   for (const file of candidates(cwd)) {
     let md: string;
@@ -82,7 +82,8 @@ export function findStandards(cwd: string): { file: string; text: string } | und
     const i = md.indexOf(START);
     if (i < 0) continue;
     const j = md.indexOf(END, i);
-    return { file, text: md.slice(i + START.length, j < 0 ? undefined : j).trim() };
+    if (j < 0) continue;
+    return { file, text: md.slice(i + START.length, j).trim() };
   }
   return undefined;
 }
@@ -120,7 +121,7 @@ function userTemplates(): Record<string, Template> {
   for (const f of files.sort()) {
     const name = f.slice(0, -3);
     let text = fs.readFileSync(path.join(templatesDir(), f), "utf8");
-    const detect = text.match(/^detect:\s*(.*)\n/i);
+    const detect = text.match(/^detect:\s*(.*?)(?:\n|$)/i);
     if (detect) text = text.slice(detect[0].length);
     const body = text.trim();
     const section = body.includes(START) ? `${body}\n` : `${START}\n${/^## /.test(body) ? "" : "## Engineering standards\n\n"}${body}\n${END}\n`;
@@ -145,7 +146,7 @@ const detects = (cwd: string, d: string) => {
   if (!dep) return fs.existsSync(path.join(cwd, file));
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(cwd, file), "utf8"));
-    return !!(pkg.dependencies?.[dep] || pkg.devDependencies?.[dep]);
+    return !!(pkg.dependencies?.[dep] || pkg.devDependencies?.[dep] || pkg.peerDependencies?.[dep] || pkg.optionalDependencies?.[dep]);
   } catch {
     return false; // missing or not JSON
   }
@@ -173,14 +174,22 @@ export function writeStandards(file: string, stack?: Stack): "created" | "added"
   if (prev !== undefined && i >= 0) {
     const j = prev.indexOf(END, i);
     if (j < 0) return "broken";
-    const next = `${prev.slice(0, i)}${section.trimEnd()}${prev.slice(j + END.length)}`;
+    const head = prev.slice(0, i).replace(/\s*$/, "");
+    const tail = prev.slice(j + END.length).replace(/^\s*/, "");
+    const next = `${head ? `${head}\n\n` : ""}${section.trimEnd()}${tail ? `\n\n${tail}` : "\n"}`;
     if (next === prev) return "unchanged";
-    fs.writeFileSync(file, next);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, next, "utf8");
+    fs.renameSync(tmp, file);
     return "replaced";
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const before = prev ?? "";
-  fs.writeFileSync(file, `${before}${before && !before.endsWith("\n\n") ? (before.endsWith("\n") ? "\n" : "\n\n") : ""}${section}`);
+  const out = `${before}${before && !before.endsWith("\n\n") ? (before.endsWith("\n") ? "\n" : "\n\n") : ""}${section}`;
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, out, "utf8");
+  fs.renameSync(tmp, file);
   return prev === undefined ? "created" : "added";
 }
 

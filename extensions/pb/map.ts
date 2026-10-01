@@ -17,7 +17,7 @@ export const MAP_TOKENS = 20000;
 
 export const mapFile = (cwd: string) => path.join(cwd, "AGENTS.md");
 
-/** The map's body (without markers and heading), or "" when there is none yet. */
+/** The map's body (without markers and heading), or "" when there is none yet or it is broken. */
 export function readMap(cwd: string): string {
   let md: string;
   try {
@@ -28,8 +28,9 @@ export function readMap(cwd: string): string {
   const i = md.indexOf(START);
   if (i < 0) return "";
   const j = md.indexOf(END, i);
+  if (j < 0) return ""; // start without end: broken, don't swallow the rest of the file
   return md
-    .slice(i + START.length, j < 0 ? undefined : j)
+    .slice(i + START.length, j)
     .trim()
     .replace(new RegExp(`^${HEADING}\\s*\\n`), "")
     .trim();
@@ -42,20 +43,27 @@ export function writeMap(cwd: string, body: string): void {
   const prev = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
   const i = prev.indexOf(START);
   const j = i < 0 ? -1 : prev.indexOf(END, i);
-  const next =
-    i >= 0 && j >= 0
-      ? `${prev.slice(0, i)}${section.trimEnd()}${prev.slice(j + END.length)}`
-      : `${prev}${prev && !prev.endsWith("\n\n") ? (prev.endsWith("\n") ? "\n" : "\n\n") : ""}${section}`;
-  fs.writeFileSync(file, next.endsWith("\n") ? next : `${next}\n`);
+  let next: string;
+  if (i >= 0 && j >= 0) next = `${prev.slice(0, i)}${section.trimEnd()}${prev.slice(j + END.length)}`;
+  else if (i >= 0) next = `${prev.slice(0, i)}${section}`; // broken marker: replace from START to end
+  else next = `${prev}${prev && !prev.endsWith("\n\n") ? (prev.endsWith("\n") ? "\n" : "\n\n") : ""}${section}`;
+  const out = next.endsWith("\n") ? next : `${next}\n`;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, out, "utf8");
+  fs.renameSync(tmp, file);
 }
 
+/** Root-level files without an extension that are still files, not routes. */
+const ROOT_FILES = /^(Makefile|Dockerfile|LICENSE|README|CHANGELOG|CONTRIBUTING|Gemfile|Rakefile|Procfile|go\.mod|go\.sum|package\.json|tsconfig\.json|pom\.xml|build\.gradle(?:\.kts)?)$/i;
+
 /**
- * Paths the map names: backticked tokens with a slash or a file extension, without spaces, wildcards,
- * placeholders or calls. `module/Class` and package-relative paths count: they're resolved leniently.
+ * Paths the map names: backticked tokens with a slash, a file extension, or a known root file;
+ * without spaces, wildcards, placeholders or calls. `module/Class` and package-relative paths count.
  */
 export function mapPaths(body: string): string[] {
   const found = [...body.matchAll(/`([^`\s]+)`/g)]
-    .map((m) => m[1].replace(/[:#].*$/, "").replace(/\/+$/, ""))
+    .map((m) => m[1].replace(/^\/+/, "").replace(/[:#].*$/, "").replace(/\/+$/, ""))
     .filter(
       (p) =>
         p &&
@@ -63,8 +71,7 @@ export function mapPaths(body: string): string[] {
         !/^[a-z]+:\/\//i.test(p) &&
         !p.includes("...") &&
         !/[*?{}<>$()=,;@]/.test(p) &&
-        (p.includes("/") || /\.[a-z][a-z0-9]{0,5}$/i.test(p)) &&
-        !/^\//.test(p), // "/signin/**" style routes aren't files
+        (p.includes("/") || /\.[a-z][a-z0-9]{0,10}$/i.test(p) || ROOT_FILES.test(p)),
     );
   return [...new Set(found)];
 }
@@ -86,18 +93,25 @@ function projectFiles(cwd: string): string[] {
  */
 function resolves(cwd: string, p: string, base: string | undefined, files: string[]): boolean {
   if (fs.existsSync(path.resolve(cwd, p)) || (base && fs.existsSync(path.resolve(cwd, base, p)))) return true;
-  const tail = `/${p}`;
+  const tail = `/${p.toLowerCase()}`;
+  const esc = tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return files.some((f) => {
-    const g = `/${f}`;
-    return g.endsWith(tail) || g.includes(`${tail}/`) || new RegExp(`${tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.[a-z0-9]+$`, "i").test(g);
+    const g = `/${f.toLowerCase()}`;
+    return g.endsWith(tail) || g.includes(`${tail}/`) || new RegExp(`${esc}\\..+$`, "").test(g);
   });
 }
 
-/** The paths in the map that don't resolve, with the line naming each. */
+/** The paths in the map that don't resolve, with the line naming each. Code fences aren't paths. */
 export function unresolvedPaths(cwd: string, body: string, files = projectFiles(cwd)): { path: string; line: string }[] {
   const out: { path: string; line: string }[] = [];
   let base: string | undefined;
+  let inFence = false;
   for (const line of body.split("\n")) {
+    if (/^(\s*)```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
     if (/^#{1,6}\s/.test(line)) base = line.match(/\(([^()\s]+\/)\)/)?.[1];
     for (const p of mapPaths(line)) if (!resolves(cwd, p, base, files)) out.push({ path: p, line: line.trim() });
   }
@@ -203,7 +217,22 @@ export function cartographerBrief(o: {
   ].join("\n");
 }
 
-/** A spec's Findings section, the part of it that's about the project rather than the feature. */
+/** A spec's Findings section, the part of it that's about the project rather than the feature. Fence-aware. */
 export function findingsOf(markdown: string): string {
-  return markdown.split(/^##\s+Findings\s*$/im)[1]?.split(/^##\s+(?!#)/m)[0]?.trim() ?? "";
+  const lines = markdown.split("\n");
+  const blanked: string[] = [];
+  let inFence = false;
+  for (const line of markdown.split("\n")) {
+    if (/^(\s*)```/.test(line)) {
+      inFence = !inFence;
+      blanked.push("");
+      continue;
+    }
+    blanked.push(inFence ? "" : line);
+  }
+  const idx = blanked.findIndex((l) => /^##\s+Findings\s*:?\s*$/i.test(l));
+  if (idx < 0) return "";
+  const rel = blanked.slice(idx + 1).findIndex((l) => /^##\s+(?!#)/.test(l));
+  const end = rel < 0 ? lines.length : idx + 1 + rel;
+  return lines.slice(idx + 1, end).join("\n").trim();
 }

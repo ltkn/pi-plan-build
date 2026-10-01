@@ -6,13 +6,19 @@
  */
 import { execFile } from "node:child_process";
 
-/** One line, no control characters (they would end the escape sequence early), and short. */
+/** One line, no control characters (they would end the escape sequence early), and short. Surrogate-safe. */
 const clean = (s: string, max: number) =>
-  s
-    .replace(/[\x00-\x1f\x7f;]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
+  Array.from(
+    s
+      .replace(/[\x00-\x1f\x7f;]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  )
+    .slice(0, max)
+    .join("");
+
+/** Terminals with native OSC notification support; anything else on macOS falls back to osascript. */
+const OSC_TERMS = new Set(["Ghostty", "iTerm.app", "WezTerm"]);
 
 function send(title: string, body: string): void {
   if (process.env.WT_SESSION || process.platform === "win32") {
@@ -27,7 +33,7 @@ function send(title: string, body: string): void {
     execFile("powershell.exe", ["-NoProfile", "-Command", script], () => {});
   } else if (process.env.KITTY_WINDOW_ID) {
     process.stdout.write(`\x1b]99;i=1:d=0;${title}\x1b\\\x1b]99;i=1:p=body;${body}\x1b\\`);
-  } else if (process.env.TERM_PROGRAM === "Apple_Terminal") {
+  } else if (process.platform === "darwin" && (process.env.TERM_PROGRAM === "Apple_Terminal" || !OSC_TERMS.has(process.env.TERM_PROGRAM ?? ""))) {
     execFile("osascript", ["-e", `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)}`], () => {});
   } else {
     process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);

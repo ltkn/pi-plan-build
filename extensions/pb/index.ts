@@ -33,6 +33,8 @@ import {
   buildStateSummary,
   checkpointPrompt,
   checkpointSummary,
+  reviewStateSummary,
+  designProvenance,
   continuePlanPrompt,
   continuePrompt,
   depsPrompt,
@@ -45,7 +47,6 @@ import {
   planPrompt,
   reviewSessionPrompt,
   reviewerBrief,
-  skeletonPrompt,
   specPrompt,
   taskPrompt,
 } from "./prompts.ts";
@@ -53,10 +54,10 @@ import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff
 import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SKELETON, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, needsSkeleton, parseSpec, sectionOf, setSection, setStatus, skeletonTask, tokensOf } from "./spec.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionOf, setSection, setStatus, sharedTestCommands, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, untrackedText } from "./store.ts";
+import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -69,6 +70,52 @@ const LONG_SPEC_TOKENS = 12000;
 /** What the model is told about a spec's size after writing it. */
 const sizeNote = (tokens: number) =>
   `~${tokens} tokens${tokens > LONG_SPEC_TOKENS ? ". That's long: if it copies code or repeats facts, pointing to the code and stating each fact once would help the next reader; if it's all needed, keep it" : ""}`;
+
+/**
+ * Structural warnings for a spec's author: advisory, never rejections. A shared Test: command means the
+ * later tasks auto-proceed as pre-green once the earlier proves it; missing Contracts on a multi-task
+ * spec leaves every seam for the tasks to invent.
+ */
+/** A Test: command that cannot fail (so red is impossible and the build wedges demanding it). */
+const noopCommand = (command: string) => {
+  const cmd = command.trim();
+  if (/^(true|:|exit 0)\s*$/.test(cmd)) return true;
+  // A bare echo/printf with no shell operators always exits 0; piped ones can fail, so they're fine.
+  return /^(echo|printf)(\s|$)/.test(cmd) && !/[|&;><$`]/.test(cmd);
+};
+
+/**
+ * A Test: command that chains shells or reaches the network: it runs in the harness with your
+ * privileges, so review it before building. The build's agent can already run bash, so this isn't
+ * a new privilege — but the dry-run below must not execute it before you've approved the spec.
+ */
+const suspiciousCommand = (command: string) => {
+  const cmd = command.trim();
+  if (/[;`$<>]/.test(cmd)) return true;
+  if (/\|/.test(cmd)) return true;
+  return /\b(curl|wget)\b/.test(cmd);
+};
+
+const specWarnings = (md: string, spec: ParsedSpec): string[] => {
+  const redEligible = (t: SpecTask) => spec.gate === "tests" && spec.newTests && !/^\(refactor\)/i.test(t.title);
+  const shared = sharedTestCommands(spec).map(
+    ({ command, ids }) => `\`${command}\` is the Test: of ${ids.join(", ")}: the later auto-proceed as pre-green once the earlier proves it (the reviewer sees each) — a shared command must still fail at each task's turn`,
+  );
+  const contracts =
+    spec.tasks.length > 1 && !new RegExp(`^##\\s+Contracts\\s*$`, "mi").test(md)
+      ? [`${spec.tasks.length} tasks and no ## Contracts: pin every seam they share (and which task owns each side); if truly independent, ignore this`]
+      : [];
+  const untestable = spec.tasks.flatMap((t) => {
+    if (!redEligible(t) || !/^\s*-\s*Acceptance:/m.test(t.text)) return [];
+    if (t.test) {
+      if (noopCommand(t.test)) return [`${t.id}'s Test: \`${t.test}\` always passes — the build will wedge demanding red; omit Test: (disclosed to the reviewer) or write a command that fails without the change`];
+      if (suspiciousCommand(t.test)) return [`${t.id}'s Test: \`${t.test}\` chains shells or reaches the network — it runs with your privileges, so review it before building; the dry-run below doesn't execute it`];
+      return [];
+    }
+    return [`${t.id} adds behaviour but has no Test:: add a targeted command, or leave it out and the reviewer judges its tests at the end`];
+  });
+  return [...shared, ...contracts, ...untestable];
+};
 
 /** Spec names for argument completion (completions run without a ctx, in Pi's working directory). */
 const specCompletions = (prefix: string) =>
@@ -137,32 +184,60 @@ export default function pb(pi: ExtensionAPI) {
 
   /** Keep task statuses by id when a spec is (re)written; new tasks start as todo. */
   const syncTasks = (spec: ParsedSpec, old: TaskProgress[] = []): TaskProgress[] => {
-    const list: TaskProgress[] = spec.tasks.map((t) => {
-      const prev = old.find((o) => o.id === t.id);
-      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, red: prev?.red };
+    const sharing = redSharing(spec);
+    const byId = new Map(old.map((o) => [o.id, o]));
+    return spec.tasks.map((t) => {
+      const prev = byId.get(t.id);
+      // A red proof belongs to the exact Test: command it ran. A rewritten command re-requires proof;
+      // legacy proofs without a recorded command can't be verified, so they don't carry over.
+      const redKept = prev?.red && prev?.redCommand !== undefined ? prev.redCommand === t.test : undefined;
+      const red = redKept ? prev!.red : undefined;
+      const redCommand = redKept ? prev!.redCommand : undefined;
+      // A pre-green pointer is valid only when the earlier task still exists before this one,
+      // still runs the same command, and still holds its own proof.
+      let preGreen: string | undefined;
+      if (prev?.preGreen) {
+        const earlierId = prev.preGreen;
+        const earlier = spec.tasks.find((x) => x.id === earlierId);
+        const earlierPrev = byId.get(earlierId);
+        const earlierIndex = earlier ? spec.tasks.indexOf(earlier) : -1;
+        const currentIndex = spec.tasks.indexOf(t);
+        if (
+          earlier &&
+          earlierIndex >= 0 &&
+          earlierIndex < currentIndex &&
+          earlier.test !== undefined &&
+          earlier.test === t.test &&
+          earlierPrev?.status === "done" &&
+          earlierPrev.red &&
+          (earlierPrev.redCommand === undefined || earlierPrev.redCommand === earlier.test)
+        ) {
+          preGreen = earlierId;
+        }
+      }
+      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, red, redCommand, redShared: sharing.get(t.id), preGreen };
     });
-    if (!needsSkeleton(spec)) return list;
-    // After the refactors (they keep behaviour), before the first task that adds some.
-    const prev = old.find((o) => o.id === SKELETON);
-    const started = list.some((t) => t.status !== "todo" && needsRed(spec, spec.tasks.find((x) => x.id === t.id)));
-    const skeleton: TaskProgress = prev ?? { id: SKELETON, title: skeletonTask().title, status: started ? "done" : "todo", attempts: 0 };
-    const at = spec.tasks.findIndex((t) => !/^\(refactor\)/i.test(t.title));
-    list.splice(at < 0 ? list.length : at, 0, skeleton);
-    return list;
   };
 
-  /** The tasks the skeleton writes the tests for: those whose new tests haven't been seen failing yet. */
-  const skeletonTasks = (spec: ParsedSpec, p: Progress) =>
-    spec.tasks.filter((t) => needsRed(spec, t) && !p.tasks.find((x) => x.id === t.id && (x.status === "done" || x.red)));
-
-  /** What the agent is told for a step of the build: the skeleton, or a spec task. */
+  /** What the agent is told for a step of the build: a spec task. */
   const stepPrompt = (ctx: ExtensionContext, store: Store, spec: ParsedSpec, p: Progress, task: SpecTask, attempts: number) => {
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
-    if (task.id === SKELETON) return skeletonPrompt(skeletonTasks(spec, p), buildCmd, attempts, cfg.maxAttempts);
     const tp = p.tasks.find((t) => t.id === task.id);
     const red = needsRed(spec, task);
-    return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.red, red && !!tp?.red);
+    return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.red);
   };
+
+  /**
+   * The tasks whose new tests carry no proof, for the reviewer and the build's end: each with why it has
+   * none, or — proven, but sharing its Test: command — why that run doesn't prove its own tests.
+   */
+  const redNotes = (spec: ParsedSpec, p: Progress): string[] =>
+    spec.tasks.flatMap((t) => {
+      const tp = p.tasks.find((x) => x.id === t.id);
+      if (tp?.preGreen) return [`${t.id}: \`${t.test}\` already satisfied by ${tp.preGreen}'s proven run, so no run proves ${t.id}'s own tests`];
+      if (!tp?.red) return [`${t.id}: ${redExemption(spec, t) ?? "its new tests were never seen failing"}`];
+      return tp.redShared ? [`${t.id}: \`${t.test}\` is also ${tp.redShared}'s Test: command, so that one run doesn't prove ${t.id}'s own tests`] : [];
+    });
 
   const mark = (t: TaskProgress) => (t.status === "done" ? "✓" : t.status === "doing" ? "▸" : t.status === "blocked" ? "✗" : "·");
   const taskLine = (t: TaskProgress) => `${mark(t)} ${t.id} ${t.title}${t.attempts > 1 ? ` (${t.attempts} attempts)` : ""}`;
@@ -251,8 +326,24 @@ export default function pb(pi: ExtensionAPI) {
     return spec.gate === "tests" ? (task?.test ?? buildCmd) : buildCmd;
   };
 
-  // Set while a check runs inside pb_task_done: the prompt cache is certain to be needed afterwards.
-  let checking = false;
+  // Checks running right now: the prompt cache is certain to be needed afterwards.
+  let checking = 0;
+  const withChecking = async <T>(fn: () => Promise<T>): Promise<T> => {
+    checking += 1;
+    try {
+      return await fn();
+    } finally {
+      checking -= 1;
+    }
+  };
+  /**
+   * Mid-task compactions with no forward progress in a row, by session: the thrash guard's memory.
+   * In-memory (a crash just delays it); a task boundary is progress by construction, so only the
+   * Pi-compaction path reads it.
+   */
+  const compactStalls = new Map<string, { task?: string; changed: string[]; read: string[]; tokens: number; strikes: number }>();
+  /** Compacting this often with nothing changed, read, or shrunk means stuck, not long: pause instead of looping. */
+  const COMPACT_STALL_LIMIT = 3;
   // Set by /pb:undo while it rewinds the conversation: the branch summary pb supplies instead of an LLM's.
   let undoSummary: string | undefined;
   // A task boundary happened in this turn: the moment pruning is allowed.
@@ -290,7 +381,8 @@ export default function pb(pi: ExtensionAPI) {
       });
       store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, status: spec.status, tokens: tokensOf(params.content) });
       const what = spec.status === "planning" ? "status planning" : `${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}`;
-      return reply(`Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${what}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}; ${sizeNote(tokensOf(params.content))}.`);
+      const notes = specWarnings(params.content, spec).map((w) => `\nNote: ${w}.`);
+      return reply(`Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${what}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}; ${sizeNote(tokensOf(params.content))}.${notes.join("")}`);
     },
   });
 
@@ -298,9 +390,9 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_update_spec",
     label: "Update spec",
     description:
-      "Change part of an existing pb spec instead of rewriting it: replace or append to one section (e.g. Findings, Decisions, Open questions, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written.",
+      "Change part of an existing pb spec instead of rewriting it: replace or append to one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written.",
     parameters: Type.Object({
-      name: Type.String({ description: "the spec's name" }),
+      name: Type.Optional(Type.String({ description: "the spec's name; the one this session is building or writing, if omitted" })),
       section: Type.Optional(Type.String({ description: 'the "## " section to change, e.g. Decisions; created if missing' })),
       content: Type.Optional(Type.String({ description: "the section's new body (without its heading), or the lines to append" })),
       mode: Type.Optional(StringEnum(["replace", "append"])),
@@ -308,8 +400,10 @@ export default function pb(pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const store = new Store(ctx.cwd);
-      let md = store.readSpec(params.name);
-      if (!md) throw new Error(`No spec "${params.name}": write it with pb_write_spec.`);
+      const name = params.name ?? specOfSession(ctx)?.progress?.spec;
+      if (!name) throw new Error("Which spec? Give its name.");
+      let md = store.readSpec(name);
+      if (!md) throw new Error(`No spec "${name}": write it with pb_write_spec.`);
       if (params.section) {
         if (params.content === undefined) throw new Error("content is required with section.");
         md = setSection(md, params.section, params.content, (params.mode as "replace" | "append" | undefined) ?? "replace");
@@ -317,11 +411,12 @@ export default function pb(pi: ExtensionAPI) {
       if (params.status) md = setStatus(md, params.status as "planning" | "ready");
       const { spec, errors } = parseSpec(md);
       if (!spec) throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.join("\n- ")}`);
-      store.writeSpec(params.name, md);
-      const prev = store.progress(params.name);
-      store.saveProgress({ ...(prev ?? { spec: params.name, phase: "written" }), spec: params.name, tasks: syncTasks(spec, prev?.tasks), writtenIn: ctx.sessionManager.getSessionFile(), updatedAt: now() });
-      store.event(params.name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md) });
-      return reply(`Updated ${store.rel("specs", params.name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}; ${sizeNote(tokensOf(md))}.`);
+      store.writeSpec(name, md);
+      const prev = store.progress(name);
+      store.saveProgress({ ...(prev ?? { spec: name, phase: "written" }), spec: name, tasks: syncTasks(spec, prev?.tasks), writtenIn: ctx.sessionManager.getSessionFile(), updatedAt: now() });
+      store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md) });
+      const notes = params.section?.replace(/^#+\s*/, "").trim().toLowerCase() === "tasks" ? specWarnings(md, spec).map((w) => `\nNote: ${w}.`) : [];
+      return reply(`Updated ${store.rel("specs", name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}; ${sizeNote(tokensOf(md))}.${notes.join("")}`);
     },
   });
 
@@ -424,6 +519,8 @@ export default function pb(pi: ExtensionAPI) {
         return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: take the sensible reading${timedOut && params.recommended ? ` (your recommendation: ${params.recommended})` : ""}${record} and carry on.${KEPT}`);
       }
       if (building) {
+        // Human answers are decisions, not assumptions: they live in the spec's Decisions for the
+        // reviewer. p.assumptions is only for builder-made choices (timeout recommendations above).
         const md = store.readSpec(name!);
         if (md) store.writeSpec(name!, addDecision(md, `${params.question.replace(/\s+$/, "")} → ${answer.trim()}`));
         store.event(name!, { type: "ask", task: p!.current });
@@ -537,9 +634,8 @@ export default function pb(pi: ExtensionAPI) {
         pauseBuild(ctx, store, p, `${params.task} blocked: ${params.summary}`, "build.paused", "blocked");
         return stop("The build is paused: the human decides how to go on. Stop here.");
       }
-      if (p.current === SKELETON) return reply("Finish the skeleton with pb_skeleton_done and its design: the harness checks it differently.");
       const task = loaded.spec.tasks.find((t) => t.id === p.current);
-      if (tp && needsRed(loaded.spec, task) && !tp.red) {
+      if (tp && needsRed(loaded.spec, task) && !tp.red && !tp.preGreen) {
         // Not an attempt: nothing was checked yet.
         store.saveProgress(p);
         return reply(`${p.current}'s new tests were never seen failing, so nothing shows they test the change. Call pb_tests_red: if you already made the change, set it aside first (the tests must fail without it), then put it back.`);
@@ -562,27 +658,37 @@ export default function pb(pi: ExtensionAPI) {
       const { store, progress: p } = specOfSession(ctx);
       if (!p || p.phase !== "building") throw new Error("No pb build is running in this session.");
       if (params.task !== p.current) throw new Error(`The current task is ${p.current ?? "none"}, not ${params.task}.`);
-      if (p.current === SKELETON) return reply("pb_skeleton_done checks the skeleton's tests: call it with your design.");
       const spec = loadSpec(store, p.spec)?.spec;
       const task = spec?.tasks.find((t) => t.id === p.current);
       const tp = p.tasks.find((t) => t.id === p.current);
       if (!spec || !task?.test || !tp || !needsRed(spec, task)) return reply(`${params.task} doesn't need this: finish it with pb_task_done.`);
       if (tp.red) return reply(`Already seen failing (${tp.red}). Make the change, then pb_task_done.`);
+      if (tp.preGreen) return reply(`Already satisfied by ${tp.preGreen}: confirm ${params.task}'s acceptance holds on top of that change, then pb_task_done.`);
       const cfg = store.config();
       showProgress(ctx, p, `${p.current}: its tests must fail first: ${task.test}`);
-      checking = true;
+      const testCmd = task.test;
       let r: Awaited<ReturnType<typeof runVerify>>;
-      try {
-        r = await runVerify(task.test, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal);
-      } finally {
-        checking = false;
-      }
+      r = await withChecking(() => runVerify(testCmd, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
       store.event(p.spec, { type: "red", task: p.current, ok: r.ok === false, command: task.test });
-      if (r.ok !== false)
+      if (r.ok !== false) {
+        // Pre-green: an earlier task, done and proven, runs this very command — its implementation already
+        // satisfies it, so red is impossible for this task. No wedge: confirm and finish, disclosed.
+        const earlier = spec.tasks
+          .slice(0, spec.tasks.findIndex((t) => t.id === p.current))
+          .find((t) => t.test === task.test && p.tasks.some((x) => x.id === t.id && x.status === "done" && x.red));
+        if (earlier) {
+          tp.preGreen = earlier.id;
+          store.saveProgress(p);
+          return reply(
+            `\`${task.test}\` already passes: ${earlier.id} (done, same Test: command) proved it and its change satisfies it — red is impossible for ${p.current} now. Confirm ${p.current}'s acceptance holds on top of ${earlier.id}'s change (read the code and tests; don't rerun the command), say so in your summary, then pb_task_done. This run proves nothing of ${p.current}'s own tests; the reviewer is told.`,
+          );
+        }
         return reply(
           `\`${task.test}\` passes without the change, so these tests don't check it (or that command doesn't run them). Make them fail for the behaviour that is missing, then pb_tests_red again.\n\n${r.summary}`,
         );
+      }
       tp.red = r.summary.split("\n")[0];
+      tp.redCommand = task.test;
       store.saveProgress(p);
       return reply(
         `Seen failing: \`${task.test}\`\n\n${r.summary}\n\nCheck that each fails for the reason you expect (the missing behaviour, not a typo or an unrelated error); fix any that don't, without calling this again. Then make the change and finish with pb_task_done.`,
@@ -590,129 +696,18 @@ export default function pb(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "pb_skeleton_done",
-    label: "Skeleton done",
-    description:
-      "In a pb build, at the skeleton step: after writing the stubs and every task's tests, report the design. The harness writes it into the spec's ## Design, requires the code to compile and each task's tests to fail, and gives you the first task.",
-    parameters: Type.Object({
-      design: Type.String({ description: "the shape you settled on (the main types and the flow through them) and why, above all where it differs from what the spec expected; short bullet lines" }),
-    }),
-    executionMode: "sequential",
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      const { store, progress: p } = specOfSession(ctx);
-      if (!p || p.phase !== "building") throw new Error("No pb build is running in this session.");
-      if (p.current !== SKELETON) throw new Error(`The current step is ${p.current ?? "none"}, not the skeleton.`);
-      const loaded = loadSpec(store, p.spec);
-      if (!loaded) {
-        pauseBuild(ctx, store, p, `${store.rel("specs", p.spec, "spec.md")} no longer parses; fix it, then /${cmd("build")}.`, "build.paused", "spec");
-        return stop("The spec no longer parses: the build is paused. Stop here.");
-      }
-      const tp = p.tasks.find((t) => t.id === SKELETON)!;
-      tp.summary = params.design;
-      // The design is the builder's report: kept in the spec even when a check below sends it back.
-      store.writeSpec(p.spec, setSection(loaded.md, "Design", params.design));
-      const { cfg, buildCmd } = commands(ctx.cwd, store);
-      const run = async (command: string) => {
-        checking = true;
-        try {
-          return await runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal);
-        } finally {
-          checking = false;
-        }
-      };
-      const stopped = () => {
-        pauseBuild(ctx, store, p, "you stopped the check of the skeleton.", "build.paused", "stopped");
-        return stop("The check was stopped: the build is paused. Stop here.");
-      };
-
-      // Compiling first: then a failing test fails on its assertion, not on a missing symbol.
-      if (buildCmd) {
-        showProgress(ctx, p, `skeleton: compiling: ${buildCmd}`);
-        const r = await run(buildCmd);
-        if (signal?.aborted) return stopped();
-        store.event(p.spec, { type: "check", task: SKELETON, attempt: tp.attempts, ok: r.ok !== false, command: buildCmd });
-        if (r.ok === false) return failedCheck(ctx, store, p, `\`${buildCmd}\` (the stubs and the tests must compile)`, r.summary);
-      }
-      const tasks = skeletonTasks(loaded.spec, p);
-      const results = new Map<string, Awaited<ReturnType<typeof runVerify>>>();
-      for (const t of tasks) {
-        const command = t.test!;
-        if (!results.has(command)) {
-          showProgress(ctx, p, `skeleton: ${t.id}'s tests must fail: ${command}`);
-          results.set(command, await run(command));
-          if (signal?.aborted) return stopped();
-        }
-      }
-      const passing = tasks.filter((t) => results.get(t.test!)!.ok !== false);
-      store.event(p.spec, { type: "red", task: SKELETON, ok: !passing.length, tasks: tasks.map((t) => t.id) });
-      if (passing.length)
-        return failedCheck(
-          ctx,
-          store,
-          p,
-          `these tests pass before the behaviour exists: ${passing.map((t) => `${t.id} (\`${t.test}\`)`).join(", ")}`,
-          "So they don't check it (or the command doesn't run them). Make each fail for the behaviour its task adds: the stubs must not implement it.",
-        );
-      for (const t of tasks) {
-        const x = p.tasks.find((y) => y.id === t.id);
-        if (x) x.red = results.get(t.test!)!.summary.split("\n")[0];
-      }
-      tp.status = "done";
-      const cps = store.checkpoints(p.spec);
-      const cp = cps.find((c) => c.id === SKELETON);
-      if (cp) {
-        cp.summary = `skeleton ✓ · ${(cp.files ?? []).length} files · ${params.design.replace(/\s+/g, " ").slice(0, 120)}`;
-        store.saveCheckpoints(p.spec, cps);
-      }
-      store.saveProgress(p);
-      const passed = `✓ Skeleton: ${buildCmd ? "it compiles, and " : ""}every task's tests fail (${tasks.map((t) => t.id).join(", ")}). The design is in the spec's "## Design".`;
-
-      // Your look at the design, while it's still signatures and failing tests: cheaper than at the review.
-      const large = !!sectionOf(loaded.md, "Contracts") || loaded.spec.tasks.filter((t) => needsRed(loaded.spec, t)).length > 2;
-      let edited: string | undefined;
-      if (ctx.hasUI && (cfg.designReview === "ask" || (cfg.designReview === "large" && large))) {
-        post(`**Design of ${p.spec}**, after the skeleton (the stubs are in place and every task's tests fail):\n\n${params.design}`);
-        const GO = "Go on: the tasks fill it in";
-        const EDIT = "Edit the design first";
-        const STOP = "Stop here: I'll look at the stubs and tests";
-        const notes: string[] = [];
-        const choice = await choose(ctx, store, `The design of ${p.spec} is ready. Go on?`, [GO, EDIT, STOP], GO, notes);
-        if (notes.length) p.unattended = [...(p.unattended ?? []), ...notes];
-        if (choice === EDIT) {
-          const md = store.readSpec(p.spec) ?? loaded.md;
-          const text = await ctx.ui.editor("Edit the design", sectionOf(md, "Design"));
-          if (text !== undefined && text.trim() && text.trim() !== sectionOf(md, "Design")) {
-            edited = text.trim();
-            store.writeSpec(p.spec, setSection(md, "Design", edited));
-          }
-        } else if (choice !== GO) {
-          // Resumed with /pb:build, the first task starts.
-          p.current = undefined;
-          pauseBuild(ctx, store, p, `stopped after the skeleton, to look at the design (the spec's "## Design", the stubs and the failing tests). \`/${cmd("build")}\` goes on.`, "build.paused", "design");
-          return stop(`${passed}\n\nThe human wants to look at the design first: the build is paused. Stop here.`);
-        }
-        store.saveProgress(p);
-      }
-      const next = nextTodo(p);
-      const t = next ? beginTask(ctx, store, p, next.id, { inTool: true }) : undefined;
-      if (!t) return checkAndAdvance(ctx, store, p, loaded.spec, signal);
-      boundary = true;
-      return reply(`${passed}${edited ? `\n\nThe human edited the design; follow their version:\n\n${edited}` : ""}\n\n${t.prompt}`);
-    },
-  });
-
   /* --------------------------------- plan -------------------------------- */
-
   /** Run the test suite in the background; its result is posted into the session when it's done. */
   const startBaseline = (ctx: ExtensionContext, store: Store, command: string) => {
     if (baselineRunning) return;
     baselineRunning = true;
     const cfg = store.config();
-    // In a worktree at HEAD: the planner's own builds in the working copy can't collide with it (Maven's target/).
-    void inWorktree(ctx.cwd, (dir) => runVerify(command, dir, cfg.verifyTimeoutSec, cfg.testOutputCap))
+    const head = gitHead(ctx.cwd);
+    // In a worktree at the captured HEAD: the planner's own builds in the working copy can't collide with it.
+    checking += 1;
+    void inWorktree(ctx.cwd, (dir) => runVerify(command, dir, cfg.verifyTimeoutSec, cfg.testOutputCap), head ?? "HEAD")
       .then((r) => {
-        store.saveBaseline({ ...r, head: gitHead(ctx.cwd) });
+        store.saveBaseline({ ...r, head });
         try {
           post(`**Baseline** (the test suite on the last commit): ${r.ok ? r.summary : `${r.summary}\n\nThe final check runs the whole suite, so it fails until this is fixed.`}`);
         } catch {
@@ -720,6 +715,7 @@ export default function pb(pi: ExtensionAPI) {
         }
       })
       .finally(() => {
+        checking -= 1;
         baselineRunning = false;
       });
   };
@@ -809,7 +805,7 @@ export default function pb(pi: ExtensionAPI) {
   /** Continue planning a spec in a fresh session, seeded from it: clean context, exact checkpoint. */
   const continuePlan = async (ctx: ExtensionCommandContext, store: Store, name: string) => {
     const md = store.readSpec(name)!;
-    store.setCarry({ model: sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined, spec: name });
+    store.setCarry({ model: sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined, spec: name, parent: ctx.sessionManager.getSessionFile() ?? undefined });
     const snap = store.config().checkpoints ? snapshot(ctx.cwd, "pb: start of planning") : undefined;
     const result = await ctx.newSession({
       parentSession: ctx.sessionManager.getSessionFile(),
@@ -957,10 +953,15 @@ export default function pb(pi: ExtensionAPI) {
       const snap = snapshot(ctx.cwd, `pb: before ${p.spec} ${taskId}`);
       if (snap) {
         const list = store.checkpoints(p.spec);
-        const where = o.inTool ? { pendingEntry: true } : { entry: tree(ctx).getLeafId?.() ?? undefined, intro: o.intro || undefined };
+        // Mid-run starts record a fallback entry now (crash before turn_end still rewinds somewhere);
+        // turn_end refines it to the end-of-turn leaf once the handover settles.
+        const where = o.inTool
+          ? { entry: tree(ctx).getLeafId?.() ?? undefined, pendingEntry: true as const, intro: o.intro || undefined }
+          : { entry: tree(ctx).getLeafId?.() ?? undefined, intro: o.intro || undefined };
         list.push({ id: taskId, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: taskId, ...where });
         store.saveCheckpoints(p.spec, list);
       }
+      // Outside git snapshot() is undefined: no undo point, and /pb:undo already says so. No silent failure.
     }
     tp.status = "doing";
     if (o.countAttempt ?? true) tp.attempts += 1;
@@ -1071,12 +1072,7 @@ export default function pb(pi: ExtensionAPI) {
     const ran = checkCommand(spec, task, testCmd, buildCmd, final, each);
     if (ran) {
       showProgress(ctx, p, `checking ${final ? "everything" : p.current}: ${ran}`);
-      checking = true;
-      try {
-        p.lastVerify = await runVerify(ran, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal);
-      } finally {
-        checking = false;
-      }
+      p.lastVerify = await withChecking(() => runVerify(ran, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
       store.saveProgress(p);
       if (signal?.aborted) {
         pauseBuild(ctx, store, p, `you stopped the check of ${p.current}.`, "build.paused", "stopped");
@@ -1137,6 +1133,7 @@ export default function pb(pi: ExtensionAPI) {
         p.assumptions?.length ? `\nChoices the build made where the spec was unclear (in the spec's Decisions; the review checks them):\n${p.assumptions.map((a) => `- ${a}`).join("\n")}` : "",
         p.unattended?.length ? `\nDecided without you (no answer in time):\n${p.unattended.map((c) => `- ${c}`).join("\n")}` : "",
         p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
+        redNotes(spec, p).length ? `\nNew tests never seen failing (the review judges each):\n${redNotes(spec, p).map((n) => `- ${n}`).join("\n")}` : "",
         "",
         commitBlock(commitMessage(store.readSpec(p.spec) ?? "")),
         "",
@@ -1151,7 +1148,8 @@ export default function pb(pi: ExtensionAPI) {
   pi.on("session_start", async (e, ctx) => {
     const store = new Store(ctx.cwd);
     const session = ctx.sessionManager.getSessionFile();
-    const carry = (e as { reason?: string }).reason === "new" ? store.takeCarry() : undefined;
+    const ev = e as { reason?: string; previousSessionFile?: string };
+    const carry = ev.reason === "new" ? store.takeCarry(ev.previousSessionFile) : undefined;
     if (carry?.review && session) store.saveReviewSession(session, carry.review);
     // A review session's model reads and reports only; everywhere else pb_report_findings isn't offered.
     const active = pi.getActiveTools();
@@ -1317,7 +1315,8 @@ export default function pb(pi: ExtensionAPI) {
     const branch = tree(ctx).getBranch?.() ?? [];
     const lastReset = [...branch].reverse().find((x) => x.type === "compaction")?.id;
     for (const c of cps.filter((c) => c.pendingReset)) {
-      if (lastReset) c.entry = lastReset;
+      if (!lastReset) continue; // no reset happened: keep pending for the next turn
+      c.entry = lastReset;
       delete c.pendingReset;
       changed = true;
     }
@@ -1382,6 +1381,24 @@ export default function pb(pi: ExtensionAPI) {
     const ev = e as { preparation: { firstKeptEntryId: string; tokensBefore: number; previousSummary?: string }; reason?: string };
     if (!name || !p || !unfinishedPhase(p.phase)) {
       const session = ctx.sessionManager.getSessionFile();
+      const review = store.reviewSession(session);
+      const run = review ? store.reviewRun() : undefined;
+      if (review && run) {
+        // A review session: reset to its role, the brief verbatim, and the findings so far.
+        if (run.name) store.event(run.name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, review: review.role });
+        return {
+          compaction: {
+            summary: reviewStateSummary({
+              label: run.label,
+              role: review.role,
+              brief: run.brief,
+              findings: [...run.passes.flatMap((x) => x.findings), ...(review.findings ?? [])],
+            }),
+            firstKeptEntryId: ev.preparation.firstKeptEntryId,
+            tokensBefore: ev.preparation.tokensBefore,
+          },
+        };
+      }
       const planned = session ? store.specsOfPlanning(session) : [];
       if (session && planned.length && store.planningSessions().includes(session)) {
         for (const n of planned) store.event(n, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, planning: true });
@@ -1400,12 +1417,35 @@ export default function pb(pi: ExtensionAPI) {
       return;
     }
     store.event(name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, task: p.current });
+    // No compacted flag for builds: stateSummary below includes the spec markdown, so the session still
+    // knows it (knowsSpec stays true) and continuePrompt correctly omits resending it. The flag is only
+    // for planning sessions whose compaction drops the spec.
     // What the current task has done so far, from git: the files it changed since its undo point.
     const cp = store.checkpoints(name).find((c) => c.id === p.current);
     const now_ = cp ? snapshot(ctx.cwd, `pb: compaction during ${p.current}`) : undefined;
     const changed = cp && now_ ? changedPaths(ctx.cwd, cp.commit, now_.commit) : undefined;
     const ops = (ev.preparation as { fileOps?: { read?: Iterable<string>; edited?: Iterable<string>; written?: Iterable<string> } }).fileOps;
     const read = ops?.read ? [...ops.read].filter((f) => !changed?.includes(f)) : undefined;
+    // The thrash guard: compacting the same task over and over with nothing new changed, read, or
+    // shrunk is stuck, not long (a giant output refilling the context, or a loop). Pause with the
+    // likely causes instead of compacting forever; any one sign of progress resets the count.
+    const session = ctx.sessionManager.getSessionFile();
+    const tokens = ev.preparation.tokensBefore;
+    const prev = session ? compactStalls.get(session) : undefined;
+    const progressed =
+      !prev || prev.task !== p.current || (changed?.some((f) => !prev.changed.includes(f)) ?? false) || (read?.some((f) => !prev.read.includes(f)) ?? false) || tokens < prev.tokens;
+    const strikes = progressed ? 0 : (prev?.strikes ?? 0) + 1;
+    if (session) compactStalls.set(session, { task: p.current, changed: changed ?? [], read: read ?? [], tokens, strikes });
+    if (strikes >= COMPACT_STALL_LIMIT && p.phase === "building") {
+      pauseBuild(
+        ctx,
+        store,
+        p,
+        `compacted ${strikes} times during ${p.current ?? "the build"} without getting anywhere (no new files read or changed, context not shrinking). Something is stuck: one giant tool output refilling the context (a verbose Test: command? \`testOutputCap\` trims to ${store.config().testOutputCap} chars), an oversized spec, or the task looping. Look at the session, then /${cmd("build")} to go on, /${cmd("undo")} ${p.current ?? "start"} to throw it away, or /${cmd("spec")} ${p.spec} to split the task.`,
+        "build.paused",
+        "thrash",
+      );
+    }
     return {
       compaction: {
         summary: stateSummary(ctx, store, p, "compaction", { changed, read, previous: ev.preparation.previousSummary }),
@@ -1418,7 +1458,7 @@ export default function pb(pi: ExtensionAPI) {
   pi.on("session_before_tree", () => (undoSummary ? { summary: { summary: undoSummary } } : undefined));
 
   // Keep the cache warm while a check runs: the agent certainly continues afterwards.
-  pi.on("cache_warming_decision", () => (checking ? { action: "warm" as const } : undefined));
+  pi.on("cache_warming_decision", () => (checking > 0 ? { action: "warm" as const } : undefined));
 
   /**
    * Start building a spec. In this session by default: the conversation that planned it
@@ -1487,11 +1527,13 @@ export default function pb(pi: ExtensionAPI) {
       phase: "building",
       baseCommit: restart ? (prev!.baseCommit ?? gitHead(ctx.cwd)) : gitHead(ctx.cwd),
       // A task's tests seen failing stay proven: only /pb:undo takes that back, with the files.
-      tasks: syncTasks(spec, prev?.tasks).map((t) => (t.status === "done" ? t : { ...t, status: "todo" as const, attempts: 0 })),
+      // Attempts are preserved on restart: a crash must not grant a fresh budget. A fresh set comes
+      // only from answering an exhausted task via /pb:build guidance (see the build command below).
+      tasks: syncTasks(spec, prev?.tasks).map((t) => (t.status === "done" ? t : { ...t, status: "todo" as const })),
       current: undefined,
       pause: undefined,
       nudged: undefined,
-      needsIntro: undefined,
+      needsIntro: prev?.needsIntro,
       detached: undefined,
       unattended: notes.length ? notes : undefined,
       updatedAt: now(),
@@ -1526,7 +1568,7 @@ export default function pb(pi: ExtensionAPI) {
     // Fresh session: seeded with the spec, on the model and thinking level you planned with.
     const cctx = ctx as ExtensionCommandContext;
     const carried = { model: buildModel ? cfg.buildModel : sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined };
-    store.setCarry({ ...carried, spec: name });
+    store.setCarry({ ...carried, spec: name, parent: session ?? undefined });
     // A new session loads AGENTS.md itself: the standards needn't come along.
     const intro = buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", "", md, store.extra("build"));
     const result = await cctx.newSession({
@@ -1561,7 +1603,41 @@ export default function pb(pi: ExtensionAPI) {
   /** A commit message to paste, shown wherever the work may end: after the build, the review and the archive. */
   const commitBlock = (message: string | undefined) => (message ? `**Commit message**, to paste:\n\n\`\`\`text\n${message}\n\`\`\`` : "");
 
-  const showSpec = (store: Store, name: string, names: string[] = [name]) => {
+  /** A hung task command must not stall approval: the dry-run caps each well below a real check. */
+  const DRY_RUN_TIMEOUT_SEC = 120;
+
+  /**
+   * Each red-eligible task command, run once before the human approves the build: failing is expected
+   * (nothing built yet), passing smells pre-existing behaviour, erroring smells a broken command. Advisory
+   * only — small changes (other gates, no new tests, refactors) have no red-eligible commands and skip this.
+   */
+  const dryRunTests = async (ctx: ExtensionContext, store: Store, name: string): Promise<string[]> => {
+    const loaded = loadSpec(store, name);
+    if (!loaded) return [];
+    const cfg = store.config();
+    const commands = [...new Set(loaded.spec.tasks.filter((t) => needsRed(loaded.spec, t) && t.test).map((t) => t.test!))];
+    if (!commands.length) return [];
+    const results: Array<{ command: string; result: string; line: string }> = [];
+    for (const command of commands) {
+      if (suspiciousCommand(command)) {
+        results.push({ command, result: "unknown", line: "not run here: chains shells or reaches the network — review before building" });
+        continue;
+      }
+      const r = await withChecking(() => runVerify(command, ctx.cwd, Math.min(cfg.verifyTimeoutSec, DRY_RUN_TIMEOUT_SEC), cfg.testOutputCap));
+      const line = r.summary.split("\n")[0];
+      const result = r.ok ? "pass" : /TIMEOUT|ENOENT|not found|No such file/i.test(r.summary) ? "unknown" : "fail";
+      results.push({ command, result, line });
+    }
+    store.event(name, { type: "dryrun", results: results.map(({ command, result }) => ({ command, result })) });
+    const describe: Record<string, (c: string, l: string) => string> = {
+      fail: (c) => `✗ \`${c}\` fails (expected: nothing built yet — if it fails for the wrong reason, like no runner, fix the command)`,
+      pass: (c) => `⚠ \`${c}\` passes before the build: the behaviour may already exist (re-slice?) or the tests don't cover it yet (carry on — the build still requires red)`,
+      unknown: (c, l) => `? \`${c}\` couldn't run here (${l}) — unknown, not a verdict`,
+    };
+    return ["", `Test commands, run once before you approve:`, ...results.map((r) => `- ${describe[r.result](r.command, r.line)}`)];
+  };
+
+  const showSpec = (store: Store, name: string, names: string[] = [name], extra: string[] = []) => {
     const loaded = loadSpec(store, name);
     if (!loaded) return;
     post(
@@ -1572,6 +1648,7 @@ export default function pb(pi: ExtensionAPI) {
         "",
         `Verification: ${loaded.spec.gate}${loaded.spec.newTests ? "" : " · no new tests"}`,
         ...assumptionsOf(loaded.md).map((a, i) => `${i ? "" : "\nSettled without asking you (the review checks them):\n"}- ${a}`),
+        ...extra,
       ].join("\n"),
     );
     pi.appendEntry("pb-spec", { name, markdown: loaded.md });
@@ -1643,7 +1720,7 @@ export default function pb(pi: ExtensionAPI) {
       store.setPendingBuild(session);
       return post(`No spec ready to build yet. Answer Pi's questions; once the spec is written, pb shows it and asks how to build.`);
     }
-    showSpec(store, ready[0], ready);
+    showSpec(store, ready[0], ready, await dryRunTests(ctx, store, ready[0]));
     await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes });
   };
 
@@ -1654,12 +1731,12 @@ export default function pb(pi: ExtensionAPI) {
     if (!store.pendingBuild(session)) return false;
     const names = readySpecs(store, session);
     if (!names.length) return true; // still talking (e.g. a question before writing): keep waiting
-    store.setPendingBuild(undefined);
+    if (session) store.clearPendingBuild(session);
     const name = names[0];
     const loaded = loadSpec(store, name);
     if (!loaded) return true;
     const { spec } = loaded;
-    showSpec(store, name, names);
+    showSpec(store, name, names, await dryRunTests(ctx, store, name));
     if (!ctx.hasUI) {
       post(tip("spec.next"));
       return true;
@@ -1710,12 +1787,15 @@ export default function pb(pi: ExtensionAPI) {
         const from = guidance ? `\n\nFrom the human: ${guidance}` : "";
         if (p.current === "final") {
           const fin = p.tasks.find((t) => t.id === "final");
-          if (fin) fin.attempts = 1;
+          // Like tasks below: only an exhausted final gets a fresh set; other pauses keep their count.
+          if (fin && fin.attempts >= cfg.maxAttempts) fin.attempts = 0;
+          const attempt = (fin?.attempts ?? 0) + 1;
+          if (fin) fin.attempts = attempt;
           p.phase = "building";
           p.pause = undefined;
           store.saveProgress(p);
           showProgress(ctx, p);
-          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", 1, cfg.maxAttempts, false) + from);
+          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false) + from);
         }
         const cur = p.current ?? nextTodo(p)?.id;
         const tp = p.tasks.find((t) => t.id === cur);
@@ -1857,7 +1937,7 @@ export default function pb(pi: ExtensionAPI) {
     }
     if (!todo) return reviewFinish(from, store, run);
     store.saveReviewRun(run);
-    store.setCarry({ model: run.model, thinking: run.thinking, spec: run.name ?? "", review: { role: todo, spec: run.name } });
+    store.setCarry({ model: run.model, thinking: run.thinking, spec: run.name ?? "", review: { role: todo, spec: run.name }, parent: run.home ?? undefined });
     const result = await from.newSession({
       parentSession: run.home,
       setup: async (sm) => {
@@ -1865,6 +1945,9 @@ export default function pb(pi: ExtensionAPI) {
         sm.appendSessionInfo(`review: ${run.label} · ${todo === "abuse" ? "adversarial" : run.name ? "spec" : "intent"}`);
       },
       withSession: async (c) => {
+        // Fail closed: even if the carry was stolen or expired, this session is a review session.
+        const reviewSession = (c as ExtensionContext).sessionManager.getSessionFile();
+        if (reviewSession) store.saveReviewSession(reviewSession, { role: todo, spec: run.name });
         const r = await drivePass(c, c.sendMessage, store, { role: todo, label: run.label, brief: run.brief });
         run.passes.push({ role: todo, ...r });
         await reviewNext(c, store, run, r.left);
@@ -2068,7 +2151,7 @@ export default function pb(pi: ExtensionAPI) {
       let check = "(not run)";
       if (command) {
         safely(() => ctx.ui.setWidget("pb-review", [`pb review ${label} — checking: ${command}`]));
-        const v = await runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap);
+        const v = await withChecking(() => runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap));
         safely(() => ctx.ui.setWidget("pb-review", undefined));
         check = v.summary;
         if (p) {
@@ -2102,6 +2185,8 @@ export default function pb(pi: ExtensionAPI) {
         focus: name ? rest : "",
         previous,
         testChanges: p?.testChanges,
+        redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
+        designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
       });
       // Only plain values from here on: `ctx` belongs to this session, which the first pass replaces.
       const run: ReviewRun = {
@@ -2303,7 +2388,12 @@ export default function pb(pi: ExtensionAPI) {
       const changed = changedSince(ctx.cwd, store.progress(name)?.baseCommit);
       // The feature is finished: its review runs and the explorer and map runs so far aren't needed any more.
       store.dropSessions(name);
-      const dest = store.archive(name);
+      let dest: string;
+      try {
+        dest = store.archive(name);
+      } catch (e) {
+        return ctx.ui.notify(`Could not archive ${name}: ${(e as Error).message}`, "error");
+      }
       if (!store.specNames().length) dropCheckpoints(ctx.cwd); // no live spec left to undo: let git reclaim the snapshots
       ctx.ui.notify(`Archived ${name} to ${path.relative(ctx.cwd, dest)}.`, "info");
       // The feature is done: what it established about the project goes into the map every session reads.

@@ -46,10 +46,10 @@ export interface MapView {
 
 /** What the map's entry shows: collapsed, what changed; expanded, the new map as markdown and what was removed. */
 export function mapView(d: MapView, expanded: boolean) {
-  const added = d.diff.filter((l) => l.startsWith("+")).length;
-  const removedLines = d.diff.filter((l) => l.startsWith("-")).map((l) => l.slice(2));
+  const added = d.diff.filter((l) => l.startsWith("+ ")).length;
+  const removedLines = d.diff.filter((l) => l.startsWith("- ")).map((l) => l.slice(2));
   const over = d.tokens > MAP_TOKENS;
-  const head = `~${d.tokens} tokens${over ? `, over the ~${MAP_TOKENS.toLocaleString("en-US")} budget` : ""} · ${added} line${added === 1 ? "" : "s"} added, ${removedLines.length} removed`;
+  const head = `~${d.tokens.toLocaleString("en-US")} tokens${over ? `, over the ~${MAP_TOKENS.toLocaleString("en-US")} budget` : ""} · ${added} line${added === 1 ? "" : "s"} added, ${removedLines.length} removed`;
   const lines: { text: string; kind: "change" | "warning" | "hint" }[] = [
     ...(d.changes ?? []).map((c) => ({ text: `• ${c}`, kind: "change" as const })),
     ...d.warnings.map((w) => ({ text: `⚠ ${w}`, kind: "warning" as const })),
@@ -76,9 +76,14 @@ export interface ExploreDetails {
   session?: string;
 }
 
-const short = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+const short = (t: string, n: number) => {
+  const chars = Array.from(t);
+  return chars.length > n ? `${chars.slice(0, n - 1).join("")}…` : t;
+};
 const human = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
 const secs = (ms: number) => `${Math.round(ms / 1000)}s`;
+const MAX_ANSWER_LINES = 200;
+const MAX_FILES = 50;
 
 /** The lines shown for an exploration: live steps while it runs, then one summary line (all of it when expanded). */
 export function exploreLines(o: { details?: ExploreDetails; answer: string; partial: boolean; expanded: boolean; error?: boolean; now?: number }): { text: string; kind: "step" | "count" | "done" | "answer" | "file" | "error" | "writing" }[] {
@@ -95,10 +100,15 @@ export function exploreLines(o: { details?: ExploreDetails; answer: string; part
   const head = d ? `explored in ${secs(d.ms ?? 0)} · ${d.files.length} file${d.files.length === 1 ? "" : "s"} read${d.tokens ? ` · ${human(d.tokens)} tokens` : ""}` : "explored";
   const first = o.answer.split("\n").find((l) => l.trim()) ?? "";
   if (!o.expanded) return [{ text: head, kind: "done" }, ...(first ? [{ text: short(first.trim(), 120), kind: "answer" as const }] : [])];
+  const answerLines = o.answer.split("\n");
+  const shownAnswer = answerLines.length > MAX_ANSWER_LINES ? [...answerLines.slice(0, MAX_ANSWER_LINES), `… (+${answerLines.length - MAX_ANSWER_LINES} more lines)`] : answerLines;
+  const files = d?.files ?? [];
+  const shownFiles = files.length > MAX_FILES ? files.slice(0, MAX_FILES) : files;
   return [
     { text: head, kind: "done" },
-    ...o.answer.split("\n").map((l) => ({ text: l, kind: "answer" as const })),
-    ...(d?.files.length ? [{ text: "files read:", kind: "file" as const }, ...d.files.map((f) => ({ text: `  ${f}`, kind: "file" as const }))] : []),
+    ...shownAnswer.map((l) => ({ text: l, kind: "answer" as const })),
+    ...(files.length ? [{ text: "files read:", kind: "file" as const }, ...shownFiles.map((f) => ({ text: `  ${f}`, kind: "file" as const }))] : []),
+    ...(files.length > MAX_FILES ? [{ text: `  … (+${files.length - MAX_FILES} more)`, kind: "file" as const }] : []),
     ...(d?.session ? [{ text: `the whole run: pi --session ${d.session}`, kind: "file" as const }] : []),
   ];
 }

@@ -26,7 +26,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.22.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.23.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -48,7 +48,7 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
    → asks now, while you're here: build here / in a fresh session / show me the spec first
    → Pi writes .pi/pb/specs/order-cancellation/spec.md (goal, findings,
      decisions, tasks with their test commands) and the build starts by itself
-   → one run: skeleton (stubs, every task's tests failing, design written) → T1 → T2 → … → full suite ✗ → fix → full suite ✓
+    → one run: T1 → T2 → … (each: its tests seen failing, then passing) → full suite ✗ → fix → full suite ✓
    ✅ BUILD COMPLETE
 /pb:review
    → a spec pass in a fresh session: every acceptance criterion with evidence,
@@ -73,12 +73,12 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   failure goes straight back to fix, and after `maxAttempts` the build pauses
   for you. The agent's word never ends a build. A check after every task is
   available (`taskChecks: "each"`).
-- **Design in code, tests proven to test.** Planning pins what and how you'll
-  know; the build designs the how in a skeleton (stubs and every task's tests),
-  where the compiler gives feedback. The harness requires it to compile and
-  every test to fail before the behaviour exists: a test that passes without
-  the change tests nothing. For a large change you see the design then, as
-  signatures and failing tests, cheaper to change than finished code.
+- **Tests proven to test.** Planning pins what and how you'll know, with
+  Contracts for every seam the tasks share. Each task writes its tests first,
+  where the compiler gives feedback, and the harness requires them to fail
+  before the behaviour exists: a test that passes without the change tests
+  nothing. The first task that settles a shape the later ones build on records
+  it in the spec's Design.
 - **Refactors are welcome, and reviewed.** Changed existing tests don't stop the
   build (refactors move and merge them); they're listed and the reviewer judges
   each. Refactoring the standards call for comes first, as `(refactor)` tasks.
@@ -158,7 +158,7 @@ New tests: yes                      # or: no — why
 ## Findings                          # what the analysis established: files, code to imitate, constraints, baseline
 ## Decisions                         # each with its reason, as it stands now; rejected ideas too
 ## Contracts                         # only what others depend on: signatures, API and errors, data, events
-## Design                            # written by the build after its skeleton, not by the plan
+## Design                            # the shape the build settled on, recorded as it went — not by the plan
 ## Open questions                    # only while planning
 ## Tasks
 ### T1: A pending order can be cancelled
@@ -169,10 +169,11 @@ New tests: yes                      # or: no — why
 ```
 
 The spec pins what and how you'll know, not how: Goal, Decisions, Contracts and
-Acceptance bind the build. The build starts with a skeleton that designs the
-change in code (stubs, and every task's tests, which must compile and fail),
-writes that design into `## Design`, then fills it in task by task. Each
-Acceptance line is one behaviour, a test to write.
+Acceptance bind the build. Contracts pin every seam the tasks share, since no
+later step sees the whole change at once. Each task writes its tests first
+(seen failing), then the behaviour; the first task that settles a shape the
+later ones build on records it in `## Design`. Each Acceptance line is one
+behaviour, a test to write.
 
 `## Out of scope` and `## Acceptance criteria` are optional: a spec is as long
 as the change needs and no longer. Pi points to code instead of copying it;
@@ -207,7 +208,6 @@ the existing ones still run.
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |
 | `notify` | true | a desktop notification when pb asks you something (a question, or a dialog that goes on without you) |
-| `designReview` | `"large"` | after the skeleton, show you its design before the tasks fill it in: `"large"` (the spec has Contracts, or more than two tasks with tests), `"ask"` (always), `"off"` |
 | `extra` | unset | your instructions added to a role's prompt: `{"plan", "spec", "build", "review", "adversarial", "map"}`; also read from `~/.pi/agent/pb/config.json`, applied first |
 | `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build is reset to its state at the next task boundary; 0 = never |
 

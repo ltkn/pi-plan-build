@@ -18,9 +18,21 @@ export const blocking = (f: Finding) => f.priority === "P0" || f.priority === "P
 /** Any P0 or P1 means changes needed. */
 export const verdictOf = (findings: Finding[]): Verdict => (findings.some(blocking) ? "changes_needed" : "pass");
 
-/** A pass that answered in prose only: findings are the lines that start with a priority tag. */
+/** A pass that answered in prose only: findings are the lines that start with a priority tag (outside fences). */
 export function fromProse(text: string): Finding[] {
-  return [...text.matchAll(/^\s*(?:\d+[.)]\s*|[-*]\s*)?\[(P[0-3])\]\s*(.+)$/gm)].map((m) => ({ priority: m[1] as Priority, title: m[2].trim() }));
+  const lines = text.split("\n");
+  let inFence = false;
+  const out: Finding[] = [];
+  for (const line of lines) {
+    if (/^(\s*)```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = line.match(/^\s*(?:\d+[.)]\s*|[-*]\s*)?\[(P[0-3])\]\s*(.+)$/);
+    if (m) out.push({ priority: m[1] as Priority, title: m[2].trim() });
+  }
+  return out;
 }
 
 /**
@@ -61,8 +73,15 @@ export async function verifyFindings(o: {
   const usage = { tokens: { input: t.input, output: t.output, cacheRead: t.cacheRead, cacheWrite: t.cacheWrite }, cost: v.cost, sessionFile: v.sessionFile };
   if (v.aborted) return { ...none, ...usage, aborted: true };
   const verdicts = v.toolCalls.filter((c) => c.name === "report_verdicts").flatMap((c) => (Array.isArray(c.arguments.verdicts) ? (c.arguments.verdicts as { finding: number; verdict: string; evidence: string }[]) : []));
+  // Last verdict wins per finding; out-of-range numbers are ignored (model miscounted, harness keeps all).
+  const byIndex = new Map<number, { verdict: string; evidence: string }>();
+  for (const x of verdicts) {
+    if (!Number.isInteger(x.finding) || x.finding < 1 || x.finding > toCheck.length) continue;
+    if (x.verdict !== "rejected" && x.verdict !== "confirmed") continue;
+    byIndex.set(x.finding, { verdict: x.verdict, evidence: typeof x.evidence === "string" ? x.evidence : "" });
+  }
   const rejected = new Map<Finding, string>();
-  for (const x of verdicts) if (x.verdict === "rejected" && toCheck[x.finding - 1]) rejected.set(toCheck[x.finding - 1], x.evidence ?? "");
+  for (const [n, v] of byIndex) if (v.verdict === "rejected") rejected.set(toCheck[n - 1], v.evidence);
   return { ...usage, aborted: false, findings: o.findings.filter((f) => !rejected.has(f)), dismissed: [...rejected].map(([finding, evidence]) => ({ finding, evidence })) };
 }
 
@@ -71,12 +90,21 @@ export async function verifyFindings(o: {
  * from its spec and its diff: a reason, or undefined. Used with reviewer.security "auto"; deliberately broad.
  */
 export function sensitiveGround(o: { spec?: string; files: string[]; diff: string }): string | undefined {
-  if (o.spec && /^##\s+Threats(\s+and\s+abuse)?\s*$/im.test(o.spec)) return "the spec has Threats and abuse";
+  const specBody = (o.spec ?? "").split("\n");
+  let inFence = false;
+  const hasThreats = specBody.some((l) => {
+    if (/^(\s*)```/.test(l)) {
+      inFence = !inFence;
+      return false;
+    }
+    return !inFence && /^##\s+Threats(\s+and\s+abuse)?\s*:?\s*$/i.test(l);
+  });
+  if (hasThreats) return "the spec has Threats and abuse";
   const words =
-    /\b(auth\w*|login|logout|sign-?in|session|token|jwt|oauth|saml|sso|password|passwd|credential|secret|api[_-]?key|permission|role|acl|polic(y|ies)|grant|privilege|admin|csrf|cors|cookie|crypt\w*|hash\w*|signature|upload|download|payment|billing|invoice|refund|webhook|redirect|sanitiz\w*|escape|exec|eval|deserializ\w*|security|route|router|controller|handler|endpoint|resolver|consumer|listener|job|cron|schedul\w*|amount|price|balance|quantity|stock|discount|coupon|credit|limit|quota|status|retry|transfer|withdraw\w*)\b/i;
+    /\b(auth\w*|login|logout|sign-?in|session|token|jwt|oauth|saml|sso|password|passwd|credential|secret|api[_-]?key|permission|role|acl|polic(y|ies)|grant|privilege|admin|csrf|cors|cookie|crypt\w*|hash\w*|signature|upload|download|payment|billing|invoice|refund|webhook|redirect|sanitiz\w*|escape|exec|eval|deserializ\w*|security|route|router|controller|handler|endpoint|resolver|consumer|listener|job|cron|schedul\w*|amount|price|balance|quantity|stock|discount|coupon|credit|limit|quota|status|retry|transfer|withdraw\w*|email|phone|address|ssn|credit.?card)\b/i;
   const file = o.files.find((f) => words.test(f.replace(/[/._-]/g, " ")));
   if (file) return `touches ${file}`;
-  const line = o.diff.split("\n").find((l) => /^\+(?!\+\+)/.test(l) && words.test(l));
+  const line = o.diff.split("\n").find((l) => /^[+-](?![+-])/.test(l) && words.test(l.slice(1)));
   return line ? `the diff mentions "${line.slice(1).trim().match(words)![0]}"` : undefined;
 }
 

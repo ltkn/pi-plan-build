@@ -83,7 +83,7 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
   for (const e of o.extensions ?? []) args.push("-e", e);
   if (o.model) args.push("--model", o.model);
   if (o.thinking) args.push("--thinking", o.thinking);
-  args.push("--tools", o.tools.join(","));
+  if (o.tools.length) args.push("--tools", o.tools.join(","));
   args.push("--append-system-prompt", sysFile, `@${briefFile}`, o.prompt);
 
   const started = Date.now();
@@ -106,6 +106,7 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
       const proc = spawn(inv.command, inv.args, { cwd: o.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
       let buf = "";
       let stderr = "";
+      let closed = false;
 
       const onLine = (line: string) => {
         if (!line.trim()) return;
@@ -115,7 +116,7 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
         } catch {
           return;
         }
-        if (ev.type === "session") sessionId = ev.id;
+        if (ev.type === "session") sessionId = ev.id ?? ev.sessionId ?? ev.session_id;
         if (ev.type === "message_update") {
           const d = ev.assistantMessageEvent;
           if ((d?.type === "text_delta" || d?.type === "thinking_delta") && typeof d.delta === "string") {
@@ -128,12 +129,12 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
         streaming = "";
         const m = ev.message;
         res.turns++;
-        res.cost += m.usage?.cost?.total ?? 0;
+        res.cost += m.usage?.cost?.total ?? (typeof m.usage?.cost === "number" ? m.usage.cost : 0);
         const u = m.usage ?? {};
         const t = res.tokens;
-        t.input += u.input ?? 0;
-        t.output += u.output ?? 0;
-        t.cacheRead += u.cacheRead ?? 0;
+        t.input += u.input ?? u.inputTokens ?? u.prompt_tokens ?? 0;
+        t.output += u.output ?? u.outputTokens ?? u.completion_tokens ?? 0;
+        t.cacheRead += u.cacheRead ?? u.cached_tokens ?? 0;
         t.cacheWrite += u.cacheWrite ?? 0;
         t.peakContext = Math.max(t.peakContext, (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0));
         if (m.stopReason) res.stopReason = m.stopReason;
@@ -159,23 +160,43 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
       proc.stderr.on("data", (d) => {
         stderr += d.toString();
       });
-      proc.on("close", (code) => {
+      proc.on("close", (code, signal) => {
+        closed = true;
+        if (o.signal) o.signal.removeEventListener("abort", kill);
         if (buf.trim()) onLine(buf);
-        if ((code ?? 0) !== 0 && !res.error) res.error = stderr.trim().slice(-2000) || `exit code ${code}`;
-        resolve(code ?? 0);
+        if (res.aborted) return resolve(1);
+        if (signal) {
+          res.error = res.error || `killed by ${signal}${stderr.trim() ? `: ${stderr.trim().slice(-2000)}` : ""}`;
+          return resolve(1);
+        }
+        if ((code ?? 1) !== 0 && !res.error) res.error = stderr.trim().slice(-2000) || `exit code ${code}`;
+        resolve(code ?? 1);
       });
       proc.on("error", (e) => {
+        closed = true;
+        if (o.signal) o.signal.removeEventListener("abort", kill);
         res.error = e.message;
         resolve(1);
       });
-      if (o.signal) {
-        const kill = () => {
-          res.aborted = true;
+      const kill = () => {
+        if (closed) return;
+        res.aborted = true;
+        try {
           proc.kill("SIGTERM");
-          setTimeout(() => {
-            if (!proc.killed) proc.kill("SIGKILL");
-          }, 5000);
-        };
+        } catch {
+          /* ignore */
+        }
+        setTimeout(() => {
+          if (!closed) {
+            try {
+              proc.kill("SIGKILL");
+            } catch {
+              /* ignore */
+            }
+          }
+        }, 5000);
+      };
+      if (o.signal) {
         if (o.signal.aborted) kill();
         else o.signal.addEventListener("abort", kill, { once: true });
       }
@@ -185,7 +206,10 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
   }
   res.ms = Date.now() - started;
   if (o.sessionDir && sessionId) {
-    const file = (await fs.promises.readdir(o.sessionDir).catch(() => [] as string[])).find((f) => f.includes(sessionId!) && f.endsWith(".jsonl"));
+    const files = await fs.promises.readdir(o.sessionDir).catch(() => [] as string[]);
+    const exact = files.find((f) => f === `${sessionId}.jsonl`);
+    const contains = files.filter((f) => f.endsWith(".jsonl") && f.includes(sessionId!));
+    const file = exact ?? (contains.length === 1 ? contains[0] : undefined);
     if (file) res.sessionFile = path.join(o.sessionDir, file);
   }
   return res;

@@ -14,20 +14,24 @@ interface Regions {
 }
 
 let cache: Regions | undefined;
+let cacheMtime = 0;
 
 function regions(): Regions {
-  if (cache) return cache;
-  cache = { tip: new Map(), topic: new Map() };
-  let md = "";
   try {
-    md = fs.readFileSync(HELP_PATH, "utf8");
+    const mtime = fs.statSync(HELP_PATH).mtimeMs;
+    if (!cache || mtime !== cacheMtime) {
+      cache = { tip: new Map(), topic: new Map() };
+      cacheMtime = mtime;
+      const md = fs.readFileSync(HELP_PATH, "utf8");
+      for (const m of md.matchAll(/<!--\s*pb:(tip|topic)\s+([\w.-]+)\s*-->\s*([\s\S]*?)\s*<!--\s*\/pb\s*-->/g)) {
+        const map = cache[m[1] as keyof Regions];
+        if (!map.has(m[2])) map.set(m[2], m[3].trim());
+      }
+    }
+    return cache;
   } catch {
-    return cache; // help is best-effort; never break a phase over it
+    return cache ?? { tip: new Map(), topic: new Map() }; // help is best-effort; never break a phase over it
   }
-  for (const m of md.matchAll(/<!-- pb:(tip|topic) ([\w.-]+) -->\n([\s\S]*?)<!-- \/pb -->/g)) {
-    cache[m[1] as keyof Regions].set(m[2], m[3].trim());
-  }
-  return cache;
 }
 
 /** Short "What now" block for a phase result; `{name}` placeholders are filled from vars. */

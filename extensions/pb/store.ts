@@ -54,8 +54,6 @@ export interface Config {
   mapOnArchive: boolean;
   /** A desktop notification when pb asks you something (a question, or a dialog that goes on without you). */
   notify: boolean;
-  /** After the skeleton, show you its design before the tasks fill it in: always ("ask"), for a large change ("large"), never ("off"). */
-  designReview: "off" | "ask" | "large";
   /**
    * Your own instructions, added to a role's prompt (never replacing pb's, which the harness relies on).
    * Also read from ~/.pi/agent/pb/config.json for every project; both apply, the global ones first.
@@ -83,8 +81,45 @@ export const DEFAULT_CONFIG: Config = {
   checkpointAt: 75,
   mapOnArchive: true,
   notify: true,
-  designReview: "large",
 };
+
+/** Config with wrong types falls back to defaults field by field, so one typo can't break the build. */
+function sanitizeConfig(raw: Partial<Config>): Config {
+  const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : d);
+  const bool = (v: unknown, d: boolean) => (typeof v === "boolean" ? v : d);
+  const strOrNull = (v: unknown, d: string | null) => (v === null || v === undefined ? d : typeof v === "string" ? v : d);
+  const reviewerRaw = typeof raw.reviewer === "object" && raw.reviewer !== null ? raw.reviewer : {};
+  const explorerRaw = typeof raw.explorer === "object" && raw.explorer !== null ? raw.explorer : {};
+  const security = (reviewerRaw as { security?: unknown }).security;
+  return {
+    verify: strOrNull((raw as { verify?: unknown }).verify, DEFAULT_CONFIG.verify),
+    build: strOrNull((raw as { build?: unknown }).build, DEFAULT_CONFIG.build),
+    verifyTimeoutSec: num((raw as { verifyTimeoutSec?: unknown }).verifyTimeoutSec, DEFAULT_CONFIG.verifyTimeoutSec),
+    maxAttempts: Math.max(1, Math.floor(num((raw as { maxAttempts?: unknown }).maxAttempts, DEFAULT_CONFIG.maxAttempts))),
+    taskChecks: (raw as { taskChecks?: unknown }).taskChecks === "each" ? "each" : "end",
+    askTimeoutSec: num((raw as { askTimeoutSec?: unknown }).askTimeoutSec, DEFAULT_CONFIG.askTimeoutSec),
+    testOutputCap: num((raw as { testOutputCap?: unknown }).testOutputCap, DEFAULT_CONFIG.testOutputCap),
+    checkpoints: bool((raw as { checkpoints?: unknown }).checkpoints, true),
+    reviewer: {
+      model: typeof (reviewerRaw as { model?: unknown }).model === "string" ? (reviewerRaw as { model: string }).model : undefined,
+      thinking: typeof (reviewerRaw as { thinking?: unknown }).thinking === "string" ? (reviewerRaw as { thinking: string }).thinking : undefined,
+      verify: bool((reviewerRaw as { verify?: unknown }).verify, true),
+      security: security === "auto" || security === "always" || security === "off" ? security : "always",
+      idleSec: typeof (reviewerRaw as { idleSec?: unknown }).idleSec === "number" ? (reviewerRaw as { idleSec: number }).idleSec : undefined,
+    },
+    freshAbove: num((raw as { freshAbove?: unknown }).freshAbove, DEFAULT_CONFIG.freshAbove),
+    baseline: bool((raw as { baseline?: unknown }).baseline, true),
+    explorer: {
+      model: typeof (explorerRaw as { model?: unknown }).model === "string" ? (explorerRaw as { model: string }).model : undefined,
+      thinking: typeof (explorerRaw as { thinking?: unknown }).thinking === "string" ? (explorerRaw as { thinking: string }).thinking : undefined,
+    },
+    buildModel: typeof (raw as { buildModel?: unknown }).buildModel === "string" ? (raw as { buildModel: string }).buildModel : undefined,
+    checkpointAt: num((raw as { checkpointAt?: unknown }).checkpointAt, DEFAULT_CONFIG.checkpointAt),
+    mapOnArchive: bool((raw as { mapOnArchive?: unknown }).mapOnArchive, true),
+    notify: bool((raw as { notify?: unknown }).notify, true),
+    extra: typeof raw.extra === "object" && raw.extra !== null ? raw.extra : undefined,
+  };
+}
 
 export interface VerifyResult {
   ok: boolean | null; // null = nothing to run
@@ -104,6 +139,12 @@ export interface TaskProgress {
   summary?: string;
   /** the task's new tests, seen failing before the change (pb_tests_red): its first line */
   red?: string;
+  /** the Test: command that was seen failing for red, so a rewritten command re-requires proof */
+  redCommand?: string;
+  /** tasks needing red that run the very same Test: command: one run doesn't prove each task's own tests */
+  redShared?: string;
+  /** pre-green: the command already passed, proven by the done earlier task named here — red was impossible */
+  preGreen?: string;
 }
 
 export type Phase = "written" | "building" | "paused" | "built" | "reviewed";
@@ -237,7 +278,9 @@ function readJson<T>(file: string): T | undefined {
 
 function writeFile(file: string, content: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, content, "utf8");
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, content, "utf8");
+  fs.renameSync(tmp, file);
 }
 
 export function readEvents(file: string): Record<string, unknown>[] {
@@ -273,13 +316,13 @@ export class Store {
   config(): Config {
     const file = path.join(this.root, "config.json");
     if (!fs.existsSync(file)) writeFile(file, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
-    const raw = readJson<Partial<Config>>(file) ?? {};
-    return { ...DEFAULT_CONFIG, ...raw, reviewer: { ...DEFAULT_CONFIG.reviewer, ...(raw.reviewer ?? {}) }, explorer: { ...(raw.explorer ?? {}) } };
+    return sanitizeConfig(readJson<Partial<Config>>(file) ?? {});
   }
-  /** Your extra instructions for a role: the global ones, then this project's. */
+  /** Your extra instructions for a role: the global ones, then this project's. Read-only: never creates files. */
   extra(role: Role): string {
     const global = readJson<Partial<Config>>(path.join(agentDir(), "pb", "config.json"))?.extra?.[role];
-    const mine = this.config().extra?.[role];
+    const raw = readJson<Partial<Config>>(path.join(this.root, "config.json"));
+    const mine = raw?.extra?.[role];
     return [global, mine].filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => x.trim()).join("\n");
   }
   /** Change settings in config.json, keeping everything else in it as written. */
@@ -312,6 +355,11 @@ export class Store {
   progress(name: string): Progress | undefined {
     const p = readJson<Progress>(path.join(this.specDir(name), "progress.json"));
     if (p && (p.phase as string) === "checking") p.phase = "paused"; // the gap check of earlier versions
+    // The skeleton step is gone: a build caught mid-skeleton resumes at its first unfinished task.
+    if (p && (p.tasks ?? []).some((t) => t.id === "skeleton")) {
+      p.tasks = p.tasks.filter((t) => t.id !== "skeleton");
+      if (p.current === "skeleton") p.current = p.tasks.find((t) => t.status === "doing" || t.status === "todo")?.id;
+    }
     return p;
   }
   saveProgress(p: Progress): void {
@@ -348,9 +396,19 @@ export class Store {
    * planning began and the entry the last checkpoint reset from (what /pb:compact undo goes back to).
    */
   private planningMap(): Record<string, { snapshot?: string; checkpointFrom?: string }> {
-    const raw = readJson<string[] | Record<string, { snapshot?: string; checkpointFrom?: string }>>(path.join(this.root, "planning.json"));
-    if (Array.isArray(raw)) return Object.fromEntries(raw.map((s) => [s, {}]));
-    return raw ?? {};
+    const raw = readJson<string[] | Record<string, unknown>>(path.join(this.root, "planning.json"));
+    if (Array.isArray(raw)) return Object.fromEntries(raw.filter((s) => typeof s === "string").map((s) => [s, {}]));
+    if (!raw || typeof raw !== "object") return {};
+    const out: Record<string, { snapshot?: string; checkpointFrom?: string }> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof k !== "string" || !k || typeof v !== "object" || v === null) continue;
+      const rec = v as { snapshot?: unknown; checkpointFrom?: unknown };
+      out[k] = {
+        ...(typeof rec.snapshot === "string" ? { snapshot: rec.snapshot } : {}),
+        ...(typeof rec.checkpointFrom === "string" ? { checkpointFrom: rec.checkpointFrom } : {}),
+      };
+    }
+    return out;
   }
   planningSessions(): string[] {
     return Object.keys(this.planningMap());
@@ -377,7 +435,9 @@ export class Store {
    */
   reviewSession(sessionFile: string | undefined): ReviewSessionState | undefined {
     if (!sessionFile) return undefined;
-    return readJson<Record<string, ReviewSessionState>>(path.join(this.root, "review-sessions.json"))?.[sessionFile];
+    const rec = readJson<Record<string, ReviewSessionState>>(path.join(this.root, "review-sessions.json"))?.[sessionFile];
+    if (!rec || (rec.role !== "review" && rec.role !== "abuse")) return undefined;
+    return rec;
   }
   saveReviewSession(sessionFile: string, state: ReviewSessionState): void {
     const file = path.join(this.root, "review-sessions.json");
@@ -418,6 +478,19 @@ export class Store {
   dropSessions(name: string): void {
     fs.rmSync(path.join(this.specDir(name), "sessions"), { recursive: true, force: true });
     fs.rmSync(path.join(this.root, "sessions"), { recursive: true, force: true });
+    // GC review-sessions.json entries for this spec; the file otherwise grows without bound.
+    const file = path.join(this.root, "review-sessions.json");
+    const all = readJson<Record<string, ReviewSessionState>>(file);
+    if (all) {
+      let changed = false;
+      for (const [k, v] of Object.entries(all)) {
+        if (v?.spec === name) {
+          delete all[k];
+          changed = true;
+        }
+      }
+      if (changed) writeFile(file, `${JSON.stringify(all, null, 2)}\n`);
+    }
   }
 
   /** The project map before its last update, for /pb:map undo. */
@@ -443,15 +516,24 @@ export class Store {
   /**
    * Hand-over to the next build session: the planning session's model and thinking level,
    * applied by pb's fresh instance at session_start (the old pi is stale by then).
+   * Scoped by parent session so an unrelated new session can't steal it; 60min TTL for slow approvals.
    */
-  setCarry(c: { model?: string; thinking?: string; spec: string; review?: ReviewSessionState }): void {
+  setCarry(c: { model?: string; thinking?: string; spec: string; review?: ReviewSessionState; parent?: string }): void {
     writeFile(path.join(this.root, "carry.json"), `${JSON.stringify({ ...c, at: Date.now() })}\n`);
   }
-  takeCarry(): { model?: string; thinking?: string; spec: string; review?: ReviewSessionState } | undefined {
+  takeCarry(previousSessionFile?: string): { model?: string; thinking?: string; spec: string; review?: ReviewSessionState; parent?: string } | undefined {
     const file = path.join(this.root, "carry.json");
-    const c = readJson<{ model?: string; thinking?: string; spec: string; review?: ReviewSessionState; at: number }>(file);
+    const c = readJson<{ model?: string; thinking?: string; spec: string; review?: ReviewSessionState; parent?: string; at: number }>(file);
+    if (!c) return undefined;
+    if (typeof c.at !== "number" || Date.now() - c.at >= 60 * 60_000) {
+      fs.rmSync(file, { force: true });
+      return undefined;
+    }
+    // An unrelated new session must not consume another session's handover; leave it for its target.
+    // previousSessionFile is provided by Pi for new/resume/fork; without it (tests, older Pi) fall back to consuming.
+    if (c.parent && previousSessionFile && c.parent !== previousSessionFile) return undefined;
     fs.rmSync(file, { force: true });
-    return c && Date.now() - c.at < 5 * 60_000 ? c : undefined;
+    return c;
   }
 
   /** One-time questions already asked in this project (e.g. adding the standards to AGENTS.md). */
@@ -465,17 +547,28 @@ export class Store {
   }
 
   /**
-   * The spec being built in this session: the unfinished one, else the most recent that a new
-   * plan hasn't detached (one session can build several in turn).
+   * The spec being built in this session: the unfinished one (most recent when several claim it),
+   * else the most recent that a new plan hasn't detached (one session can build several in turn).
+   * Session paths are compared by realpath: /tmp vs /private/tmp must not orphan a paused build.
    */
   specForSession(sessionFile: string | undefined): string | undefined {
     if (!sessionFile) return undefined;
+    const same = (a: string, b: string) => {
+      if (a === b) return true;
+      try {
+        return fs.realpathSync(a) === fs.realpathSync(b);
+      } catch {
+        return false;
+      }
+    };
     const mine = this.specNames()
       .map((n) => ({ n, p: this.progress(n) }))
-      .filter((x) => x.p?.session === sessionFile);
-    const active = mine.find((x) => ["building", "paused"].includes(x.p!.phase));
+      .filter((x) => typeof x.p?.session === "string" && same(x.p.session as string, sessionFile));
+    const active = mine
+      .filter((x) => ["building", "paused"].includes(x.p!.phase))
+      .sort((a, b) => (b.p!.updatedAt ?? "").localeCompare(a.p!.updatedAt ?? ""))[0];
     if (active) return active.n;
-    return mine.filter((x) => !x.p!.detached).sort((a, b) => b.p!.updatedAt.localeCompare(a.p!.updatedAt))[0]?.n;
+    return mine.filter((x) => !x.p!.detached).sort((a, b) => (b.p!.updatedAt ?? "").localeCompare(a.p!.updatedAt ?? ""))[0]?.n;
   }
 
   /** Specs this session wrote that aren't built yet: what a planning session is working on. */
@@ -497,25 +590,50 @@ export class Store {
     }
   }
 
-  /** A /pb:build that first asked for the spec: build it once it is written (in this session). */
+  /** A /pb:build that first asked for the spec: build it once it is written (in this session). Per-session, so parallel planners don't clobber each other. */
   setPendingBuild(sessionFile: string | undefined): void {
     const file = path.join(this.root, "pending-build.json");
-    if (sessionFile) writeFile(file, `${JSON.stringify({ session: sessionFile, at: Date.now() })}\n`);
-    else fs.rmSync(file, { force: true });
+    if (!sessionFile) {
+      fs.rmSync(file, { force: true });
+      return;
+    }
+    const all = readJson<Record<string, { at: number }>>(file) ?? {};
+    // Migrate single-global format: {session, at} → {sessionFile: {at}}.
+    const migrated: Record<string, { at: number }> = Array.isArray(all)
+      ? {}
+      : typeof (all as { session?: unknown }).session === "string"
+        ? { [(all as unknown as { session: string }).session]: { at: (all as unknown as { at: number }).at ?? Date.now() } }
+        : (all as Record<string, { at: number }>);
+    migrated[sessionFile] = { at: Date.now() };
+    writeFile(file, `${JSON.stringify(migrated, null, 2)}\n`);
   }
   pendingBuild(sessionFile: string | undefined): boolean {
-    const p = readJson<{ session: string; at: number }>(path.join(this.root, "pending-build.json"));
-    return !!p && !!sessionFile && p.session === sessionFile && Date.now() - p.at < 60 * 60_000;
+    const raw = readJson<Record<string, { at: number }> | { session: string; at: number }>(path.join(this.root, "pending-build.json"));
+    if (!raw || !sessionFile) return false;
+    const rec = (raw as Record<string, { at: number }>)[sessionFile] ?? ((raw as { session?: string }).session === sessionFile ? (raw as { at: number }) : undefined);
+    return !!rec && typeof rec.at === "number" && Date.now() - rec.at < 60 * 60_000;
+  }
+  clearPendingBuild(sessionFile: string): void {
+    const file = path.join(this.root, "pending-build.json");
+    const raw = readJson<Record<string, { at: number }>>(file);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+    if (raw[sessionFile]) {
+      delete raw[sessionFile];
+      writeFile(file, `${JSON.stringify(raw, null, 2)}\n`);
+    }
   }
 
-  /** Move a finished spec out of .pi/pb/ so later sessions only see live specs. */
+  /** Move a finished spec out of .pi/pb/ so later sessions only see live specs. Unique dest; throws clearly when missing. */
   archive(name: string): string {
+    const src = this.specDir(name);
+    if (!fs.existsSync(src)) throw new Error(`No spec "${name}" to archive.`);
     fs.mkdirSync(this.archiveRoot, { recursive: true });
     const ignore = path.join(this.archiveRoot, ".gitignore");
     if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, "*\n");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const dest = path.join(this.archiveRoot, `${stamp}-${name}`);
-    fs.renameSync(this.specDir(name), dest);
+    let dest = path.join(this.archiveRoot, `${stamp}-${name}`);
+    for (let i = 2; fs.existsSync(dest) && i < 100; i++) dest = path.join(this.archiveRoot, `${stamp}-${name}-${i}`);
+    fs.renameSync(src, dest);
     return dest;
   }
 }
@@ -532,28 +650,34 @@ function git(cwd: string, args: string[]): string | undefined {
 
 export const gitHead = (cwd: string) => git(cwd, ["rev-parse", "HEAD"])?.trim() || undefined;
 
-/** Files changed since a commit (tracked + untracked), pb state excluded. */
+/** Files changed since a commit (tracked + untracked), pb state excluded (all of .pi, including the archive). */
 export function changedSince(cwd: string, base?: string): string[] {
-  const tracked = git(cwd, ["diff", "--name-only", base ?? "HEAD", "--", ".", ":(exclude).pi/pb"]) ?? "";
-  const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).pi/pb"]) ?? "";
+  const tracked = git(cwd, ["diff", "--name-only", base ?? "HEAD", "--", ".", ":(exclude).pi"]) ?? "";
+  const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).pi"]) ?? "";
   return [...new Set(`${tracked}\n${untracked}`.split("\n").filter(Boolean))];
 }
 
 /** The change's diff against a commit (pb state excluded), capped: for spotting sensitive ground. */
 export const gitDiff = (cwd: string, base?: string) => (git(cwd, ["diff", "--no-color", "-U0", base ?? "HEAD", "--", ".", ":(exclude).pi"]) ?? "").slice(0, 2_000_000);
 
-/** New, untracked files as added diff lines (capped), so a brand-new file counts too. */
+/** New, untracked files as added diff lines (capped without reading huge files), so a brand-new file counts too. */
 export function untrackedText(cwd: string, files: string[]): string {
   const untracked = new Set((git(cwd, ["ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).pi"]) ?? "").split("\n").filter(Boolean));
   let out = "";
   for (const f of files.filter((x) => untracked.has(x))) {
     try {
-      out += `\n${fs.readFileSync(path.join(cwd, f), "utf8").slice(0, 200_000).split("\n").map((l) => `+${l}`).join("\n")}`;
+      const full = path.join(cwd, f);
+      const size = fs.statSync(full).size;
+      if (size > 500_000) continue; // huge dumps rely on the file list, not content, for sensitiveGround
+      const buf = fs.readFileSync(full);
+      if (buf.includes(0)) continue; // binary
+      out += `\n${buf.toString("utf8").slice(0, 200_000).split("\n").map((l) => `+${l}`).join("\n")}`;
     } catch {
       // unreadable: skip
     }
+    if (out.length > 500_000) break;
   }
   return out;
 }
 
-export const diffStat = (cwd: string, base?: string) => git(cwd, ["diff", "--stat", base ?? "HEAD", "--", ".", ":(exclude).pi/pb"])?.trim() ?? "";
+export const diffStat = (cwd: string, base?: string) => git(cwd, ["diff", "--stat", base ?? "HEAD", "--", ".", ":(exclude).pi"])?.trim() ?? "";
