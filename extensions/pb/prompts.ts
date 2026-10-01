@@ -190,6 +190,18 @@ export function continuePrompt(task: SpecTask): string {
   return `[pb:build] Continue task ${task.id}: ${task.title}. Finish it with pb_task_done.`;
 }
 
+/**
+ * check: nothing (the final check afterwards guards it). base: the build's base commit for the diff, if known.
+ */
+export function coherePrompt(base: string | undefined, attempt: number, max: number): string {
+  const diff = base ? `git diff ${base} -- . ':(exclude).pi'` : `git diff HEAD -- . ':(exclude).pi'`;
+  return `[pb:build] Coherence pass${attempt > 1 ? ` (attempt ${attempt} of ${max})` : ""}. Do only this task:
+
+Read the whole change of this feature (\`${diff}\`, plus untracked files from git status), looking only for what task slicing leaves behind: duplicated helpers or logic across tasks, dead code a slice made redundant, and inconsistent naming or error handling. Consolidate what is worth consolidating, strictly within what the spec's Goal, Decisions, Contracts and Acceptance allow: change no behaviour, API, or data, and never weaken an existing test.
+
+When done, call pb_task_done with task "cohere". If it can't be done properly, status "blocked" with why. If there is nothing worth consolidating, say so and finish done anyway.`;
+}
+
 export function fixText(taskId: string, what: string, output: string, attempt: number, max: number, last: boolean): string {
   const head = `${taskId === "final" ? "The final check" : `The check for ${taskId}`} failed (attempt ${attempt} of ${max}): ${what}`;
   return last

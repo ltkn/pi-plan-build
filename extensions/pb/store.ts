@@ -130,6 +130,10 @@ export interface VerifyResult {
 
 export type TaskStatus = "todo" | "doing" | "done" | "blocked";
 
+/** Synthetic build step between the last task and the final check (not a spec task): re-read the whole
+ * diff and consolidate what task slicing split apart. Mirrored with "final" everywhere progress tasks appear. */
+export const COHERE_TASK_ID = "cohere";
+
 export interface TaskProgress {
   id: string;
   title: string;

@@ -365,7 +365,11 @@ named "build: <spec>", seeded with the spec, on your model and thinking level.
    task by task, where each step is checked by something real. The first task
    that settles a shape the later ones build on records it in the spec's
    `## Design`.
-2. **The end.** After the last task, the harness runs the full test suite (a
+2. **The end.** After the last task, on a build of three or more tasks the
+   harness hands out one coherence pass first: re-read the whole diff and
+   consolidate the duplication, dead code or inconsistent naming the slicing
+   left behind, strictly within the spec (no behaviour, API or data change;
+   nothing to consolidate is a fine result). Then it runs the full test suite (a
    compile for `Verification: build`) **inside that same call**. A failure
    comes straight back to fix, up to `maxAttempts`, then the build pauses for
    you. The agent's word never ends a build: the check does.
@@ -646,7 +650,8 @@ model call).
 
 - **`/pb:status`**: every spec, its state, verification, dependencies and tasks.
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and
-  failed, pauses, the review verdicts, the build session's tokens, share served
+  failed, pauses, the review verdicts with the latest review's confirmed P0/P1,
+  red proofs (proven, sent back, pre-green), the build session's tokens, share served
   from cache, peak context, cost and time, the explorer's calls, and how often
   the session was compacted, reset, reminded or asked you something.
   `/pb:stats all` compares every spec, archived ones included.

@@ -33,6 +33,7 @@ import {
   buildStateSummary,
   checkpointPrompt,
   checkpointSummary,
+  coherePrompt,
   reviewStateSummary,
   designProvenance,
   continuePlanPrompt,
@@ -57,10 +58,13 @@ import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionOf, setSection, setStatus, sharedTestCommands, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
+import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
+
+/** Coherence pays off once slices can drift: smaller builds skip the pass. */
+const COHERE_MIN_TASKS = 3;
 
 /** Pi compacts at the context window minus this reserve (its default reserveTokens): a checkpoint must come earlier. */
 const PI_RESERVE_TOKENS = 16384;
@@ -978,6 +982,33 @@ export default function pb(pi: ExtensionAPI) {
     };
   };
 
+  /** Coherence pays off once slices can drift: single- and two-task builds skip the pass. */
+  const needsCohere = (spec: ParsedSpec) => spec.tasks.length >= COHERE_MIN_TASKS;
+
+  /**
+   * Open the coherence pass: snapshot for undo (replacing any stale checkpoint from an undone pass),
+   * record the synthetic step, and mark the turn boundary. Callers compose the marker and prompt.
+   */
+  const beginCohereEntry = (ctx: ExtensionContext, store: Store, p: Progress): void => {
+    const { cfg } = commands(ctx.cwd, store);
+    if (cfg.checkpoints) {
+      const kept = store.checkpoints(p.spec).filter((c) => c.id !== COHERE_TASK_ID);
+      const snap = snapshot(ctx.cwd, `pb: before ${p.spec} cohere`);
+      if (snap) {
+        kept.push({ id: COHERE_TASK_ID, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: COHERE_TASK_ID, entry: tree(ctx).getLeafId?.() ?? undefined, pendingEntry: true });
+        store.saveCheckpoints(p.spec, kept);
+      }
+    }
+    p.tasks.push({ id: COHERE_TASK_ID, title: "Coherence pass: consolidate what slicing split apart", status: "doing", attempts: 1 });
+    p.current = COHERE_TASK_ID;
+    p.phase = "building";
+    p.pause = undefined;
+    store.saveProgress(p);
+    showProgress(ctx, p);
+    boundary = true;
+  };
+  const COHERE_MARKER = "▶ coherence pass";
+
   /** The build's state as a summary, for a reset at a task boundary or a compaction in the middle of a task. */
   const stateSummary = (ctx: ExtensionContext, store: Store, p: Progress, reason: "reset" | "compaction", extra: { changed?: string[]; read?: string[]; previous?: string } = {}) => {
     const loaded = loadSpec(store, p.spec);
@@ -988,9 +1019,11 @@ export default function pb(pi: ExtensionAPI) {
     const current =
       p.current === "final"
         ? fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", tp?.attempts ?? 1, cfg.maxAttempts, false)
-        : task && loaded
-          ? stepPrompt(ctx, store, loaded.spec, p, task, tp?.attempts ?? 1)
-          : `Carry on with ${p.current ?? "the build"}; finish it with pb_task_done.`;
+        : p.current === COHERE_TASK_ID
+          ? coherePrompt(p.baseCommit, tp?.attempts ?? 1, cfg.maxAttempts)
+          : task && loaded
+            ? stepPrompt(ctx, store, loaded.spec, p, task, tp?.attempts ?? 1)
+            : `Carry on with ${p.current ?? "the build"}; finish it with pb_task_done.`;
     return buildStateSummary({ p, markdown: loaded?.md, mechanics: loaded ? buildMechanics(loaded.spec, buildCmd, each, store.extra("build")) : "", current, reason, ...extra });
   };
 
@@ -1103,6 +1136,11 @@ export default function pb(pi: ExtensionAPI) {
       const t = beginTask(ctx, store, p, next.id, { inTool: true })!;
       boundary = true;
       return reply(`${passed}\n\n${t.prompt}`);
+    }
+    // Every spec task done: on builds big enough to drift, one coherence pass before the final check.
+    if (!final && p.current !== COHERE_TASK_ID && !p.tasks.some((t) => t.id === COHERE_TASK_ID) && needsCohere(spec)) {
+      beginCohereEntry(ctx, store, p);
+      return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts)}`);
     }
     // Every task done: one full check, unless the last task's check was that already.
     const endCmd = checkCommand(spec, undefined, testCmd, buildCmd, true, each);
@@ -1538,7 +1576,7 @@ export default function pb(pi: ExtensionAPI) {
       unattended: notes.length ? notes : undefined,
       updatedAt: now(),
     };
-    const first = p.tasks.find((t) => t.status !== "done")?.id;
+    const first = p.tasks.find((t) => t.status !== "done")?.id ?? (needsCohere(spec) && !prev?.tasks.some((t) => t.id === COHERE_TASK_ID && t.status === "done") ? COHERE_TASK_ID : undefined);
     if (!first) return ctx.ui.notify(`Every task of ${name} is done. Next: /${cmd("review")} ${name}.`, "info");
     /** The start-of-build undo point, in the session that builds. */
     const startCheckpoint = (c: ExtensionContext) => {
@@ -1557,10 +1595,14 @@ export default function pb(pi: ExtensionAPI) {
       startCheckpoint(ctx);
       store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false });
       const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
-      const task = beginTask(ctx, store, p, first, { intro: true })!;
+      const cohereFirst = first === COHERE_TASK_ID;
+      if (cohereFirst) beginCohereEntry(ctx, store, p);
+      const task = cohereFirst ? null : beginTask(ctx, store, p, first, { intro: true })!;
+      const marker = cohereFirst ? COHERE_MARKER : task!.marker;
+      const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts) : task!.prompt;
       instruct(
-        `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${task.marker}`,
-        `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : md, store.extra("build"))}\n\n${task.prompt}`,
+        `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${marker}`,
+        `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : md, store.extra("build"))}\n\n${prompt}`,
       );
       return;
     }
@@ -1583,17 +1625,20 @@ export default function pb(pi: ExtensionAPI) {
         store.saveProgress(p);
         startCheckpoint(c);
         store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: true });
-        const task = beginTask(c, store, p, first, { intro: true })!;
+        const cohereFirst = first === COHERE_TASK_ID;
+        if (cohereFirst) beginCohereEntry(c, store, p);
+        const task = cohereFirst ? null : beginTask(c, store, p, first, { intro: true })!;
+        const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts) : task!.prompt;
         await c.sendMessage(
           {
             customType: "pb",
-            content: `▶ Building **${name}** from ${store.rel("specs", name, "spec.md")}${carried.model ? `, on ${carried.model}` : ""}${carried.thinking ? `, thinking ${carried.thinking}` : ""}.\nThis session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\`\n${task.marker}`,
+            content: `▶ Building **${name}** from ${store.rel("specs", name, "spec.md")}${carried.model ? `, on ${carried.model}` : ""}${carried.thinking ? `, thinking ${carried.thinking}` : ""}.\nThis session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\`\n${cohereFirst ? COHERE_MARKER : task!.marker}`,
             display: true,
           },
           { triggerTurn: false },
         );
         // Not awaited: the build runs on in this session while the command returns.
-        void c.sendMessage({ customType: "pb-instruction", content: `${intro}\n\n${task.prompt}`, display: false }, { triggerTurn: true });
+        void c.sendMessage({ customType: "pb-instruction", content: `${intro}\n\n${prompt}`, display: false }, { triggerTurn: true });
       },
     });
     if (result.cancelled) ctx.ui.notify("Build cancelled.", "info");
@@ -1797,10 +1842,31 @@ export default function pb(pi: ExtensionAPI) {
           showProgress(ctx, p);
           return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false) + from);
         }
+        if (p.current === COHERE_TASK_ID) {
+          const cc = p.tasks.find((t) => t.id === COHERE_TASK_ID);
+          if (!cc) {
+            beginCohereEntry(ctx, store, p);
+            return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts)}${from}`);
+          }
+          // Like tasks below: only an exhausted pass gets a fresh set; other pauses keep their count.
+          if (cc.attempts >= cfg.maxAttempts) cc.attempts = 0;
+          const attempt = cc.attempts + 1;
+          cc.attempts = attempt;
+          p.phase = "building";
+          p.pause = undefined;
+          store.saveProgress(p);
+          showProgress(ctx, p);
+          return instruct("▶ coherence pass", `${coherePrompt(p.baseCommit, attempt, cfg.maxAttempts)}${from}`);
+        }
         const cur = p.current ?? nextTodo(p)?.id;
         const tp = p.tasks.find((t) => t.id === cur);
         const loaded = loadSpec(store, p.spec);
         if (!loaded) return ctx.ui.notify(`${store.rel("specs", p.spec, "spec.md")} doesn't parse. Fix it (or /${cmd("spec")} ${p.spec}), then /${cmd("build")}.`, "error");
+        // Undone past the coherence pass (or a restart that dropped it): all spec tasks done, pass pending.
+        if ((!cur || !tp) && needsCohere(loaded.spec) && !p.tasks.some((t) => t.id === COHERE_TASK_ID)) {
+          beginCohereEntry(ctx, store, p);
+          return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts)}${from}`);
+        }
         if (!cur || !tp) return ctx.ui.notify("Nothing left to build here.", "info");
         // Your answer to a task that kept failing buys it a fresh set of attempts; other pauses cost none.
         const exhausted = tp.attempts >= cfg.maxAttempts;
@@ -2495,7 +2561,7 @@ export default function pb(pi: ExtensionAPI) {
       }
       const undoEntry: Checkpoint = { id: `u${cps.filter((c) => c.id.startsWith("u")).length + 1}`, at: now(), ...cur, head, tasks: structuredClone(p.tasks), entry: rewound ? oldLeaf : undefined };
       store.saveCheckpoints(name, [...cps.slice(0, idx).concat(target.id === "start" ? [target] : []), undoEntry]);
-      p.tasks = structuredClone(target.tasks).filter((t) => t.id !== "final");
+      p.tasks = structuredClone(target.tasks).filter((t) => t.id !== "final" && t.id !== COHERE_TASK_ID);
       p.current = undefined;
       p.phase = "paused";
       p.pause = `undone to before ${target.id}`;

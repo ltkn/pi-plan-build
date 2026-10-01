@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Coherence pass before the final check**: builds of three or more tasks get one extra step after the last task — re-read the whole diff and consolidate the duplication, dead code or inconsistent naming the slicing left behind, strictly within the spec and guarded by the final check. Smaller builds skip it; undo, resume, restarts, and stats treat it like the final check
+- **Stats for the retirement bar**: `/pb:stats` reports red proofs (proven, sent back, pre-green) and the latest review's confirmed P0/P1 — the two counts that decide whether the build ceremony earns its keep over plain Pi
+
 ## 1.23.0
 
 - **No more skeleton**: the build no longer starts with stubs plus every task's tests. Each task is built the same way — tests first (`pb_tests_red`), then the behaviour — with the compiler and the tests giving feedback task by task. Contracts carry the whole shape instead (every seam the tasks share, and who owns each side), and the first task that settles a shape records it in the spec's `## Design` with `pb_update_spec` (later changes go in Decisions). Gone with it: `pb_skeleton_done`, the `filled` prompt variant, and the `designReview` dialog

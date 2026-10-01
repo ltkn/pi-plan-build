@@ -48,7 +48,7 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
    → asks now, while you're here: build here / in a fresh session / show me the spec first
    → Pi writes .pi/pb/specs/order-cancellation/spec.md (goal, findings,
      decisions, tasks with their test commands) and the build starts by itself
-    → one run: T1 → T2 → … (each: its tests seen failing, then passing) → full suite ✗ → fix → full suite ✓
+    → one run: T1 → T2 → … (each: its tests seen failing, then passing) → coherence (3+ tasks) → full suite ✗ → fix → full suite ✓
    ✅ BUILD COMPLETE
 /pb:review
    → a spec pass in a fresh session: every acceptance criterion with evidence,

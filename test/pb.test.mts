@@ -928,6 +928,91 @@ Create T2.txt.
   assert.match(t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!, /- T2: `test -f both\.txt` already satisfied by T1's proven run/);
 });
 
+const THREE_TASKS = `### T1: first file
+Create T1.txt.
+- Acceptance: T1.txt exists
+- Test: \`test -f T1.txt\`
+
+### T2: second file
+Create T2.txt.
+- Acceptance: T2.txt exists
+- Test: \`test -f T2.txt\`
+
+### T3: third file
+Create T3.txt.
+- Acceptance: T3.txt exists
+- Test: \`test -f T3.txt\``;
+
+/** Like diligent, but finishes the coherence pass without pretending it wrote a file. */
+const withCohere = (seen: string[], cohere: (text: string, tool: Tool) => Promise<void> | void): Script => async (text, tool) => {
+  if (text.includes('task "cohere"')) {
+    seen.push(text);
+    return cohere(text, tool);
+  }
+  return diligent(text, tool);
+};
+
+test("build: coherence pass runs on 3+ task builds and is skipped on smaller ones", async () => {
+  const t = setup({ verify: "true" });
+  await written(t, SPEC({ tasks: THREE_TASKS }));
+  const seen: string[] = [];
+  t.agent.script = withCohere(seen, async (_text, tool) => {
+    await tool("pb_task_done", { task: "cohere", status: "done", summary: "nothing to consolidate" });
+  });
+  await t.run("build");
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "built");
+  assert.equal(seen.length, 1);
+  assert.deepEqual(p.tasks.map((x: any) => [x.id, x.status]), [["T1", "done"], ["T2", "done"], ["T3", "done"], ["cohere", "done"]]);
+  assert.match(t.posts.at(-1)!, /cohere/); // the completed build lists the pass
+
+  const u = setup({ verify: "true" });
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  assert.equal(u.progress("order-cancellation").phase, "built");
+  assert.ok(!u.progress("order-cancellation").tasks.some((x: any) => x.id === "cohere"));
+});
+
+test("build: pausing mid-coherence resumes the pass instead of stranding the build", async () => {
+  const t = setup({ verify: "true" });
+  await written(t, SPEC({ tasks: THREE_TASKS }));
+  let coheres = 0;
+  t.agent.script = withCohere([], async (_text, tool) => {
+    coheres++;
+    if (coheres === 1) return; // stop without finishing: nudge, then pause
+    await tool("pb_task_done", { task: "cohere", status: "done", summary: "consolidated on retry" });
+  });
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+  await t.run("build");
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "built");
+  assert.equal(coheres, 2);
+  assert.deepEqual(p.tasks.find((x: any) => x.id === "cohere").status, "done");
+});
+
+test("build: undoing the coherence pass restores files and the pass re-runs", async () => {
+  const t = setup({ verify: "true" });
+  await written(t, SPEC({ tasks: THREE_TASKS }));
+  let coheres = 0;
+  t.agent.script = withCohere([], async (_text, tool) => {
+    coheres++;
+    if (coheres === 1) fs.appendFileSync("T1.txt", "# consolidated\n");
+    await tool("pb_task_done", { task: "cohere", status: "done", summary: coheres === 1 ? "consolidated" : "nothing left" });
+  });
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.match(t.read("T1.txt"), /consolidated/);
+  await t.run("undo", "cohere");
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+  assert.ok(!t.progress("order-cancellation").tasks.some((x: any) => x.id === "cohere"));
+  assert.doesNotMatch(t.read("T1.txt"), /consolidated/);
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.equal(coheres, 2);
+});
+
 test("build: without a shared proven command, a passing task still wedges honestly — blocked, for the human", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -1577,6 +1662,37 @@ test("stats: tasks, first try, checks, pauses, review, and the build session's t
 
   await t.run("stats", "all");
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2 +50%/);
+});
+
+test("stats: proof and confirmed counts render for the retirement bar", async () => {
+  const { renderCard } = await import("../extensions/pb/stats.ts");
+  const card = renderCard({
+    name: "demo",
+    phase: "built",
+    events: [
+      { type: "build-start", at: "2026-10-01 10:00:00" },
+      { type: "red", task: "T1", ok: true, at: "2026-10-01 10:01:00" },
+      { type: "check", task: "T1", ok: true, at: "2026-10-01 10:02:00" },
+      { type: "red", task: "T2", ok: false, at: "2026-10-01 10:03:00" },
+      { type: "check", task: "T2", ok: true, at: "2026-10-01 10:04:00" },
+      { type: "red", task: "T3", ok: false, at: "2026-10-01 10:05:00" },
+      { type: "review", verdict: "changes_needed", p: [1, 2, 0, 3], at: "2026-10-01 10:06:00" },
+      { type: "built", at: "2026-10-01 10:07:00" },
+    ],
+    explore: [],
+    progress: {
+      spec: "demo",
+      phase: "built",
+      tasks: [
+        { id: "T1", title: "a", status: "done", attempts: 1, red: "failing" },
+        { id: "T2", title: "b", status: "done", attempts: 1, preGreen: "T1" },
+        { id: "T3", title: "c", status: "done", attempts: 1 },
+      ],
+      updatedAt: "2026-10-01 10:07:00",
+    },
+  } as any);
+  assert.match(card, /Proof +1 proven · 1 sent back · 1 pre-green/);
+  assert.match(card, /Review.*P0\/P1 confirmed \(latest\): 3/);
 });
 
 test("stats: after a new plan in the build's session, its turns stop counting for the finished spec", async () => {

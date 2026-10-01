@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type Progress, type Store, readEvents as readJsonl } from "./store.ts";
+import { type Progress, type Store, readEvents as readJsonl, COHERE_TASK_ID } from "./store.ts";
 
 type Ev = { type: string; at: string; [k: string]: unknown };
 
@@ -95,6 +95,10 @@ export interface Summary {
   pauses: Record<string, number>;
   undo: number;
   reviews: string[];
+  /** Red-proof signal: tasks proven, tasks sent back at least once (excluding pre-green), pre-green tasks. */
+  proof: { proven: number; sentBack: number; preGreen: number };
+  /** Confirmed P0/P1 of the latest review (post double-check). */
+  confirmed: { p0: number; p1: number };
   build: { prompt: number; cached: number; output: number; cost: number; peak: number; window?: number; turns: number };
   review: { prompt: number; output: number; cost: number };
   explorer: { calls: number; prompt: number; output: number; cost: number };
@@ -104,11 +108,11 @@ export interface Summary {
 
 export function summarize(s: SpecStats): Summary {
   const e = s.events;
-  // The spec's tasks: not the final check, nor the skeleton step earlier versions recorded.
-  const checks = e.filter((x) => x.type === "check" && x.task !== "final" && x.task !== "skeleton");
+  // The spec's tasks: not the final check, the coherence pass, nor the skeleton step earlier versions recorded.
+  const checks = e.filter((x) => x.type === "check" && x.task !== "final" && x.task !== "skeleton" && x.task !== COHERE_TASK_ID);
   const perTask = new Map<string, Ev[]>();
   for (const c of checks) perTask.set(String(c.task), [...(perTask.get(String(c.task)) ?? []), c]);
-  const tasks = (s.progress?.tasks ?? []).filter((t) => t.id !== "final" && t.id !== "skeleton");
+  const tasks = (s.progress?.tasks ?? []).filter((t) => t.id !== "final" && t.id !== "skeleton" && t.id !== COHERE_TASK_ID);
   const done = tasks.filter((t) => t.status === "done");
   // First-try only over tasks with a check: gate "none" and unchecked middle tasks carry no signal.
   const tried = done.filter((t) => perTask.has(t.id));
@@ -148,6 +152,12 @@ export function summarize(s: SpecStats): Summary {
   const count = (type: string) => e.filter((x) => x.type === type).length;
   const start = e.find((x) => x.type === "build-start");
   const end = [...e].reverse().find((x) => x.type === "built") ?? e.at(-1);
+  // Red sent-backs: a `red` event with ok:false means the tests passed without the change.
+  // Pre-green tasks share that event shape, so they count as pre-green, not sent back.
+  const sentBackIds = new Set(e.filter((x) => x.type === "red" && x.ok === false).map((x) => String(x.task)));
+  const preGreenIds = new Set(tasks.filter((t) => t.preGreen).map((t) => t.id));
+  const lastReview = [...e].reverse().find((x) => x.type === "review");
+  const pp = Array.isArray(lastReview?.p) ? (lastReview.p as unknown[]) : [];
   return {
     tasks: tasks.length,
     done: done.length,
@@ -159,6 +169,12 @@ export function summarize(s: SpecStats): Summary {
     pauses,
     undo: e.filter((x) => x.type === "undo").length,
     reviews: reviews.map((r) => String(r.verdict)),
+    proof: {
+      proven: tasks.filter((t) => !!t.red).length,
+      sentBack: [...sentBackIds].filter((id) => !preGreenIds.has(id)).length,
+      preGreen: preGreenIds.size,
+    },
+    confirmed: { p0: num(pp[0]), p1: num(pp[1]) },
     build,
     review,
     explorer,
@@ -171,6 +187,7 @@ export function renderCard(s: SpecStats): string {
   const x = summarize(s);
   const pauses = Object.entries(x.pauses).map(([k, v]) => `${k} ${v}`).join(" · ");
   const b = x.build;
+  const hasRed = s.events.some((e) => e.type === "red");
   return [
     "```",
     `pb stats — ${s.name} (${s.phase})`,
@@ -178,7 +195,8 @@ export function renderCard(s: SpecStats): string {
     `Tasks     ${x.done} of ${x.tasks} done · first try ${x.firstTry[0]}/${x.firstTry[1]} (${pct(...x.firstTry)}) · ${x.attempts} task checks${x.most ? ` · most: ${x.most[0]} (${x.most[1]})` : ""}`,
     `Checks    ${x.checks} run, ${x.failed} failed`,
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,
-    `Review    ${x.reviews.length ? x.reviews.join(" → ") : "not run"}`,
+    `Review    ${x.reviews.length ? `${x.reviews.join(" → ")} · P0/P1 confirmed (latest): ${x.confirmed.p0 + x.confirmed.p1}` : "not run"}`,
+    ...(hasRed ? [`Proof     ${x.proof.proven} proven · ${x.proof.sentBack} sent back · ${x.proof.preGreen} pre-green`] : []),
     `Build     ${b.turns} turns · prompt ${human(b.prompt)} (${pct(b.cached, b.prompt)} from cache) · output ${human(b.output)} · $${b.cost.toFixed(2)}${x.ms ? ` · ${dur(x.ms)}` : ""}`,
     `Context   peak ${human(b.peak)}${b.window ? ` (${pct(b.peak, b.window)} of ${human(b.window)})` : ""}`,
     `Reviewer  prompt ${human(x.review.prompt)} · output ${human(x.review.output)} · $${x.review.cost.toFixed(2)}`,
