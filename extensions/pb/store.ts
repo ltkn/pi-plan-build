@@ -308,7 +308,9 @@ export function readEvents(file: string): Record<string, unknown>[] {
 export class Store {
   readonly root: string;
   readonly archiveRoot: string;
-  constructor(readonly cwd: string) {
+  readonly cwd: string;
+  constructor(cwd: string) {
+    this.cwd = cwd;
     this.root = path.join(cwd, PB_DIR);
     this.archiveRoot = path.join(cwd, ARCHIVE_DIR);
   }

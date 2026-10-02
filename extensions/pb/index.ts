@@ -52,7 +52,7 @@ import {
   taskPrompt,
 } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
-import { type ExploreDetails, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
+import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionOf, setSection, setStatus, sharedTestCommands, tokensOf } from "./spec.ts";
@@ -278,18 +278,52 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   /**
-   * A dialog that goes on without you: after askTimeoutSec (with a countdown), `fallback` is taken and noted
-   * in `notes`, so a build started before you walk away doesn't wait all night. Esc still cancels (undefined).
+   * Dialog patience: ms counts idle time, not wall time. Any terminal input (TUI only)
+   * restarts the countdown, so a slow-but-present human never loses a dialog while a truly
+   * away human still gets the fallback. Headless keeps the absolute timeout. Returns the
+   * dialog result plus whether it timed out while idle.
+   */
+  const patiently = async <T>(ctx: ExtensionContext, ms: number, run: (opts: { signal?: AbortSignal; timeout?: number } | undefined) => Promise<T>): Promise<{ result: T; timedOut: boolean }> => {
+    const canHear = ctx.hasUI && ctx.mode === "tui" && typeof ctx.ui.onTerminalInput === "function";
+    if (ms <= 0 || !canHear) {
+      const asked = Date.now();
+      const result = await run(ms > 0 ? { timeout: ms } : undefined);
+      return { result, timedOut: ms > 0 && Date.now() - asked >= ms - 1000 };
+    }
+    const ctrl = new AbortController();
+    let lastActive = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => ctrl.abort(), Math.max(0, ms - (Date.now() - lastActive)));
+    };
+    const unsub = ctx.ui.onTerminalInput(() => {
+      lastActive = Date.now();
+      arm();
+    });
+    arm();
+    try {
+      const result = await run({ signal: ctrl.signal });
+      return { result, timedOut: result === undefined && Date.now() - lastActive >= ms - 1000 };
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      unsub();
+    }
+  };
+
+  /**
+   * A dialog that goes on without you: after askTimeoutSec idle (with a countdown), `fallback`
+   * is taken and noted in `notes`, so a build started before you walk away doesn't wait all night.
+   * Esc still cancels (undefined).
    */
   const choose = async (ctx: ExtensionContext, store: Store, title: string, options: string[], fallback: string, notes?: string[]): Promise<string | undefined> => {
     if (!ctx.hasUI) return fallback;
     // It goes on without you: tell you, in case you're in another window.
     if (store.config().notify) notifyDesktop("pb: your choice", title);
     const ms = store.config().askTimeoutSec * 1000;
-    const asked = Date.now();
-    const choice = await ctx.ui.select(title, options, ms > 0 ? { timeout: ms } : undefined);
+    const { result: choice, timedOut } = await patiently(ctx, ms, (opts) => ctx.ui.select(title, options, opts));
     if (choice !== undefined) return choice;
-    if (ms > 0 && Date.now() - asked >= ms - 1000) {
+    if (timedOut) {
       notes?.push(`${title} → ${fallback} (no answer within ${Math.max(1, Math.round(ms / 60_000))} min)`);
       return fallback;
     }
@@ -474,24 +508,35 @@ export default function pb(pi: ExtensionAPI) {
         }
         return reply("No one can answer right now: take the sensible reading, say which one you took, and carry on.");
       }
-      // During a build the human may be away: after askTimeoutSec it goes on with the recommendation.
+      // During a build the human may be away: after askTimeoutSec idle it goes on with the recommendation.
       const timeoutMs = unattended ? store.config().askTimeoutSec * 1000 : 0;
-      const opts = timeoutMs > 0 ? { timeout: timeoutMs } : undefined;
       if (store.config().notify) notifyDesktop("pb: a question for you", params.question);
-      const asked = Date.now();
+      // Lettered, so "A and C" is a complete answer whenever it comes: in the dialog, in the
+      // chat later, or typed freehand after picking "Something else".
+      const letter = (i: number) => String.fromCharCode(65 + i);
+      const lettered = (params.options ?? []).map((o, i) => `${letter(i)}. ${o}${o === params.recommended ? " (recommended)" : ""}`);
       let answer: string | undefined;
+      let timedOut = false;
       const OTHER = "Something else (type it)";
       if (params.options?.length) {
         const labels = params.options.map((o) => (o === params.recommended ? `${o} (recommended)` : o));
-        const choice = await ctx.ui.select(params.question, [...labels, OTHER], opts);
-        answer = choice === OTHER ? await ctx.ui.input(params.question, undefined, opts) : choice ? params.options[labels.indexOf(choice)] : undefined;
-      } else answer = await ctx.ui.input(params.question, params.recommended, opts);
+        const sel = await patiently(ctx, timeoutMs, (opts) => ctx.ui.select(params.question, [...labels, OTHER], opts));
+        timedOut = sel.timedOut;
+        if (sel.result === OTHER) {
+          // The options vanish the moment the typing dialog opens, and the choice is often
+          // written from them: keep them in the chat, where they stay visible while typing.
+          post([`**Answering with your own words:**`, "", params.question, "", ...lettered, "", `Type it here — a letter is enough, or write guidance based on the options above.`].join("\n"));
+          const inp = await patiently(ctx, timeoutMs, (opts) => ctx.ui.input(params.question, "A letter is enough, or your own words based on the options above", opts));
+          timedOut = timedOut || inp.timedOut;
+          answer = inp.result;
+        } else answer = sel.result ? params.options[labels.indexOf(sel.result)] : undefined;
+      } else {
+        const inp = await patiently(ctx, timeoutMs, (opts) => ctx.ui.input(params.question, params.recommended, opts));
+        timedOut = inp.timedOut;
+        answer = inp.result;
+      }
       if (!answer?.trim()) {
-        const timedOut = timeoutMs > 0 && Date.now() - asked >= timeoutMs - 1000;
         // The dialog is gone; the question stays in the chat, to answer whenever the human is back.
-        // Lettered, so "A and C" is a complete answer when it comes hours later.
-        const letter = (i: number) => String.fromCharCode(65 + i);
-        const lettered = (params.options ?? []).map((o, i) => `${letter(i)}. ${o}${o === params.recommended ? " (recommended)" : ""}`);
         const KEPT = ` The question stays in the chat${lettered.length ? `, its options lettered (${lettered.map((o) => o.replace(/ \(recommended\)$/, "")).join("; ")})` : ""}: if the human answers later, by letter or in words, follow their answer.`;
         post(
           [
@@ -553,7 +598,30 @@ export default function pb(pi: ExtensionAPI) {
       const steps: string[] = [];
       const files = new Set<string>();
       let writing = "";
-      const details = (): ExploreDetails => ({ steps: steps.slice(-3), count: steps.length, files: [...files], started, writing: tail(writing, 2) });
+      const details = (): ExploreDetails => ({ steps: steps.slice(-LIVE_STEPS), count: steps.length, files: [...files], started, writing: tail(writing, LIVE_WRITING_LINES) });
+      // Bursts of sub-second tool calls repaint faster than anyone can read: coalesce them,
+      // trailing-edge so the latest state always lands. Terminal states flush on their own path.
+      let lastPaint = 0;
+      let paintTimer: ReturnType<typeof setTimeout> | undefined;
+      let pendingContent: { type: "text"; text: string }[] | undefined;
+      const paint = (content: { type: "text"; text: string }[]) => {
+        if (!onUpdate) return;
+        pendingContent = content;
+        if (paintTimer !== undefined) return; // a flush is queued; it picks up the latest content
+        const wait = LIVE_FLUSH_MS - (Date.now() - lastPaint);
+        if (wait <= 0) {
+          lastPaint = Date.now();
+          onUpdate({ content: pendingContent, details: details() });
+          pendingContent = undefined;
+        } else {
+          paintTimer = setTimeout(() => {
+            paintTimer = undefined;
+            lastPaint = Date.now();
+            if (pendingContent) onUpdate?.({ content: pendingContent, details: details() });
+            pendingContent = undefined;
+          }, wait);
+        }
+      };
       const res = await runFresh({
         cwd: ctx.cwd,
         role: "explorer",
@@ -568,20 +636,26 @@ export default function pb(pi: ExtensionAPI) {
           steps.push(line);
           const p = call.arguments.path ?? call.arguments.file_path;
           if (call.name === "read" && typeof p === "string") files.add(p);
-          onUpdate?.({ content: text(`↳ ${line}`), details: details() });
+          paint(text(`↳ ${line}`));
         },
         onText: (t) => {
           writing = t;
-          onUpdate?.({ content: text(""), details: details() });
+          paint(text(""));
         },
         sessionDir: store.sessionsDir("explorer"),
+      }).finally(() => {
+        if (paintTimer !== undefined) {
+          // A trailing repaint is obsolete now: the returned details carry the final state.
+          clearTimeout(paintTimer);
+          paintTimer = undefined;
+        }
       });
       store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
       if (res.aborted) throw new Error("Exploration stopped.");
       if (!res.text.trim()) throw new Error(`The explorer produced no answer${res.error ? `: ${res.error}` : ""}`);
       const t = res.tokens;
       const session = res.sessionFile ? path.relative(ctx.cwd, res.sessionFile) : undefined;
-      return { content: text(res.text.trim()), details: { ...details(), writing: [], ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite, session }, usage: usageOf(res) };
+      return { content: text(res.text.trim()), details: { ...details(), writing: [], ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite, tokensIn: t.input + t.cacheRead + t.cacheWrite, tokensOut: t.output, session }, usage: usageOf(res) };
     },
   });
 

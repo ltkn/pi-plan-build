@@ -39,6 +39,7 @@ function setup(config: object = {}) {
   const selectOptions: string[][] = [];
   const confirms: string[] = [];
   const dialogTimeouts: (number | undefined)[] = [];
+  const terminalInput: ((d: string) => void)[] = [];
   const editors: (string | undefined)[] = [];
   const views: { customType: string; data: any }[] = [];
   const navigations: { target: string; summary?: string }[] = [];
@@ -193,13 +194,26 @@ function setup(config: object = {}) {
         setWidget: () => {},
         setStatus: () => {},
         setEditorText: (t: string) => (stat.editorText = t),
-        select: async (title: string, opts: string[], o?: { timeout?: number }) => {
+        select: async (title: string, opts: string[], o?: { timeout?: number; signal?: AbortSignal }) => {
           selectTitles.push(title);
           selectOptions.push(opts);
           dialogTimeouts.push(o?.timeout);
           const pick = selects.shift();
+          if (pick === "<hang>") {
+            // A dialog that stays open until dismissed: resolves on abort, like a real timeout.
+            if (o?.signal?.aborted) return undefined;
+            if (o?.signal) await new Promise<void>((res) => o.signal!.addEventListener("abort", () => res(), { once: true }));
+            return undefined;
+          }
           if (pick === "<timeout>") return undefined;
           return pick ?? opts[0];
+        },
+        onTerminalInput: (h: (d: string) => void) => {
+          terminalInput.push(h);
+          return () => {
+            const i = terminalInput.indexOf(h);
+            if (i >= 0) terminalInput.splice(i, 1);
+          };
         },
         confirm: async (title: string) => (confirms.push(title), true),
         input: async () => selects.shift() ?? "",
@@ -367,6 +381,8 @@ function setup(config: object = {}) {
     progress,
     events,
     callTool,
+    /** Simulate terminal activity (arrow keys, typing): resets idle dialog countdowns. */
+    key: (d = "key") => terminalInput.slice().forEach((f) => f(d)),
     settle,
     fire: (event: string, e: object, ctx?: Parameters<typeof fire>[2]) => fire(event, e, ctx),
     entry: (id: string) => treeOf(rt.file()).entries.get(id),
@@ -702,7 +718,7 @@ test("pb_explore answers from a separate context; its usage is reported and coun
   t.agent.script = diligent;
   await t.run("build");
   await t.run("stats");
-  assert.match(t.posts.at(-1)!, /Explorer +1 calls · prompt 3\.0k · output 400 · \$0\.02/);
+  assert.match(t.posts.at(-1)!, /Explorer +1 calls · in 3\.0k · out 400( @ [\d.]+k? tok\/s)? · \$0\.02/);
 });
 
 test("/pb:deps investigates dependencies as a change of its own, in planning mode", async () => {
@@ -1656,9 +1672,9 @@ test("stats: tasks, first try, checks, pauses, review, and the build session's t
   assert.match(card, /Tasks +2 of 2 done · first try 1\/2 \(50%\) · 3 task checks · most: T1 \(2\)/);
   assert.match(card, /Checks +4 run, 1 failed/); // T1 ×2, T2, final
   assert.match(card, /Review +pass/);
-  assert.match(card, /prompt [\d.]+k \(90% from cache\)/);
+  assert.match(card, /in [\d.]+k \(90% cached\)/);
   assert.match(card, /Context +peak 10\.0k \(10% of 100\.0k\)/);
-  assert.match(card, /Reviewer +prompt 20\.0k · output 200/); // the review and abuse sessions' own turns
+  assert.match(card, /Reviewer +in 20\.0k · out 200/); // the review and abuse sessions' own turns
 
   await t.run("stats", "all");
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2 +50%/);
@@ -1679,10 +1695,11 @@ test("stats: proof and confirmed counts render for the retirement bar", async ()
       { type: "review", verdict: "changes_needed", p: [1, 2, 0, 3], at: "2026-10-01 10:06:00" },
       { type: "built", at: "2026-10-01 10:07:00" },
     ],
-    explore: [],
+    explore: [{ session: "s1", input: 3000, output: 400, cacheRead: 0, cacheWrite: 0, cost: 0.02, ms: 1000, at: "2026-10-01 09:59:00" }],
     progress: {
       spec: "demo",
       phase: "built",
+      session: "s1",
       tasks: [
         { id: "T1", title: "a", status: "done", attempts: 1, red: "failing" },
         { id: "T2", title: "b", status: "done", attempts: 1, preGreen: "T1" },
@@ -1693,6 +1710,7 @@ test("stats: proof and confirmed counts render for the retirement bar", async ()
   } as any);
   assert.match(card, /Proof +1 proven · 1 sent back · 1 pre-green/);
   assert.match(card, /Review.*P0\/P1 confirmed \(latest\): 3/);
+  assert.match(card, /Explorer +1 calls · in 3\.0k · out 400 @ 3\.4k tok\/s · \$0\.02/);
 });
 
 test("stats: after a new plan in the build's session, its turns stop counting for the finished spec", async () => {
@@ -2203,9 +2221,27 @@ test("pb_explore shows what it's doing: the question, its live steps, then a one
   const answer = "OrderService applies the transitions.\nOrder holds the state.";
   const done = { ...details, ms: 34_000, tokens: 3200 };
   assert.deepEqual(exploreLines({ details: done, answer, partial: false, expanded: false }).map((l) => l.text), ["explored in 34s · 2 files read · 3.2k tokens", "OrderService applies the transitions."]);
+  assert.deepEqual(
+    exploreLines({ details: { ...done, tokens: undefined, tokensIn: 3000, tokensOut: 200 }, answer, partial: false, expanded: false }).map((l) => l.text),
+    ["explored in 34s · 2 files read · 3.0k in · 200 out @ 5.9 tok/s", "OrderService applies the transitions."],
+  );
+  assert.deepEqual(
+    exploreLines({ details: { ...done, ms: undefined, tokens: undefined, tokensIn: 3000, tokensOut: 200 }, answer, partial: false, expanded: false }).map((l) => l.text),
+    ["explored in 0s · 2 files read · 3.0k in · 200 out", "OrderService applies the transitions."],
+  );
   const all = exploreLines({ details: done, answer, partial: false, expanded: true }).map((l) => l.text);
   assert.deepEqual(all, ["explored in 34s · 2 files read · 3.2k tokens", "OrderService applies the transitions.", "Order holds the state.", "files read:", "  src/order/OrderService.java", "  src/order/Order.java"]);
   assert.deepEqual(exploreLines({ answer: "Exploration stopped.", partial: false, expanded: false, error: true }).map((l) => l.kind), ["error"]);
+});
+
+test("pb_explore live view keeps a wider, bounded window over bursts", async () => {
+  const { exploreLines, LIVE_STEPS, LIVE_WRITING_LINES } = await import("../extensions/pb/render.ts");
+  assert.equal(LIVE_STEPS, 8);
+  assert.equal(LIVE_WRITING_LINES, 4);
+  const steps = Array.from({ length: 12 }, (_, i) => `grep hit${i} src/`);
+  const writing = ["l1", "l2", "l3", "l4", "l5", "l6"];
+  const lines = exploreLines({ details: { steps, count: 12, files: [], started: 1000, writing }, answer: "", partial: true, expanded: false, now: 19_000 }).map((l) => l.text);
+  assert.deepEqual(lines, [...steps.slice(-8).map((s) => `↳ ${s}`), ...writing.slice(-4).map((l) => `│ ${l}`), "12 steps · 18s"]);
 });
 
 test("build: asked up front for a fresh session, the command waits for the spec and opens it itself", async () => {
@@ -2519,6 +2555,54 @@ test("pb_ask: a dialog closed before its time is kept in the chat too; an answer
   const r = await t.callTool("pb_ask", { question: "Which name?", options: ["a", "b"] });
   assert.match(r.content![0].text, /^The human dismissed the question: take the sensible reading[\s\S]*The question stays in the chat/);
   assert.match(t.posts.at(-1)!, /^\*\*Unanswered question\*\* \(the dialog was closed; Pi went on with the sensible reading\):\n\nWhich name\?\n\nA\. a\nB\. b\n/);
+});
+
+test("pb_ask: terminal activity restarts the countdown — idle time, not wall time", async () => {
+  const t = setup({ askTimeoutSec: 2 });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  (t.runtime().ctx as any).mode = "tui";
+  t.selects.push("<hang>");
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let settled = false;
+  const p = t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" }).then((r) => {
+    settled = true;
+    return r;
+  });
+  await sleep(1000);
+  t.key();
+  await sleep(500);
+  t.key();
+  await sleep(1000);
+  assert.equal(settled, false); // 2.5s elapsed but 1s idle: an absolute timeout would have fired
+  const r = await p;
+  assert.equal(settled, true);
+  assert.match(r.content![0].text, /No answer in time: take the sensible reading/);
+  assert.ok(t.posts.some((x) => x.startsWith("**Unanswered question**")));
+});
+
+test("pb_ask: silence still times out the dialog", async () => {
+  const t = setup({ askTimeoutSec: 1 });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  (t.runtime().ctx as any).mode = "tui";
+  t.selects.push("<hang>");
+  const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
+  assert.match(r.content![0].text, /No answer in time: take the sensible reading/);
+  assert.ok(t.posts.some((x) => x.startsWith("**Unanswered question**")));
+});
+
+test("pb_ask: picking Something else keeps the options visible while typing", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  t.selects.push("Something else (type it)", "event, but only for refunds");
+  const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
+  assert.match(r.content![0].text, /^The human answered: event, but only for refunds$/);
+  const posted = t.posts.find((x) => x.startsWith("**Answering with your own words:**"));
+  assert.ok(posted);
+  assert.match(posted!, /Mail or event\?[\s\S]*A\. mail[\s\S]*B\. event \(recommended\)/);
 });
 
 test("notify: a desktop notification when pb asks, and none when it's turned off", async () => {

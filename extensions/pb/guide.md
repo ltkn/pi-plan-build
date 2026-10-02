@@ -160,8 +160,10 @@ background and without tokens, and posts the result into the session. A suite th
 is built, what calls what), Pi calls `pb_explore`: a separate, read-only
 context that reads what it needs and hands back only the answer, so the
 planning conversation stays lean. Pi decides when it's worth it; several can
-run at once. Each shows its question, its live steps (what it greps and reads)
-and then one summary line: time, files read, tokens, and the answer's first
+run at once. Each shows its question, its live steps (the last few of what it
+greps and reads, repainted a few times a second so fast runs stay followable)
+and then one summary line: time, files read, tokens in/out with output rate,
+and the answer's first
 line; expand it for the whole answer and the files it read. Give it a cheaper model in the config
 (`"explorer": {"model": "provider/id"}`); its thinking level defaults to max
 (clamped to what the model supports), `"explorer": {"thinking": "medium"}`
@@ -177,8 +179,10 @@ lists the files and asks whether to keep or restore them.
 
 **Questions.** Pi asks what only you can decide; a choice between options comes
 as a dialog (`pb_ask`) with its recommendation marked. If you're away, it counts
-down (`askTimeoutSec`, 5 minutes) and Pi goes on with its recommendation, telling
-you it's an assumption to confirm.
+down (`askTimeoutSec`, 5 minutes of idle time — any key you press restarts it)
+and Pi goes on with its recommendation, telling
+you it's an assumption to confirm. Picking "Something else (type it)" keeps the
+options in the chat, lettered, so you can write your answer from them.
 
 A question you didn't answer (it timed out, or you closed the dialog) **stays in
 the chat** with its options lettered: type your answer whenever you're back ("A"
@@ -388,7 +392,7 @@ and carries on. The build summary lists these choices and the reviewer checks
 them, so you look once, at the end. When a choice would change behaviour, an
 API or data, Pi asks you in a dialog (`pb_ask`) and carries on with your
 answer, which goes into the spec; answering early often saves later questions.
-If you're away, the dialog counts down (`askTimeoutSec`, 5 minutes) and the
+If you're away, the dialog counts down `askTimeoutSec` of idle time (5 minutes; any key restarts it) and the
 build goes on with Pi's recommendation, recorded as an assumption. It leaves
 `.pi/` alone.
 
@@ -651,10 +655,11 @@ model call).
 - **`/pb:status`**: every spec, its state, verification, dependencies and tasks.
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and
   failed, pauses, the review verdicts with the latest review's confirmed P0/P1,
-  red proofs (proven, sent back, pre-green), the build session's tokens, share served
-  from cache, peak context, cost and time, the explorer's calls, and how often
-  the session was compacted, reset, reminded or asked you something.
-  `/pb:stats all` compares every spec, archived ones included.
+  red proofs (proven, sent back, pre-green), tokens in and out per role (with
+  output rate where pure run time is known: explorer calls), peak context, cost
+  and time, and how often the session was compacted, reset, reminded or asked
+  you something. Build and review show no rate: their wall time includes your
+  pauses. `/pb:stats all` compares every spec, archived ones included.
 - **`/pb:archive`**: moves a finished spec to `.pi/pb-archive/` (which git
   ignores), so `/pb:build` and `/pb:status` only show live work, and offers to
   update the project map (`/pb:help map`).

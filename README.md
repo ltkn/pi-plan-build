@@ -26,7 +26,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.23.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.24.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 

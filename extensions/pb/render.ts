@@ -70,6 +70,9 @@ export interface ExploreDetails {
   started: number;
   ms?: number;
   tokens?: number;
+  /** Split of tokens for the head line: in = input + cache, out = completions. The rate uses out/ms. */
+  tokensIn?: number;
+  tokensOut?: number;
   /** the last lines it's writing (or thinking), while it runs */
   writing?: string[];
   /** its saved session, to open with `pi --session <file>` */
@@ -80,8 +83,18 @@ const short = (t: string, n: number) => {
   const chars = Array.from(t);
   return chars.length > n ? `${chars.slice(0, n - 1).join("")}…` : t;
 };
+/** Live view budget: a wider window than the blur of one step, still bounded so fast runs can't flood the transcript. */
+export const LIVE_STEPS = 8;
+export const LIVE_WRITING_LINES = 4;
+/** Minimum ms between live repaints: calmer screen, same data. Terminal states always flush immediately. */
+export const LIVE_FLUSH_MS = 250;
 const human = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
 const secs = (ms: number) => `${Math.round(ms / 1000)}s`;
+/** Blended throughput over the run's wall time (which includes the tools the explorer ran), not pure generation speed. */
+export const outRate = (out: number, ms: number) => {
+  const r = (out / ms) * 1000;
+  return r < 1000 ? r.toFixed(1) : human(r);
+};
 const MAX_ANSWER_LINES = 200;
 const MAX_FILES = 50;
 
@@ -92,12 +105,18 @@ export function exploreLines(o: { details?: ExploreDetails; answer: string; part
   if (o.partial) {
     if (!d) return [{ text: "starting…", kind: "count" }];
     return [
-      ...d.steps.map((s) => ({ text: `↳ ${s}`, kind: "step" as const })),
-      ...(d.writing ?? []).map((l) => ({ text: `│ ${l}`, kind: "writing" as const })),
+      ...d.steps.slice(-LIVE_STEPS).map((s) => ({ text: `↳ ${s}`, kind: "step" as const })),
+      ...(d.writing ?? []).slice(-LIVE_WRITING_LINES).map((l) => ({ text: `│ ${l}`, kind: "writing" as const })),
       { text: `${d.count} step${d.count === 1 ? "" : "s"} · ${secs((o.now ?? Date.now()) - d.started)}`, kind: "count" as const },
     ];
   }
-  const head = d ? `explored in ${secs(d.ms ?? 0)} · ${d.files.length} file${d.files.length === 1 ? "" : "s"} read${d.tokens ? ` · ${human(d.tokens)} tokens` : ""}` : "explored";
+  const usage =
+    d && (d.tokensIn !== undefined || d.tokensOut !== undefined)
+      ? `${human(d.tokensIn ?? 0)} in · ${human(d.tokensOut ?? 0)} out${d.ms ? ` @ ${outRate(d.tokensOut ?? 0, d.ms)} tok/s` : ""}`
+      : d?.tokens
+        ? `${human(d.tokens)} tokens`
+        : "";
+  const head = d ? `explored in ${secs(d.ms ?? 0)} · ${d.files.length} file${d.files.length === 1 ? "" : "s"} read${usage ? ` · ${usage}` : ""}` : "explored";
   const first = o.answer.split("\n").find((l) => l.trim()) ?? "";
   if (!o.expanded) return [{ text: head, kind: "done" }, ...(first ? [{ text: short(first.trim(), 120), kind: "answer" as const }] : [])];
   const answerLines = o.answer.split("\n");

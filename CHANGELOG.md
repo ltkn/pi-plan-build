@@ -1,9 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.24.0
 
 - **Coherence pass before the final check**: builds of three or more tasks get one extra step after the last task — re-read the whole diff and consolidate the duplication, dead code or inconsistent naming the slicing left behind, strictly within the spec and guarded by the final check. Smaller builds skip it; undo, resume, restarts, and stats treat it like the final check
 - **Stats for the retirement bar**: `/pb:stats` reports red proofs (proven, sent back, pre-green) and the latest review's confirmed P0/P1 — the two counts that decide whether the build ceremony earns its keep over plain Pi
+- Dev toolchain aligned with Pi itself: tests run on plain `node --test` (type stripping) instead of `tsx`, guarded by `erasableSyntaxOnly`
+- Support Pi 1.0: `pi-coding-agent` 0.87.1 → 1.0.0 (codemode/MCP era). No pb behaviour changes; verified by typecheck, the full suite, and a real-binary load smoke test
+- **Patient dialogs, kept options**: question countdowns now measure idle time — any key restarts them — and picking "Something else (type it)" keeps the lettered options in the chat to write from
 
 ## 1.23.0
 

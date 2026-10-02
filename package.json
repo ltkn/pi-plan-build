@@ -1,6 +1,6 @@
 {
   "name": "pi-plan-build",
-  "version": "1.23.0",
+  "version": "1.24.0",
   "description": "Plan → spec → build → review for the Pi coding agent: plan together, build each feature task by task behind checks the harness runs, then an independent, double-checked review.",
   "type": "module",
   "license": "MIT",
@@ -32,7 +32,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p .",
-    "test": "tsx --test test/pb.test.mts",
+    "test": "node --test test/pb.test.mts",
     "check": "npm run typecheck && npm test"
   },
   "peerDependencies": {
@@ -41,9 +41,8 @@
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.87.1",
+    "@earendil-works/pi-coding-agent": "^1.0.0",
     "@types/node": "^26.6.2",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
   "engines": {

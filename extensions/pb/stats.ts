@@ -7,6 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type Progress, type Store, readEvents as readJsonl, COHERE_TASK_ID } from "./store.ts";
+import { outRate } from "./render.ts";
 
 type Ev = { type: string; at: string; [k: string]: unknown };
 
@@ -101,7 +102,7 @@ export interface Summary {
   confirmed: { p0: number; p1: number };
   build: { prompt: number; cached: number; output: number; cost: number; peak: number; window?: number; turns: number };
   review: { prompt: number; output: number; cost: number };
-  explorer: { calls: number; prompt: number; output: number; cost: number };
+  explorer: { calls: number; prompt: number; output: number; cost: number; ms: number };
   context: { compactions: number; resets: number; nudges: number; asks: number };
   ms: number;
 }
@@ -143,11 +144,12 @@ export function summarize(s: SpecStats): Summary {
     review.output += num(r.output);
     review.cost += num(r.cost);
   }
-  const explorer = { calls: s.explore.length, prompt: 0, output: 0, cost: 0 };
+  const explorer = { calls: s.explore.length, prompt: 0, output: 0, cost: 0, ms: 0 };
   for (const x of s.explore) {
     explorer.prompt += num(x.input) + num(x.cacheRead) + num(x.cacheWrite);
     explorer.output += num(x.output);
     explorer.cost += num(x.cost);
+    explorer.ms += num(x.ms);
   }
   const count = (type: string) => e.filter((x) => x.type === type).length;
   const start = e.find((x) => x.type === "build-start");
@@ -197,10 +199,10 @@ export function renderCard(s: SpecStats): string {
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,
     `Review    ${x.reviews.length ? `${x.reviews.join(" → ")} · P0/P1 confirmed (latest): ${x.confirmed.p0 + x.confirmed.p1}` : "not run"}`,
     ...(hasRed ? [`Proof     ${x.proof.proven} proven · ${x.proof.sentBack} sent back · ${x.proof.preGreen} pre-green`] : []),
-    `Build     ${b.turns} turns · prompt ${human(b.prompt)} (${pct(b.cached, b.prompt)} from cache) · output ${human(b.output)} · $${b.cost.toFixed(2)}${x.ms ? ` · ${dur(x.ms)}` : ""}`,
+    `Build     ${b.turns} turns · in ${human(b.prompt)} (${pct(b.cached, b.prompt)} cached) · out ${human(b.output)} · $${b.cost.toFixed(2)}${x.ms ? ` · ${dur(x.ms)}` : ""}`,
     `Context   peak ${human(b.peak)}${b.window ? ` (${pct(b.peak, b.window)} of ${human(b.window)})` : ""}`,
-    `Reviewer  prompt ${human(x.review.prompt)} · output ${human(x.review.output)} · $${x.review.cost.toFixed(2)}`,
-    `Explorer  ${x.explorer.calls ? `${x.explorer.calls} calls · prompt ${human(x.explorer.prompt)} · output ${human(x.explorer.output)} · $${x.explorer.cost.toFixed(2)}` : "not used"}`,
+    `Reviewer  in ${human(x.review.prompt)} · out ${human(x.review.output)} · $${x.review.cost.toFixed(2)}`,
+    `Explorer  ${x.explorer.calls ? `${x.explorer.calls} calls · in ${human(x.explorer.prompt)} · out ${human(x.explorer.output)}${x.explorer.ms > 0 ? ` @ ${outRate(x.explorer.prompt + x.explorer.output, x.explorer.ms)} tok/s` : ""} · $${x.explorer.cost.toFixed(2)}` : "not used"}`,
     `Session   ${x.context.compactions} compactions · ${x.context.resets} resets · ${x.context.nudges} reminders · ${x.context.asks} questions`,
     "",
     "Build = the build session's model turns; the planning conversation isn't counted.",
