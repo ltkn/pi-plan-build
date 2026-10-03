@@ -486,7 +486,7 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   await t.run("plan", "let admins cancel pending orders");
   assert.equal(t.names.get(path.join(t.repo, "planning-session.jsonl")), "plan: let admins cancel pending orders");
   assert.match(t.posts.at(-1)!, /back to it any time with \/resume, or `pi --session planning-session`/);
-  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl, one-off scripts in a temp directory[\s\S]*call pb_explore[\s\S]*Run `true` once[\s\S]*pb_ask/);
+  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl, one-off scripts in a temp directory[\s\S]*project map in AGENTS\.md[\s\S]*call pb_explore[\s\S]*Run `true` once[\s\S]*pb_ask/);
   const scratch = path.join(os.tmpdir(), "pb-scratch.py");
   assert.equal((await t.callTool("write", { path: scratch, content: "print(1)" })).error, undefined); // outside the project: fine
   assert.match((await t.callTool("write", { path: "src/Order.java", content: "x" })).error!, /Planning mode: the project's files stay untouched/);
@@ -755,6 +755,12 @@ test("pb_try probes by running in a separate context; project changes are put ba
   const stopped = new AbortController();
   stopped.abort();
   await assert.rejects(t.runtime().tools.pb_try.execute("call", { goal: "Is it still fast?" }, stopped.signal, undefined, t.runtime().ctx), /Split the goal/);
+});
+
+test("explorer and trier check the project map before reading code", async () => {
+  const { EXPLORER_SYSTEM, TRY_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  assert.match(EXPLORER_SYSTEM, /project map in AGENTS\.md/);
+  assert.match(TRY_SYSTEM, /project map in AGENTS\.md/);
 });
 
 test("/pb:deps investigates dependencies as a change of its own, in planning mode", async () => {

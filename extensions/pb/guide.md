@@ -160,7 +160,8 @@ background and without tokens, and posts the result into the session. A suite th
 is built, what calls what), Pi calls `pb_explore`: a separate, read-only
 context that reads code only (experiments — curl, scripts, builds — stay in the
 planning session) and hands back only the answer as Answer / Files (`path:line`)
-/ Uncertainties, so the planning conversation stays lean. When the 1-3 files are
+/ Uncertainties, so the planning conversation stays lean. It checks the project
+map in AGENTS.md first and explores only what the map doesn't answer. When the 1-3 files are
 known, Pi reads them itself and trusts the explorer's Files list instead of
 re-reading everything. Pi decides when it's worth it; several can
 run at once. Each shows its question, its live steps (the last few of what it
