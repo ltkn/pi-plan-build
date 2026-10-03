@@ -714,11 +714,47 @@ test("pb_explore answers from a separate context; its usage is reported and coun
   const d = (r as { details?: any }).details;
   assert.equal(d.tokens, 3400);
   assert.equal(typeof d.ms, "number");
+  // Anything the explorer changes in the project is put back.
+  process.env.MOCK_EXPLORE_WRITE = path.join(t.repo, "EXPLORE_WAS_HERE");
+  try {
+    await t.callTool("pb_explore", { question: "Where else?" });
+    assert.ok(!fs.existsSync(path.join(t.repo, "EXPLORE_WAS_HERE")));
+  } finally {
+    delete process.env.MOCK_EXPLORE_WRITE;
+  }
+  // A stopped run tells the planner how to retry.
+  const stopped = new AbortController();
+  stopped.abort();
+  await assert.rejects(t.runtime().tools.pb_explore.execute("call", { question: "Where else?" }, stopped.signal, undefined, t.runtime().ctx), /Narrow the question/);
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
   await t.run("stats");
-  assert.match(t.posts.at(-1)!, /Explorer +1 calls · in 3\.0k · out 400( @ [\d.]+k? tok\/s)? · \$0\.02/);
+  assert.match(t.posts.at(-1)!, /Explorer +3 calls · in 6\.0k · out 800( @ [\d.]+k? tok\/s)? · \$0\.04/);
+});
+
+test("pb_try probes by running in a separate context; project changes are put back", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  const r = await t.callTool("pb_try", { goal: "Is probing fast enough for 10k rows?" });
+  assert.match(r.content![0].text, /## Conclusion[\s\S]*fast enough\. \(goal: Is probing fast enough/);
+  assert.equal(r.usage!.totalTokens, 3400);
+  const d = (r as { details?: any }).details;
+  assert.match(d.session, /^\.pi\/pb\/sessions\/try\/.+\.jsonl$/);
+  assert.equal(execSync("git status --porcelain --untracked-files=no", { cwd: t.repo, encoding: "utf8" }).trim(), "");
+  // Anything the probe changes in the project is put back.
+  process.env.MOCK_TRY_WRITE = path.join(t.repo, "TRY_WAS_HERE");
+  try {
+    await t.callTool("pb_try", { goal: "Does the probe leave files behind?" });
+    assert.ok(!fs.existsSync(path.join(t.repo, "TRY_WAS_HERE")));
+  } finally {
+    delete process.env.MOCK_TRY_WRITE;
+  }
+  // A stopped probe tells the planner how to retry.
+  const stopped = new AbortController();
+  stopped.abort();
+  await assert.rejects(t.runtime().tools.pb_try.execute("call", { goal: "Is it still fast?" }, stopped.signal, undefined, t.runtime().ctx), /Split the goal/);
 });
 
 test("/pb:deps investigates dependencies as a change of its own, in planning mode", async () => {

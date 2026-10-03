@@ -156,10 +156,13 @@ collide with a build in your working copy, e.g. Maven's `target/`), in the
 background and without tokens, and posts the result into the session. A suite that already fails would fail the build's final check too, so
 `/pb:build` warns you. `"baseline": false` in the config turns it off.
 
-**The explorer.** For broad questions (where things live, how a similar feature
+**The explorer.** For broad or multi-file questions (where things live, how a similar feature
 is built, what calls what), Pi calls `pb_explore`: a separate, read-only
-context that reads what it needs and hands back only the answer, so the
-planning conversation stays lean. Pi decides when it's worth it; several can
+context that reads code only (experiments — curl, scripts, builds — stay in the
+planning session) and hands back only the answer as Answer / Files (`path:line`)
+/ Uncertainties, so the planning conversation stays lean. When the 1-3 files are
+known, Pi reads them itself and trusts the explorer's Files list instead of
+re-reading everything. Pi decides when it's worth it; several can
 run at once. Each shows its question, its live steps (the last few of what it
 greps and reads, repainted a few times a second so fast runs stay followable)
 and then one summary line: time, files read, tokens in/out with output rate,
@@ -168,6 +171,12 @@ line; expand it for the whole answer and the files it read. Give it a cheaper mo
 (`"explorer": {"model": "provider/id"}`); its thinking level defaults to max
 (clamped to what the model supports), `"explorer": {"thinking": "medium"}`
 lowers it.
+
+**Probes.** When something must be established by running (a library's behaviour
+or limits, performance, a read-only query), Pi calls `pb_try` with the goal: a
+separate context that reads the project but writes scratch files only outside
+it (anything it changes in the project is put back) and hands back Commands /
+Result / Conclusion. Trivial checks stay in the planning session.
 
 **Investigating is free, changing the project isn't.** Pi can read, search, run
 the build and tests, curl an API, and write and run one-off scripts or programs

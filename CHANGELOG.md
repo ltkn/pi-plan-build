@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.25.0
+
+- **A probe runner beside the explorer**: new `pb_try` tool for what must be established by running (a library's behaviour or limits, performance, a read-only query). It runs in a separate context — scratch files outside the project, anything changed in the project put back — and hands back Commands / Result / Conclusion, so the planning session stays lean. The plan prompt routes it (more than one command or a long log → delegate; one quick check stays local), and Findings keep probe Commands with their Conclusion so the build doesn't re-probe and the reviewer can rerun
+- **A tighter explorer contract**: `pb_explore` reads code only (shell caged to read-only commands; experiments moved to `pb_try`), returns Answer / Files (`path:line — role`, one role a `pattern to imitate`) / Uncertainties, and anything it changes is restored like the reviewer's. Planning trusts its Files list instead of re-reading, fans out up to 6 explores and tries in one block, then synthesizes
+- **Stopped runs say how to retry**: an aborted exploration tells the planner to narrow the question or split it; an aborted probe to split the goal or bound it — the partial steps stay in the transcript
+
 ## 1.24.0
 
 - **Coherence pass before the final check**: builds of three or more tasks get one extra step after the last task — re-read the whole diff and consolidate the duplication, dead code or inconsistent naming the slicing left behind, strictly within the spec and guarded by the final check. Smaller builds skip it; undo, resume, restarts, and stats treat it like the final check

@@ -19,10 +19,18 @@ export const extraBlock = (extra: string) => (extra ? `\n\nAlso, from your pb co
 
 /* ================================ explorer ================================ */
 
-export const EXPLORER_SYSTEM = `You are an EXPLORER in a fresh context: you answer a question about the code so the conversation that asked doesn't have to read it all. Do not modify any file; use read-only commands, and run a build or tests only when the question needs it. Report facts with paths (file:line where it helps), not a design. Be compact: your answer is all that goes back.`;
+export const EXPLORER_SYSTEM = `You are an EXPLORER in a fresh context: you answer a question about the code so the conversation that asked doesn't have to read it all. Read code only: use grep for regex, find and ls for patterns, read for known paths, in parallel where it helps. Shell is read-only only (ls, find, cat, head, tail, git status, log and diff, rg): no mkdir, touch, rm, cp, mv, redirects, installs, curl, or scripts — experiments stay in the session that asked. Do not create or modify any file. Be concise: conclusion first. Quote only what the question asked for (rows, excerpts); otherwise cite paths (file:line), not pastes. Your answer is all that goes back.`;
 
 export function explorerBrief(question: string, context?: string): string {
-  return `# Question\n\n${question}${context ? `\n\n# What is being planned\n\n${context}` : ""}`;
+  return `# Question\n\n${question}${context ? `\n\n# What is being planned\n\n${context}` : ""}\n\n# Return exactly\n\n## Answer — the conclusion first, 5-15 lines\n## Files — \`path:line — role\`, up to ~20, no pastes; one role is \`pattern to imitate\` when relevant\n## Uncertainties — what wasn't found, or would need running code`;
+}
+
+/* ================================= try ================================= */
+
+export const TRY_SYSTEM = `You are a TRIER in a fresh context: you establish something by running code so the conversation that asked doesn't pay for the output. Read the project, then run commands, curl, one-off scripts or single-file programs in a temporary directory outside the project. Do not create or modify any project file; for a database use read-only queries. Be concise: conclusion first. Include only the evidence the question asked for (rows, excerpts, output excerpts); otherwise state commands and exits. Your answer is all that goes back.`;
+
+export function tryBrief(goal: string, context?: string): string {
+  return `# Goal\n\n${goal}${context ? `\n\n# What is being planned\n\n${context}` : ""}\n\n# Return exactly\n\n## Commands — what you ran, one line each\n## Result — evidence: exits and output excerpts, up to ~20 lines\n## Conclusion — what this establishes, 3-10 lines`;
 }
 
 /* ================================== plan ================================== */
@@ -37,7 +45,7 @@ export function planPrompt(feature: string, testCmd: string | null, standards: s
 
 Let's plan this together. Investigate as you like (read the code, run the build or tests, curl, one-off scripts in a temp directory), but don't change the project's files: that is blocked until /pb:build.
 
-For a broad look (where things live, how a similar feature is built, the conventions), call pb_explore: it answers from a separate context, so this one stays lean. Read files yourself where our discussion needs exact lines. When a choice rests on something only running code shows (a library's behaviour or limits, performance), try it in a scratch copy before deciding. ${tests}
+For a broad or multi-file look (where things live, how a similar feature is built, the conventions, what calls what), call pb_explore: it answers from a separate context, so this one stays lean. For a big question, fan out up to 6 explores and tries in one block, then synthesize. When you know the 1-3 files, read them yourself. Trust its Files list instead of re-reading everything it read. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query) and settling it takes more than one command or a long log, call pb_try with the question to settle: back come Commands, Result and Conclusion. One quick command with short output stays here in a scratch copy. ${tests}
 
 Tell me what you found, the approach you recommend (and any alternative worth weighing), and the questions only I can answer (pb_ask for a choice between options). Keep it in proportion to the change.${standardsBlock(standards)}${extraBlock(extra)}
 
@@ -63,7 +71,7 @@ New tests: yes | no — <why>
 
 ## Goal
 ## Findings
-What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Dead ends too: what was tried or ruled out, and why.
+What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Probes kept as Commands with their Conclusion (tried X via \`command\`, got Y). Dead ends too: what was tried or ruled out, and why.
 ## Decisions
 Each decision with its reason, as it stands now: no dates, no history, not who decided. Rejected ideas as "Not doing X, because …", so they aren't reconsidered.
 ## Contracts

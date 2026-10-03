@@ -53,5 +53,9 @@ if (sys.includes("ATTACKER")) {
   const map = `## Layout\n- \`src/\`: the application\n### Orders\n- \`src/order.ts\`: the order model and its transitions\n- Sign-in: follow \`auth/Login\`.${gone}\n- Services own transactions; controllers never call repositories.\n### Empty${big}`;
   say([call("report_map", { map, changes: ["added Orders", "noted transactions"] })]);
 } else if (sys.includes("EXPLORER")) {
+  if (process.env.MOCK_EXPLORE_WRITE) fs.writeFileSync(process.env.MOCK_EXPLORE_WRITE, "explorer was here");
   say([{ type: "text", text: `src/order/Order.java holds the model; OrderService applies transitions. (asked: ${brief.split("\n")[2]})` }]);
+} else if (sys.includes("TRIER")) {
+  if (process.env.MOCK_TRY_WRITE) fs.writeFileSync(process.env.MOCK_TRY_WRITE, "trier was here");
+  say([{ type: "text", text: `## Commands\n- python3 /tmp/probe.py\n## Result\n- exit 0, 1.2s for 10k rows\n## Conclusion\nProbing is fast enough. (goal: ${brief.split("\n")[2]})` }]);
 } else say([{ type: "text", text: "unexpected role" }]);

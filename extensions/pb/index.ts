@@ -28,6 +28,7 @@ import { notifyDesktop } from "./notify.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import {
   EXPLORER_SYSTEM,
+  TRY_SYSTEM,
   buildIntro,
   buildMechanics,
   buildStateSummary,
@@ -40,6 +41,7 @@ import {
   continuePrompt,
   depsPrompt,
   explorerBrief,
+  tryBrief,
   extraBlock,
   findingLine,
   finishSpecPrompt,
@@ -52,7 +54,7 @@ import {
   taskPrompt,
 } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
-import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult } from "./render.ts";
+import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionOf, setSection, setStatus, sharedTestCommands, tokensOf } from "./spec.ts";
@@ -582,7 +584,7 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_explore",
     label: "Explore",
     description:
-      "Answer a question about the code from a separate, read-only context and get back only the answer: where things live, how a similar feature is built, the conventions, what calls what. Use it for broad questions when you need the conclusion, not the file contents; read files yourself when you need exact lines. Several calls can run in parallel.",
+      "Answer a question about the code from a separate, read-only context and get back only the answer: where things live, how a similar feature is built, the conventions, what calls what. It reads code only (no curl, scripts or builds: those stay in this session). Use it for broad or multi-file questions when you need the conclusion; when you know the 1-3 files, read them yourself. Several calls can run in parallel.",
     parameters: Type.Object({
       question: Type.String({ description: "what to find out, specific enough to answer in a short report" }),
     }),
@@ -594,6 +596,7 @@ export default function pb(pi: ExtensionAPI) {
       const store = new Store(ctx.cwd);
       const cfg = store.config();
       const name = tree(ctx).getSessionName?.();
+      const before = snapshot(ctx.cwd, "pb: before explore");
       const started = Date.now();
       const steps: string[] = [];
       const files = new Set<string>();
@@ -650,9 +653,91 @@ export default function pb(pi: ExtensionAPI) {
           paintTimer = undefined;
         }
       });
+      const after = snapshot(ctx.cwd, "pb: after explore");
+      if (before && after && before.tree !== after.tree) restore(ctx.cwd, after.commit, before.commit);
       store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
-      if (res.aborted) throw new Error("Exploration stopped.");
+      if (res.aborted) throw new Error("Exploration stopped. Narrow the question to one area or split it across two calls in one block; what was already read is listed above.");
       if (!res.text.trim()) throw new Error(`The explorer produced no answer${res.error ? `: ${res.error}` : ""}`);
+      const t = res.tokens;
+      const session = res.sessionFile ? path.relative(ctx.cwd, res.sessionFile) : undefined;
+      return { content: text(res.text.trim()), details: { ...details(), writing: [], ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite, tokensIn: t.input + t.cacheRead + t.cacheWrite, tokensOut: t.output, session }, usage: usageOf(res) };
+    },
+  });
+
+  pi.registerTool({
+    name: "pb_try",
+    label: "Try",
+    description:
+      "When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query) and settling it takes more than one command or a long log, call pb_try with the question to settle: back come Commands, Result and Conclusion. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. One quick command with short output stays in this session. Several calls can run in parallel.",
+    parameters: Type.Object({
+      goal: Type.String({ description: "the question to settle by running, specific enough to probe in one go" }),
+    }),
+    executionMode: "parallel",
+    renderCall: (args, theme) => renderTryCall(args, theme),
+    renderResult: (result, opts, theme, context) => renderTryResult(result as { content: { type: string; text?: string }[]; details?: ExploreDetails }, opts, theme, context?.isError),
+    async execute(_id, params, signal, onUpdate, ctx) {
+      const store = new Store(ctx.cwd);
+      const cfg = store.config();
+      const name = tree(ctx).getSessionName?.();
+      const before = snapshot(ctx.cwd, "pb: before try");
+      const started = Date.now();
+      const steps: string[] = [];
+      const files = new Set<string>();
+      let writing = "";
+      const details = (): ExploreDetails => ({ steps: steps.slice(-LIVE_STEPS), count: steps.length, files: [...files], started, writing: tail(writing, LIVE_WRITING_LINES) });
+      let lastPaint = 0;
+      let paintTimer: ReturnType<typeof setTimeout> | undefined;
+      let pendingContent: { type: "text"; text: string }[] | undefined;
+      const paint = (content: { type: "text"; text: string }[]) => {
+        if (!onUpdate) return;
+        pendingContent = content;
+        if (paintTimer !== undefined) return;
+        const wait = LIVE_FLUSH_MS - (Date.now() - lastPaint);
+        if (wait <= 0) {
+          lastPaint = Date.now();
+          onUpdate({ content: pendingContent, details: details() });
+          pendingContent = undefined;
+        } else {
+          paintTimer = setTimeout(() => {
+            paintTimer = undefined;
+            lastPaint = Date.now();
+            if (pendingContent) onUpdate?.({ content: pendingContent, details: details() });
+            pendingContent = undefined;
+          }, wait);
+        }
+      };
+      const res = await runFresh({
+        cwd: ctx.cwd,
+        role: "try",
+        systemPrompt: TRY_SYSTEM,
+        brief: tryBrief(params.goal, name?.startsWith("plan: ") ? name.slice(6) : undefined),
+        prompt: "Establish the goal in the attached file. Scratch files go to a temporary directory outside the project; read-only queries only.",
+        tools: ["read", "grep", "find", "ls", "bash"],
+        model: cfg.explorer.model ?? sessionModel(ctx),
+        thinking: cfg.explorer.thinking ?? "max",
+        signal,
+        onActivity: (line, call) => {
+          steps.push(line);
+          const p = call.arguments.path ?? call.arguments.file_path;
+          if (call.name === "read" && typeof p === "string") files.add(p);
+          paint(text(`↳ ${line}`));
+        },
+        onText: (t) => {
+          writing = t;
+          paint(text(""));
+        },
+        sessionDir: store.sessionsDir("try"),
+      }).finally(() => {
+        if (paintTimer !== undefined) {
+          clearTimeout(paintTimer);
+          paintTimer = undefined;
+        }
+      });
+      const after = snapshot(ctx.cwd, "pb: after try");
+      if (before && after && before.tree !== after.tree) restore(ctx.cwd, after.commit, before.commit);
+      store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
+      if (res.aborted) throw new Error("Probe stopped. Split the goal into smaller steps or bound it (fewer rows, less work); rerun the smaller probe.");
+      if (!res.text.trim()) throw new Error(`The trier produced no answer${res.error ? `: ${res.error}` : ""}`);
       const t = res.tokens;
       const session = res.sessionFile ? path.relative(ctx.cwd, res.sessionFile) : undefined;
       return { content: text(res.text.trim()), details: { ...details(), writing: [], ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite, tokensIn: t.input + t.cacheRead + t.cacheWrite, tokensOut: t.output, session }, usage: usageOf(res) };

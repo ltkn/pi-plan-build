@@ -99,9 +99,11 @@ const MAX_ANSWER_LINES = 200;
 const MAX_FILES = 50;
 
 /** The lines shown for an exploration: live steps while it runs, then one summary line (all of it when expanded). */
-export function exploreLines(o: { details?: ExploreDetails; answer: string; partial: boolean; expanded: boolean; error?: boolean; now?: number }): { text: string; kind: "step" | "count" | "done" | "answer" | "file" | "error" | "writing" }[] {
+export function exploreLines(o: { details?: ExploreDetails; answer: string; partial: boolean; expanded: boolean; error?: boolean; now?: number; verb?: string }): { text: string; kind: "step" | "count" | "done" | "answer" | "file" | "error" | "writing" }[] {
+  const verb = o.verb ?? "explored";
+  const failed = verb === "explored" ? "exploration failed" : "probe failed";
   const d = o.details;
-  if (o.error) return [{ text: o.answer.trim() || "exploration failed", kind: "error" }];
+  if (o.error) return [{ text: o.answer.trim() || failed, kind: "error" }];
   if (o.partial) {
     if (!d) return [{ text: "starting…", kind: "count" }];
     return [
@@ -116,7 +118,7 @@ export function exploreLines(o: { details?: ExploreDetails; answer: string; part
       : d?.tokens
         ? `${human(d.tokens)} tokens`
         : "";
-  const head = d ? `explored in ${secs(d.ms ?? 0)} · ${d.files.length} file${d.files.length === 1 ? "" : "s"} read${usage ? ` · ${usage}` : ""}` : "explored";
+  const head = d ? `${verb} in ${secs(d.ms ?? 0)} · ${d.files.length} file${d.files.length === 1 ? "" : "s"} read${usage ? ` · ${usage}` : ""}` : verb;
   const first = o.answer.split("\n").find((l) => l.trim()) ?? "";
   if (!o.expanded) return [{ text: head, kind: "done" }, ...(first ? [{ text: short(first.trim(), 120), kind: "answer" as const }] : [])];
   const answerLines = o.answer.split("\n");
@@ -142,5 +144,16 @@ export function renderExploreResult(result: { content: { type: string; text?: st
   const answer = result.content.map((c) => c.text ?? "").join("");
   const color = { step: "dim", count: "muted", done: "success", answer: "text", file: "dim", error: "error", writing: "muted" } as const;
   const lines = exploreLines({ details: result.details, answer, partial: opts.isPartial, expanded: opts.expanded, error: isError });
+  return new Text(lines.map((l) => theme.fg(color[l.kind], l.text)).join("\n"), 0, 0);
+}
+
+export function renderTryCall(args: { goal?: string }, theme: Theme) {
+  return new Text(theme.fg("toolTitle", theme.bold("try ")) + theme.fg("accent", args.goal ?? ""), 0, 0);
+}
+
+export function renderTryResult(result: { content: { type: string; text?: string }[]; details?: ExploreDetails }, opts: { expanded: boolean; isPartial: boolean }, theme: Theme, isError = false) {
+  const answer = result.content.map((c) => c.text ?? "").join("");
+  const color = { step: "dim", count: "muted", done: "success", answer: "text", file: "dim", error: "error", writing: "muted" } as const;
+  const lines = exploreLines({ details: result.details, answer, partial: opts.isPartial, expanded: opts.expanded, error: isError, verb: "tried" });
   return new Text(lines.map((l) => theme.fg(color[l.kind], l.text)).join("\n"), 0, 0);
 }
