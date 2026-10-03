@@ -668,7 +668,7 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_try",
     label: "Try",
     description:
-      "When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query) and settling it takes more than one command or a long log, call pb_try with the question to settle: back come Commands, Result and Conclusion. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. One quick command with short output stays in this session. Several calls can run in parallel.",
+      "When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. Several calls can run in parallel.",
     parameters: Type.Object({
       goal: Type.String({ description: "the question to settle by running, specific enough to probe in one go" }),
     }),

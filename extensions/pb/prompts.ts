@@ -45,7 +45,7 @@ export function planPrompt(feature: string, testCmd: string | null, standards: s
 
 Let's plan this together. Investigate as you like (read the code, run the build or tests, curl, one-off scripts in a temp directory), but don't change the project's files: that is blocked until /pb:build.
 
-Check the project map in AGENTS.md first; only what it doesn't answer is worth a fresh call. For a broad or multi-file look (where things live, how a similar feature is built, the conventions, what calls what), call pb_explore: it answers from a separate context, so this one stays lean. For a big question, fan out up to 6 explores and tries in one block, then synthesize. When you know the 1-3 files, read them yourself. Trust its Files list instead of re-reading everything it read. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query) and settling it takes more than one command or a long log, call pb_try with the question to settle: back come Commands, Result and Conclusion. One quick command with short output stays here in a scratch copy. ${tests}
+Check the project map in AGENTS.md first; only what it doesn't answer is worth a fresh call. For a broad or multi-file look (where things live, how a similar feature is built, the conventions, what calls what), call pb_explore: it answers from a separate context, so this one stays lean. For a big question, fan out up to 6 explores and tries in one block, then synthesize. When you know the 1-3 files, read them yourself. Grep narrow: one path and pattern, low limit, no surrounding lines unless a match is ambiguous; read the exact lines for discussion. Trust its Files list instead of re-reading everything it read. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try. Single read-only commands stay here in a scratch copy. ${tests}
 
 Tell me what you found, the approach you recommend (and any alternative worth weighing), and the questions only I can answer (pb_ask for a choice between options). Keep it in proportion to the change.${standardsBlock(standards)}${extraBlock(extra)}
 
@@ -136,6 +136,8 @@ export function checkpointSummary(specs: { name: string; markdown: string }[], l
 /** Continue planning a spec in a fresh session. */
 export function continuePlanPrompt(name: string, markdown: string, standards: string, extra = ""): string {
   return `[pb:plan ${name}] Let's continue planning this, from its spec below: it holds what was found and decided so far. Don't redo the analysis or reopen rejected ideas unless something new turns up. The project's files stay untouched until /pb:build.
+
+Investigating further: check the project map in AGENTS.md first; grep narrow (one path and pattern, low limit, no surrounding lines); broad questions go to pb_explore, anything needing a scratch script to pb_try.
 
 Start with the open questions: summarise where we are in a few lines, and ask what only I can answer.${standardsBlock(standards)}${extraBlock(extra)}
 

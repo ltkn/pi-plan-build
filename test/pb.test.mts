@@ -486,7 +486,7 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   await t.run("plan", "let admins cancel pending orders");
   assert.equal(t.names.get(path.join(t.repo, "planning-session.jsonl")), "plan: let admins cancel pending orders");
   assert.match(t.posts.at(-1)!, /back to it any time with \/resume, or `pi --session planning-session`/);
-  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl, one-off scripts in a temp directory[\s\S]*project map in AGENTS\.md[\s\S]*call pb_explore[\s\S]*Run `true` once[\s\S]*pb_ask/);
+  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl, one-off scripts in a temp directory[\s\S]*project map in AGENTS\.md[\s\S]*call pb_explore[\s\S]*Grep narrow[\s\S]*Run `true` once[\s\S]*pb_ask/);
   const scratch = path.join(os.tmpdir(), "pb-scratch.py");
   assert.equal((await t.callTool("write", { path: scratch, content: "print(1)" })).error, undefined); // outside the project: fine
   assert.match((await t.callTool("write", { path: "src/Order.java", content: "x" })).error!, /Planning mode: the project's files stay untouched/);
@@ -2204,7 +2204,7 @@ test("/pb:plan <spec> continues planning in a fresh session seeded from the spec
   const session = r.ctx.sessionManager.getSessionFile();
   assert.equal(t.names.get(session), "plan: order-cancellation");
   assert.equal(r.model.id, "big");
-  assert.match(t.instructions.at(-1)!, /^\[pb:plan order-cancellation\] Let's continue planning this[\s\S]*Don't redo the analysis or reopen rejected ideas[\s\S]*Start with the open questions[\s\S]*## Open questions/);
+  assert.match(t.instructions.at(-1)!, /^\[pb:plan order-cancellation\] Let's continue planning this[\s\S]*Don't redo the analysis or reopen rejected ideas[\s\S]*project map in AGENTS\.md[\s\S]*Start with the open questions[\s\S]*## Open questions/);
   assert.equal(t.progress("order-cancellation").writtenIn, session); // it knows the spec now
   assert.match((await t.callTool("write", { path: "x.java", content: "x" })).error!, /Planning mode/); // planning mode in the new session
 });
