@@ -53,7 +53,7 @@ import {
   specPrompt,
   taskPrompt,
 } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapRepairPhase, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
@@ -2460,11 +2460,13 @@ export default function pb(pi: ExtensionAPI) {
   const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string } = {}): Promise<string[] | undefined> => {
     const cfg = store.config();
     const current = readMap(ctx.cwd);
+    const started = Date.now();
     const abort = new AbortController();
-    const unsubEsc = ctx.mode === "tui" ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
+    const canEsc = ctx.hasUI && ctx.mode === "tui" && typeof ctx.ui.onTerminalInput === "function";
+    const unsubEsc = canEsc ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
     let textNow = "";
     const render = (phase: string, activity?: string) =>
-      safely(() => ctx.ui.setWidget("pb-map", [`pb map — ${phase}   (Esc to stop)`, ...(activity ? [`  ↳ ${activity}`] : []), ...tail(textNow).map((l) => `  │ ${l}`)]));
+      safely(() => ctx.ui.setWidget("pb-map", [`pb map — ${phase}${canEsc ? "   (Esc to stop)" : ""}`, ...(activity ? [`  ↳ ${activity}`] : []), ...tail(textNow).map((l) => `  │ ${l}`)]));
     let mapSession: string | undefined;
     const cartographer = (brief: string, phase: string) =>
       runFresh({
@@ -2510,7 +2512,7 @@ export default function pb(pi: ExtensionAPI) {
       if (unresolved.length || overBy > 0) {
         // Once: the cartographer corrects or removes what doesn't resolve and trims to the budget, still able to
         // read the code; nothing is deleted behind its back.
-        const phase = unresolved.length ? (overBy > 0 ? "checking its paths and trimming it" : "checking its paths") : "trimming it to the budget";
+        const phase = mapRepairPhase(unresolved.length, overBy > 0 ? overBy : 0);
         const second = await cartographer(cartographerBrief({ current, proposed: body, unresolved, overBy: overBy > 0 ? overBy : undefined }), phase);
         store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...second.tokens, cost: second.cost, ms: second.ms });
         if (second.aborted) return void ctx.ui.notify("Map update stopped.", "info");
@@ -2549,7 +2551,7 @@ export default function pb(pi: ExtensionAPI) {
     store.saveMapPrevious(current);
     writeMap(ctx.cwd, body);
     ctx.ui.notify(
-      `Project map ${current ? "updated" : "written"} in AGENTS.md (~${tokens} tokens${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}). \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
+      `Project map ${current ? "updated" : "written"} in AGENTS.md (~${tokens} tokens in ${Math.max(1, Math.round((Date.now() - started) / 1000))}s${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}). \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
       "info",
     );
     return changes;
@@ -2620,14 +2622,19 @@ export default function pb(pi: ExtensionAPI) {
         return ctx.ui.notify(`Could not archive ${name}: ${(e as Error).message}`, "error");
       }
       if (!store.specNames().length) dropCheckpoints(ctx.cwd); // no live spec left to undo: let git reclaim the snapshots
-      ctx.ui.notify(`Archived ${name} to ${path.relative(ctx.cwd, dest)}.`, "info");
       // The feature is done: what it established about the project goes into the map every session reads.
       let mapChanges: string[] | undefined;
-      if (store.config().mapOnArchive) {
-        ctx.ui.notify(`Updating the project map from ${name} (mapOnArchive in ${store.rel("config.json")} turns this off)…`, "info");
-        // What it established about the project: its Findings, and the design the build settled on.
-        const design = sectionOf(markdown, "Design");
-        const findings = [findingsOf(markdown), design ? `The design as built (its "## Design"):\n${design}` : ""].filter(Boolean).join("\n\n");
+      // What it established about the project: its Findings, and the design the build settled on.
+      const design = sectionOf(markdown, "Design");
+      const findings = [findingsOf(markdown), design ? `The design as built (its "## Design"):\n${design}` : ""].filter(Boolean).join("\n\n");
+      // Writing the first map is always worth one read; an update needs stated findings —
+      // changed files alone rarely justify a full re-read, and the next feature's run covers placement.
+      const mapNews = !!findings.trim() || !readMap(ctx.cwd);
+      const willMap = store.config().mapOnArchive && mapNews;
+      ctx.ui.notify(`Archived ${name} to ${path.relative(ctx.cwd, dest)}.${willMap ? ` Updating the project map from ${name}…` : ""}`, "info");
+      if (store.config().mapOnArchive && !mapNews) {
+        ctx.ui.notify(`No new findings in ${name} for the project map; skipping.`, "info");
+      } else if (willMap) {
         mapChanges = await updateMap(ctx, store, { spec: { name, findings }, changed });
       }
       // What's left to commit: the feature itself if it wasn't committed yet, and the map.

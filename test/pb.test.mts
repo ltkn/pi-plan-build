@@ -763,6 +763,15 @@ test("explorer and trier check the project map before reading code", async () =>
   assert.match(TRY_SYSTEM, /project map in AGENTS\.md/);
 });
 
+test("map: area headings carry a path prefix; sessions read Security plus covering headings", async () => {
+  const { CARTOGRAPHER_SYSTEM } = await import("../extensions/pb/map.ts");
+  assert.match(CARTOGRAPHER_SYSTEM, /area heading carries its path prefix/);
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  assert.match(t.instructions.at(-1)!, /From the map, read Security invariants in full and only the area headings covering the touched paths/);
+});
+
 test("/pb:deps investigates dependencies as a change of its own, in planning mode", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -1862,12 +1871,13 @@ test("an unfinished build (e.g. after a crash) can be restarted in a new session
 test("prompts: short mechanics plus your standards; a minimal spec is enough", async () => {
   const { buildMechanics } = await import("../extensions/pb/prompts.ts");
   const mech = buildMechanics(parseSpec(SPEC()).spec!, null, true);
-  assert.ok(mech.length < 900, `build mechanics grew to ${mech.length} chars`); // keep them short
+  assert.ok(mech.length < 1000, `build mechanics grew to ${mech.length} chars`); // keep them short
   assert.match(mech, /take the sensible reading, record it with pb_record_decision \(assumption: true\)[\s\S]*Ask with pb_ask only/);
   assert.match(mech, /leave \.pi\/ alone/);
+  assert.match(mech, /Tests quiet, full log to a temp file/);
   assert.match(mech, /Finish each task with pb_task_done: it runs the task's Test: command \(a compile when there is none\)/);
   assert.match(mech, /Change or remove an existing test only when what it covers changes; never skip or weaken one/);
-  assert.ok(buildMechanics(parseSpec(SPEC()).spec!, null).length < 900);
+  assert.ok(buildMechanics(parseSpec(SPEC()).spec!, null).length < 1000);
 
   const t = setup({ taskChecks: "each", verify: "true" });
   await written(t);
@@ -2418,6 +2428,34 @@ test("map: helpers read and write the AGENTS.md section, resolve its paths lenie
   assert.deepEqual(mapDiff("- a\n- b", "- a\n- c"), ["- - b", "+ - c"]);
 });
 
+test("map: the repair pass says what it's fixing", async () => {
+  const { mapRepairPhase } = await import("../extensions/pb/map.ts");
+  assert.equal(mapRepairPhase(3, 0), "checking 3 paths");
+  assert.equal(mapRepairPhase(1, 0), "checking 1 path");
+  assert.equal(mapRepairPhase(0, 1500), "trimming 1,500 tokens");
+  assert.equal(mapRepairPhase(2, 2500), "checking 2 paths and trimming 2,500 tokens");
+});
+
+test("map: /pb:archive skips the map when the spec established nothing new", async () => {
+  const t = setup({ verify: "true" });
+  const { writeMap, readMap } = await import("../extensions/pb/map.ts");
+  writeMap(t.repo, "- `README`: readme");
+  await written(t); // ## Context, no Findings; the build records no Design
+  t.agent.script = diligent;
+  await t.run("build");
+  const briefFile = path.join(os.tmpdir(), `pb-map-skip-${process.pid}.md`);
+  if (fs.existsSync(briefFile)) fs.rmSync(briefFile);
+  process.env.MOCK_BRIEF_OUT = briefFile;
+  await t.run("archive");
+  delete process.env.MOCK_BRIEF_OUT;
+  assert.ok(!fs.existsSync(briefFile)); // the cartographer never ran
+  assert.ok(t.notes.some((n) => /No new findings in order-cancellation for the project map; skipping\./.test(n)));
+  assert.equal(readMap(t.repo), "- `README`: readme"); // untouched
+  const archived = t.notes.filter((n) => n.startsWith("Archived order-cancellation to "));
+  assert.equal(archived.length, 1); // one notice, no map trailer when skipping
+  assert.ok(!archived[0].includes("Updating"));
+});
+
 test("map: /pb:archive updates it by itself: paths that don't resolve go back once to be fixed, then it's written, and undo swaps back", async () => {
   const t = setup({ verify: "true" });
   fs.mkdirSync(path.join(t.repo, "src/main/auth"), { recursive: true });
@@ -2443,7 +2481,7 @@ test("map: /pb:archive updates it by itself: paths that don't resolve go back on
   assert.match(agents, /^# Shop\n\n<!-- pb:map -->\n## Project map\n\n### Layout\n- `src\/`: the application\n### Orders\n- `src\/order\.ts`[\s\S]*follow `auth\/Login`[\s\S]*Services own transactions[\s\S]*<!-- \/pb:map -->/);
   assert.doesNotMatch(agents, /gone\.ts|### Empty/); // corrected by the cartographer, not cut by pb; empty headings go
   assert.deepEqual(t.views.find((v) => v.customType === "pb-map")!.data.warnings, []);
-  assert.match(t.notes.at(-1)!, /Project map written in AGENTS\.md \(~\d+ tokens: added Orders; noted transactions\)\. `\/pb:map undo` puts the previous one back/);
+  assert.match(t.notes.at(-1)!, /Project map written in AGENTS\.md \(~\d+ tokens in \d+s: added Orders; noted transactions\)\. `\/pb:map undo` puts the previous one back/);
 
   await t.run("map", "undo");
   assert.doesNotMatch(t.read("AGENTS.md"), /### Orders/); // back to no map

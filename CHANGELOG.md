@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.26.0
+
+- **Leaner planning**: check the project map in AGENTS.md before exploring or probing (planner, explorer and trier alike — an exploration used to re-derive what the map already said); area headings carry their path prefix so sessions read Security invariants in full and only the headings covering their paths; grep narrow (one path and pattern, low limit, no surrounding lines); anything needing a scratch script file belongs in `pb_try`; builds run tests quiet with the full log to a temp file, failures back only
+- **Quieter archive**: `/pb:archive` skips the map run when the spec established nothing new (writing the first map always runs); one pre-notice instead of two; the done notice reports elapsed time like the explore line; the repair pass says what it's fixing (paths, tokens); Esc-to-stop no longer advertised where there is no Esc
+- Continued planning (`/pb:plan <spec>`) carries the same routing, so a resumed session investigates like a new one
+
 ## 1.25.0
 
 - **A probe runner beside the explorer**: new `pb_try` tool for what must be established by running (a library's behaviour or limits, performance, a read-only query). It runs in a separate context — scratch files outside the project, anything changed in the project put back — and hands back Commands / Result / Conclusion, so the planning session stays lean. The plan prompt routes it (more than one command or a long log → delegate; one quick check stays local), and Findings keep probe Commands with their Conclusion so the build doesn't re-probe and the reviewer can rerun

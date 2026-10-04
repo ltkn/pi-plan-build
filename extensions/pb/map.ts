@@ -147,6 +147,13 @@ export function mapDiff(before: string, after: string): string[] {
   return [...a.filter((l) => l.trim() && !inB.has(l)).map((l) => `- ${l}`), ...b.filter((l) => l.trim() && !inA.has(l)).map((l) => `+ ${l}`)];
 }
 
+/** Widget phase for the cartographer's repair pass: what it's fixing, so a long run doesn't look stuck. */
+export function mapRepairPhase(unresolved: number, overBy: number): string {
+  const paths = unresolved > 0 ? `checking ${unresolved} path${unresolved === 1 ? "" : "s"}` : "";
+  const budget = overBy > 0 ? `trimming ${overBy.toLocaleString("en-US")} tokens` : "";
+  return [paths, budget].filter(Boolean).join(" and ");
+}
+
 export const CARTOGRAPHER_SYSTEM = `You are a CARTOGRAPHER in a fresh context: you maintain the project map, a short section of AGENTS.md that every session of every coding agent reads before working in this project. It saves them from rediscovering the project — above all, from breaking an invariant the code doesn't make obvious at the call site.
 
 Do not modify any file. Use read/grep/find/ls and bash only for inspection.
@@ -167,7 +174,7 @@ Say where to look and what isn't obvious, not how things work in detail: the cod
 
 Every claim comes from reading the code, never from a name, a comment or a doc — and for security or data claims, follow the call far enough to see the mechanism: the callers, shared helpers, filters, SQL and constraints the invariant actually depends on. Never write a verdict ("secure", "tenant-safe", "atomic", "non-enumerating") without naming the code that makes it true; if it's enforced indirectly, name the indirect point. Otherwise leave the claim out.
 
-Revisit the whole map, not only the area just worked on: check every path, command and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings. It is read in every session: keep each line only if it saves a later feature a search or a mistake, and cut what the code, a file name or one \`ls\` already says. As long as the project needs (a small project may need a few lines), as short as it allows; about ${MAP_TOKENS.toLocaleString("en-US")} tokens at most.
+Revisit the whole map, not only the area just worked on: check every path, command and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings. Every area heading carries its path prefix, e.g. "### Levels (src/main/java/ark/ai/regime/levels/)", so a later session reads only the headings covering the paths it touches; "### Security invariants" carries none, it is read in full every time. It is read in every session: keep each line only if it saves a later feature a search or a mistake, and cut what the code, a file name or one \`ls\` already says. As long as the project needs (a small project may need a few lines), as short as it allows; about ${MAP_TOKENS.toLocaleString("en-US")} tokens at most.
 
 Report with the report_map tool: the whole new map (its body, without a top heading) and the list of changes, one line each.`;
 

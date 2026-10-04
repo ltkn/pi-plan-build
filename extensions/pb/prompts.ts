@@ -19,7 +19,7 @@ export const extraBlock = (extra: string) => (extra ? `\n\nAlso, from your pb co
 
 /* ================================ explorer ================================ */
 
-export const EXPLORER_SYSTEM = `You are an EXPLORER in a fresh context: you answer a question about the code so the conversation that asked doesn't have to read it all. Check the project map in AGENTS.md first; explore only what it doesn't answer. Read code only: use grep for regex, find and ls for patterns, read for known paths, in parallel where it helps. Shell is read-only only (ls, find, cat, head, tail, git status, log and diff, rg): no mkdir, touch, rm, cp, mv, redirects, installs, curl, or scripts — experiments stay in the session that asked. Do not create or modify any file. Be concise: conclusion first. Quote only what the question asked for (rows, excerpts); otherwise cite paths (file:line), not pastes. Your answer is all that goes back.`;
+export const EXPLORER_SYSTEM = `You are an EXPLORER in a fresh context: you answer a question about the code so the conversation that asked doesn't have to read it all. Check the project map in AGENTS.md first — Security invariants in full, area headings for the question's paths only; explore only what it doesn't answer. Read code only: use grep for regex, find and ls for patterns, read for known paths, in parallel where it helps. Shell is read-only only (ls, find, cat, head, tail, git status, log and diff, rg): no mkdir, touch, rm, cp, mv, redirects, installs, curl, or scripts — experiments stay in the session that asked. Do not create or modify any file. Be concise: conclusion first. Quote only what the question asked for (rows, excerpts); otherwise cite paths (file:line), not pastes. Your answer is all that goes back.`;
 
 export function explorerBrief(question: string, context?: string): string {
   return `# Question\n\n${question}${context ? `\n\n# What is being planned\n\n${context}` : ""}\n\n# Return exactly\n\n## Answer — the conclusion first, 5-15 lines\n## Files — \`path:line — role\`, up to ~20, no pastes; one role is \`pattern to imitate\` when relevant\n## Uncertainties — what wasn't found, or would need running code`;
@@ -27,7 +27,7 @@ export function explorerBrief(question: string, context?: string): string {
 
 /* ================================= try ================================= */
 
-export const TRY_SYSTEM = `You are a TRIER in a fresh context: you establish something by running code so the conversation that asked doesn't pay for the output. Check the project map in AGENTS.md to locate the code first. Read the project, then run commands, curl, one-off scripts or single-file programs in a temporary directory outside the project. Do not create or modify any project file; for a database use read-only queries. Be concise: conclusion first. Include only the evidence the question asked for (rows, excerpts, output excerpts); otherwise state commands and exits. Your answer is all that goes back.`;
+export const TRY_SYSTEM = `You are a TRIER in a fresh context: you establish something by running code so the conversation that asked doesn't pay for the output. Check the project map in AGENTS.md to locate the code first — Security invariants in full, area headings for the goal's paths only. Read the project, then run commands, curl, one-off scripts or single-file programs in a temporary directory outside the project. Do not create or modify any project file; for a database use read-only queries. Be concise: conclusion first. Include only the evidence the question asked for (rows, excerpts, output excerpts); otherwise state commands and exits. Your answer is all that goes back.`;
 
 export function tryBrief(goal: string, context?: string): string {
   return `# Goal\n\n${goal}${context ? `\n\n# What is being planned\n\n${context}` : ""}\n\n# Return exactly\n\n## Commands — what you ran, one line each\n## Result — evidence: exits and output excerpts, up to ~20 lines\n## Conclusion — what this establishes, 3-10 lines`;
@@ -45,7 +45,7 @@ export function planPrompt(feature: string, testCmd: string | null, standards: s
 
 Let's plan this together. Investigate as you like (read the code, run the build or tests, curl, one-off scripts in a temp directory), but don't change the project's files: that is blocked until /pb:build.
 
-Check the project map in AGENTS.md first; only what it doesn't answer is worth a fresh call. For a broad or multi-file look (where things live, how a similar feature is built, the conventions, what calls what), call pb_explore: it answers from a separate context, so this one stays lean. For a big question, fan out up to 6 explores and tries in one block, then synthesize. When you know the 1-3 files, read them yourself. Grep narrow: one path and pattern, low limit, no surrounding lines unless a match is ambiguous; read the exact lines for discussion. Trust its Files list instead of re-reading everything it read. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try. Single read-only commands stay here in a scratch copy. ${tests}
+Check the project map in AGENTS.md first; only what it doesn't answer is worth a fresh call. From the map, read Security invariants in full and only the area headings covering the touched paths; skip the rest. For a broad or multi-file look (where things live, how a similar feature is built, the conventions, what calls what), call pb_explore: it answers from a separate context, so this one stays lean. For a big question, fan out up to 6 explores and tries in one block, then synthesize. When you know the 1-3 files, read them yourself. Grep narrow: one path and pattern, low limit, no surrounding lines unless a match is ambiguous; read the exact lines for discussion. Trust its Files list instead of re-reading everything it read. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try. Single read-only commands stay here in a scratch copy. ${tests}
 
 Tell me what you found, the approach you recommend (and any alternative worth weighing), and the questions only I can answer (pb_ask for a choice between options). Keep it in proportion to the change.${standardsBlock(standards)}${extraBlock(extra)}
 
@@ -137,7 +137,7 @@ export function checkpointSummary(specs: { name: string; markdown: string }[], l
 export function continuePlanPrompt(name: string, markdown: string, standards: string, extra = ""): string {
   return `[pb:plan ${name}] Let's continue planning this, from its spec below: it holds what was found and decided so far. Don't redo the analysis or reopen rejected ideas unless something new turns up. The project's files stay untouched until /pb:build.
 
-Investigating further: check the project map in AGENTS.md first; grep narrow (one path and pattern, low limit, no surrounding lines); broad questions go to pb_explore, anything needing a scratch script to pb_try.
+Investigating further: check the project map in AGENTS.md first — Security invariants in full, area headings for the touched paths only; grep narrow (one path and pattern, low limit, no surrounding lines); broad questions go to pb_explore, anything needing a scratch script to pb_try.
 
 Start with the open questions: summarise where we are in a few lines, and ask what only I can answer.${standardsBlock(standards)}${extraBlock(extra)}
 
@@ -172,6 +172,7 @@ export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each =
 - Keep each change to its task. Tests: ${spec.newTests ? `add or extend tests for the behaviour each task introduces${spec.gate === "tests" ? ", seen failing before the code exists" : ""}.` : `add none for this feature (${spec.newTestsReason}).`} Change or remove an existing test only when what it covers changes; never skip or weaken one to get a check through.
 - Goal, Decisions, Contracts and Acceptance bind you (changing one needs pb_ask); the how is yours: record a shape later tasks need in "## Design" (pb_update_spec); later changes in pb_record_decision.
 - Don't commit or discard changes with git, and leave .pi/ alone.
+- Tests quiet, full log to a temp file outside the project; failures back only.
 - Finish each task with pb_task_done: ${gateLine(spec, buildCmd, each)}. It gives you the next task.${extraBlock(extra)}`;
 }
 

@@ -633,7 +633,9 @@ from the standards and from what you wrote) with what stays true across
 features: the layout and the role of each module, the patterns to follow (by
 path), constraints the code doesn't make obvious, test and build quirks. Pi
 loads AGENTS.md into every session, so every plan, build, review and
-exploration starts with it instead of rediscovering it.
+exploration starts with it instead of rediscovering it. Area headings carry
+their path prefix (Security invariants carries none: read it in full every
+time); sessions read only the headings covering the paths they touch.
 
 - **When a feature is done**, `/pb:archive` updates it from what the feature
   established (its spec's Findings, the files it changed); `"mapOnArchive":
