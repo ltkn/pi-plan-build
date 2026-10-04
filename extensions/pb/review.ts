@@ -36,6 +36,15 @@ export function fromProse(text: string): Finding[] {
 }
 
 /**
+ * A pass whose report can't be trusted structurally: no tool findings, nothing parseable
+ * in the prose, yet the prose is substantial (a real report in the wrong shape, not a
+ * one-line "done"). The harness must say so instead of reporting a clean verdict.
+ */
+export function unparsedReport(toolFindings: Finding[] | undefined, text: string): boolean {
+  return !toolFindings?.length && !fromProse(text).length && text.trim().length > 500;
+}
+
+/**
  * The double-check: a fresh background call looks at each P0/P1 finding in the code and confirms or rejects
  * it. Only an explicit rejection drops a finding.
  */

@@ -55,7 +55,7 @@ import {
 } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapRepairPhase, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
-import { REVIEW_TOOLS, fromProse, sensitiveGround, verdictOf, verifyFindings } from "./review.ts";
+import { REVIEW_TOOLS, fromProse, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionOf, setSection, setStatus, sharedTestCommands, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
@@ -2137,10 +2137,11 @@ export default function pb(pi: ExtensionAPI) {
       const text = prose ? contentText(prose.message!.content).trim() : "";
       const state = store.reviewSession(session);
       if (state?.done) store.saveReviewSession(session, { ...state, done: undefined });
-      return { findings: state?.findings ?? fromProse(text), prose: text, left: false, session };
+      const findings = state?.findings ?? fromProse(text);
+      return { findings, prose: text, unparsed: unparsedReport(state?.findings, text), left: false, session };
     } catch {
       // You switched to another session: this one can't be driven any more.
-      return { findings: store.reviewSession(session)?.findings ?? [], prose: "", left: true, session };
+      return { findings: store.reviewSession(session)?.findings ?? [], prose: "", left: true, session, unparsed: false };
     }
   };
 
@@ -2208,12 +2209,14 @@ export default function pb(pi: ExtensionAPI) {
     const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left);
     const verdict = run.passes.length ? verdictOf(findings) : "none";
     const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
+    const unparsed = run.passes.filter((x) => x.unparsed && !x.left).map((x) => (x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"));
     const sessions = run.passes.map((x) => `${x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"} \`pi --session ${path.relative(run.cwd, x.session)}\``);
     const text = [
       `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : run.abuseSkipped ? " · adversarial pass skipped" : ""}`,
       ...(o.partial
         ? ["", `⚠ You left the review before it finished: the ${finished("review") ? "adversarial pass" : "review"} didn't finish; this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),
+      ...(unparsed.length ? ["", `⚠ The ${unparsed.join(" and ")} pass${unparsed.length === 1 ? "" : "es"} reported in prose only — nothing parseable, so findings may be missing above. Read the session${unparsed.length === 1 ? "" : "s"} before trusting this verdict.`] : []),
       "",
       run.passes.find((x) => x.role === "review")?.prose ?? "",
       ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),

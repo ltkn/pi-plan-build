@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.0
+
+- **Fixed: the adversarial pass could run ungated.** The review handover (`setCarry`) pinned the parent to the review's home session, but each pass creates its session from the *previous pass* — so every pass after the first missed the carry, lost its model/thinking handover, and, worst, never got the review toolset: no `pb_report_findings`, with `edit`/`write` available. Findings reported as untagged prose then parsed to zero (a silent clean-looking verdict). The carry parent is now the session calling `newSession`; the suite simulates real Pi session events (`previousSessionFile`) and asserts every pass session is gated. Plus a backstop: a pass ending with no tool findings and no parseable prose gets a loud warning (`reported in prose only — read the session before trusting this verdict`) in the result and `review.md`, instead of a silent pass
+- **Planning delegation that bites**: repo-wide searches go to `pb_explore` (grep stays within named files/dirs), fan-out names the tools (`pb_explore`/`pb_try`), and a tripwire — raising a grep limit past ~15 or re-searching a term delegates with learnings
+- **Livelier fresh runs**: activity lines say what and where (`pattern in path`, full command capped), and a 1s heartbeat ticks the elapsed counter on quiet stretches; the 250ms coalescing stays (render storms would steal CPU from local inference)
+
 ## 1.26.0
 
 - **Leaner planning**: check the project map in AGENTS.md before exploring or probing (planner, explorer and trier alike — an exploration used to re-derive what the map already said); area headings carry their path prefix so sessions read Security invariants in full and only the headings covering their paths; grep narrow (one path and pattern, low limit, no surrounding lines); anything needing a scratch script file belongs in `pb_try`; builds run tests quiet with the full log to a temp file, failures back only

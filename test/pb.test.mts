@@ -1525,6 +1525,15 @@ const CHANGES = [
   { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
 ];
 
+test("review: a long prose report with no parseable findings is flagged, not silently passed", async () => {
+  const { unparsedReport } = await import("../extensions/pb/review.ts");
+  assert.equal(unparsedReport([{ priority: "P1", file: "f", title: "t" }], "whatever"), false); // tool findings: trusted
+  assert.equal(unparsedReport(undefined, "1. [P2] src/order.ts:30 — name the constant"), false); // tagged prose parses
+  assert.equal(unparsedReport(undefined, "Done."), false); // short prose: nothing to lose
+  const lost = `P1 — the updated_at bump on in-place edits is silently lost in production. GexStalenessScheduler.updateStoredSet calls row.setUpdatedAt(now) on detached entities, so the bump never persists.\n\nP2 — a DB failure between the landed post and saveAll orphans a stale standing set with no coordinate rows.\n\n${"Fix: persist the bump through the repository. ".repeat(20)}`;
+  assert.equal(unparsedReport(undefined, lost), true); // substantial but tagless: warn, don't pass clean
+});
+
 test("review: a fresh review session with the spec first and the diff; you're brought back with the result", async () => {
   const t = setup({ verify: "true" });
   await written(t);
