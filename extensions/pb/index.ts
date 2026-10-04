@@ -625,6 +625,8 @@ export default function pb(pi: ExtensionAPI) {
           }, wait);
         }
       };
+      // Heartbeat so the elapsed counter ticks even between tool calls on quiet stretches.
+      const beat = setInterval(() => paint(text("")), 1000);
       const res = await runFresh({
         cwd: ctx.cwd,
         role: "explorer",
@@ -647,6 +649,7 @@ export default function pb(pi: ExtensionAPI) {
         },
         sessionDir: store.sessionsDir("explorer"),
       }).finally(() => {
+        clearInterval(beat);
         if (paintTimer !== undefined) {
           // A trailing repaint is obsolete now: the returned details carry the final state.
           clearTimeout(paintTimer);
@@ -706,6 +709,8 @@ export default function pb(pi: ExtensionAPI) {
           }, wait);
         }
       };
+      // Heartbeat so the elapsed counter ticks even between tool calls on quiet stretches.
+      const beat = setInterval(() => paint(text("")), 1000);
       const res = await runFresh({
         cwd: ctx.cwd,
         role: "try",
@@ -728,6 +733,7 @@ export default function pb(pi: ExtensionAPI) {
         },
         sessionDir: store.sessionsDir("try"),
       }).finally(() => {
+        clearInterval(beat);
         if (paintTimer !== undefined) {
           clearTimeout(paintTimer);
           paintTimer = undefined;
@@ -2162,7 +2168,10 @@ export default function pb(pi: ExtensionAPI) {
     }
     if (!todo) return reviewFinish(from, store, run);
     store.saveReviewRun(run);
-    store.setCarry({ model: run.model, thinking: run.thinking, spec: run.name ?? "", review: { role: todo, spec: run.name }, parent: run.home ?? undefined });
+    // The carry's parent is the session calling newSession (not the review's home): takeCarry only
+    // hands it to that session's child, so an unrelated new session can't steal it.
+    const caller = (from as ExtensionContext).sessionManager?.getSessionFile() ?? run.home ?? undefined;
+    store.setCarry({ model: run.model, thinking: run.thinking, spec: run.name ?? "", review: { role: todo, spec: run.name }, parent: caller });
     const result = await from.newSession({
       parentSession: run.home,
       setup: async (sm) => {

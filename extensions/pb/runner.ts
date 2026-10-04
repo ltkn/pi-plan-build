@@ -67,9 +67,15 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
   return { command: "pi", args };
 }
 
-function preview(args: Record<string, unknown>): string {
-  const v = (args.command ?? args.path ?? args.file_path ?? args.pattern ?? "") as string;
-  return String(v).replace(/\s+/g, " ");
+/** One-line live activity for fresh runs: what is being searched, and where. */
+export function previewCall(name: string, args: Record<string, unknown>): string {
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const cmd = str(args.command).replace(/\s+/g, " ");
+  if (cmd) return cmd.length > 120 ? `${cmd.slice(0, 119)}…` : cmd;
+  const pattern = str(args.pattern);
+  const at = str(args.path ?? args.file_path);
+  if (pattern && at) return `${pattern} in ${at}`;
+  return (pattern || at).replace(/\s+/g, " ");
 }
 
 export async function runFresh(o: RunOptions): Promise<RunResult> {
@@ -145,7 +151,7 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
           else if (part.type === "toolCall") {
             const call = { name: part.name, arguments: part.arguments ?? {} };
             res.toolCalls.push(call);
-            o.onActivity?.(`${part.name} ${preview(call.arguments)}`, call);
+            o.onActivity?.(`${part.name} ${previewCall(part.name, call.arguments)}`, call);
           }
         }
         if (texts.length) res.text = texts.join("\n");

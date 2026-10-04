@@ -230,20 +230,22 @@ function setup(config: object = {}) {
         return { cancelled: false };
       },
       newSession: async (opts: { setup?: (sm: object) => Promise<void>; withSession?: (c: object) => Promise<void> }) => {
+        const prev = rt.ctx.sessionManager.getSessionFile();
         self.stale = true;
         const next = path.join(repo, `build-session-${++sessions}.jsonl`);
         rt = makeRuntime(next);
         const fresh = rt;
-        await fire("session_start", { reason: "new" }, fresh.ctx); // as in Pi: the new runtime starts first,
+        await fire("session_start", { reason: "new", previousSessionFile: prev }, fresh.ctx); // as in Pi: the new runtime starts first,
         await opts.setup?.({ appendSessionInfo: (n: string) => names.set(next, n), getSessionFile: () => next }); // then setup,
         await opts.withSession?.(handover(fresh)); // then withSession
         return { cancelled: false };
       },
       switchSession: async (file: string, opts: { withSession?: (c: object) => Promise<void> } = {}) => {
+        const prev = rt.ctx.sessionManager.getSessionFile();
         self.stale = true;
         rt = makeRuntime(file);
         const back = rt;
-        await fire("session_start", { reason: "resume" }, back.ctx);
+        await fire("session_start", { reason: "resume", previousSessionFile: prev }, back.ctx);
         await opts.withSession?.(handover(back));
         return { cancelled: false };
       },
@@ -486,7 +488,7 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   await t.run("plan", "let admins cancel pending orders");
   assert.equal(t.names.get(path.join(t.repo, "planning-session.jsonl")), "plan: let admins cancel pending orders");
   assert.match(t.posts.at(-1)!, /back to it any time with \/resume, or `pi --session planning-session`/);
-  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl, one-off scripts in a temp directory[\s\S]*project map in AGENTS\.md[\s\S]*call pb_explore[\s\S]*Grep narrow[\s\S]*Run `true` once[\s\S]*pb_ask/);
+  assert.match(t.instructions.at(-1)!, /\[pb:plan\] let admins cancel pending orders[\s\S]*curl, one-off scripts in a temp directory[\s\S]*project map in AGENTS\.md[\s\S]*call pb_explore[\s\S]*whole repo[\s\S]*pb_explore and pb_try calls[\s\S]*raising a grep limit past ~15[\s\S]*Grep narrow[\s\S]*Run `true` once[\s\S]*pb_ask/);
   const scratch = path.join(os.tmpdir(), "pb-scratch.py");
   assert.equal((await t.callTool("write", { path: scratch, content: "print(1)" })).error, undefined); // outside the project: fine
   assert.match((await t.callTool("write", { path: "src/Order.java", content: "x" })).error!, /Planning mode: the project's files stay untouched/);
@@ -1588,6 +1590,33 @@ test("review: the review session is read-only for its model; /pb:review done end
   assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-run.json"))); // finished: nothing left to continue
 });
 
+test("review: every pass session is gated (reporting tool present, editing blocked)", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  const gated: string[][] = [];
+  const blocked: (string | undefined)[] = [];
+  t.reviewer.script = true; // drive each pass session by hand
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:review]") || text.startsWith("[pb:abuse]")) {
+      gated.push(t.runtime().pi.getActiveTools());
+      blocked.push((await tool("write", { path: "x.ts", content: "x" })).error);
+      await tool("pb_report_findings", { findings: [] });
+      return;
+    }
+    return diligent(text, tool);
+  };
+  await t.run("review");
+  // Spec pass and adversarial pass alike: without the reporting tool a pass degrades to
+  // unparseable prose and its findings are lost.
+  assert.deepEqual(gated, [
+    ["read", "grep", "find", "ls", "bash", "pb_report_findings"],
+    ["read", "grep", "find", "ls", "bash", "pb_report_findings"],
+  ]);
+  assert.ok(blocked.every((b) => /This is a review session: read-only/.test(b ?? "")));
+});
+
 test("review: reopening an interrupted review session, /pb:review continue picks it up there", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -2294,6 +2323,15 @@ test("pb_explore live view keeps a wider, bounded window over bursts", async () 
   const writing = ["l1", "l2", "l3", "l4", "l5", "l6"];
   const lines = exploreLines({ details: { steps, count: 12, files: [], started: 1000, writing }, answer: "", partial: true, expanded: false, now: 19_000 }).map((l) => l.text);
   assert.deepEqual(lines, [...steps.slice(-8).map((s) => `↳ ${s}`), ...writing.slice(-4).map((l) => `│ ${l}`), "12 steps · 18s"]);
+});
+
+test("fresh runs preview what and where: pattern in path, full command capped", async () => {
+  const { previewCall } = await import("../extensions/pb/runner.ts");
+  assert.equal(previewCall("grep", { pattern: "tradingview", path: "src/main/java" }), "tradingview in src/main/java");
+  assert.equal(previewCall("read", { path: "src/order/Order.java" }), "src/order/Order.java");
+  assert.equal(previewCall("bash", { command: "cd /tmp && python3 probe.py" }), "cd /tmp && python3 probe.py");
+  assert.equal(previewCall("bash", { command: `x${"y".repeat(200)}` }), `x${"y".repeat(118)}…`);
+  assert.equal(previewCall("find", { pattern: "*.java" }), "*.java");
 });
 
 test("build: asked up front for a fresh session, the command waits for the spec and opens it itself", async () => {
