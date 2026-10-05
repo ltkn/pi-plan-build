@@ -3,6 +3,7 @@
  * behind checks the harness runs, and have it reviewed with fresh eyes.
  *
  *   /pb:plan <what you want> plan together; the project's files stay untouched (/pb:plan <spec>: continue one)
+  *   /pb:approach [idea]    in planning: hear how Pi would approach it (chat only: no writes, no dialogs)
  *   /pb:compact [undo]     planning: write the plan to its spec and reset to it; build: compact to the build's state
  *   /pb:spec [which]       write or revise the spec(s) from the discussion
  *   /pb:build [name]       build a spec here (--fresh: in a new session); resumes after a pause
@@ -23,12 +24,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { changedPaths, dropCheckpoints, inWorktree, inspectChanges, restore, snapshot } from "./checkpoint.ts";
+import { changedPaths, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot } from "./checkpoint.ts";
 import { notifyDesktop } from "./notify.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import {
   EXPLORER_SYSTEM,
   TRY_SYSTEM,
+  approachPrompt,
   buildIntro,
   buildMechanics,
   buildStateSummary,
@@ -136,6 +138,8 @@ const contentText = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c
 const tree = (ctx: ExtensionContext) => ctx.sessionManager as unknown as Tree;
 
 const text = (t: string) => [{ type: "text" as const, text: t }];
+/** What `pi --session` takes for a session file: its id, as getSessionId() derives it. */
+const sessionIdOf = (file: string) => path.basename(file, ".jsonl");
 /** A tool result the agent carries on from. */
 const reply = (t: string) => ({ content: text(t), details: undefined });
 /** The last few non-empty lines of a text being written, for a live view. */
@@ -388,7 +392,7 @@ export default function pb(pi: ExtensionAPI) {
   let undoSummary: string | undefined;
   // A task boundary happened in this turn: the moment pruning is allowed.
   let boundary = false;
-  let baselineRunning = false;
+  const baselineSessions = new Set<string>();
 
   registerRenderers(pi);
 
@@ -867,36 +871,78 @@ export default function pb(pi: ExtensionAPI) {
 
   /* --------------------------------- plan -------------------------------- */
   /** Run the test suite in the background; its result is posted into the session when it's done. */
-  const startBaseline = (ctx: ExtensionContext, store: Store, command: string) => {
-    if (baselineRunning) return;
-    baselineRunning = true;
+  const startBaseline = (ctx: ExtensionContext, store: Store, command: string, say?: (content: string) => void) => {
+    const session = ctx.sessionManager.getSessionFile();
+    // One baseline per session: re-planning here reuses the one in flight, a second planning session gets its own.
+    if (session) {
+      if (baselineSessions.has(session)) return;
+      baselineSessions.add(session);
+    }
+    const origin = session;
     const cfg = store.config();
     const head = gitHead(ctx.cwd);
+    // Outside git there is no worktree to isolate the run: it shares the working copy, so its
+    // artifacts (coverage, caches) may show up as planning changes — reviewPlanningChanges will list them.
+    if (!head) ctx.ui.notify("Not a git repo, so the baseline runs in the working copy; its test artifacts may show as planning changes.", "warning");
     // In a worktree at the captured HEAD: the planner's own builds in the working copy can't collide with it.
     checking += 1;
     void inWorktree(ctx.cwd, (dir) => runVerify(command, dir, cfg.verifyTimeoutSec, cfg.testOutputCap), head ?? "HEAD")
       .then((r) => {
-        store.saveBaseline({ ...r, head });
+        store.saveBaseline({ ...r, head }, origin ?? undefined);
+        const poster =
+          say ??
+          ((content: string) => {
+            try {
+              if (ctx.sessionManager.getSessionFile() !== origin) return;
+            } catch {
+              return;
+            }
+            post(content);
+          });
         try {
-          post(`**Baseline** (the test suite on the last commit): ${r.ok ? r.summary : `${r.summary}\n\nThe final check runs the whole suite, so it fails until this is fixed.`}`);
+          poster(`**Baseline** (the test suite on the last commit): ${r.ok ? r.summary : `${r.summary}\n\nThe final check runs the whole suite, so it fails until this is fixed.`}`);
         } catch {
           // the session was replaced meanwhile: baseline.json still has the result
         }
       })
       .finally(() => {
         checking -= 1;
-        baselineRunning = false;
+        if (session) baselineSessions.delete(session);
       });
   };
 
+  /** Why pb can't list what changed while planning when no snapshot was taken. */
+  const noSnapshotWarning = (checkpoints: boolean) =>
+    checkpoints
+      ? "Could not snapshot the working tree, so pb can't list what changed while planning; review the working tree yourself."
+      : "Checkpoints are off, so pb can't list what changed while planning; review the working tree yourself.";
+
+  /** The project map may have rotted since it was written: name the paths that no longer resolve. */
+  const warnStaleMap = (ctx: ExtensionContext) => {
+    const gone = missingPaths(ctx.cwd, readMap(ctx.cwd));
+    if (gone.length)
+      ctx.ui.notify(
+        `The project map in AGENTS.md names ${gone.length} path(s) that no longer exist (${gone.slice(0, 3).join(", ")}${gone.length > 3 ? ", …" : ""}): /${cmd("map")} refreshes it.`,
+        "warning",
+      );
+  };
+
   /** Start planning mode for this session (the snapshot shows later what changed while it was on). */
-  const startPlanning = (ctx: ExtensionContext, store: Store) => {
+  const startPlanning = (ctx: ExtensionContext, store: Store): boolean => {
     const session = ctx.sessionManager.getSessionFile();
-    if (!session) return;
+    if (!session) {
+      // Every planning guard keys off the session file (edit/write block, undo snapshots, checkpointing): without it,
+      // "the project's files stay untouched" would be a promise pb can't keep, so planning doesn't start.
+      ctx.ui.notify("No session file for this session, so the planning protections can't run. Start Pi with a saved session and try again.", "error");
+      return false;
+    }
     const existing = store.planning(session)?.snapshot;
-    const snap = existing ? undefined : store.config().checkpoints ? snapshot(ctx.cwd, "pb: start of planning") : undefined;
+    const checkpoints = store.config().checkpoints;
+    const snap = existing ? undefined : checkpoints ? snapshot(ctx.cwd, "pb: start of planning") : undefined;
     store.setPlanning(session, true, existing ?? snap?.commit);
     store.detachSession(session);
+    if (!existing && !snap?.commit) ctx.ui.notify(noSnapshotWarning(checkpoints), "warning");
+    return true;
   };
 
   /**
@@ -905,19 +951,32 @@ export default function pb(pi: ExtensionAPI) {
    */
   const reviewPlanningChanges = async (ctx: ExtensionContext, store: Store, notes?: string[]): Promise<boolean> => {
     const session = ctx.sessionManager.getSessionFile();
-    const snap = session ? store.planning(session)?.snapshot : undefined;
-    if (!session || !snap) return true;
+    const rec = session ? store.planning(session) : undefined;
+    if (!session || !rec) return true;
+    const snap = rec.snapshot;
+    if (!snap) {
+      ctx.ui.notify(noSnapshotWarning(store.config().checkpoints), "warning");
+      return true;
+    }
     const cur = snapshot(ctx.cwd, "pb: end of planning");
-    if (!cur) return true;
+    if (!cur) {
+      ctx.ui.notify(noSnapshotWarning(store.config().checkpoints), "warning");
+      return true;
+    }
     const files = changedPaths(ctx.cwd, snap, cur.commit);
+    const since = commitTime(ctx.cwd, snap);
+    const big = skippedLargeFiles(ctx.cwd, since);
+    if (big.length) ctx.ui.notify(`Large files changed while planning (not captured by pb's snapshots, so changes to them aren't in the list above and a restore won't touch them): ${big.slice(0, 5).join(", ")}${big.length > 5 ? ", …" : ""} — check them yourself.`, "warning");
     if (!files.length) return true;
     const list = `${files.slice(0, 10).join(", ")}${files.length > 10 ? ` … (+${files.length - 10})` : ""}`;
     const KEEP = "Keep them";
     const RESTORE = "Restore them to how they were when planning began";
     const choice = await choose(ctx, store, `These project files changed while planning: ${list}`, [KEEP, RESTORE, "Cancel"], KEEP, notes);
     if (choice === RESTORE) {
-      restore(ctx.cwd, cur.commit, snap, files);
-      ctx.ui.notify(`Restored ${files.length} file(s).`, "info");
+      const restored = restore(ctx.cwd, cur.commit, snap, files);
+      ctx.ui.notify(`Restored ${restored.length} file(s).`, "info");
+      const skipped = files.filter((f) => !restored.includes(f));
+      if (skipped.length) ctx.ui.notify(`Left alone because they changed again since: ${skipped.slice(0, 5).join(", ")}${skipped.length > 5 ? ", …" : ""}`, "warning");
     } else if (choice !== KEEP) return false;
     else if (!ctx.hasUI) ctx.ui.notify(`Kept files changed while planning: ${list}`, "warning");
     store.setPlanning(session, store.planningSessions().includes(session), (choice === RESTORE ? undefined : cur.commit) ?? snap);
@@ -926,7 +985,7 @@ export default function pb(pi: ExtensionAPI) {
 
   /**
    * Standards live in AGENTS.md (Pi loads it everywhere); offer pb's section once per project, at the
-   * first /pb:plan or /pb:build. A stack's own section (Java, Vue) goes only in the project's AGENTS.md,
+   * first /pb:plan, /pb:deps or /pb:build. A stack's own section (Java, Vue) goes only in the project's AGENTS.md,
    * so the shared one stays free of stack rules. A Vue project that only finds a shared section (a
    * parent's or the agent directory's, e.g. the backend's) is offered its frontend one next to it.
    */
@@ -973,32 +1032,71 @@ export default function pb(pi: ExtensionAPI) {
 
   /** Continue planning a spec in a fresh session, seeded from it: clean context, exact checkpoint. */
   const continuePlan = async (ctx: ExtensionCommandContext, store: Store, name: string) => {
-    const md = store.readSpec(name)!;
-    store.setCarry({ model: sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined, spec: name, parent: ctx.sessionManager.getSessionFile() ?? undefined });
-    const snap = store.config().checkpoints ? snapshot(ctx.cwd, "pb: start of planning") : undefined;
+    let md = store.readSpec(name)!;
+    const oldSession = ctx.sessionManager.getSessionFile();
+    // Files the old planning session's bash wrote are reviewed before we move on.
+    if (!(await reviewPlanningChanges(ctx, store))) return;
+    // A finished plan reopened: the spec says so while it is replanned, or the next /pb:build would build it mid-replan.
+    if (parseSpec(md).spec?.status === "ready") {
+      const reopened = setStatus(md, "planning");
+      if (parseSpec(reopened).spec) {
+        md = reopened;
+        store.writeSpec(name, md);
+        store.event(name, { type: "spec", update: "status", status: "planning" });
+        ctx.ui.notify(`\`${name}\` was Status: ready; set back to planning while we replan it.`, "info");
+      }
+    }
+    store.setCarry({ model: sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined, spec: name, parent: oldSession ?? undefined });
+    let newSessionFile: string | undefined;
     const result = await ctx.newSession({
-      parentSession: ctx.sessionManager.getSessionFile(),
+      parentSession: oldSession,
       setup: async (sm) => {
         sm.appendSessionInfo(`plan: ${name}`);
       },
       withSession: async (c) => {
         // Only `c` from here on: the captured pi and ctx belong to the replaced session.
+        // Snapshot here, in the new session's working copy: the old session's tree may differ.
+        const ns = new Store(c.cwd);
+        const checkpoints = ns.config().checkpoints;
+        const snap = checkpoints ? snapshot(c.cwd, "pb: start of planning") : undefined;
         const session = c.sessionManager.getSessionFile();
-        if (session) store.setPlanning(session, true, snap?.commit);
-        const p = store.progress(name);
-        if (p) store.saveProgress({ ...p, writtenIn: session, compacted: false });
+        newSessionFile = session ?? undefined;
+        if (session) ns.setPlanning(session, true, snap?.commit);
+        if (!snap?.commit) c.ui.notify(noSnapshotWarning(checkpoints), "warning");
+        // Same staleness check as /pb:plan: the map may have rotted since the old session.
+        warnStaleMap(c);
+        const p = ns.progress(name);
+        if (p) ns.saveProgress({ ...p, writtenIn: session, compacted: false });
+        else {
+          const parsed = parseSpec(md).spec;
+          if (parsed && session) ns.saveProgress({ spec: name, phase: "written", writtenIn: session, tasks: syncTasks(parsed, []), edited: false, compacted: false, updatedAt: now() });
+        }
+        // A fresh session gets a fresh baseline, not the previous session's result.
+        const { cfg, testCmd } = commands(c.cwd, ns);
+        const baseline = cfg.baseline && !!testCmd;
+        if (baseline) startBaseline(c, ns, testCmd!, (content) => c.sendMessage({ customType: "pb", content, display: true }, { triggerTurn: false }));
         await c.sendMessage(
           {
             customType: "pb",
-            content: `▶ Planning **${name}** on, from ${store.rel("specs", name, "spec.md")} (the project's files stay untouched).\nThis session: "plan: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\``,
+            content: `▶ Planning **${name}** on, from ${ns.rel("specs", name, "spec.md")} (the project's files stay untouched).${baseline ? ` Running \`${testCmd}\` in the background for a baseline.` : ""}\nThis session: "plan: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\``,
             display: true,
           },
           { triggerTurn: false },
         );
-        void c.sendMessage({ customType: "pb-instruction", content: continuePlanPrompt(name, md, "", store.extra("plan")), display: false }, { triggerTurn: true });
+        void c.sendMessage({ customType: "pb-instruction", content: continuePlanPrompt(name, md, "", ns.extra("plan")), display: false }, { triggerTurn: true });
       },
+    }).catch((e) => {
+      store.clearCarry(); // a throw must not leave the handover behind either
+      throw e;
     });
-    if (result.cancelled) ctx.ui.notify("Cancelled.", "info");
+    if (result.cancelled) {
+      store.clearCarry(); // its handover must not leak into a later, unrelated new session
+      ctx.ui.notify("Cancelled.", "info");
+      return;
+    }
+    if (oldSession && newSessionFile && oldSession !== newSessionFile && store.planning(oldSession) && store.specsOfPlanning(oldSession).length === 0) {
+      store.setPlanning(oldSession, false);
+    }
   };
 
   pi.registerCommand(cmd("plan"), {
@@ -1009,28 +1107,39 @@ export default function pb(pi: ExtensionAPI) {
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
       if (arg === "off") {
-        if (session && !(await reviewPlanningChanges(ctx, store))) return;
-        if (session) store.setPlanning(session, false);
+        if (!session || !store.planningSessions().includes(session)) return ctx.ui.notify("Not in planning mode.", "info");
+        if (!(await reviewPlanningChanges(ctx, store))) return;
+        store.setPlanning(session, false);
         return ctx.ui.notify("Planning mode off: Pi can change the project's files again.", "info");
       }
       if (!arg)
         return ctx.ui.notify(`Describe what you want, in your own words, e.g.\n/${cmd("plan")} let admins cancel an order while it is still pending, and notify the customer`, "warning");
-      if (SPEC_NAME.test(arg) && store.readSpec(arg) && (store.progress(arg)?.phase ?? "written") === "written") {
-        if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
-        return continuePlan(ctx, store, arg);
+      if (SPEC_NAME.test(arg) && store.readSpec(arg)) {
+        const phase = store.progress(arg)?.phase ?? "written";
+        if (phase === "written") {
+          if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+          return continuePlan(ctx, store, arg);
+        }
+        const next = unfinishedPhase(phase)
+          ? `\`/${cmd("build")} ${arg}\` continues the unfinished build, \`/${cmd("spec")} ${arg}\` revises its spec`
+          : `\`/${cmd("review")} ${arg}\` reviews it, \`/${cmd("spec")} ${arg}\` revises its spec`;
+        return ctx.ui.notify(
+          `\`${arg}\` is not being planned (its phase is ${phase}): ${next}. To plan something new, describe it in your own words.`,
+          "warning",
+        );
       }
       // A name makes the planning session easy to find again in /resume, e.g. after a crash.
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const title = arg.length > 60 ? `${arg.slice(0, 57)}…` : arg;
-      pi.setSessionName(`plan: ${title}`);
       const { cfg, testCmd } = commands(ctx.cwd, store);
 
       await offerStandards(ctx, store);
 
       // After the standards offer: its AGENTS.md isn't a change made while planning.
-      startPlanning(ctx, store);
+      if (!startPlanning(ctx, store)) return;
+      pi.setSessionName(`plan: ${title}`);
       // A cheap staleness check of the project map, no model call: paths it names that are gone.
-      const gone = missingPaths(ctx.cwd, readMap(ctx.cwd));
-      if (gone.length) ctx.ui.notify(`The project map in AGENTS.md names ${gone.length} path(s) that no longer exist (${gone.slice(0, 3).join(", ")}${gone.length > 3 ? ", …" : ""}): /${cmd("map")} refreshes it.`, "warning");
+      warnStaleMap(ctx);
 
       // The baseline costs no tokens: the harness runs the suite while the discussion starts.
       const baseline = cfg.baseline && !!testCmd;
@@ -1042,17 +1151,39 @@ export default function pb(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand(cmd("approach"), {
+    description: "In a planning session: hear how Pi would approach the implementation — architecture, seams, non-goals, test strategy, alternatives, risks, open questions (listed, not asked). Optional: which idea to expand",
+    handler: async (args, ctx) => {
+      const store = new Store(ctx.cwd);
+      const session = ctx.sessionManager.getSessionFile();
+      if (!session || !store.planningSessions().includes(session))
+        return ctx.ui.notify(`/${cmd("approach")} is for planning sessions: run /${cmd("plan")} first, then ask for the approach mid-discussion.`, "warning");
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      const focus = args.trim();
+      const shown = focus.length > 60 ? `${focus.slice(0, 57)}…` : focus;
+      instruct(
+        `▶ /${cmd("approach")}${shown ? ` — ${shown}` : ""} (chat only: nothing is written)`,
+        approachPrompt(focus, standardsFor(ctx), store.extra("plan")),
+      );
+    },
+  });
+
   pi.registerCommand(cmd("deps"), {
     description: "Check dependencies (versions, deprecations) and propose upgrades as a change of their own. Optional: which ones",
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
-      startPlanning(ctx, store);
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      await offerStandards(ctx, store);
+      if (!startPlanning(ctx, store)) return;
       pi.setSessionName(`deps: ${args.trim() || "all"}`);
+      // Same staleness check as /pb:plan: the investigation starts from the map.
+      warnStaleMap(ctx);
       instruct(`▶ /${cmd("deps")}${args.trim() ? ` — ${args.trim()}` : ""} (the project's files stay untouched)`, depsPrompt(args.trim()));
     },
   });
 
-  // Planning mode: investigating is free (bash, curl, scripts, scratch files elsewhere), changing the project isn't.
+  // Planning mode, first layer: edit/write inside the project are blocked synchronously.
+  // Anything else that can write (bash, other tools) is caught by reviewPlanningChanges at the end of planning.
   pi.on("tool_call", (e, ctx) => {
     const ev = e as { toolName: string; input: { path?: string } };
     if (ev.toolName !== "edit" && ev.toolName !== "write") return;
@@ -1060,8 +1191,8 @@ export default function pb(pi: ExtensionAPI) {
     const store = new Store(ctx.cwd);
     if (session && store.reviewSession(session)) return { block: true, reason: "This is a review session: read-only. Report what should change with pb_report_findings." };
     if (!session || !store.planningSessions().includes(session)) return;
-    const rel = path.relative(ctx.cwd, path.resolve(ctx.cwd, ev.input.path ?? ""));
-    if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return;
+    const target = path.resolve(ctx.cwd, ev.input.path ?? "");
+    if (target !== ctx.cwd && !target.startsWith(ctx.cwd + path.sep)) return; // outside the project: scratch files are fine
     return {
       block: true,
       reason: `Planning mode: the project's files stay untouched until /${cmd("build")}. Put scratch files outside the project (e.g. in a mktemp -d directory), or say what you would change.`,
@@ -1201,13 +1332,24 @@ export default function pb(pi: ExtensionAPI) {
     return usage.tokens >= limit ? Math.round((100 * usage.tokens) / usage.contextWindow) : undefined;
   };
 
-  const pauseBuild = (ctx: ExtensionContext, store: Store, p: Progress, reason: string, tipKey: string, why: string, vars: Record<string, string | number> = {}) => {
+  const pauseBuild = (ctx: ExtensionContext, store: Store, p: Progress, reason: string, tipKey: string, why: string, vars: Record<string, string | number> = {}, say = post) => {
     p.phase = "paused";
     p.pause = reason;
     store.saveProgress(p);
     store.event(p.spec, { type: "pause", why, task: p.current });
     showProgress(ctx, p);
-    post(`**⏸ Build paused** — ${reason}\n\n${tip(tipKey, { spec: p.spec, ...vars })}`);
+    say(`**⏸ Build paused** — ${reason}\n\n${tip(tipKey, { spec: p.spec, ...vars })}`);
+  };
+
+  /**
+   * A resume buys an exhausted step a fresh set of attempts; any other pause keeps its count.
+   * Resets and returns true only when the step had exhausted its budget; the next handout
+   * counts the new attempt.
+   */
+  const resetExhausted = (tp: { attempts: number } | undefined, max: number): boolean => {
+    const exhausted = (tp?.attempts ?? 0) >= max;
+    if (exhausted && tp) tp.attempts = 0;
+    return exhausted;
   };
 
   /**
@@ -1284,7 +1426,26 @@ export default function pb(pi: ExtensionAPI) {
     store.event(p.spec, { type: "check", task: p.current, attempt: tp?.attempts ?? 1, ok: !failure, command: ran, notices: found });
 
     if (failure) return failedCheck(ctx, store, p, what, failure);
+    return advanceAfterCheck(ctx, store, p, spec, signal, found, ran);
+  };
 
+  /**
+   * A check passed: close the finished step, then hand out the next task, open the
+   * coherence pass, run the final check, or finish the build — the build's state machine.
+   */
+  const advanceAfterCheck = async (
+    ctx: ExtensionContext,
+    store: Store,
+    p: Progress,
+    spec: ParsedSpec,
+    signal: AbortSignal | undefined,
+    found: string[],
+    ran: string | null,
+  ): Promise<ReturnType<typeof reply> | ReturnType<typeof stop>> => {
+    const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+    const each = cfg.taskChecks === "each";
+    const final = p.current === "final";
+    const tp = p.tasks.find((t) => t.id === p.current);
     // Passed: close the task and move on.
     if (tp) tp.status = "done";
     const cps = store.checkpoints(p.spec);
@@ -1298,7 +1459,11 @@ export default function pb(pi: ExtensionAPI) {
 
     const next = nextTodo(p);
     if (next) {
-      const t = beginTask(ctx, store, p, next.id, { inTool: true })!;
+      const t = beginTask(ctx, store, p, next.id, { inTool: true });
+      if (!t) {
+        pauseBuild(ctx, store, p, `${store.rel("specs", p.spec, "spec.md")} no longer parses; fix it, then /${cmd("build")}.`, "build.paused", "spec");
+        return stop("The spec no longer parses: the build is paused. Stop here.");
+      }
       boundary = true;
       return reply(`${passed}\n\n${t.prompt}`);
     }
@@ -1664,6 +1829,183 @@ export default function pb(pi: ExtensionAPI) {
   pi.on("cache_warming_decision", () => (checking > 0 ? { action: "warm" as const } : undefined));
 
   /**
+   * Everything that must hold before a build starts: a parseable, finished spec, a check
+   * command for its gate, the dependency built, a green (or accepted red) baseline, and
+   * planning changes reviewed. Returns the loaded spec and its build command, or undefined
+   * after telling the human why not.
+   */
+  const preBuildChecks = async (
+    ctx: ExtensionContext,
+    store: Store,
+    name: string,
+    o: { checked?: boolean; notes?: string[] },
+  ) => {
+    const notes = o.notes ?? [];
+    const loaded = loadSpec(store, name);
+    if (!loaded) {
+      ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
+      return undefined;
+    }
+    const { spec, md } = loaded;
+    if (spec.status === "planning") {
+      ctx.ui.notify(`${name} is still being planned: /${cmd("build")} ${name} finishes it first.`, "warning");
+      return undefined;
+    }
+    const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+    if (spec.gate === "tests" && !testCmd) {
+      ctx.ui.notify(`Verification is "tests" but no test command is set: set "verify" in ${store.rel("config.json")}, or use Verification: build/none in the spec.`, "warning");
+      return undefined;
+    }
+    if (spec.gate === "build" && !buildCmd) {
+      ctx.ui.notify(`Verification is "build" but no build command is set: set "build" in ${store.rel("config.json")}.`, "warning");
+      return undefined;
+    }
+    if (spec.dependsOn) {
+      const dep = store.progress(spec.dependsOn)?.phase;
+      if (dep !== "built" && dep !== "reviewed") {
+        if (!(await agree(ctx, store, `${name} depends on ${spec.dependsOn}, which isn't built yet. Build ${name} anyway?`, notes))) return undefined;
+      }
+    }
+    if (!o.checked && spec.gate === "tests" && baselineApplies(ctx, store, testCmd)) {
+      if (!(await agree(ctx, store, baselineQuestion(store.baseline(ctx.sessionManager.getSessionFile() ?? undefined)!), notes))) return undefined;
+    }
+    if (!o.checked && !(await reviewPlanningChanges(ctx, store, notes))) return undefined;
+    if (!cfg.checkpoints) ctx.ui.notify("Checkpoints are off: this build runs without undo points, and without the test-tampering checks.", "warning");
+    return { spec, md, cfg, buildCmd };
+  };
+
+  /**
+   * Fresh progress for (re)starting a build: finished tasks stay done with their proofs,
+   * everything else goes back to todo — attempts included, so a crash grants no fresh budget.
+   * Returns the progress and the first unfinished step, or undefined when nothing is left.
+   */
+  const initBuildProgress = (ctx: ExtensionContext, store: Store, name: string, spec: ParsedSpec, notes: string[]) => {
+    const prev = store.progress(name);
+    const restart = !!prev && unfinishedPhase(prev.phase);
+    const p: Progress = {
+      ...prev,
+      spec: name,
+      phase: "building",
+      baseCommit: restart ? (prev!.baseCommit ?? gitHead(ctx.cwd)) : gitHead(ctx.cwd),
+      // A task's tests seen failing stay proven: only /pb:undo takes that back, with the files.
+      // Attempts are preserved on restart: a crash must not grant a fresh budget. A fresh set comes
+      // only from answering an exhausted task via /pb:build guidance (see the build command below).
+      tasks: syncTasks(spec, prev?.tasks).map((t) => (t.status === "done" ? t : { ...t, status: "todo" as const })),
+      current: undefined,
+      pause: undefined,
+      nudged: undefined,
+      needsIntro: prev?.needsIntro,
+      detached: undefined,
+      unattended: notes.length ? notes : undefined,
+      updatedAt: now(),
+    };
+    const first = p.tasks.find((t) => t.status !== "done")?.id ?? (needsCohere(spec) && !prev?.tasks.some((t) => t.id === COHERE_TASK_ID && t.status === "done") ? COHERE_TASK_ID : undefined);
+    if (!first) {
+      ctx.ui.notify(`Every task of ${name} is done. Next: /${cmd("review")} ${name}.`, "info");
+      return undefined;
+    }
+    return { p, first, restart };
+  };
+
+  /** The start-of-build undo point, in the session that builds. */
+  const saveStartCheckpoint = (c: ExtensionContext, store: Store, name: string, p: Progress, checkpoints: boolean, restart: boolean) => {
+    if (!checkpoints || (restart && store.checkpoints(name).length)) return;
+    const snap = snapshot(c.cwd, `pb: start of ${name}`);
+    const entry = tree(c).getLeafId?.() ?? undefined;
+    store.saveCheckpoints(name, snap ? [{ id: "start", at: now(), ...snap, head: p.baseCommit, tasks: structuredClone(p.tasks), entry, intro: true }] : []);
+  };
+
+  interface LaunchBuild {
+    ctx: ExtensionContext;
+    store: Store;
+    name: string;
+    spec: ParsedSpec;
+    md: string;
+    p: Progress;
+    first: string;
+    restart: boolean;
+    buildModel: unknown;
+    switching: boolean;
+    session: string | undefined;
+  }
+
+  /** Same session: lift the planning protection, send the build instructions and the first task. */
+  const launchBuildHere = async (o: LaunchBuild): Promise<void> => {
+    const { ctx, store, name, spec, md, p, first, restart, buildModel, switching, session } = o;
+    const { cfg, buildCmd } = commands(ctx.cwd, store);
+    if (buildModel && switching) await pi.setModel(buildModel as Parameters<typeof pi.setModel>[0]);
+    p.session = session;
+    if (session) store.setPlanning(session, false);
+    store.saveProgress(p);
+    saveStartCheckpoint(ctx, store, name, p, cfg.checkpoints, restart);
+    store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false });
+    const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
+    const cohereFirst = first === COHERE_TASK_ID;
+    if (cohereFirst) beginCohereEntry(ctx, store, p);
+    const task = cohereFirst ? null : beginTask(ctx, store, p, first, { intro: true });
+    if (!task && !cohereFirst) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} no longer parses. Fix it (or /${cmd("spec")} ${name}), then /${cmd("build")}.`, "error");
+    const marker = cohereFirst ? COHERE_MARKER : task!.marker;
+    const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts) : task!.prompt;
+    instruct(
+      `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${marker}`,
+      `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : md, store.extra("build"))}\n\n${prompt}`,
+    );
+  };
+
+  /** Fresh session: seeded with the spec, on the model and thinking level you planned with. */
+  const launchBuildFresh = async (o: LaunchBuild): Promise<void> => {
+    const { ctx, store, name, spec, md, p, first, restart, buildModel, switching, session } = o;
+    const { cfg, buildCmd } = commands(ctx.cwd, store);
+    const cctx = ctx as ExtensionCommandContext;
+    const carried = { model: buildModel ? cfg.buildModel : sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined };
+    store.setCarry({ ...carried, spec: name, parent: session ?? undefined });
+    // A new session loads AGENTS.md itself: the standards needn't come along.
+    const intro = buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", "", md, store.extra("build"));
+    const result = await cctx.newSession({
+      parentSession: session,
+      setup: async (sm) => {
+        sm.appendSessionInfo(`build: ${name}`);
+      },
+      withSession: async (c) => {
+        // Only `c` from here on: the captured pi and ctx belong to the replaced session.
+        // The new session gets a fresh runtime with the default tools, so editing is on.
+        p.session = c.sessionManager.getSessionFile();
+        store.saveProgress(p);
+        saveStartCheckpoint(c, store, name, p, cfg.checkpoints, restart);
+        if (!cfg.checkpoints) c.ui.notify("Checkpoints are off: this build runs without undo points, and without the test-tampering checks.", "warning");
+        store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: true });
+        const cohereFirst = first === COHERE_TASK_ID;
+        if (cohereFirst) beginCohereEntry(c, store, p);
+        const task = cohereFirst ? null : beginTask(c, store, p, first, { intro: true });
+        if (!task && !cohereFirst) {
+          pauseBuild(c, store, p, `${store.rel("specs", name, "spec.md")} no longer parses; fix it, then /${cmd("build")}.`, "build.paused", "spec", {}, (content) =>
+            c.sendMessage({ customType: "pb", content, display: true }, { triggerTurn: false }),
+          );
+          return;
+        }
+        const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts) : task!.prompt;
+        await c.sendMessage(
+          {
+            customType: "pb",
+            content: `▶ Building **${name}** from ${store.rel("specs", name, "spec.md")}${carried.model ? `, on ${carried.model}` : ""}${carried.thinking ? `, thinking ${carried.thinking}` : ""}.\nThis session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\`\n${cohereFirst ? COHERE_MARKER : task!.marker}`,
+            display: true,
+          },
+          { triggerTurn: false },
+        );
+        // Not awaited: the build runs on in this session while the command returns.
+        void c.sendMessage({ customType: "pb-instruction", content: `${intro}\n\n${prompt}`, display: false }, { triggerTurn: true });
+      },
+    }).catch((e) => {
+      store.clearCarry(); // a throw must not leave the handover behind either
+      throw e;
+    });
+    if (result.cancelled) {
+      store.clearCarry(); // its handover must not leak into a later, unrelated new session
+      ctx.ui.notify("Build cancelled.", "info");
+    }
+  };
+
+  /**
    * Start building a spec. In this session by default: the conversation that planned it
    * stays, and the prompt cache with it. `fresh` opens a new session seeded with the spec
    * instead (command context only: sessions can't be replaced from event handlers).
@@ -1677,24 +2019,9 @@ export default function pb(pi: ExtensionAPI) {
     o: { decided?: boolean; checked?: boolean; notes?: string[] } = {},
   ): Promise<void> => {
     const notes = o.notes ?? [];
-    const loaded = loadSpec(store, name);
-    if (!loaded) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
-    const { spec, md } = loaded;
-    if (spec.status === "planning") return ctx.ui.notify(`${name} is still being planned: /${cmd("build")} ${name} finishes it first.`, "warning");
-    const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
-    if (spec.gate === "tests" && !testCmd) return ctx.ui.notify(`Verification is "tests" but no test command is set: set "verify" in ${store.rel("config.json")}, or use Verification: build/none in the spec.`, "warning");
-    if (spec.gate === "build" && !buildCmd) return ctx.ui.notify(`Verification is "build" but no build command is set: set "build" in ${store.rel("config.json")}.`, "warning");
-    if (spec.dependsOn) {
-      const dep = store.progress(spec.dependsOn)?.phase;
-      if (dep !== "built" && dep !== "reviewed") {
-        if (!(await agree(ctx, store, `${name} depends on ${spec.dependsOn}, which isn't built yet. Build ${name} anyway?`, notes))) return;
-      }
-    }
-    const baseline = store.baseline();
-    if (!o.checked && spec.gate === "tests" && baseline?.ok === false && baseline.command === testCmd) {
-      if (!(await agree(ctx, store, baselineQuestion(baseline), notes))) return;
-    }
-    if (!o.checked && !(await reviewPlanningChanges(ctx, store, notes))) return;
+    const checked = await preBuildChecks(ctx, store, name, o);
+    if (!checked) return;
+    const { spec, md, cfg } = checked;
 
     // Optionally build on another model (e.g. plan on a strong one, build on a local one).
     let buildModel: unknown;
@@ -1722,91 +2049,11 @@ export default function pb(pi: ExtensionAPI) {
     }
 
     const session = ctx.sessionManager.getSessionFile();
-    const prev = store.progress(name);
-    const restart = !!prev && unfinishedPhase(prev.phase);
-    const p: Progress = {
-      ...prev,
-      spec: name,
-      phase: "building",
-      baseCommit: restart ? (prev!.baseCommit ?? gitHead(ctx.cwd)) : gitHead(ctx.cwd),
-      // A task's tests seen failing stay proven: only /pb:undo takes that back, with the files.
-      // Attempts are preserved on restart: a crash must not grant a fresh budget. A fresh set comes
-      // only from answering an exhausted task via /pb:build guidance (see the build command below).
-      tasks: syncTasks(spec, prev?.tasks).map((t) => (t.status === "done" ? t : { ...t, status: "todo" as const })),
-      current: undefined,
-      pause: undefined,
-      nudged: undefined,
-      needsIntro: prev?.needsIntro,
-      detached: undefined,
-      unattended: notes.length ? notes : undefined,
-      updatedAt: now(),
-    };
-    const first = p.tasks.find((t) => t.status !== "done")?.id ?? (needsCohere(spec) && !prev?.tasks.some((t) => t.id === COHERE_TASK_ID && t.status === "done") ? COHERE_TASK_ID : undefined);
-    if (!first) return ctx.ui.notify(`Every task of ${name} is done. Next: /${cmd("review")} ${name}.`, "info");
-    /** The start-of-build undo point, in the session that builds. */
-    const startCheckpoint = (c: ExtensionContext) => {
-      if (!cfg.checkpoints || (restart && store.checkpoints(name).length)) return;
-      const snap = snapshot(c.cwd, `pb: start of ${name}`);
-      const entry = tree(c).getLeafId?.() ?? undefined;
-      store.saveCheckpoints(name, snap ? [{ id: "start", at: now(), ...snap, head: p.baseCommit, tasks: structuredClone(p.tasks), entry, intro: true }] : []);
-    };
-
-    if (!fresh) {
-      // Same session: lift the planning protection, send the build instructions and the first task.
-      if (buildModel && switching) await pi.setModel(buildModel as Parameters<typeof pi.setModel>[0]);
-      p.session = session;
-      if (session) store.setPlanning(session, false);
-      store.saveProgress(p);
-      startCheckpoint(ctx);
-      store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false });
-      const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
-      const cohereFirst = first === COHERE_TASK_ID;
-      if (cohereFirst) beginCohereEntry(ctx, store, p);
-      const task = cohereFirst ? null : beginTask(ctx, store, p, first, { intro: true })!;
-      const marker = cohereFirst ? COHERE_MARKER : task!.marker;
-      const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts) : task!.prompt;
-      instruct(
-        `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${marker}`,
-        `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : md, store.extra("build"))}\n\n${prompt}`,
-      );
-      return;
-    }
-
-    // Fresh session: seeded with the spec, on the model and thinking level you planned with.
-    const cctx = ctx as ExtensionCommandContext;
-    const carried = { model: buildModel ? cfg.buildModel : sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined };
-    store.setCarry({ ...carried, spec: name, parent: session ?? undefined });
-    // A new session loads AGENTS.md itself: the standards needn't come along.
-    const intro = buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", "", md, store.extra("build"));
-    const result = await cctx.newSession({
-      parentSession: session,
-      setup: async (sm) => {
-        sm.appendSessionInfo(`build: ${name}`);
-      },
-      withSession: async (c) => {
-        // Only `c` from here on: the captured pi and ctx belong to the replaced session.
-        // The new session gets a fresh runtime with the default tools, so editing is on.
-        p.session = c.sessionManager.getSessionFile();
-        store.saveProgress(p);
-        startCheckpoint(c);
-        store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: true });
-        const cohereFirst = first === COHERE_TASK_ID;
-        if (cohereFirst) beginCohereEntry(c, store, p);
-        const task = cohereFirst ? null : beginTask(c, store, p, first, { intro: true })!;
-        const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts) : task!.prompt;
-        await c.sendMessage(
-          {
-            customType: "pb",
-            content: `▶ Building **${name}** from ${store.rel("specs", name, "spec.md")}${carried.model ? `, on ${carried.model}` : ""}${carried.thinking ? `, thinking ${carried.thinking}` : ""}.\nThis session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\`\n${cohereFirst ? COHERE_MARKER : task!.marker}`,
-            display: true,
-          },
-          { triggerTurn: false },
-        );
-        // Not awaited: the build runs on in this session while the command returns.
-        void c.sendMessage({ customType: "pb-instruction", content: `${intro}\n\n${prompt}`, display: false }, { triggerTurn: true });
-      },
-    });
-    if (result.cancelled) ctx.ui.notify("Build cancelled.", "info");
+    const init = initBuildProgress(ctx, store, name, spec, notes);
+    if (!init) return;
+    const launch = { ctx, store, name, spec, md, p: init.p, first: init.first, restart: init.restart, buildModel, switching, session };
+    if (!fresh) return launchBuildHere(launch);
+    return launchBuildFresh(launch);
   };
 
   /** The spec that was just written: its tasks in the session, the whole of it as a view (not sent to the model: it wrote it). */
@@ -1870,6 +2117,13 @@ export default function pb(pi: ExtensionAPI) {
     return [...decisions.matchAll(/^\s*-\s*(Assumption(?! \(build)[^\n]*)/gm)].map((m) => m[1].trim());
   };
 
+  const baselineApplies = (ctx: ExtensionContext, store: Store, testCmd: string | null | undefined) => {
+    const b = store.baseline(ctx.sessionManager.getSessionFile() ?? undefined);
+    // A red baseline blocks the build only when it describes this commit; a newer HEAD may already have fixed it.
+    // No head (outside git): nothing to compare against, so block conservatively.
+    return b?.ok === false && b.command === testCmd && (!b.head || b.head === gitHead(ctx.cwd));
+  };
+
   const baselineQuestion = (b: { summary: string; at: string }) =>
     `The test suite already failed when planning began (${b.summary.split("\n")[0]}, ${b.at}): the final check runs it, so it fails too unless that's fixed. Build anyway?`;
 
@@ -1897,8 +2151,8 @@ export default function pb(pi: ExtensionAPI) {
     const { cfg, testCmd } = commands(ctx.cwd, store);
     const notes: string[] = [];
     if (!(await reviewPlanningChanges(ctx, store, notes))) return;
-    const baseline = store.baseline();
-    if (baseline?.ok === false && baseline.command === testCmd && !(await agree(ctx, store, baselineQuestion(baseline), notes))) return;
+    const baseline = store.baseline(session ?? undefined);
+    if (baselineApplies(ctx, store, testCmd) && !(await agree(ctx, store, baselineQuestion(baseline!), notes))) return;
 
     const usage = ctx.getContextUsage()?.percent;
     const switching = !!cfg.buildModel && cfg.buildModel !== sessionModel(ctx) && !!findModel(ctx, cfg.buildModel);
@@ -1918,9 +2172,11 @@ export default function pb(pi: ExtensionAPI) {
     if (session) specWriting.add(session);
     instruct(marker, `${prompt}\n\nAfter writing it, stop: the build starts by itself.`);
     // Wait for the spec here, in the command: the run starts right after this handler hands it over.
+    // Capped: on timeout the pending offer below picks the spec up once it is written.
     try {
       for (let i = 0; i < 40 && ctx.isIdle(); i++) await new Promise((r) => setTimeout(r, 50));
-      await ctx.waitForIdle();
+      if (cfg.specWaitSec > 0) await Promise.race([ctx.waitForIdle(), sleep(cfg.specWaitSec * 1000)]);
+      else await ctx.waitForIdle();
     } finally {
       if (session) specWriting.delete(session);
     }
@@ -1985,20 +2241,29 @@ export default function pb(pi: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionFile();
       const { cfg, buildCmd } = commands(ctx.cwd, store);
 
-      // This session has an unfinished build: continue it.
+      // This session has an unfinished build: continue it — unless a different spec was named.
       const here = specOfSession(ctx);
-      if (here.name && here.progress && unfinishedPhase(here.progress.phase)) {
+      const named = words[0] && store.readSpec(words[0]) ? words[0] : undefined;
+      if (here.name && here.progress && unfinishedPhase(here.progress.phase) && (!named || named === here.name)) {
         const p = here.progress;
-        const guidance = words.join(" ");
+        // Resuming lifts planning protection: a /pb:plan or /pb:deps after the pause turned it back on.
+        if (session) store.setPlanning(session, false);
+        // The spec name itself isn't guidance: only what follows it is.
+        const guidance = (named ? words.slice(1) : words).join(" ");
         if (guidance) {
           const md = store.readSpec(p.spec);
-          if (md) store.writeSpec(p.spec, addDecision(md, guidance));
+          if (md) {
+            const updated = addDecision(md, guidance);
+            if (parseSpec(updated).spec) {
+              store.writeSpec(p.spec, updated);
+              store.event(p.spec, { type: "spec", update: "guidance" });
+            } else ctx.ui.notify("Guidance not recorded: it would leave the spec unparseable.", "warning");
+          }
         }
         const from = guidance ? `\n\nFrom the human: ${guidance}` : "";
         if (p.current === "final") {
           const fin = p.tasks.find((t) => t.id === "final");
-          // Like tasks below: only an exhausted final gets a fresh set; other pauses keep their count.
-          if (fin && fin.attempts >= cfg.maxAttempts) fin.attempts = 0;
+          resetExhausted(fin, cfg.maxAttempts);
           const attempt = (fin?.attempts ?? 0) + 1;
           if (fin) fin.attempts = attempt;
           p.phase = "building";
@@ -2013,8 +2278,7 @@ export default function pb(pi: ExtensionAPI) {
             beginCohereEntry(ctx, store, p);
             return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts)}${from}`);
           }
-          // Like tasks below: only an exhausted pass gets a fresh set; other pauses keep their count.
-          if (cc.attempts >= cfg.maxAttempts) cc.attempts = 0;
+          resetExhausted(cc, cfg.maxAttempts);
           const attempt = cc.attempts + 1;
           cc.attempts = attempt;
           p.phase = "building";
@@ -2034,12 +2298,12 @@ export default function pb(pi: ExtensionAPI) {
         }
         if (!cur || !tp) return ctx.ui.notify("Nothing left to build here.", "info");
         // Your answer to a task that kept failing buys it a fresh set of attempts; other pauses cost none.
-        const exhausted = tp.attempts >= cfg.maxAttempts;
-        if (exhausted) tp.attempts = 0;
+        const exhausted = resetExhausted(tp, cfg.maxAttempts);
         const again = exhausted || tp.status === "todo";
         const intro = !!p.needsIntro;
         p.needsIntro = undefined;
-        const t = beginTask(ctx, store, p, cur, { countAttempt: again, intro })!;
+        const t = beginTask(ctx, store, p, cur, { countAttempt: again, intro });
+        if (!t) return ctx.ui.notify(`${store.rel("specs", p.spec, "spec.md")} doesn't parse. Fix it (or /${cmd("spec")} ${p.spec}), then /${cmd("build")}.`, "error");
         const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
         const body = intro
           ? `${buildIntro(p.spec, loaded.spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : loaded.md, store.extra("build"))}\n\n${t.prompt}`
@@ -2064,7 +2328,13 @@ export default function pb(pi: ExtensionAPI) {
           return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec")));
         }
         const pool = mine.length ? mine : offered;
-        const labelOf = (n: string) => (unfinishedPhase(phaseOf(n)) ? `${n} (restart the build, finished tasks stay done)` : n);
+        const labelOf = (n: string) => {
+          const bits: string[] = [];
+          const owner = store.progress(n)?.session ?? store.progress(n)?.writtenIn;
+          if (owner && owner !== session) bits.push("from another session");
+          if (unfinishedPhase(phaseOf(n))) bits.push("restart the build, finished tasks stay done");
+          return bits.length ? `${n} (${bits.join("; ")})` : n;
+        };
         if (pool.length === 1 || !ctx.hasUI) name = pool[0];
         else {
           const labels = pool.map(labelOf);
@@ -2203,14 +2473,14 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   /** The review's message: verdict, findings, what was dismissed or put back, and the sessions. */
-  const reviewMessage = (run: ReviewRun, o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; restored: string[]; partial: boolean }) => {
+  const reviewMessage = (run: ReviewRun, o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; restored: string[]; partial: boolean; verificationFailed?: string }) => {
     const findings = [...o.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
     const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
     const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left);
     const verdict = run.passes.length ? verdictOf(findings) : "none";
     const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
     const unparsed = run.passes.filter((x) => x.unparsed && !x.left).map((x) => (x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"));
-    const sessions = run.passes.map((x) => `${x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"} \`pi --session ${path.relative(run.cwd, x.session)}\``);
+    const sessions = run.passes.map((x) => `${x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"} \`pi --session ${sessionIdOf(x.session)}\``);
     const text = [
       `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : run.abuseSkipped ? " · adversarial pass skipped" : ""}`,
       ...(o.partial
@@ -2222,6 +2492,7 @@ export default function pb(pi: ExtensionAPI) {
       ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),
       ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
       ...(o.restored.length ? ["", `⚠ Files changed during the review were put back: ${o.restored.join(", ")}`] : []),
+      ...(o.verificationFailed ? ["", `⚠ The second look at the blocking findings couldn't run (${o.verificationFailed}): they are reported unconfirmed.`] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
       ...(run.name && !o.partial ? ["", commitBlock(commitMessage(new Store(run.cwd).readSpec(run.name) ?? ""))] : []),
       "",
@@ -2234,7 +2505,7 @@ export default function pb(pi: ExtensionAPI) {
 
   /** Never lost: the result (or what was reported so far) is kept with the spec. */
   const writeReview = (store: Store, run: ReviewRun, partial: boolean) => {
-    const m = reviewMessage(run, { findings: allFindings(run), dismissed: [], restored: [], partial });
+    const m = reviewMessage(run, { findings: allFindings(run), dismissed: [], restored: [], partial, verificationFailed: undefined });
     fs.mkdirSync(path.dirname(store.reviewFile(run.name)), { recursive: true });
     fs.writeFileSync(store.reviewFile(run.name), `${m.text}\n`);
     return m;
@@ -2248,7 +2519,7 @@ export default function pb(pi: ExtensionAPI) {
     const all = allFindings(run);
     const checked =
       cfg.reviewer.verify === false
-        ? { findings: all, dismissed: [], tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 }
+        ? { findings: all, dismissed: [], error: undefined as string | undefined, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 }
         : await verifyFindings({
             cwd: run.cwd,
             findings: all,
@@ -2265,7 +2536,7 @@ export default function pb(pi: ExtensionAPI) {
     widget(undefined);
     const after = run.before ? snapshot(run.cwd, `pb: after review ${run.label}`) : undefined;
     const restored = run.before && after && run.before.tree !== after.tree ? restore(run.cwd, after.commit, run.before.commit) : [];
-    const m = reviewMessage(run, { findings: checked.findings, dismissed: checked.dismissed, restored, partial: false });
+    const m = reviewMessage(run, { findings: checked.findings, dismissed: checked.dismissed, restored, partial: false, verificationFailed: checked.error?.split("\n")[0] });
     const p = run.name ? store.progress(run.name) : undefined;
     if (run.name && p) {
       store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ...checked.tokens, cost: checked.cost });
@@ -2325,13 +2596,24 @@ export default function pb(pi: ExtensionAPI) {
         const NEW = "Start a new review";
         const choice = ctx.hasUI ? await ctx.ui.select("A review was interrupted", [CONTINUE, SHOW, NEW]) : CONTINUE;
         if (!choice) return;
-        if (choice === SHOW) return post(fs.readFileSync(store.reviewFile(saved.name), "utf8"));
+        if (choice === SHOW) {
+          if (!fs.existsSync(store.reviewFile(saved.name))) {
+            store.saveReviewRun(undefined); // the spec went away (archived?): this run is dead
+            return ctx.ui.notify("The review's file is gone (was the spec archived?). Start a new review.", "warning");
+          }
+          return post(fs.readFileSync(store.reviewFile(saved.name), "utf8"));
+        }
         if (choice === CONTINUE) {
           // Not "interrupted" any more as you arrive: pb is continuing it, no need to say how.
           const cut = saved.interrupted;
           const run = { ...saved, interrupted: undefined };
           store.saveReviewRun(run);
-          await ctx.switchSession(cut.session, { withSession: (c) => reviewContinue(c, c.sendMessage, store, run, cut) });
+          try {
+            await ctx.switchSession(cut.session, { withSession: (c) => reviewContinue(c, c.sendMessage, store, run, cut) });
+          } catch {
+            store.saveReviewRun(undefined); // its session is gone too: nothing left to continue
+            ctx.ui.notify("The interrupted review's session is gone. Start a new review.", "warning");
+          }
           return;
         }
         store.saveReviewRun(undefined);
@@ -2383,6 +2665,10 @@ export default function pb(pi: ExtensionAPI) {
       }
 
       const label = name ?? "the uncommitted change";
+      // The tree as the reviewer sees it: snapshotted before the harness's own check, so the
+      // check's artifacts (coverage, caches) are put back with anything else the review changed.
+      // The next review's delta starts here too.
+      const before = cfg.checkpoints ? snapshot(ctx.cwd, `pb: review ${label}`) : undefined;
       // Fresh ground truth first: the reviewer should judge what's on disk now.
       const command = loaded ? (loaded.spec.gate === "tests" ? testCmd : loaded.spec.gate === "build" ? buildCmd : null) : (testCmd ?? buildCmd);
       let check = "(not run)";
@@ -2391,14 +2677,13 @@ export default function pb(pi: ExtensionAPI) {
         const v = await withChecking(() => runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap));
         safely(() => ctx.ui.setWidget("pb-review", undefined));
         check = v.summary;
-        if (p) {
+        if (p && !unfinishedPhase(p.phase)) {
+          // A mid-build review must not clobber the build's own last result.
           p.lastVerify = v;
           store.saveProgress(p);
         }
       }
 
-      // The tree as the reviewer sees it: the next review's delta starts here, and anything changed during it is put back.
-      const before = cfg.checkpoints ? snapshot(ctx.cwd, `pb: review ${label}`) : undefined;
       const prevReview = p?.review;
       let previous: { snapshot: string; findings: Finding[]; changed: string[] } | undefined;
       if (!full && prevReview?.snapshot && before) {
@@ -2768,7 +3053,7 @@ export default function pb(pi: ExtensionAPI) {
       const lines = names.flatMap((n) => {
         const p = store.progress(n);
         const s = loadSpec(store, n)?.spec;
-        const where = p?.session && n !== here ? ` · session: pi --session ${p.session}` : "";
+        const where = p?.session && n !== here ? ` · session: pi --session ${sessionIdOf(p.session)}` : "";
         const head = `${n === here ? "▸ " : ""}${n} — ${p?.phase ?? "written"}${where}${s ? ` · verification ${s.gate}${s.newTests ? "" : " · no new tests"}${s.dependsOn ? ` · depends on ${s.dependsOn}` : ""}` : " · ⚠ doesn't parse"}${p?.pause ? ` · paused: ${p.pause}` : ""}`;
         return [head, ...(p && p.phase !== "written" ? p.tasks.map((t) => `    ${taskLine(t)}`) : [])];
       });

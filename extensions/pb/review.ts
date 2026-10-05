@@ -59,7 +59,7 @@ export async function verifyFindings(o: {
   sessionDir?: string;
   onActivity?: (line: string) => void;
   onText?: (text: string) => void;
-}): Promise<{ findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; aborted: boolean; sessionFile?: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: number }> {
+}): Promise<{ findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; aborted: boolean; error?: string; sessionFile?: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: number }> {
   const toCheck = o.findings.filter(blocking);
   const none = { findings: o.findings, dismissed: [], aborted: false, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 };
   if (!toCheck.length) return none;
@@ -91,7 +91,9 @@ export async function verifyFindings(o: {
   }
   const rejected = new Map<Finding, string>();
   for (const [n, v] of byIndex) if (v.verdict === "rejected") rejected.set(toCheck[n - 1], v.evidence);
-  return { ...usage, aborted: false, findings: o.findings.filter((f) => !rejected.has(f)), dismissed: [...rejected].map(([finding, evidence]) => ({ finding, evidence })) };
+  // A failed run with no usable verdicts must not look like agreement: report it, keep everything.
+  const error = byIndex.size === 0 && v.error ? v.error : undefined;
+  return { ...usage, aborted: false, error, findings: o.findings.filter((f) => !rejected.has(f)), dismissed: [...rejected].map(([finding, evidence]) => ({ finding, evidence })) };
 }
 
 /**

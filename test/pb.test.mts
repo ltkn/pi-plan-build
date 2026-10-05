@@ -230,6 +230,7 @@ function setup(config: object = {}) {
         return { cancelled: false };
       },
       newSession: async (opts: { setup?: (sm: object) => Promise<void>; withSession?: (c: object) => Promise<void> }) => {
+        if (process.env.MOCK_NEW_SESSION_CANCEL === "1") return { cancelled: true };
         const prev = rt.ctx.sessionManager.getSessionFile();
         self.stale = true;
         const next = path.join(repo, `build-session-${++sessions}.jsonl`);
@@ -555,6 +556,63 @@ test("plan: the baseline runs in the background (no tokens) and a red suite warn
   assert.ok(t.selectTitles.some((x) => /^The test suite already failed when planning began \(`exit 1` → FAIL/.test(x)));
 });
 
+test("plan: a baseline from an older commit doesn't block the build", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/baseline.json"),
+    JSON.stringify({ ok: false, command: "true", summary: "FAIL (exit 1)", at: "2026-10-01 09:00:00", head: "0000000000000000000000000000000000000000" }),
+  );
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.ok(!t.selectTitles.some((x) => x.startsWith("The test suite already failed")));
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("skippedLargeFiles: oversized untracked files are reported because snapshots can't see them", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { snapshot, changedPaths, skippedLargeFiles } = await import("../extensions/pb/checkpoint.ts");
+  const before = snapshot(t.repo, "before")!;
+  fs.writeFileSync(path.join(t.repo, "big.bin"), Buffer.alloc(21 * 1024 * 1024, 1));
+  fs.writeFileSync(path.join(t.repo, "small.txt"), "ok");
+  const after = snapshot(t.repo, "after")!;
+  assert.deepEqual(skippedLargeFiles(t.repo), ["big.bin"]);
+  assert.deepEqual(changedPaths(t.repo, before.commit, after.commit), ["small.txt"]); // big.bin is missing from the diff: that's the blind spot this warns about
+});
+
+test("restore: files changed since the snapshot are left alone, not clobbered", async () => {
+  const t = setup();
+  const { snapshot, restore } = await import("../extensions/pb/checkpoint.ts");
+  // A: v1 → s1; A: v2 → s2 (the recorded state); then both A and B drift without a new snapshot.
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "v1");
+  const s1 = snapshot(t.repo, "s1")!;
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "v2");
+  fs.writeFileSync(path.join(t.repo, "b.txt"), "v2");
+  const s2 = snapshot(t.repo, "s2")!;
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "drift");
+  const restored = restore(t.repo, s2.commit, s1.commit, ["a.txt", "b.txt"]);
+  assert.equal(fs.readFileSync(path.join(t.repo, "a.txt"), "utf8"), "drift"); // kept: it changed again
+  assert.deepEqual(restored, ["b.txt"]); // B matches s2, so it was removed back to its s1 state (absent)
+  assert.ok(!fs.existsSync(path.join(t.repo, "b.txt")));
+});
+
+test("plan: re-planning the same session while its baseline is running doesn't start a second one", async () => {
+  const where = path.join(os.tmpdir(), `pb-baseline-count-${process.pid}`);
+  const flag = `${where}-flag`;
+  fs.rmSync(where, { force: true });
+  fs.rmSync(flag, { force: true });
+  const t = setup({ verify: `while [ ! -f ${flag} ]; do sleep 0.05; done; echo x >> ${where}`, baseline: true });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  await new Promise((r) => setTimeout(r, 300)); // let the baseline get into its loop
+  await t.run("plan", "cancel orders, delete first"); // same session: must not double-run
+  fs.writeFileSync(flag, "");
+  await until(() => t.posts.filter((p) => p.startsWith("**Baseline**")).length === 1);
+  assert.equal(fs.readFileSync(where, "utf8").trim().split("\n").length, 1);
+});
+
 test("standards: a Java project gets the Java 25 defaults with pb's section", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -733,6 +791,19 @@ test("pb_explore answers from a separate context; its usage is reported and coun
   await t.run("build");
   await t.run("stats");
   assert.match(t.posts.at(-1)!, /Explorer +3 calls · in 6\.0k · out 800( @ [\d.]+k? tok\/s)? · \$0\.04/);
+});
+
+test("pb_explore keeps the answer when it arrives across messages", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  process.env.MOCK_SPLIT_TEXT = "1";
+  try {
+    const r = await t.callTool("pb_explore", { question: "Where is the model?" });
+    assert.match(r.content![0].text, /holds the model[\s\S]*applies transitions/);
+  } finally {
+    delete process.env.MOCK_SPLIT_TEXT;
+  }
 });
 
 test("pb_try probes by running in a separate context; project changes are put back", async () => {
@@ -1534,6 +1605,88 @@ test("review: a long prose report with no parseable findings is flagged, not sil
   assert.equal(unparsedReport(undefined, lost), true); // substantial but tagless: warn, don't pass clean
 });
 
+test("review: the harness check's own artifacts are put back with the rest", async () => {
+  const t = setup({ verify: "touch review-artifact.txt" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.ok(fs.existsSync(path.join(t.repo, "review-artifact.txt"))); // the checks leave it behind
+  fs.rmSync(path.join(t.repo, "review-artifact.txt")); // ...so the review's own check is what recreates it
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS/);
+  assert.ok(!fs.existsSync(path.join(t.repo, "review-artifact.txt"))); // the review put it back
+});
+
+test("review: a mid-build review doesn't clobber the build's last result", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "building",
+      session,
+      tasks: [
+        { id: "T1", title: "first file", status: "doing", attempts: 1 },
+        { id: "T2", title: "second file", status: "todo", attempts: 0 },
+      ],
+      current: "T1",
+      lastVerify: { ok: true, command: "true", summary: "BUILD-RESULT", at: "2026-10-01 10:00:00" },
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  await t.run("review");
+  assert.equal(t.progress("order-cancellation").lastVerify.summary, "BUILD-RESULT");
+});
+
+test("status: a build running elsewhere is shown by session id, not file path", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const p = t.progress("order-cancellation");
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({ ...p, session: path.join(t.repo, "build-session-9.jsonl"), phase: "paused" }),
+  );
+  await t.run("status");
+  assert.match(t.notes.at(-1)!, /session: pi --session build-session-9 /);
+  assert.doesNotMatch(t.notes.at(-1)!, /\.jsonl/);
+});
+
+test("review: showing an archived spec's interrupted review says so instead of crashing", async () => {
+  const t = setup({ verify: "true", mapOnArchive: false });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("archive");
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/review-run.json"),
+    JSON.stringify({ cwd: t.repo, name: "order-cancellation", label: "order-cancellation", brief: "", followUp: false, passes: [], interrupted: { role: "review", session: "gone.jsonl" } }),
+  );
+  t.selects.push("Show what it had reported");
+  await t.run("review");
+  assert.match(t.notes.at(-1)!, /The review's file is gone \(was the spec archived\?\)/);
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-run.json"))); // the dead run is cleared
+});
+
+test("review: when the second look can't run, the findings are reported unconfirmed", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = CHANGES;
+  process.env.MOCK_VERIFY = "crash"; // the verifier itself blows up
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_VERIFY;
+  }
+  assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED/); // the P1 stands: failure to verify never dismisses
+  assert.match(t.posts.at(-1)!, /The second look at the blocking findings couldn't run \(verifier exploded\): they are reported unconfirmed\./);
+});
+
 test("review: a fresh review session with the spec first and the diff; you're brought back with the result", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -1546,7 +1699,7 @@ test("review: a fresh review session with the spec first and the diff; you're br
   assert.match(brief, /## The check the harness ran\n\n`true` → PASS/);
   assert.ok([...t.names.values()].includes("review: order-cancellation · spec") && [...t.names.values()].includes("review: order-cancellation · adversarial"));
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // back where you were
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+\.jsonl` · adversarial `pi --session build-session-\d+\.jsonl`/);
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session build-session-\d+`/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
   assert.equal(t.progress("order-cancellation").reviewUnshown, undefined);
   assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /Review of order-cancellation\*\* — ✅ PASS/); // kept with the spec
@@ -2257,6 +2410,403 @@ test("/pb:plan <spec> continues planning in a fresh session seeded from the spec
   assert.match((await t.callTool("write", { path: "x.java", content: "x" })).error!, /Planning mode/); // planning mode in the new session
 });
 
+test("/pb:plan refuses to start while Pi is mid-turn", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  t.agent.script = async () => {
+    await gate;
+  };
+  const first = t.run("plan", "cancel orders");
+  await until(() => t.instructions.length === 1);
+  const rt = t.runtime();
+  await rt.cmds["pb:plan"].handler("a second idea", rt.ctx);
+  assert.match(t.notes.at(-1)!, /Pi is busy\. Wait for the current turn to finish\./);
+  assert.equal(t.instructions.length, 1); // nothing was instructed mid-turn
+  release();
+  await first;
+});
+
+test("/pb:plan refuses to start without a session file instead of promising protection it can't keep", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  const rt = t.runtime();
+  const original = rt.ctx.sessionManager.getSessionFile;
+  rt.ctx.sessionManager.getSessionFile = () => undefined;
+  try {
+    await rt.cmds["pb:plan"].handler("cancel orders", rt.ctx);
+  } finally {
+    rt.ctx.sessionManager.getSessionFile = original;
+  }
+  assert.match(t.notes.at(-1)!, /No session file.*planning protections can't run/);
+  assert.equal(t.instructions.length, 0);
+});
+
+test("/pb:plan with checkpoints off warns that planning changes can't be listed", async () => {
+  const t = setup({ checkpoints: false });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "cancel orders");
+  assert.match(t.notes.at(-1)!, /Checkpoints are off, so pb can't list what changed while planning/);
+  assert.equal(t.instructions.length, 1); // planning still starts, degraded
+});
+
+test("/pb:plan <spec> with checkpoints off warns in the fresh session too", async () => {
+  const t = setup({ checkpoints: false });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  await t.run("plan", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /Checkpoints are off, so pb can't list what changed while planning/);
+  assert.match(t.instructions.at(-1)!, /^\[pb:plan order-cancellation\] Let's continue planning this/);
+});
+
+test("/pb:plan outside git warns that the tree couldn't be snapshotted", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  fs.rmSync(path.join(t.repo, ".git"), { recursive: true, force: true });
+  await t.run("plan", "cancel orders");
+  assert.match(t.notes.at(-1)!, /Could not snapshot the working tree, so pb can't list what changed while planning/);
+  assert.equal(t.instructions.length, 1);
+});
+
+test("/pb:deps refuses while Pi is mid-turn, and otherwise plans like /pb:plan", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  t.agent.script = async () => {
+    await gate;
+  };
+  const first = t.run("deps", "all");
+  await until(() => t.instructions.length === 1);
+  const rt = t.runtime();
+  await rt.cmds["pb:deps"].handler("all", rt.ctx);
+  assert.match(t.notes.at(-1)!, /Pi is busy\. Wait for the current turn to finish\./);
+  assert.equal(t.instructions.length, 1);
+  release();
+  await first;
+
+  const u = setup();
+  process.chdir(u.repo);
+  const { writeMap } = await import("../extensions/pb/map.ts");
+  writeMap(u.repo, "- `src/gone.ts`: gone");
+  await u.run("deps", "all"); // standards offered (no preselect needed: first option applies), map staleness warned
+  assert.ok(u.selectTitles.some((x) => /^Engineering standards/.test(x)));
+  assert.ok(fs.existsSync(path.join(u.repo, "AGENTS.md")));
+  assert.match((await u.callTool("write", { path: "x.ts", content: "x" })).error!, /Planning mode/);
+  assert.ok(u.notes.some((n) => /The project map in AGENTS\.md names 1 path\(s\) that no longer exist \(src\/gone\.ts\)/.test(n)));
+});
+
+test("/pb:plan without a session file leaves the session name alone", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  const rt = t.runtime();
+  const original = rt.ctx.sessionManager.getSessionFile;
+  rt.ctx.sessionManager.getSessionFile = () => undefined;
+  try {
+    await rt.cmds["pb:plan"].handler("cancel orders", rt.ctx);
+  } finally {
+    rt.ctx.sessionManager.getSessionFile = original;
+  }
+  assert.equal(t.names.size, 0); // rename happens only once planning actually starts
+});
+
+test("/pb:plan <spec> re-checks the project map in the fresh session", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  const { writeMap } = await import("../extensions/pb/map.ts");
+  writeMap(t.repo, "- `src/gone.ts`: gone");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  await t.run("plan", "order-cancellation");
+  assert.ok(t.notes.some((n) => /The project map in AGENTS\.md names 1 path\(s\) that no longer exist \(src\/gone\.ts\)/.test(n)));
+});
+
+test("planning guard: absolute paths inside the project are blocked, outside are fine", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "x");
+  assert.match((await t.callTool("write", { path: path.join(t.repo, "inside.txt"), content: "x" })).error!, /Planning mode/);
+  assert.equal((await t.callTool("write", { path: path.join(os.tmpdir(), "pb-outside.txt"), content: "x" })).error, undefined);
+});
+
+test("/pb:plan outside git warns the baseline shares the working copy", async () => {
+  const t = setup({ verify: "true", baseline: true });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  fs.rmSync(path.join(t.repo, ".git"), { recursive: true, force: true });
+  await t.run("plan", "cancel orders");
+  assert.ok(t.notes.some((n) => /Not a git repo, so the baseline runs in the working copy/.test(n)));
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
+});
+
+test("baselines run per session: a second planning session doesn't wait for the first one's", async () => {
+  const where = path.join(os.tmpdir(), `pb-baseline-two-${process.pid}`);
+  const flag = `${where}-flag`;
+  fs.rmSync(where, { force: true });
+  fs.rmSync(flag, { force: true });
+  const t = setup({ verify: `while [ ! -f ${flag} ]; do sleep 0.05; done; echo x >> ${where}`, baseline: true });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "cancel orders"); // baseline 1 starts in session 1, gated on the flag
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  await t.run("plan", "order-cancellation"); // fresh session 2: its own baseline starts, not deduped against session 1's
+  fs.writeFileSync(flag, "");
+  await until(() => fs.existsSync(where) && fs.readFileSync(where, "utf8").trim().split("\n").length === 2);
+  assert.equal(fs.readFileSync(where, "utf8").trim().split("\n").length, 2); // both ran: one global slot would have run one
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**"))); // session 2's result lands in the live session
+});
+
+test("build: naming another spec builds it instead of resuming the paused one as guidance", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  await t.callTool("pb_write_spec", { name: "other-feature", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [
+        { id: "T1", title: "first file", status: "done", attempts: 1 },
+        { id: "T2", title: "second file", status: "todo", attempts: 0 },
+      ],
+      current: "T2",
+      pause: "stopped",
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  t.agent.script = diligent;
+  await t.run("build", "other-feature");
+  assert.equal(t.progress("order-cancellation").phase, "paused"); // untouched, not resumed
+  assert.doesNotMatch(t.read(".pi/pb/specs/order-cancellation/spec.md"), /other-feature/); // no guidance junk
+  assert.equal(t.progress("other-feature").phase, "built");
+});
+
+test("build: resuming with guidance strips the spec name and records it as a spec event", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [
+        { id: "T1", title: "first file", status: "done", attempts: 1 },
+        { id: "T2", title: "second file", status: "todo", attempts: 0 },
+      ],
+      current: "T2",
+      pause: "stopped",
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  t.agent.script = diligent;
+  await t.run("build", "order-cancellation fix the flake");
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /- fix the flake/);
+  assert.doesNotMatch(t.read(".pi/pb/specs/order-cancellation/spec.md"), /- order-cancellation fix the flake/);
+  assert.ok(t.events("order-cancellation").some((e) => e.type === "spec" && e.update === "guidance"));
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("build: cancelling a fresh session drops its handover instead of leaking it", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await written(t);
+  t.agent.script = diligent;
+  process.env.MOCK_NEW_SESSION_CANCEL = "1";
+  try {
+    await t.run("build", "order-cancellation --fresh");
+  } finally {
+    delete process.env.MOCK_NEW_SESSION_CANCEL;
+  }
+  assert.match(t.notes.at(-1)!, /Build cancelled\./);
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/carry.json")));
+});
+
+test("plan: cancelling a fresh planning session drops its handover instead of leaking it", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  process.env.MOCK_NEW_SESSION_CANCEL = "1";
+  try {
+    await t.run("plan", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_NEW_SESSION_CANCEL;
+  }
+  assert.match(t.notes.at(-1)!, /Cancelled\./);
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/carry.json")));
+});
+
+test("build: a slow spec yields to the pending offer, which picks it up once written", async () => {
+  const t = setup({ verify: "true", specWaitSec: 0.2 });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  t.agent.script = async (text, tool) => {
+    if (/pb_write_spec tool/.test(text)) {
+      await new Promise((r) => setTimeout(r, 1000)); // slower than the wait cap
+      await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+      return;
+    }
+    return diligent(text, tool);
+  };
+  await t.run("build", "cancel orders");
+  assert.ok(t.posts.some((p) => p.startsWith("No spec ready to build yet."))); // yielded, didn't hang
+  assert.equal(t.progress("order-cancellation").phase, "built"); // pending picked it up and built it
+});
+
+test("build: with checkpoints off, the build says so up front", async () => {
+  const t = setup({ verify: "true", checkpoints: false });
+  process.chdir(t.repo);
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.ok(t.notes.some((n) => /Checkpoints are off: this build runs without undo points/.test(n)));
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("build: specs from another session are labelled when choosing", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "billing-export", content: SPEC() });
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  for (const n of ["billing-export", "order-cancellation"]) {
+    const p = t.progress(n);
+    fs.writeFileSync(path.join(t.repo, ".pi/pb/specs", n, "progress.json"), JSON.stringify({ ...p, writtenIn: "/elsewhere/planning.jsonl" }));
+  }
+  t.agent.script = diligent;
+  await t.run("build");
+  const options = t.selectOptions[t.selectTitles.indexOf("Build which spec?")];
+  assert.ok(options.every((o) => /from another session/.test(o)));
+  assert.equal(t.progress("billing-export").phase, "built");
+});
+
+test("build: resuming after a re-plan lifts planning protection instead of wedging on it", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [
+        { id: "T1", title: "first file", status: "done", attempts: 1 },
+        { id: "T2", title: "second file", status: "todo", attempts: 0 },
+      ],
+      current: "T2",
+      pause: "stopped",
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  t.agent.script = diligent;
+  await t.run("plan", "a new idea"); // planning back on after the pause
+  await t.run("build"); // resume
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.deepEqual(JSON.parse(t.read(".pi/pb/planning.json")), {});
+  assert.equal((await t.callTool("write", { path: "src/x.ts", content: "x" })).error, undefined);
+});
+
+test("/pb:plan off without planning mode says so instead of confirming", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.run("plan", "off");
+  assert.match(t.notes.at(-1)!, /Not in planning mode\./);
+});
+
+test("/pb:plan <spec> sets a ready spec back to planning while it is replanned", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() }); // no Status line: ready
+  await t.run("plan", "order-cancellation");
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /Status: planning/);
+  assert.ok(t.events("order-cancellation").some((e) => e.type === "spec" && e.update === "status"));
+  assert.match(t.notes.at(-1)!, /set back to planning/);
+  assert.match(t.instructions.at(-1)!, /^\[pb:plan order-cancellation\] Let's continue planning this/);
+});
+
+test("/pb:plan <spec> points finished specs at review, unfinished ones at build", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await written(t);
+  const instructionsBefore = t.instructions.length;
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({ ...t.progress("order-cancellation"), phase: "paused" }),
+  );
+  await t.run("plan", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /its phase is paused\): `\/pb:build order-cancellation` continues the unfinished build/);
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({ ...t.progress("order-cancellation"), phase: "built" }),
+  );
+  await t.run("plan", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /its phase is built\): `\/pb:review order-cancellation` reviews it/);
+  assert.equal(t.instructions.length, instructionsBefore); // warnings only, no planning started
+});
+
+test("/pb:plan <spec> warns instead of treating the name as a new idea when the spec already passed planning", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await written(t);
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({ ...t.progress("order-cancellation"), phase: "paused" }),
+  );
+  const instructionsBefore = t.instructions.length;
+  await t.run("plan", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /`order-cancellation` is not being planned \(its phase is paused\)/);
+  assert.equal(t.instructions.length, instructionsBefore); // no new planning instruction was sent
+});
+
+test("/pb:plan <spec> first asks about files the old planning session changed, and baselines the new one", async () => {
+  const t = setup({ verify: "true", baseline: true });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "cancel orders");
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**"))); // the old session's baseline
+  fs.writeFileSync(path.join(t.repo, "stray.txt"), "written by a shell command");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  t.selects.push("Restore them to how they were when planning began");
+  await t.run("plan", "order-cancellation");
+  assert.ok(t.selectTitles.some((x) => x.startsWith("These project files changed while planning:")));
+  assert.ok(!fs.existsSync(path.join(t.repo, "stray.txt")));
+  await until(() => t.posts.filter((p) => p.startsWith("**Baseline**")).length === 2); // a fresh one for the new session
+});
+
 test("/pb:spec <name> revises the spec from the file, not from memory", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -2779,7 +3329,7 @@ test("fresh calls are saved as sessions to open afterwards, and stream their tex
   t.agent.script = diligent;
   await t.run("build");
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /The review sessions: spec `pi --session build-session-\d+\.jsonl` · adversarial `pi --session build-session-\d+\.jsonl`/);
+  assert.match(t.posts.at(-1)!, /The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session build-session-\d+`/);
   const e = await t.callTool("pb_explore", { question: "where?" });
   assert.match((e as any).details.session, /^\.pi\/pb\/sessions\/explorer\/.+\.jsonl$/);
 
@@ -2807,4 +3357,154 @@ test("/pb:compact in a build session compacts to the build's state (Pi's compact
   await t.run("compact");
   assert.ok(compacted);
   assert.match(t.notes.at(-1)!, /Compacted to the build's state/);
+});
+
+test("plan continue clears the old session when it has no specs left", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "cancel orders");
+  const oldFile = t.runtime().ctx.sessionManager.getSessionFile();
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  await t.run("plan", "order-cancellation");
+  const newFile = t.runtime().ctx.sessionManager.getSessionFile();
+  assert.notEqual(newFile, oldFile);
+  const s = new Store(t.repo);
+  assert.ok(s.planning(newFile));
+  assert.equal(s.planning(oldFile), undefined);
+});
+
+test("baselines are per session: parallel planners don't clobber", async () => {
+  const t = setup({ verify: "true", baseline: true });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "cancel orders");
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
+  const sess1 = t.runtime().ctx.sessionManager.getSessionFile();
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  await t.run("plan", "order-cancellation");
+  await until(() => t.posts.filter((p) => p.startsWith("**Baseline**")).length === 2);
+  const sess2 = t.runtime().ctx.sessionManager.getSessionFile();
+  assert.notEqual(sess1, sess2);
+  const dir = path.join(t.repo, ".pi/pb/baselines");
+  assert.ok(fs.existsSync(dir));
+  assert.equal(fs.readdirSync(dir).length, 2);
+  const s = new Store(t.repo);
+  assert.ok(s.baseline(sess1));
+  assert.ok(s.baseline(sess2));
+});
+
+test("plan continue tracks a spec that has no progress yet", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  fs.mkdirSync(path.join(t.repo, ".pi/pb/specs/manual"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/manual/spec.md"), PLANNING);
+  await t.run("plan", "manual");
+  const sess = t.runtime().ctx.sessionManager.getSessionFile();
+  const s = new Store(t.repo);
+  const p = s.progress("manual");
+  assert.ok(p);
+  assert.equal(p.writtenIn, sess);
+  assert.ok(s.specsOfPlanning(sess).includes("manual"));
+});
+
+test("reviewing planning changes without a snapshot warns instead of silently keeping", async () => {
+  const t = setup({ checkpoints: false });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "cancel orders");
+  fs.writeFileSync(path.join(t.repo, "stray.txt"), "x");
+  const before = t.notes.length;
+  await t.run("plan", "off");
+  assert.ok(t.notes.slice(before).some((n) => /Checkpoints are off.*can't list/));
+});
+
+test("large-file warning only lists files changed while planning", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  const oldBig = path.join(t.repo, "old-big.bin");
+  fs.writeFileSync(oldBig, Buffer.alloc(21 * 1024 * 1024, 1));
+  const oldTime = new Date(Date.now() - 3600 * 1000);
+  fs.utimesSync(oldBig, oldTime, oldTime);
+  await t.run("plan", "x");
+  fs.writeFileSync(path.join(t.repo, "new-big.bin"), Buffer.alloc(21 * 1024 * 1024, 1));
+  const before = t.notes.length;
+  await t.run("plan", "off");
+  const warnings = t.notes.slice(before).filter((n) => /Large files/.test(n));
+  assert.ok(warnings.length > 0);
+  assert.match(warnings.at(-1)!, /new-big\.bin/);
+  assert.doesNotMatch(warnings.at(-1)!, /old-big\.bin/);
+});
+
+test("/pb:approach needs a planning session and waits for Pi to be idle", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("approach", "event-driven");
+  assert.match(t.notes.at(-1)!, /is for planning sessions: run \/pb:plan first/);
+  assert.equal(t.instructions.length, 0);
+
+  const { Store: S2 } = await import("../extensions/pb/store.ts");
+  new S2(t.repo).markAsked("standards");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  t.agent.script = async () => {
+    await gate;
+  };
+  const first = t.run("plan", "cancel orders");
+  await until(() => t.instructions.length === 1);
+  const rt = t.runtime();
+  await rt.cmds["pb:approach"].handler("event-driven", rt.ctx);
+  assert.match(t.notes.at(-1)!, /Pi is busy\. Wait for the current turn to finish\./);
+  assert.equal(t.instructions.length, 1);
+  release();
+  await first;
+});
+
+test("/pb:approach expands the named idea without writing anything or asking", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "cancel orders");
+  await t.run("approach", "event-driven notifications");
+  assert.match(t.posts.at(-1)!, /▶ \/pb:approach — event-driven notifications \(chat only: nothing is written\)/);
+  assert.match(
+    t.instructions.at(-1)!,
+    /^\[pb:approach\] event-driven notifications[\s\S]*Expand this idea: event-driven notifications[\s\S]*Understanding[\s\S]*Approach[\s\S]*Non-goals[\s\S]*Test strategy[\s\S]*Alternatives[\s\S]*Risks[\s\S]*Assumptions[\s\S]*Open questions[\s\S]*List them only: do not call pb_ask[\s\S]*No code, no task breakdown/,
+  );
+  assert.deepEqual(new Store(t.repo).specNames(), []);
+});
+
+test("/pb:approach without an idea infers it from the discussion", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "cancel orders");
+  await t.run("approach");
+  assert.match(t.posts.at(-1)!, /▶ \/pb:approach \(chat only: nothing is written\)/);
+  assert.match(t.instructions.at(-1)!, /^\[pb:approach\][\s\S]*Infer the idea from our discussion/);
+});
+
+test("planning prompts push back like a senior engineer", async () => {
+  const { planPrompt, continuePlanPrompt, approachPrompt } = await import("../extensions/pb/prompts.ts");
+  for (const p of [planPrompt("x", "true", "", "none"), continuePlanPrompt("s", "# S", ""), approachPrompt("y", "")]) {
+    assert.match(p, /Push back like a senior engineer/);
+    assert.match(p, /disagree when the idea is second-best/);
+    assert.match(p, /never taste/);
+    assert.match(p, /blocker, suggestion, or nit/);
+    assert.match(p, /what would change your mind/);
+    assert.match(p, /When you know better, teach/);
+    assert.match(p, /guide like a mentor/);
+    assert.match(p, /rabbit holes/);
+  }
 });

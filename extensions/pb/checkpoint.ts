@@ -107,6 +107,32 @@ export async function inWorktree<T>(cwd: string, fn: (dir: string) => Promise<T>
   }
 }
 
+/** Untracked files over the snapshot size cap: they go into no snapshot, so none of the diffs above can see them. */
+export function skippedLargeFiles(cwd: string, sinceMs?: number): string[] {
+  if (tryRun(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() !== "true") return [];
+  try {
+    const env = { GIT_INDEX_FILE: gitPath(cwd, "pb-index") };
+    return split0(tryRun(cwd, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", LEDGER_EXCLUDE], env)).filter((f) => {
+      try {
+        const st = fs.statSync(path.join(cwd, f));
+        if (st.size <= MAX_UNTRACKED_BYTES) return false;
+        return sinceMs === undefined || st.mtimeMs > sinceMs;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** Commit time of a snapshot commit, ms since epoch; undefined when it no longer resolves. */
+export function commitTime(cwd: string, commit: string): number | undefined {
+  const out = tryRun(cwd, ["show", "-s", "--format=%ct", commit])?.trim();
+  const secs = out ? Number(out) : NaN;
+  return Number.isFinite(secs) && secs > 0 ? secs * 1000 : undefined;
+}
+
 /** Forget pb's checkpoints; git garbage-collects the objects later. */
 export function dropCheckpoints(cwd: string): void {
   tryRun(cwd, ["update-ref", "-d", REF]);
@@ -128,23 +154,30 @@ function content(cwd: string, commit: string, p: string): string | undefined {
 /**
  * Make the working tree match `to` (optionally only for `paths`), given that it currently matches `from`.
  * Only the differing files are written or deleted; HEAD and your index are left alone. Returns the paths changed.
+ * Files that no longer match `from` are left alone rather than clobbered: the worktree moved on since `from`
+ * was recorded (another session, a save-time formatter), and overwriting it would lose that.
  */
 export function restore(cwd: string, from: string, to: string, paths: string[] = []): string[] {
   const entries = split0(tryRun(cwd, ["diff", "-z", "--name-status", "--no-renames", from, to, "--", ...paths]));
   const write: string[] = [];
   const remove: string[] = [];
   for (let i = 0; i + 1 < entries.length; i += 2) (entries[i] === "D" ? remove : write).push(entries[i + 1]);
-  for (const f of remove) fs.rmSync(path.join(cwd, f), { force: true });
-  if (write.length) {
+  const current = snapshot(cwd, "pb: restore guard");
+  const drifted = current ? new Set(changedPaths(cwd, from, current.commit, [...write, ...remove])) : new Set<string>();
+  const keep = (f: string) => !drifted.has(f);
+  const toRemove = remove.filter(keep);
+  const toWrite = write.filter(keep);
+  for (const f of toRemove) fs.rmSync(path.join(cwd, f), { force: true });
+  if (toWrite.length) {
     const env = { GIT_INDEX_FILE: gitPath(cwd, "pb-restore-index") };
     try {
       run(cwd, ["read-tree", to], env);
-      run(cwd, ["checkout-index", "-f", "-z", "--stdin"], env, write.join("\0"));
+      run(cwd, ["checkout-index", "-f", "-z", "--stdin"], env, toWrite.join("\0"));
     } finally {
       fs.rmSync(env.GIT_INDEX_FILE, { force: true });
     }
   }
-  return [...write, ...remove];
+  return [...toWrite, ...toRemove];
 }
 
 /* ------------------------------- detection ------------------------------- */

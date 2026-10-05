@@ -206,6 +206,14 @@ not get through.
 Discuss as long as you like. When a discussion turns out to cover two things you
 would merge separately, Pi should say so; they become two specs.
 
+**Hearing the approach.** Mid-discussion, `/pb:approach [which idea]`
+asks Pi how it would implement it: understanding, seams, non-goals, test
+strategy, alternatives, risks, assumptions, open questions (listed, never
+asked as dialogs). Chat only: nothing is written, so `/pb:spec` still does
+the settling. Without an idea it infers the one from the discussion; with
+several on the table, name one to expand it, or leave it out for a
+comparison with a recommendation.
+
 **Long discussions: the checkpoint.** A planning session isn't compacted like
 other sessions. When it passes `checkpointAt` (75% of its context window, and
 always early enough to stay clear of Pi's own compaction), Pi writes the plan to

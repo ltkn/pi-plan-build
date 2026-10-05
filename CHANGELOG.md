@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.28.0
+
+- **`/pb:approach [idea]`**: mid-discussion, hear how Pi would approach the implementation — understanding, seams, non-goals, test strategy, alternatives, risks, assumptions, open questions (listed, never asked). Chat only: nothing is written, so `/pb:spec` still does the settling. With an idea it expands that one; without, it infers the one from the discussion (or compares several with a recommendation)
+- **Planning that pushes back**: the plan, continued-plan and approach prompts share one senior-engineer stance — disagree when the idea is second-best, no objection without evidence (`file:line`, a constraint, or a failing test; never taste), severity labels (blocker/suggestion/nit), what would change its mind, and teaching the better idea (trade-off, principle, where the codebase already applies it). Small change, small pushback
+- **Plan-method fixes**: baselines are per planning session (parallel planners no longer clobber `baseline.json`); continuing a spec in a fresh session clears the old one when it has no specs left, snapshots in the new session's tree, and tracks specs that have no progress yet; a missing snapshot warns at review time instead of silently keeping; the large-file warning lists only files changed while planning
+- Follow-ups from the fresh `/pb:plan` review are listed in `TODO.md`
+
 ## 1.27.0
 
 - **Fixed: the adversarial pass could run ungated.** The review handover (`setCarry`) pinned the parent to the review's home session, but each pass creates its session from the *previous pass* — so every pass after the first missed the carry, lost its model/thinking handover, and, worst, never got the review toolset: no `pb_report_findings`, with `edit`/`write` available. Findings reported as untagged prose then parsed to zero (a silent clean-looking verdict). The carry parent is now the session calling `newSession`; the suite simulates real Pi session events (`previousSessionFile`) and asserts every pass session is gated. Plus a backstop: a pass ending with no tool findings and no parseable prose gets a loud warning (`reported in prose only — read the session before trusting this verdict`) in the result and `review.md`, instead of a silent pass

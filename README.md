@@ -8,6 +8,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ```
 /pb:plan <what>       plan together; project files untouched; the test baseline runs in the background
 /pb:plan <spec>       continue planning a spec in a fresh session, from the spec
+/pb:approach [idea]   in planning: hear how Pi would approach it (chat only: no writes, no dialogs)
 /pb:compact [undo]    pb's compaction: planning, write the spec and reset to it (automatic at checkpointAt);
                       build, compact to the build's state
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
@@ -26,7 +27,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.27.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.28.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -199,6 +200,7 @@ the existing ones still run.
 | `maxAttempts` | 3 | failed checks (the final one, or a task's) before the build pauses |
 | `taskChecks` | `"end"` | `"end"`: the full check after the last task; `"each"`: also a check after every task |
 | `askTimeoutSec` | 300 | how long a dialog waits before going on without you: a `pb_ask` question in a build takes the recommendation, a dialog on the way into a build takes pb's choice; 0 = forever |
+| `specWaitSec` | 0 | how long `/pb:build` waits for the spec before yielding to the pending offer (which picks it up once written); 0 = wait as long as it takes (for slow local models) |
 | `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, the planning and reviewer guards |
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |

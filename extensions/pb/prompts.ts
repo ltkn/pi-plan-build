@@ -35,7 +35,15 @@ export function tryBrief(goal: string, context?: string): string {
 
 /* ================================== plan ================================== */
 
-/** baseline: "running" while the harness runs the suite in the background, "none" when it doesn't. */
+/**
+ * The stance for every planning discussion: a senior engineer, not an agreeable
+ * assistant. Shared by the plan, continued-plan and approach prompts so the
+ * pushback is identical wherever the discussion happens.
+ */
+const CHALLENGE =
+  "Push back like a senior engineer would: disagree when the idea is second-best and say what you would do instead, with concrete reasons grounded in this code. No objection without evidence: cite a path (file:line), a constraint found, or a test that would fail — never taste. Label each pushback blocker, suggestion, or nit, so it's clear what needs an answer. For each objection, say what would change your mind — a measurement, a probe via pb_try, a fact about the code. When you know better, teach: explain the trade-off and the principle behind your alternative, and point to where this codebase already applies it — guide like a mentor, so the engineer grows, not just the plan. Name rabbit holes early — what isn't worth exploring, and why — and don't follow them. Challenge weak spots (missing cases, the wrong layer, reinventing what exists, generality it doesn't need). Small change, small pushback: never debate for its own sake.";
+
+ /** baseline: "running" while the harness runs the suite in the background, "none" when it doesn't. */
 export function planPrompt(feature: string, testCmd: string | null, standards: string, baseline: "running" | "none", extra = ""): string {
   const tests =
     baseline === "running" && testCmd
@@ -45,7 +53,14 @@ export function planPrompt(feature: string, testCmd: string | null, standards: s
 
 Let's plan this together. Investigate as you like (read the code, run the build or tests, curl, one-off scripts in a temp directory), but don't change the project's files: that is blocked until /pb:build.
 
-Check the project map in AGENTS.md first; only what it doesn't answer is worth a fresh call. From the map, read Security invariants in full and only the area headings covering the touched paths; skip the rest. For a broad or multi-file look (where things live, how a similar feature is built, the conventions, what calls what), call pb_explore: it answers from a separate context, so this one stays lean. Searching the whole repo for a common term goes to pb_explore, not a direct grep; grep directly only within named files or directories. For a big question, fan out up to 6 pb_explore and pb_try calls in one block, then synthesize. When you catch yourself raising a grep limit past ~15 or searching the same term twice, stop and call pb_explore with what you've learned instead. When you know the 1-3 files, read them yourself. Grep narrow: one path and pattern, low limit, no surrounding lines unless a match is ambiguous; read the exact lines for discussion. Trust its Files list instead of re-reading everything it read. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try. Single read-only commands stay here in a scratch copy. ${tests}
+Check the project map in AGENTS.md first; only what it doesn't answer is worth a fresh call. How to investigate:
+1. From the map, read Security invariants in full and only the area headings covering the touched paths; skip the rest.
+2. For a broad or multi-file look (where things live, how a similar feature is built, the conventions, what calls what), call pb_explore: it answers from a separate context, so this one stays lean. Searching the whole repo for a common term goes to pb_explore, not a direct grep; grep directly only within named files or directories.
+3. For a big question, fan out up to 6 pb_explore and pb_try calls in one block, then synthesize. When you catch yourself raising a grep limit past ~15 or searching the same term twice, stop and call pb_explore with what you've learned instead.
+4. When you know the 1-3 files, read them yourself. Grep narrow: one path and pattern, low limit, no surrounding lines unless a match is ambiguous; read the exact lines for discussion. Trust its Files list instead of re-reading everything it read.
+5. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try. Single read-only commands stay here in a scratch copy. ${tests}
+
+${CHALLENGE}
 
 Tell me what you found, the approach you recommend (and any alternative worth weighing), and the questions only I can answer (pb_ask for a choice between options). Keep it in proportion to the change.${standardsBlock(standards)}${extraBlock(extra)}
 
@@ -58,6 +73,39 @@ export function depsPrompt(scope: string): string {
   return `[pb:deps]${scope ? ` ${scope}` : ""}
 
 Check ${scope ? `these dependencies: ${scope}` : "this project's dependencies"}: the versions in use against the latest stable ones, deprecated APIs we call, and what an upgrade would break. Don't change the project's files. Then propose the upgrades worth doing, each with its benefit and risk. If I agree, /pb:build turns them into a spec of their own.`;
+}
+
+/* ================================== approach ================================== */
+
+/** Mid-discussion readout of how the implementation would be approached. focus: one idea to expand; empty infers it. */
+export function approachPrompt(focus: string, standards: string, extra = ""): string {
+  const which = focus
+    ? `Expand this idea: ${focus}. If the discussion holds several ideas, expand this one fully and cover the others briefly, with why this one is preferred (or what would change that).`
+    : `Infer the idea from our discussion (usually there is just one). If several are on the table, expand each briefly, compare them, and recommend one with why.`;
+  return `[pb:approach]${focus ? ` ${focus}` : ""}
+
+${which}
+
+Ground it first: the files and roles involved, the existing code to imitate (by path, not pasted), and the constraints found. Check the project map in AGENTS.md first; broad questions go to pb_explore, anything needing running code to pb_try. Don't change the project's files.
+
+${CHALLENGE}
+
+Reply with exactly:
+
+- Understanding — the change in 2–3 sentences.
+- Approach — the seams as they must end up (signatures, API with errors, data and migrations, events, which side owns each); everything behind them is left to the build.
+- Non-goals — each as "Not doing X, because …", plus what stays untouched.
+- Test strategy — the behaviours to prove (abuse cases included), red-proofable; no tasks.
+- Alternatives — weighed and rejected, with reasons.
+- Risks — only what applies: trust boundaries, races, failure halfway, unbounded work.
+- Assumptions — each marked as such, to confirm.
+- Open questions — undecided, each with its options and your recommendation. List them only: do not call pb_ask.
+
+No code, no task breakdown; keep it in proportion to the change.${standardsBlock(standards)}${extraBlock(extra)}
+
+End your reply with this block, verbatim:
+
+${tip("plan.next")}`;
 }
 
 /* ================================== spec ================================== */
@@ -137,7 +185,12 @@ export function checkpointSummary(specs: { name: string; markdown: string }[], l
 export function continuePlanPrompt(name: string, markdown: string, standards: string, extra = ""): string {
   return `[pb:plan ${name}] Let's continue planning this, from its spec below: it holds what was found and decided so far. Don't redo the analysis or reopen rejected ideas unless something new turns up. The project's files stay untouched until /pb:build.
 
-Investigating further: check the project map in AGENTS.md first — Security invariants in full, area headings for the touched paths only; grep narrow (one path and pattern, low limit, no surrounding lines); broad questions go to pb_explore, anything needing a scratch script to pb_try.
+Investigating further:
+1. Check the project map in AGENTS.md first — Security invariants in full, area headings for the touched paths only.
+2. Grep narrow (one path and pattern, low limit, no surrounding lines).
+3. Broad questions go to pb_explore, anything needing a scratch script to pb_try.
+
+${CHALLENGE}
 
 Start with the open questions: summarise where we are in a few lines, and ask what only I can answer.${standardsBlock(standards)}${extraBlock(extra)}
 

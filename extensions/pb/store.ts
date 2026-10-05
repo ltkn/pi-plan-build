@@ -26,6 +26,8 @@ export interface Config {
   taskChecks: "end" | "each";
   /** How long a pb_ask dialog in a build waits before the build goes on with the recommendation (seconds; 0 = forever). */
   askTimeoutSec: number;
+  /** How long /pb:build waits for the spec before yielding to the pending offer (seconds; 0 = wait as long as it takes). */
+  specWaitSec: number;
   /** Chars of test output shown to the agent and the reviewer. */
   testOutputCap: number;
   /** Shadow snapshots per task: real diffs, changed-test checks, /pb:undo. */
@@ -72,6 +74,7 @@ export const DEFAULT_CONFIG: Config = {
   maxAttempts: 3,
   taskChecks: "end",
   askTimeoutSec: 300,
+  specWaitSec: 0,
   testOutputCap: 4000,
   checkpoints: true,
   reviewer: { verify: true, security: "always" },
@@ -98,6 +101,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     maxAttempts: Math.max(1, Math.floor(num((raw as { maxAttempts?: unknown }).maxAttempts, DEFAULT_CONFIG.maxAttempts))),
     taskChecks: (raw as { taskChecks?: unknown }).taskChecks === "each" ? "each" : "end",
     askTimeoutSec: num((raw as { askTimeoutSec?: unknown }).askTimeoutSec, DEFAULT_CONFIG.askTimeoutSec),
+    specWaitSec: num((raw as { specWaitSec?: unknown }).specWaitSec, DEFAULT_CONFIG.specWaitSec),
     testOutputCap: num((raw as { testOutputCap?: unknown }).testOutputCap, DEFAULT_CONFIG.testOutputCap),
     checkpoints: bool((raw as { checkpoints?: unknown }).checkpoints, true),
     reviewer: {
@@ -511,12 +515,21 @@ export class Store {
     writeFile(path.join(this.root, "map-previous.md"), body);
   }
 
-  /** The test suite's result when planning began. */
-  baseline(): Baseline | undefined {
+  /** The test suite's result when planning began. Per session when known, global last otherwise. */
+  baseline(sessionFile?: string): Baseline | undefined {
+    if (sessionFile) {
+      const per = readJson<Baseline>(this.sessionBaselineFile(sessionFile));
+      if (per) return per;
+    }
     return readJson<Baseline>(path.join(this.root, "baseline.json"));
   }
-  saveBaseline(b: Baseline): void {
+  saveBaseline(b: Baseline, sessionFile?: string): void {
     writeFile(path.join(this.root, "baseline.json"), `${JSON.stringify(b, null, 2)}\n`);
+    if (sessionFile) writeFile(this.sessionBaselineFile(sessionFile), `${JSON.stringify(b, null, 2)}\n`);
+  }
+  private sessionBaselineFile(sessionFile: string): string {
+    const safe = Buffer.from(sessionFile).toString("base64url");
+    return path.join(this.root, "baselines", `${safe}.json`);
   }
 
   /**
@@ -540,6 +553,11 @@ export class Store {
     if (c.parent && previousSessionFile && c.parent !== previousSessionFile) return undefined;
     fs.rmSync(file, { force: true });
     return c;
+  }
+
+  /** Drop a handover (e.g. its session was cancelled): no later session must inherit it. */
+  clearCarry(): void {
+    fs.rmSync(path.join(this.root, "carry.json"), { force: true });
   }
 
   /** One-time questions already asked in this project (e.g. adding the standards to AGENTS.md). */

@@ -39,6 +39,10 @@ if (sys.includes("ATTACKER")) {
     say([{ type: "text", text: "Acceptance: all met." }]);
   }
 } else if (sys.includes("VERIFIER")) {
+  if (process.env.MOCK_VERIFY === "crash") {
+    console.error("verifier exploded");
+    process.exit(1);
+  }
   const n = (brief.match(/^\d+\. \[P/gm) ?? []).length;
   const verdict = process.env.MOCK_VERIFY === "reject" ? "rejected" : "confirmed";
   say([call("report_verdicts", { verdicts: Array.from({ length: n }, (_, i) => ({ finding: i + 1, verdict, evidence: "src/order.ts:11 already guards it" })) })]);
@@ -54,7 +58,12 @@ if (sys.includes("ATTACKER")) {
   say([call("report_map", { map, changes: ["added Orders", "noted transactions"] })]);
 } else if (sys.includes("EXPLORER")) {
   if (process.env.MOCK_EXPLORE_WRITE) fs.writeFileSync(process.env.MOCK_EXPLORE_WRITE, "explorer was here");
-  say([{ type: "text", text: `src/order/Order.java holds the model; OrderService applies transitions. (asked: ${brief.split("\n")[2]})` }]);
+  const answer = `src/order/Order.java holds the model; OrderService applies transitions. (asked: ${brief.split("\n")[2]})`;
+  if (process.env.MOCK_SPLIT_TEXT === "1") {
+    const mid = Math.floor(answer.length / 2);
+    say([{ type: "text", text: answer.slice(0, mid) }]);
+    say([{ type: "text", text: answer.slice(mid) }]);
+  } else say([{ type: "text", text: answer }]);
 } else if (sys.includes("TRIER")) {
   if (process.env.MOCK_TRY_WRITE) fs.writeFileSync(process.env.MOCK_TRY_WRITE, "trier was here");
   say([{ type: "text", text: `## Commands\n- python3 /tmp/probe.py\n## Result\n- exit 0, 1.2s for 10k rows\n## Conclusion\nProbing is fast enough. (goal: ${brief.split("\n")[2]})` }]);

@@ -154,7 +154,8 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
             o.onActivity?.(`${part.name} ${previewCall(part.name, call.arguments)}`, call);
           }
         }
-        if (texts.length) res.text = texts.join("\n");
+        // Every message's text is kept: answers routinely span turns (analysis, calls, conclusion).
+        if (texts.length) res.text = res.text ? `${res.text}\n${texts.join("\n")}` : texts.join("\n");
       };
 
       proc.stdout.on("data", (d) => {
