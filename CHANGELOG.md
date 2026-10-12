@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.29.1
+
+- README catches up with 1.29.0: `/pb:fix` in the command list, the spec-review gate in the flow, acceptance markers in the spec example, and the per-session state files on disk. No code changes.
+
 ## 1.29.0
 
 - **`/pb:fix [ids]`**: fix review findings in a fresh fenced session — seed, fence and completion report, then `/pb:review` checks the delta. Unknown ids refused, never guessed; laps repeat to a cap of 3 then escalate as silent or stuck; spec-revision items never start a lap.

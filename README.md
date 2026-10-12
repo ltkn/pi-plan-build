@@ -13,6 +13,8 @@ build. Your engineering standards live in AGENTS.md, written once.
                       build, compact to the build's state
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
                       (--fresh: in a new session from the spec)
+                      before the first task, fresh eyes attack the spec itself: P0/P1 findings stop the build until amended
+/pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default); /pb:review checks the delta after
 /pb:review [focus]    independent review, in fresh sessions you watch (spec pass, then adversarial pass), P0–P3, blocking findings
                       double-checked; follow-ups look only at what changed (--full: everything)
                       no spec? reviews the uncommitted change against its intent
@@ -27,7 +29,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.29.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.29.1   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -48,14 +50,15 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
 /pb:build
    → asks now, while you're here: build here / in a fresh session / show me the spec first
    → Pi writes .pi/pb/specs/order-cancellation/spec.md (goal, findings,
-     decisions, tasks with their test commands) and the build starts by itself
+     decisions, tasks with their test commands) and fresh eyes attack the spec
+     before the first task (P0/P1 findings stop the build until amended)
     → one run: T1 → T2 → … (each: its tests seen failing, then passing) → coherence (3+ tasks) → full suite ✗ → fix → full suite ✓
    ✅ BUILD COMPLETE
 /pb:review
    → a spec pass in a fresh session: every acceptance criterion with evidence,
      decisions, tests, comments, your standards; then an adversarial pass that
      tries to break the change; P0/P1 findings double-checked
-   → fix them right there, /pb:review again (only the findings and what changed)
+   → fix them right there (`/pb:fix` opens a fenced session for them), /pb:review again (only the findings and what changed)
 ```
 
 For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
@@ -112,6 +115,12 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   fresh, read-only Pi session that pb takes you into: watch it, interrupt it,
   ask it something; pb brings you back with the result, which is also kept in
   the spec's `review.md`.
+- **Fresh eyes on the plan, too.** Before the first task, a spec-sized review
+  attacks the spec's Decisions, re-tests every "Not doing X", and flags
+  unmeasured numbers — P0/P1 findings stop the build until amended or rebutted,
+  exactly once. And every acceptance line names its proof, so uncovered lines
+  can't slip to review unnoticed (prose that can't be tested says so, and never
+  blocks).
 - **Fresh eyes where they pay.** The reviewer never saw the build's reasoning,
   and judges the spec too: a faithful build of a wrong plan is still wrong. It
   reports findings through a tool; a second fresh call double-checks the
@@ -133,7 +142,7 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   commands can still write, so pb snapshots the project and shows you what
   changed before building.
 - **Structured, not parsed from prose.** The agent reports through tools
-  (`pb_write_spec`, `pb_task_done`, `pb_record_decision`, `pb_ask`), and so do
+  (`pb_write_spec`, `pb_task_done`, `pb_record_decision`, `pb_ask`, `pb_fix_done`), and so do
   the reviewer and the verifier.
 - **The spec is the planning session's checkpoint.** A long planning session
   isn't compacted: at `checkpointAt` (75% of the window, always before Pi would
@@ -164,8 +173,8 @@ New tests: yes                      # or: no — why
 ## Tasks
 ### T1: A pending order can be cancelled
 …what must be true when it's done; how to build it is the build's…
-- Acceptance: cancel() on PENDING sets CANCELLED
-- Acceptance: cancel() on any other state throws, and changes nothing
+- Acceptance: cancel() on PENDING sets CANCELLED (tests: cancels-pending)
+- Acceptance: cancel() on any other state throws, and changes nothing (tests: rejects-other-states)
 - Test: `mvn -B -q -Dtest=OrderTest test`   # seen failing before the change, then passing
 ```
 
@@ -174,7 +183,8 @@ Acceptance bind the build. Contracts pin every seam the tasks share, since no
 later step sees the whole change at once. Each task writes its tests first
 (seen failing), then the behaviour; the first task that settles a shape the
 later ones build on records it in `## Design`. Each Acceptance line is one
-behaviour, a test to write.
+behaviour, a test to write — with `(tests: …)` naming its proof, or
+`(non-testable: …)` saying why no test can (docs and config stay unblocked).
 
 `## Out of scope` and `## Acceptance criteria` are optional: a spec is as long
 as the change needs and no longer. Pi points to code instead of copying it;
@@ -221,6 +231,7 @@ the existing ones still run.
 | `.pi/pb/specs/<name>/progress.json` | task states, the session the build runs in, the last review, harness-owned |
 | `.pi/pb/specs/<name>/checkpoints.json`, `events.jsonl` | undo points (files and conversation) and stats |
 | `.pi/pb/baseline.json`, `.pi/pb/planning/<session>.json` | the last test baseline; planning sessions and their snapshots (one file per session) |
+| `.pi/pb/reviews/<session>.json`, `.pi/pb/pending-build/<session>.json`, `.pi/pb/fixes/<session>.json` | review passes, pending builds and fixes sessions (one file per session, so parallel sessions never clobber each other) |
 | `.pi/pb/explore.jsonl` | `pb_explore` usage per session |
 | `.pi/pb/specs/<name>/review.md` | the last review's result (also posted in the session) |
 | `.pi/pb/specs/<name>/sessions/`, `.pi/pb/sessions/` | the saved runs of the verifier, the explorer and the cartographer, to open with `pi --session <file>`; removed by `/pb:archive` |
