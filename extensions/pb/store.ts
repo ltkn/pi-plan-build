@@ -4,6 +4,7 @@
  * under .pi/pb-archive/, which ignores itself in git.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { agentDir } from "./standards.ts";
@@ -404,8 +405,19 @@ export class Store {
   /**
    * Planning sessions (project files read-only, see the tool_call guard), with a snapshot of the tree when
    * planning began and the entry the last checkpoint reset from (what /pb:compact undo goes back to).
+   *
+   * One file per session under planning/ (atomic single-file writes via writeFile, no read-modify-write),
+   * so parallel planners can't clobber each other. The legacy planning.json map (array or object form) is
+   * still read and is migrated to per-session files on the first write, never written.
    */
-  private planningMap(): Record<string, { snapshot?: string; checkpointFrom?: string }> {
+  private planningDir(): string {
+    return path.join(this.root, "planning");
+  }
+  private planningFile(sessionFile: string): string {
+    return path.join(this.planningDir(), `${createHash("sha1").update(sessionFile).digest("hex")}.json`);
+  }
+  /** Legacy planning.json entries (array or map form), frozen: migrated on first write, never written. */
+  private legacyPlanningMap(): Record<string, { snapshot?: string; checkpointFrom?: string }> {
     const raw = readJson<string[] | Record<string, unknown>>(path.join(this.root, "planning.json"));
     if (Array.isArray(raw)) return Object.fromEntries(raw.filter((s) => typeof s === "string").map((s) => [s, {}]));
     if (!raw || typeof raw !== "object") return {};
@@ -420,6 +432,40 @@ export class Store {
     }
     return out;
   }
+  /** One-time move of the legacy map to per-session files; afterwards the legacy file is gone. Idempotent, so concurrent migrators converge. */
+  private migratePlanning(): void {
+    const legacy = path.join(this.root, "planning.json");
+    let exists = false;
+    try {
+      exists = fs.statSync(legacy).isFile();
+    } catch {
+      return;
+    }
+    if (!exists) return;
+    for (const [sessionFile, rec] of Object.entries(this.legacyPlanningMap())) {
+      writeFile(this.planningFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...rec }, null, 2)}\n`);
+    }
+    fs.rmSync(legacy, { force: true });
+  }
+  private planningMap(): Record<string, { snapshot?: string; checkpointFrom?: string }> {
+    const out = this.legacyPlanningMap();
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(this.planningDir());
+    } catch {
+      return out; // no per-session files yet
+    }
+    for (const f of files) {
+      if (!f.endsWith(".json")) continue;
+      const rec = readJson<{ session?: unknown; snapshot?: unknown; checkpointFrom?: unknown }>(path.join(this.planningDir(), f));
+      if (typeof rec?.session !== "string" || !rec.session) continue;
+      out[rec.session] = {
+        ...(typeof rec.snapshot === "string" ? { snapshot: rec.snapshot } : {}),
+        ...(typeof rec.checkpointFrom === "string" ? { checkpointFrom: rec.checkpointFrom } : {}),
+      };
+    }
+    return out;
+  }
   planningSessions(): string[] {
     return Object.keys(this.planningMap());
   }
@@ -427,33 +473,72 @@ export class Store {
     return this.planningMap()[sessionFile];
   }
   setPlanning(sessionFile: string, on: boolean, snapshot?: string): void {
-    const map = this.planningMap();
-    if (on) map[sessionFile] = { ...map[sessionFile], snapshot: snapshot ?? map[sessionFile]?.snapshot };
-    else delete map[sessionFile];
-    writeFile(path.join(this.root, "planning.json"), `${JSON.stringify(map, null, 2)}\n`);
+    this.migratePlanning();
+    const file = this.planningFile(sessionFile);
+    if (!on) {
+      fs.rmSync(file, { force: true });
+      return;
+    }
+    const prev = readJson<{ snapshot?: unknown; checkpointFrom?: unknown }>(file) ?? {};
+    const rec: Record<string, unknown> = { session: sessionFile };
+    const snap = snapshot ?? (typeof prev.snapshot === "string" ? prev.snapshot : undefined);
+    if (snap !== undefined) rec.snapshot = snap;
+    if (typeof prev.checkpointFrom === "string") rec.checkpointFrom = prev.checkpointFrom;
+    writeFile(file, `${JSON.stringify(rec, null, 2)}\n`);
   }
   setCheckpointFrom(sessionFile: string, entry: string | undefined): void {
-    const map = this.planningMap();
-    if (!map[sessionFile]) return;
-    map[sessionFile] = { ...map[sessionFile], checkpointFrom: entry };
-    writeFile(path.join(this.root, "planning.json"), `${JSON.stringify(map, null, 2)}\n`);
+    this.migratePlanning();
+    const file = this.planningFile(sessionFile);
+    const prev = readJson<{ snapshot?: unknown; checkpointFrom?: unknown }>(file);
+    if (!prev) return;
+    writeFile(file, `${JSON.stringify({ session: sessionFile, ...prev, checkpointFrom: entry }, null, 2)}\n`);
   }
 
   /**
    * Review sessions: a real Pi session per pass (reviewer, abuse pass), read-only for the model. The file
    * records which session plays which role for which spec, and what its pass reported.
+   * One file per session under reviews/ (atomic single-file writes, no read-modify-write).
+   * The legacy review-sessions.json map is still read and is migrated on the first write.
    */
+  private reviewSessionsDir(): string {
+    return path.join(this.root, "reviews");
+  }
+  private reviewSessionFile(sessionFile: string): string {
+    return path.join(this.reviewSessionsDir(), `${createHash("sha1").update(sessionFile).digest("hex")}.json`);
+  }
+  /** Legacy review-sessions.json map, frozen: migrated on first write, never written. */
+  private legacyReviewSessions(): Record<string, ReviewSessionState> {
+    const all = readJson<Record<string, ReviewSessionState>>(path.join(this.root, "review-sessions.json"));
+    if (!all || typeof all !== "object" || Array.isArray(all)) return {};
+    return all;
+  }
+  /** One-time move of the legacy map to per-session files; afterwards the legacy file is gone. Idempotent. */
+  private migrateReviewSessions(): void {
+    const legacy = path.join(this.root, "review-sessions.json");
+    try {
+      if (!fs.statSync(legacy).isFile()) return;
+    } catch {
+      return;
+    }
+    for (const [sessionFile, state] of Object.entries(this.legacyReviewSessions())) {
+      if (!state || (state.role !== "review" && state.role !== "abuse")) continue;
+      writeFile(this.reviewSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...state }, null, 2)}\n`);
+    }
+    fs.rmSync(legacy, { force: true });
+  }
+  private validReviewState(rec: unknown): ReviewSessionState | undefined {
+    const r = rec as { role?: unknown } & Record<string, unknown>;
+    if (!r || (r.role !== "review" && r.role !== "abuse")) return undefined;
+    const { session: _drop, ...state } = r;
+    return state as ReviewSessionState;
+  }
   reviewSession(sessionFile: string | undefined): ReviewSessionState | undefined {
     if (!sessionFile) return undefined;
-    const rec = readJson<Record<string, ReviewSessionState>>(path.join(this.root, "review-sessions.json"))?.[sessionFile];
-    if (!rec || (rec.role !== "review" && rec.role !== "abuse")) return undefined;
-    return rec;
+    return this.validReviewState(readJson(path.join(this.reviewSessionFile(sessionFile)))) ?? this.validReviewState(this.legacyReviewSessions()[sessionFile]);
   }
   saveReviewSession(sessionFile: string, state: ReviewSessionState): void {
-    const file = path.join(this.root, "review-sessions.json");
-    const all = readJson<Record<string, ReviewSessionState>>(file) ?? {};
-    all[sessionFile] = state;
-    writeFile(file, `${JSON.stringify(all, null, 2)}\n`);
+    this.migrateReviewSessions();
+    writeFile(this.reviewSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...state }, null, 2)}\n`);
   }
 
   reviewRun(): ReviewRun | undefined {
@@ -488,6 +573,17 @@ export class Store {
   dropSessions(name: string): void {
     fs.rmSync(path.join(this.specDir(name), "sessions"), { recursive: true, force: true });
     fs.rmSync(path.join(this.root, "sessions"), { recursive: true, force: true });
+    // GC per-session review files for this spec.
+    try {
+      for (const f of fs.readdirSync(path.join(this.root, "reviews"))) {
+        if (!f.endsWith(".json")) continue;
+        const full = path.join(this.root, "reviews", f);
+        const rec = readJson<{ session?: unknown; spec?: unknown }>(full);
+        if (rec && typeof rec.session === "string" && rec.spec === name) fs.rmSync(full, { force: true });
+      }
+    } catch {
+      // no per-session review files yet
+    }
     // GC review-sessions.json entries for this spec; the file otherwise grows without bound.
     const file = path.join(this.root, "review-sessions.json");
     const all = readJson<Record<string, ReviewSessionState>>(file);
@@ -560,14 +656,59 @@ export class Store {
     fs.rmSync(path.join(this.root, "carry.json"), { force: true });
   }
 
-  /** One-time questions already asked in this project (e.g. adding the standards to AGENTS.md). */
+  /** One-time questions already asked in this project (e.g. adding the standards to AGENTS.md). Append-only: concurrent writers add lines, never rewrite, so nothing is lost. */
+  private askedKeys(): string[] {
+    let text: string;
+    try {
+      text = fs.readFileSync(path.join(this.root, "asked.json"), "utf8");
+    } catch {
+      return [];
+    }
+    const out: string[] = [];
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        const v: unknown = JSON.parse(t);
+        if (typeof v === "string") {
+          if (!out.includes(v)) out.push(v);
+        } else if (Array.isArray(v)) {
+          // Legacy whole-file form: ["a", "b"]. Still read; new marks append lines.
+          for (const k of v) if (typeof k === "string" && !out.includes(k)) out.push(k);
+        }
+      } catch {
+        // A torn line from a concurrent append: ignored, the key is asked again.
+      }
+    }
+    return out;
+  }
   asked(key: string): boolean {
-    return (readJson<string[]>(path.join(this.root, "asked.json")) ?? []).includes(key);
+    return this.askedKeys().includes(key);
   }
   markAsked(key: string): void {
-    const list = new Set(readJson<string[]>(path.join(this.root, "asked.json")) ?? []);
-    list.add(key);
-    writeFile(path.join(this.root, "asked.json"), `${JSON.stringify([...list])}\n`);
+    if (this.askedKeys().includes(key)) return;
+    fs.mkdirSync(this.root, { recursive: true });
+    fs.appendFileSync(path.join(this.root, "asked.json"), `${JSON.stringify(key)}\n`, "utf8");
+  }
+
+  /**
+   * Open fixes sessions (/pb:fix): which spec and findings each was opened for. One file per
+   * session (the extension object itself is per-session, so only the store crosses the boundary).
+   */
+  private fixSessionFile(sessionFile: string): string {
+    return path.join(this.root, "fixes", `${createHash("sha1").update(sessionFile).digest("hex")}.json`);
+  }
+  saveFixSession(sessionFile: string, rec: { spec: string; findings: Finding[] }): void {
+    writeFile(this.fixSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...rec }, null, 2)}\n`);
+  }
+  fixSession(sessionFile: string | undefined): { spec: string; findings: Finding[] } | undefined {
+    if (!sessionFile) return undefined;
+    const rec = readJson<{ session?: unknown; spec?: unknown; findings?: unknown }>(this.fixSessionFile(sessionFile));
+    if (typeof rec?.session !== "string" || typeof rec?.spec !== "string" || !Array.isArray(rec?.findings)) return undefined;
+    return { spec: rec.spec, findings: rec.findings as Finding[] };
+  }
+  clearFixSession(sessionFile: string): void {
+    fs.rmSync(this.fixSessionFile(sessionFile), { force: true });
   }
 
   /**
@@ -615,36 +756,63 @@ export class Store {
   }
 
   /** A /pb:build that first asked for the spec: build it once it is written (in this session). Per-session, so parallel planners don't clobber each other. */
-  setPendingBuild(sessionFile: string | undefined): void {
-    const file = path.join(this.root, "pending-build.json");
-    if (!sessionFile) {
-      fs.rmSync(file, { force: true });
+  private pendingBuildsDir(): string {
+    return path.join(this.root, "pending-build");
+  }
+  private pendingBuildFile(sessionFile: string): string {
+    return path.join(this.pendingBuildsDir(), `${createHash("sha1").update(sessionFile).digest("hex")}.json`);
+  }
+  /** Legacy pending-build.json entries (map or single-global form), frozen: migrated on first write, never written. */
+  private legacyPendingBuilds(): Record<string, { at: number }> {
+    const raw = readJson<Record<string, { at: number }> | { session: string; at: number }>(path.join(this.root, "pending-build.json"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    if (typeof (raw as { session?: unknown }).session === "string") {
+      const single = raw as unknown as { session: string; at: number };
+      return typeof single.at === "number" ? { [single.session]: { at: single.at } } : {};
+    }
+    const out: Record<string, { at: number }> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (v && typeof v.at === "number") out[k] = { at: v.at };
+    }
+    return out;
+  }
+  /** One-time move of the legacy map to per-session files; afterwards the legacy file is gone. Idempotent. */
+  private migratePendingBuilds(): void {
+    const legacy = path.join(this.root, "pending-build.json");
+    try {
+      if (!fs.statSync(legacy).isFile()) return;
+    } catch {
       return;
     }
-    const all = readJson<Record<string, { at: number }>>(file) ?? {};
-    // Migrate single-global format: {session, at} → {sessionFile: {at}}.
-    const migrated: Record<string, { at: number }> = Array.isArray(all)
-      ? {}
-      : typeof (all as { session?: unknown }).session === "string"
-        ? { [(all as unknown as { session: string }).session]: { at: (all as unknown as { at: number }).at ?? Date.now() } }
-        : (all as Record<string, { at: number }>);
-    migrated[sessionFile] = { at: Date.now() };
-    writeFile(file, `${JSON.stringify(migrated, null, 2)}\n`);
+    for (const [sessionFile, rec] of Object.entries(this.legacyPendingBuilds())) {
+      writeFile(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: rec.at }, null, 2)}\n`);
+    }
+    fs.rmSync(legacy, { force: true });
+  }
+  private pendingBuildTTL = 60 * 60_000;
+  setPendingBuild(sessionFile: string | undefined): void {
+    this.migratePendingBuilds();
+    if (!sessionFile) {
+      fs.rmSync(this.pendingBuildsDir(), { recursive: true, force: true });
+      return;
+    }
+    writeFile(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: Date.now() }, null, 2)}\n`);
   }
   pendingBuild(sessionFile: string | undefined): boolean {
-    const raw = readJson<Record<string, { at: number }> | { session: string; at: number }>(path.join(this.root, "pending-build.json"));
-    if (!raw || !sessionFile) return false;
-    const rec = (raw as Record<string, { at: number }>)[sessionFile] ?? ((raw as { session?: string }).session === sessionFile ? (raw as { at: number }) : undefined);
-    return !!rec && typeof rec.at === "number" && Date.now() - rec.at < 60 * 60_000;
+    if (!sessionFile) return false;
+    const rec =
+      readJson<{ session?: unknown; at?: unknown }>(this.pendingBuildFile(sessionFile)) ??
+      this.legacyPendingBuilds()[sessionFile];
+    if (!rec || typeof rec.at !== "number") return false;
+    if (Date.now() - rec.at >= this.pendingBuildTTL) {
+      fs.rmSync(this.pendingBuildFile(sessionFile), { force: true });
+      return false;
+    }
+    return true;
   }
   clearPendingBuild(sessionFile: string): void {
-    const file = path.join(this.root, "pending-build.json");
-    const raw = readJson<Record<string, { at: number }>>(file);
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
-    if (raw[sessionFile]) {
-      delete raw[sessionFile];
-      writeFile(file, `${JSON.stringify(raw, null, 2)}\n`);
-    }
+    this.migratePendingBuilds();
+    fs.rmSync(this.pendingBuildFile(sessionFile), { force: true });
   }
 
   /** Move a finished spec out of .pi/pb/ so later sessions only see live specs. Unique dest; throws clearly when missing. */

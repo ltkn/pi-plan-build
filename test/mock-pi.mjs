@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for the fresh `pi --mode json -p` explorer, reviewer and verifier.
-// MOCK_REVIEW picks the reviewer's findings, MOCK_VERIFY=reject makes the verifier reject them,
-// MOCK_REVIEW_WRITE makes the reviewer write that file (it mustn't).
+// MOCK_VERIFY=reject makes the verifier reject findings (MOCK_VERIFY=crash blows it up).
 import * as fs from "node:fs";
 const argv = process.argv.slice(2);
 const sys = fs.readFileSync(argv[argv.indexOf("--append-system-prompt") + 1], "utf8");
@@ -21,23 +20,22 @@ const say = (content) => {
 const call = (name, args) => ({ type: "toolCall", id: `call-${name}`, name, arguments: args });
 
 if (sys.includes("ATTACKER")) {
-  const findings = process.env.MOCK_ATTACK !== "finding" ? [] : [{ priority: "P1", file: "src/account.ts", line: 7, title: "a stolen session alone can set a password the owner never set", fix: "require proof for a first password" }];
-  say([call("report_findings", { findings })]);
+  say([call("report_findings", { findings: [] })]);
   say([{ type: "text", text: "Done." }]);
+} else if (sys.includes("SPEC REVIEWER")) {
+  // MOCK_SPEC_REVIEW=block: a P0 plus a block verdict; =advisory: a P2 that travels on.
+  const mode = process.env.MOCK_SPEC_REVIEW;
+  if (mode === "block") say([{ type: "text", text: "[P0] Decisions — unguarded transition\nFix: guard it\n\nVERDICT: block" }]);
+  else if (mode === "advisory") say([{ type: "text", text: "[P2] Contracts — unmeasured window\nFix: measure it\n\nVERDICT: pass" }]);
+  else say([{ type: "text", text: "VERDICT: pass" }]);
 } else if (sys.includes("REVIEWER")) {
   if (process.env.MOCK_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_BRIEF_OUT, brief);
-  if (process.env.MOCK_REVIEW_WRITE) fs.writeFileSync(process.env.MOCK_REVIEW_WRITE, "reviewer was here");
-  const verdict = process.env.MOCK_REVIEW ?? "pass";
-  if (verdict === "untagged") say([{ type: "text", text: "1. src/order.ts:12 — consider a guard clause.\n\nVERDICT: pass" }]);
-  else if (verdict === "prose") say([{ type: "text", text: "No [P0] or [P1] issues found.\n\n1. [P2] src/order.ts:30 — name the constant.\n\nVERDICT: pass" }]);
-  else {
-    const findings = [
-      { priority: verdict === "pass" ? "P3" : "P1", file: "src/order.ts", line: 12, title: "consider a guard clause", fix: "return early" },
-      { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
-    ];
-    say([call("report_findings", { findings })]);
-    say([{ type: "text", text: "Acceptance: all met." }]);
-  }
+  const findings = [
+    { priority: "P3", file: "src/order.ts", line: 12, title: "consider a guard clause", fix: "return early" },
+    { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
+  ];
+  say([call("report_findings", { findings })]);
+  say([{ type: "text", text: "Acceptance: all met." }]);
 } else if (sys.includes("VERIFIER")) {
   if (process.env.MOCK_VERIFY === "crash") {
     console.error("verifier exploded");

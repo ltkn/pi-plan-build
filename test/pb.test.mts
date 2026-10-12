@@ -32,6 +32,7 @@ function setup(config: object = {}) {
 
   const posts: string[] = [];
   const notes: string[] = [];
+  const widgets = new Map<string, string[] | undefined>();
   const instructions: string[] = [];
   const results: string[] = []; // every pb_task_done result, including the ones that end the run
   const selects: string[] = [];
@@ -191,7 +192,7 @@ function setup(config: object = {}) {
       },
       ui: {
         notify: (m: string) => notes.push(m),
-        setWidget: () => {},
+        setWidget: (id: string, lines?: string[]) => void widgets.set(id, lines),
         setStatus: () => {},
         setEditorText: (t: string) => (stat.editorText = t),
         select: async (title: string, opts: string[], o?: { timeout?: number; signal?: AbortSignal }) => {
@@ -364,6 +365,7 @@ function setup(config: object = {}) {
     names,
     posts,
     notes,
+    widgets,
     instructions,
     results,
     selects,
@@ -419,12 +421,12 @@ ${
   opts.tasks ??
   `### T1: first file
 Create T1.txt.
-- Acceptance: T1.txt exists
+- Acceptance: T1.txt exists (tests: T1)
 - Test: \`test -f T1.txt\`
 
 ### T2: second file
 Create T2.txt.
-- Acceptance: T2.txt exists
+- Acceptance: T2.txt exists (tests: T2)
 - Test: \`test -f T2.txt\``
 }
 `;
@@ -474,6 +476,12 @@ test("spec: parses the header, sections and tasks; says what's wrong otherwise",
   assert.ok(bad.errors.some((e) => e.includes('"Verification: none" needs a reason')));
   assert.ok(bad.errors.some((e) => e.includes('missing the "## Decisions" section')));
   assert.ok(bad.errors.some((e) => e.includes('T1 has no "- Acceptance:" line')));
+});
+
+test("spec: 'Depends on: none' allows a trailing note; real names still resolve", () => {
+  assert.equal(parseSpec(SPEC()).spec!.dependsOn, undefined);
+  assert.equal(parseSpec(SPEC().replace("Depends on: none", "Depends on: none (follows the shipped gex-update-banner-delete-first)")).spec!.dependsOn, undefined);
+  assert.equal(parseSpec(SPEC().replace("Depends on: none", "Depends on: none-foo")).spec!.dependsOn, "none-foo");
 });
 
 test("spec: decisions are added under Decisions, before the next section", () => {
@@ -580,6 +588,20 @@ test("skippedLargeFiles: oversized untracked files are reported because snapshot
   const after = snapshot(t.repo, "after")!;
   assert.deepEqual(skippedLargeFiles(t.repo), ["big.bin"]);
   assert.deepEqual(changedPaths(t.repo, before.commit, after.commit), ["small.txt"]); // big.bin is missing from the diff: that's the blind spot this warns about
+});
+
+test("snapshot: works when .pi is gitignored wholesale (the recommended setup)", async () => {
+  const t = setup();
+  const { snapshot, changedPaths } = await import("../extensions/pb/checkpoint.ts");
+  fs.writeFileSync(path.join(t.repo, ".gitignore"), ".pi/\n");
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/ledger.json"), "{}");
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "v1");
+  const before = snapshot(t.repo, "before");
+  assert.ok(before, "snapshot must not fail on the ignored ledger path");
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "v2");
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/ledger.json"), `{"n":1}`);
+  const after = snapshot(t.repo, "after")!;
+  assert.deepEqual(changedPaths(t.repo, before!.commit, after.commit), ["a.txt"]); // ledger never captured
 });
 
 test("restore: files changed since the snapshot are left alone, not clobbered", async () => {
@@ -895,7 +917,7 @@ test("build: with taskChecks each, the check runs inside pb_task_done: one agent
 
 test("build: with taskChecks each, a task without a Test: line is compiled, not run against the full suite", async () => {
   const t = setup({ taskChecks: "each",  verify: "true", build: "echo compiled" });
-  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists" }));
+  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)" }));
   t.agent.script = diligent;
   await t.run("build");
   const checks = t.events("order-cancellation").filter((e) => e.type === "check");
@@ -925,7 +947,7 @@ test("the build: the first task that fixes a shape records it in the spec's Desi
 
 test("red then green: a task's new tests are seen failing first; refactors and no-new-tests specs are exempt", async () => {
   const t = setup({ verify: "true" });
-  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged\n- Test: `true`" }));
+  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (tests: T2)\n- Test: `true`" }));
   const said: string[] = [];
   t.agent.script = async (text, tool) => {
     const task = taskOf(text) ?? (text.includes("Continue task T1") ? "T1" : undefined);
@@ -972,12 +994,12 @@ test("build: a task with no Test: command gets no red proof, and that is recorde
     SPEC({
       tasks: `### T1: first file
 Create T1.txt.
-- Acceptance: T1.txt exists
+- Acceptance: T1.txt exists (tests: T1)
 - Test: \`test -f T1.txt\`
 
 ### T2: second file
 Create T2.txt.
-- Acceptance: T2.txt exists`,
+- Acceptance: T2.txt exists (tests: T2)`,
     }),
   );
   const said: string[] = [];
@@ -1010,12 +1032,12 @@ test("build: one Test: command shared by two tasks proves only that something is
     SPEC({
       tasks: `### T1: first file
 Create T1.txt.
-- Acceptance: T1.txt exists
+- Acceptance: T1.txt exists (tests: T1)
 - Test: \`test -f both.txt\`
 
 ### T2: second file
 Create T2.txt.
-- Acceptance: T2.txt exists
+- Acceptance: T2.txt exists (tests: T2)
 - Test: \`test -f both.txt\``,
     }),
   );
@@ -1037,12 +1059,12 @@ test("build: pre-green — a task whose command an earlier proven task already s
     SPEC({
       tasks: `### T1: first file
 Create T1.txt.
-- Acceptance: T1.txt exists
+- Acceptance: T1.txt exists (tests: T1)
 - Test: \`test -f both.txt\`
 
 ### T2: second file
 Create T2.txt.
-- Acceptance: T2.txt exists
+- Acceptance: T2.txt exists (tests: T2)
 - Test: \`test -f both.txt\``,
     }),
   );
@@ -1070,17 +1092,17 @@ Create T2.txt.
 
 const THREE_TASKS = `### T1: first file
 Create T1.txt.
-- Acceptance: T1.txt exists
+- Acceptance: T1.txt exists (tests: T1)
 - Test: \`test -f T1.txt\`
 
 ### T2: second file
 Create T2.txt.
-- Acceptance: T2.txt exists
+- Acceptance: T2.txt exists (tests: T2)
 - Test: \`test -f T2.txt\`
 
 ### T3: third file
 Create T3.txt.
-- Acceptance: T3.txt exists
+- Acceptance: T3.txt exists (tests: T3)
 - Test: \`test -f T3.txt\``;
 
 /** Like diligent, but finishes the coherence pass without pretending it wrote a file. */
@@ -1243,11 +1265,11 @@ test("spec: Status: ready can't have Open questions; planning can", async () => 
 test("spec: a behaviour task without Test:, or with a no-op one, warns — refactors stay quiet", async () => {
   const t = setup();
   process.chdir(t.repo);
-  const tasks = "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged\n- Test: `true`";
+  const tasks = "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (tests: T2)\n- Test: `true`";
   const w = (await t.callTool("pb_write_spec", { name: "a", content: SPEC({ tasks }) })).content![0].text;
   assert.match(w, /Note: T1 adds behaviour but has no Test:: add a targeted command, or leave it out/);
   assert.doesNotMatch(w, /T2/); // a refactor is exempt: nothing to warn
-  const noop = (await t.callTool("pb_write_spec", { name: "b", content: SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `true`" }) })).content![0].text;
+  const noop = (await t.callTool("pb_write_spec", { name: "b", content: SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `true`" }) })).content![0].text;
   assert.match(noop, /Note: T1's Test: `true` always passes — the build will wedge demanding red/);
 });
 
@@ -1260,12 +1282,12 @@ test("spec: writing tasks without Contracts, or with a shared Test:, warns — a
   assert.doesNotMatch(withContracts, /Note: 2 tasks/);
   const shared = (await t.callTool("pb_write_spec", {
     name: "c",
-    content: SPEC({ tasks: "### T1: a\n- Acceptance: a\n- Test: `true`\n\n### T2: b\n- Acceptance: b\n- Test: `true`" }),
+    content: SPEC({ tasks: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `true`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `true`" }),
   })).content![0].text;
   assert.match(shared, /\nNote: `true` is the Test: of T1, T2: the later auto-proceed as pre-green once the earlier proves it/);
   assert.doesNotMatch(noContracts, /is the Test: of/); // distinct commands: nothing shared
   // A Tasks edit re-warns; anything else stays quiet.
-  const tasks = (await t.callTool("pb_update_spec", { name: "a", section: "Tasks", content: "### T1: a\n- Acceptance: a\n- Test: `true`\n\n### T2: b\n- Acceptance: b\n- Test: `true`\n\n### T3: c\n- Acceptance: c\n- Test: `true`" })).content![0].text;
+  const tasks = (await t.callTool("pb_update_spec", { name: "a", section: "Tasks", content: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `true`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `true`\n\n### T3: c\n- Acceptance: c (tests: T3)\n- Test: `true`" })).content![0].text;
   assert.match(tasks, /Note: 3 tasks and no ## Contracts/);
   assert.match(tasks, /Note: `true` is the Test: of T1, T2, T3/);
   const decisions = (await t.callTool("pb_update_spec", { name: "a", section: "Decisions", content: "- d" })).content![0].text;
@@ -1639,6 +1661,287 @@ test("review: a mid-build review doesn't clobber the build's last result", async
   );
   await t.run("review");
   assert.equal(t.progress("order-cancellation").lastVerify.summary, "BUILD-RESULT");
+});
+
+test("fix: an unfinished lap starts the next one automatically", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  const findings = [
+    { priority: "P2", file: "src/order.ts", line: 30, title: "first" },
+    { priority: "P2", file: "src/order.ts", line: 12, title: "second" },
+  ];
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({ spec: "order-cancellation", phase: "paused", session, tasks: [], review: { at: "2026-10-01 10:00:00", verdict: "changes", findings }, updatedAt: "2026-10-01 10:00:00" }),
+  );
+  let laps = 0;
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:fix")) {
+      laps++;
+      await tool("pb_fix_done", { fixed: laps === 1 ? ["first"] : ["second"], skipped: [], tests: "ok" });
+    }
+  };
+  await t.run("fix");
+  assert.equal(laps, 2);
+  assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 2);
+  assert.match(t.posts.at(-1)!, /complete[\s\S]*\/pb:review/);
+});
+
+test("fix: a lap that never reports stops the loop and escalates as silent", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [],
+      review: { at: "2026-10-01 10:00:00", verdict: "changes", findings: [{ priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" }] },
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  t.agent.script = async () => {}; // the lap never reports, nudges unanswered
+  await t.run("fix");
+  assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 1); // never retried into a second silent session
+  assert.match(t.posts.at(-1)!, /silent/);
+});
+
+test("fix: skipped findings never start a lap and reach the escalation", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [],
+      review: { at: "2026-10-01 10:00:00", verdict: "changes", findings: [{ priority: "P2", file: "a", title: "first" }, { priority: "P2", file: "b", title: "second" }] },
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:fix")) await tool("pb_fix_done", { fixed: ["first"], skipped: ["second"], tests: "ok" });
+  };
+  await t.run("fix");
+  assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 1);
+  assert.match(t.posts.at(-1)!, /second/);
+  assert.match(t.posts.at(-1)!, /spec revision/);
+});
+
+test("fix: unknown finding ids are refused, not guessed", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [],
+      review: { at: "2026-10-01 10:00:00", verdict: "changes", findings: [{ priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" }] },
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  const before = [...t.names.values()].length;
+  await t.run("fix", "99");
+  assert.match(t.notes.at(-1)!, /no such finding/i);
+  assert.match(t.notes.at(-1)!, /1\. name the constant/); // lists what's actually open
+  assert.equal([...t.names.values()].length, before); // no session opened
+});
+
+test("fix: a lap opens a fenced session seeded with the findings", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [],
+      review: { at: "2026-10-01 10:00:00", verdict: "changes", findings: [{ priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" }] },
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  await t.run("fix", "name the constant");
+  assert.ok([...t.names.values()].includes("fix: order-cancellation"));
+  const seed = t.instructions.find((x) => x.startsWith("[pb:fix"))!;
+  assert.match(seed, /Fix exactly the review findings below/);
+  assert.match(seed, /name the constant/);
+  assert.match(seed, /Do not commit, archive, or write under \.pi\//);
+  assert.match(seed, /call pb_fix_done/);
+});
+
+test("fix: the report lands only in its own session, once", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const r = await t.callTool("pb_fix_done", { fixed: ["x"], skipped: [], tests: "none" });
+  assert.match(r.error!, /not a pb fixes session/);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [],
+      review: { at: "2026-10-01 10:00:00", verdict: "changes", findings: [{ priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" }] },
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:fix")) await tool("pb_fix_done", { fixed: ["name the constant"], skipped: [], tests: "`true` passes" });
+  };
+  await t.run("fix");
+  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "fix").length, 1); // the lap's single report landed, once
+  const again = await t.callTool("pb_fix_done", { fixed: [], skipped: [], tests: "none" });
+  assert.match(again.error!, /not a pb fixes session/); // single use: no double counting
+});
+
+test("fix: with no open findings there is nothing to open", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  await t.run("fix");
+  assert.match(t.notes.at(-1)!, /no open review findings/);
+});
+
+test("review: a pass verdict mid-build keeps the phase and says tasks remain", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "building",
+      session,
+      tasks: [
+        { id: "T1", title: "first file", status: "done", attempts: 1 },
+        { id: "T2", title: "second file", status: "todo", attempts: 0 },
+      ],
+      current: "T2",
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  await t.run("review");
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "building"); // a pass must not strand the build as reviewed
+  assert.equal(p.review?.verdict, "pass"); // the follow-up delta baseline is still kept
+  assert.match(t.posts.at(-1)!, /still to build/);
+});
+
+test("review: an explicit spec name wins over this session's spec", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({ spec: "order-cancellation", phase: "paused", session, tasks: [], updatedAt: "2026-10-01 10:00:00" }),
+  );
+  await t.callTool("pb_write_spec", { name: "beta-flag", content: SPEC() });
+  await t.run("review", "beta-flag");
+  assert.ok([...t.names.values()].includes("review: beta-flag · spec"));
+  assert.ok(![...t.names.values()].some((n) => n === "review: order-cancellation · spec"));
+  assert.match(t.posts.at(-1)!, /Review of beta-flag/);
+});
+
+test('review: "done" outside a review session is refused instead of reviewed', async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.run("review", "done");
+  assert.match(t.notes.at(-1)!, /only works inside a review session/);
+  assert.equal(t.instructions.length, 0);
+});
+
+test("review: a spec building in another session confirms before snapshotting", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("reviewer-model");
+  await t.callTool("pb_write_spec", { name: "other-feature", content: SPEC() });
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/other-feature/progress.json"),
+    JSON.stringify({
+      spec: "other-feature",
+      phase: "building",
+      session: "/elsewhere/other.jsonl",
+      tasks: [{ id: "T1", title: "first file", status: "doing", attempts: 1 }],
+      current: "T1",
+      updatedAt: "2020-01-01 00:00:00",
+    }),
+  );
+  t.selects.push("No, stop here");
+  await t.run("review", "other-feature");
+  assert.ok(t.selectTitles.some((x) => /building in another session/.test(x)));
+  assert.equal(t.instructions.length, 0); // returned before snapshot, check and passes
+});
+
+test("review: a missing replay file warns without clearing the flag", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({ spec: "order-cancellation", phase: "paused", session, tasks: [], reviewUnshown: true, updatedAt: "2026-10-01 10:00:00" }),
+  );
+  await t.run("review");
+  assert.match(t.notes.at(-1)!, /was the spec archived/);
+  assert.equal(t.progress("order-cancellation").reviewUnshown, true); // kept: the replay can retry
+});
+
+test("review: with several built specs the picker chooses", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  await t.callTool("pb_write_spec", { name: "beta-flag", content: SPEC() });
+  for (const n of ["order-cancellation", "beta-flag"]) {
+    fs.writeFileSync(
+      path.join(t.repo, `.pi/pb/specs/${n}/progress.json`),
+      JSON.stringify({ spec: n, phase: "built", session: "/elsewhere/other.jsonl", tasks: [], updatedAt: "2026-10-01 10:00:00" }),
+    );
+  }
+  await t.run("review");
+  assert.ok(t.selectTitles.some((x) => x === "Review what?"));
+  assert.ok([...t.names.values()].includes("review: beta-flag · spec")); // pool[0]: sorted, default-picked
+});
+
+test("review: security auto skips the adversarial pass on calm ground", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "auto" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /✅ PASS/);
+  assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
+});
+
+test("review: security off never runs the adversarial pass", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /✅ PASS/);
+  assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
 });
 
 test("status: a build running elsewhere is shown by session id, not file path", async () => {
@@ -2062,13 +2365,13 @@ test("an unfinished build (e.g. after a crash) can be restarted in a new session
 test("prompts: short mechanics plus your standards; a minimal spec is enough", async () => {
   const { buildMechanics } = await import("../extensions/pb/prompts.ts");
   const mech = buildMechanics(parseSpec(SPEC()).spec!, null, true);
-  assert.ok(mech.length < 1000, `build mechanics grew to ${mech.length} chars`); // keep them short
+  assert.ok(mech.length < 1150, `build mechanics grew to ${mech.length} chars`); // keep them short
   assert.match(mech, /take the sensible reading, record it with pb_record_decision \(assumption: true\)[\s\S]*Ask with pb_ask only/);
   assert.match(mech, /leave \.pi\/ alone/);
   assert.match(mech, /Tests quiet, full log to a temp file/);
   assert.match(mech, /Finish each task with pb_task_done: it runs the task's Test: command \(a compile when there is none\)/);
   assert.match(mech, /Change or remove an existing test only when what it covers changes; never skip or weaken one/);
-  assert.ok(buildMechanics(parseSpec(SPEC()).spec!, null).length < 1000);
+  assert.ok(buildMechanics(parseSpec(SPEC()).spec!, null).length < 1150);
 
   const t = setup({ taskChecks: "each", verify: "true" });
   await written(t);
@@ -2576,6 +2879,312 @@ test("baselines run per session: a second planning session doesn't wait for the 
   await until(() => t.posts.some((p) => p.startsWith("**Baseline**"))); // session 2's result lands in the live session
 });
 
+test("/pb:plan one-lines a long multi-line arg for display and caps the model copy", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  const arg = `add cancel\n**bold** line ${"x".repeat(20000)}`;
+  await t.run("plan", arg);
+  const name = t.names.get(path.join(t.repo, "planning-session.jsonl"))!;
+  assert.ok(!name.includes("\n"), "session name is one line");
+  assert.ok(name.length <= "plan: ".length + 60, `session name capped (${name.length})`);
+  const marker = t.posts.at(-1)!;
+  assert.ok(!marker.includes("\n**bold**"), "marker carries no raw newline from the arg");
+  assert.match(t.instructions.at(-1)!, /…\[truncated \d+ chars\]/); // the cut is disclosed, not silent
+});
+
+test("/pb:plan near-miss spec names redirect instead of starting a silent new plan", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  const before = t.instructions.length;
+  for (const miss of ["order_cancellation", "Order-Cancellation", "order-cancellation."]) {
+    await t.run("plan", miss);
+    assert.match(t.notes.at(-1)!, new RegExp(`Did you mean \`order-cancellation\`\\? \`\\/pb:plan order-cancellation\``));
+  }
+  assert.equal(t.instructions.length, before); // nothing was instructed, no session renamed
+  assert.equal(t.names.get(path.join(t.repo, "planning-session.jsonl")), undefined);
+});
+
+test("planning sessions are per-session files: interleaved writes don't clobber", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const s = new Store(t.repo);
+  s.setPlanning("/s/a.jsonl", true, "snap-a");
+  s.setPlanning("/s/b.jsonl", true, "snap-b"); // a second writer must not drop the first entry (the old read-modify-write did)
+  assert.deepEqual(s.planningSessions().sort(), ["/s/a.jsonl", "/s/b.jsonl"]);
+  assert.equal(s.planning("/s/a.jsonl")?.snapshot, "snap-a");
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/planning.json"))); // no shared file to race on
+  s.setPlanning("/s/a.jsonl", false);
+  assert.deepEqual(s.planningSessions(), ["/s/b.jsonl"]);
+  assert.equal(s.planning("/s/b.jsonl")?.snapshot, "snap-b");
+  s.setCheckpointFrom("/s/b.jsonl", "e1");
+  assert.equal(s.planning("/s/b.jsonl")?.checkpointFrom, "e1");
+  assert.equal(s.planning("/s/b.jsonl")?.snapshot, "snap-b"); // merge preserved
+});
+
+test("legacy planning.json migrates to per-session files on first write", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/planning.json"), JSON.stringify({ "/s/old.jsonl": { snapshot: "s0" } }));
+  const s = new Store(t.repo);
+  assert.deepEqual(s.planningSessions(), ["/s/old.jsonl"]); // legacy still read
+  s.setPlanning("/s/new.jsonl", true);
+  assert.deepEqual(s.planningSessions().sort(), ["/s/new.jsonl", "/s/old.jsonl"]);
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/planning.json"))); // migrated away
+  assert.equal(s.planning("/s/old.jsonl")?.snapshot, "s0");
+});
+
+test("asked.json is append-only: interleaved writers keep both keys, legacy array still reads", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const a = new Store(t.repo);
+  const b = new Store(t.repo);
+  a.markAsked("x");
+  b.markAsked("y"); // second writer must not drop the first key
+  assert.ok(a.asked("x") && a.asked("y"));
+  assert.ok(b.asked("x") && b.asked("y"));
+  a.markAsked("x"); // duplicate tolerated
+  assert.ok(a.asked("x"));
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/asked.json"), '["legacy"]\n');
+  const c = new Store(t.repo);
+  assert.ok(c.asked("legacy"));
+  c.markAsked("fresh");
+  assert.ok(c.asked("legacy") && c.asked("fresh"));
+});
+
+test("review sessions are per-session files: two passes don't clobber, archive GCs by spec", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const s = new Store(t.repo);
+  s.saveReviewSession("/s/r1.jsonl", { role: "review", spec: "a" });
+  s.saveReviewSession("/s/r2.jsonl", { role: "abuse", spec: "a" }); // must not drop r1
+  assert.equal(s.reviewSession("/s/r1.jsonl")?.role, "review");
+  assert.equal(s.reviewSession("/s/r2.jsonl")?.role, "abuse");
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-sessions.json"))); // no shared file to race on
+  s.saveReviewSession("/s/r3.jsonl", { role: "review", spec: "b" });
+  s.dropSessions("a");
+  assert.equal(s.reviewSession("/s/r1.jsonl"), undefined);
+  assert.equal(s.reviewSession("/s/r2.jsonl"), undefined);
+  assert.equal(s.reviewSession("/s/r3.jsonl")?.spec, "b");
+});
+
+test("legacy review-sessions.json migrates to per-session files on first write", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/review-sessions.json"), JSON.stringify({ "/s/old.jsonl": { role: "review", spec: "a" } }));
+  const s = new Store(t.repo);
+  assert.equal(s.reviewSession("/s/old.jsonl")?.spec, "a"); // legacy still read
+  s.saveReviewSession("/s/new.jsonl", { role: "abuse", spec: "b" });
+  assert.equal(s.reviewSession("/s/old.jsonl")?.spec, "a");
+  assert.equal(s.reviewSession("/s/new.jsonl")?.role, "abuse");
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-sessions.json"))); // migrated away
+});
+
+test("pending builds are per-session files: two sessions don't clobber, expiry clears", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const s = new Store(t.repo);
+  s.setPendingBuild("/s/a.jsonl");
+  s.setPendingBuild("/s/b.jsonl"); // second writer must not drop the first flag
+  assert.ok(s.pendingBuild("/s/a.jsonl") && s.pendingBuild("/s/b.jsonl"));
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/pending-build.json"))); // no shared file to race on
+  s.clearPendingBuild("/s/a.jsonl");
+  assert.ok(!s.pendingBuild("/s/a.jsonl") && s.pendingBuild("/s/b.jsonl"));
+  s.setPendingBuild(undefined); // clears all sessions' flags, as before
+  assert.ok(!s.pendingBuild("/s/b.jsonl"));
+});
+
+test("legacy pending-build.json (map and single-global forms) migrates on write", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const s = new Store(t.repo);
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/pending-build.json"), JSON.stringify({ "/s/old.jsonl": { at: Date.now() } }));
+  assert.ok(s.pendingBuild("/s/old.jsonl")); // legacy still read
+  s.setPendingBuild("/s/new.jsonl");
+  assert.ok(s.pendingBuild("/s/old.jsonl") && s.pendingBuild("/s/new.jsonl"));
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/pending-build.json"))); // migrated away
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/pending-build.json"), JSON.stringify({ session: "/s/g.jsonl", at: Date.now() }));
+  assert.ok(s.pendingBuild("/s/g.jsonl")); // single-global form still read
+  assert.ok(!s.pendingBuild("/s/other.jsonl"));
+  assert.ok(!s.pendingBuild(undefined));
+});
+
+test("planning widget is set on /pb:plan and cleared on off", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "cancel orders");
+  assert.deepEqual(t.widgets.get("pb-plan"), ["planning · /pb:plan off"]);
+  await t.run("plan", "off");
+  assert.equal(t.widgets.get("pb-plan"), undefined);
+});
+
+test("/pb:plan while the baseline is still running says so instead of claiming a fresh one", async () => {
+  const where = path.join(os.tmpdir(), `pb-baseline-shared-${process.pid}`);
+  const flag = `${where}-flag`;
+  fs.rmSync(where, { force: true });
+  fs.rmSync(flag, { force: true });
+  const t = setup({ verify: `while [ ! -f ${flag} ]; do sleep 0.05; done; echo x >> ${where}`, baseline: true });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  try {
+    await t.run("plan", "first idea"); // baseline starts, gated on the flag
+    await t.run("plan", "second idea"); // same session, still in flight: shared, not restarted
+    const markers = t.posts.filter((p) => p.startsWith("▶ /pb:plan"));
+    assert.equal(markers.length, 2);
+    assert.match(markers[0], /running `while .*` in the background for a baseline/);
+    assert.match(markers[1], /baseline already running — its result lands here/);
+  } finally {
+    fs.writeFileSync(flag, "");
+  }
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
+});
+
+test('pb_write_spec refuses the reserved name "off"', async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const r = await t.callTool("pb_write_spec", { name: "off", content: SPEC() });
+  assert.match(r.error!, /reserved.*\/pb:plan.*off/);
+});
+
+test("/pb:build rejects a readable file under an invalid spec name instead of building it", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  fs.mkdirSync(path.join(t.repo, ".pi/docs/foo"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, ".pi/docs/foo/spec.md"), SPEC());
+  const before = t.instructions.length;
+  await t.run("build", "../../docs/foo");
+  assert.match(t.notes.at(-1)!, /isn't a valid spec name/);
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/docs/foo/progress.json"))); // no state written outside .pi/pb/
+  assert.equal(t.instructions.length, before); // nothing started
+});
+
+test("/pb:build near-miss spec names redirect instead of building the wrong spec", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  for (const miss of ["order_cancellation", "Order-Cancellation", "order-cancellation."]) {
+    await t.run("build", miss);
+    assert.match(t.notes.at(-1)!, /Did you mean `order-cancellation`\? `\/pb:build order-cancellation`/);
+  }
+  assert.equal(t.instructions.length, 0); // nothing started
+  assert.equal(t.names.get(session), undefined); // no session renamed
+});
+
+test("/pb:build records trailing words as guidance when starting a named spec", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  await t.run("build", "order-cancellation use a helper for the email");
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /use a helper for the email/);
+});
+
+test("/pb:build --fresh on a paused build warns and continues here", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [
+        { id: "T1", title: "first file", status: "done", attempts: 1 },
+        { id: "T2", title: "second file", status: "todo", attempts: 0 },
+      ],
+      current: "T2",
+      pause: "stopped",
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  await t.run("build", "--fresh");
+  assert.match(t.notes.at(-1)!, /`--fresh` only applies when starting a build: continuing here instead/);
+  assert.ok(t.instructions.some((x) => /Task T2/.test(x))); // resumed here, not in a fresh session
+});
+
+test("/pb:build resume reviews planning leftovers and clears the widget", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "paused",
+      session,
+      tasks: [
+        { id: "T1", title: "first file", status: "done", attempts: 1 },
+        { id: "T2", title: "second file", status: "todo", attempts: 0 },
+      ],
+      current: "T2",
+      pause: "stopped",
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  await t.run("plan", "a new idea");
+  fs.writeFileSync(path.join(t.repo, "stray.txt"), "written by a shell command");
+  t.selects.push("Keep them");
+  await t.run("build");
+  assert.ok(t.selectTitles.some((x) => /These project files changed while planning/.test(x)));
+  assert.equal(t.widgets.get("pb-plan"), undefined);
+  assert.equal(fs.readFileSync(path.join(t.repo, "stray.txt"), "utf8"), "written by a shell command");
+  assert.ok(t.instructions.some((x) => /Task T2/.test(x)));
+});
+
+test("/pb:build confirms before restarting a build that is live in another session", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "other-feature", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/other-feature/progress.json"),
+    JSON.stringify({
+      spec: "other-feature",
+      phase: "building",
+      session: "/elsewhere/other.jsonl",
+      tasks: [
+        { id: "T1", title: "first file", status: "doing", attempts: 1 },
+        { id: "T2", title: "second file", status: "todo", attempts: 0 },
+      ],
+      current: "T1",
+      updatedAt: "2020-01-01 00:00:00",
+    }),
+  );
+  t.selects.push("Yes, go on");
+  await t.run("build", "other-feature");
+  assert.ok(t.selectTitles.some((x) => /building in another session/.test(x)));
+  assert.equal(t.progress("other-feature").session, session); // adopted here after confirming
+});
+
 test("build: naming another spec builds it instead of resuming the paused one as guidance", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -2681,6 +3290,48 @@ test("build: a slow spec yields to the pending offer, which picks it up once wri
   assert.equal(t.progress("order-cancellation").phase, "built"); // pending picked it up and built it
 });
 
+test("spec: rewriting a finished spec with different tasks warns to write a new spec instead", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "reviewed",
+      session,
+      tasks: [{ id: "T1", title: "first file", status: "done", attempts: 1 }],
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  const changed = SPEC({ tasks: "### T1: a different change\nDo the new thing.\n- Acceptance: the new thing exists (tests: T1)\n- Test: `test -f T1.txt`\n" });
+  const r = await t.callTool("pb_write_spec", { name: "order-cancellation", content: changed });
+  assert.match(r.content![0].text, /already reviewed.*write a new spec instead/);
+  const sameAgain = await t.callTool("pb_write_spec", { name: "order-cancellation", content: changed });
+  assert.doesNotMatch(sameAgain.content![0].text, /already reviewed/); // identical tasks: a genuine revision, no warning
+});
+
+test("build: with only a finished spec around, the wait message names it instead of puzzling", async () => {
+  const t = setup({ verify: "true", specWaitSec: 0.2 });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "reviewed",
+      writtenIn: session,
+      session,
+      tasks: [{ id: "T1", title: "first file", status: "done", attempts: 1 }],
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  await t.run("build");
+  assert.match(t.posts.at(-1)!, /`order-cancellation` is already reviewed.*write a new spec/);
+});
+
 test("build: with checkpoints off, the build says so up front", async () => {
   const t = setup({ verify: "true", checkpoints: false });
   process.chdir(t.repo);
@@ -2733,7 +3384,7 @@ test("build: resuming after a re-plan lifts planning protection instead of wedgi
   await t.run("plan", "a new idea"); // planning back on after the pause
   await t.run("build"); // resume
   assert.equal(t.progress("order-cancellation").phase, "built");
-  assert.deepEqual(JSON.parse(t.read(".pi/pb/planning.json")), {});
+  assert.deepEqual(new Store(t.repo).planningSessions(), []);
   assert.equal((await t.callTool("write", { path: "src/x.ts", content: "x" })).error, undefined);
 });
 
@@ -2955,7 +3606,7 @@ test("build: Esc on the first dialog cancels; a spec that isn't written yet is o
 
 test("spec writing settles small things as assumptions; the checkpoint asks nothing; questions while writing count down", async () => {
   const { specPrompt, checkpointPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
-  assert.match(specPrompt("", []), /Settle what the discussion left open yourself[\s\S]*"Assumption: … because …"[\s\S]*only about a choice that changes behaviour, an API or data/);
+  assert.match(specPrompt("", []), /Settle what the discussion left open yourself[\s\S]*"Assumption: <claim> — settles by <how>, because <reason>"[\s\S]*only about a choice that changes behaviour, an API or data/);
   assert.match(finishSpecPrompt("x"), /settle its open questions yourself where you can/);
   assert.match(checkpointPrompt(80, []), /Don't ask me anything now: what's undecided goes into Open questions/);
 
@@ -3495,6 +4146,159 @@ test("/pb:approach without an idea infers it from the discussion", async () => {
   assert.match(t.instructions.at(-1)!, /^\[pb:approach\][\s\S]*Infer the idea from our discussion/);
 });
 
+test("review: acceptance-proof mapping is checked, faked or dodged mappings are P1", async () => {
+  const { REVIEWER_SYSTEM, taskPrompt } = await import("../extensions/pb/prompts.ts");
+  const { parseSpec } = await import("../extensions/pb/spec.ts");
+  assert.match(REVIEWER_SYSTEM, /faked mapping/);
+  assert.match(REVIEWER_SYSTEM, /non-testable/);
+  const spec = parseSpec(SPEC()).spec!;
+  assert.match(taskPrompt(spec.tasks[0], 1, 3, null, true), /which acceptance lines each failing test proves/);
+});
+
+test("spec: acceptance lines on tested tasks name their proof or exemption, or writing fails", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const bare = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`" });
+  const r = await t.callTool("pb_write_spec", { name: "a", content: bare });
+  assert.match(r.error!, /T1.*T1\.txt exists/); // the rejection names the bare line
+  assert.match(r.error!, /tests:|non-testable/);
+  const marked = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "b", content: marked })).error, undefined);
+  const mixed = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Acceptance: map paragraph updated (non-testable: docs)\n- Test: `test -f T1.txt`" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "c", content: mixed })).error, undefined);
+  const commandless = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "d", content: commandless })).error, undefined); // no Test: line: gate suite proves it, no marker needed
+  const retasked = await t.callTool("pb_update_spec", { name: "b", section: "Tasks", content: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`" });
+  assert.match(retasked.error!, /T1.*T1\.txt exists/); // Tasks rewrites are held to the same rule
+});
+
+test("spec review: advisory findings are posted and the build proceeds", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.ok(t.posts.some((p) => /unmeasured window/.test(p))); // advisory findings posted
+  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // not blocked
+});
+
+test("spec review: P0 findings stop the build before T1 with the findings shown", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "block";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.match(t.posts.at(-1)!, /changes needed before T1/);
+  assert.match(t.posts.at(-1)!, /unguarded transition/);
+  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // never launched
+  assert.equal(t.progress("order-cancellation").phase, "written"); // untouched
+});
+
+test("spec review: after amendment the build proceeds with no second gate", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "block";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist.", mode: "append" });
+  await t.run("build", "order-cancellation");
+  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // proceeds
+  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1); // exactly one gate, ever
+});
+
+test("spec review: the brief attacks decisions and demands an exact verdict", async () => {
+  const { specReviewBrief } = await import("../extensions/pb/prompts.ts");
+  const b = specReviewBrief("order-cancellation", "# Order cancellation\n\n## Decisions\n- Only PENDING orders can be cancelled.\n");
+  assert.match(b, /Attack its Decisions/);
+  assert.match(b, /Not doing/);
+  assert.match(b, /quantitative claim/);
+  assert.match(b, /VERDICT: (block|pass)/);
+});
+
+test("review: the brief carries stale prose references for judgment, absent when clean", async () => {
+  const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
+  const base = { changed: [], stat: "", check: "", focus: "" };
+  assert.match(reviewerBrief({ ...base, staleRefs: [{ symbol: "oldHelperName", referrers: ["REF.md:1"] }] }), /Possibly stale prose references[\s\S]*oldHelperName: REF\.md:1/);
+  assert.doesNotMatch(reviewerBrief(base), /Possibly stale prose/);
+});
+
+test("build: a rename that orphans a prose citation is flagged at completion", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { execSync } = await import("node:child_process");
+  fs.writeFileSync(path.join(t.repo, "src-helper.ts"), "export function oldHelperName() { return 1; }\n");
+  fs.writeFileSync(path.join(t.repo, "REF.md"), "call `oldHelperName` first\n");
+  execSync("git add -A && git commit -qm base", { cwd: t.repo });
+  await t.callTool("pb_write_spec", {
+    name: "order-cancellation",
+    content: SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`" }),
+  });
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text);
+    if (task === "T1") {
+      await tool("pb_tests_red", { task, tests: "T1.txt exists" });
+      fs.writeFileSync("src-helper.ts", "export function newHelperName() { return 1; }\n");
+      fs.writeFileSync("T1.txt", "x");
+    }
+    if (task && task !== "final") await tool("pb_task_done", { task, status: "done", summary: "did it" });
+  };
+  await t.run("build", "order-cancellation");
+  assert.match(t.posts.at(-1)!, /oldHelperName: REF\.md:1/);
+});
+
+test("rename sweep: prose citing a removed identifier is listed with file:line", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { staleProseRefs } = await import("../extensions/pb/checkpoint.ts");
+  const { execSync } = await import("node:child_process");
+  fs.writeFileSync(path.join(t.repo, "src-helper.ts"), "export function oldHelperName() { return 1; }\n");
+  fs.writeFileSync(path.join(t.repo, "REF.md"), "call `oldHelperName` first\n");
+  execSync("git add -A && git commit -qm base", { cwd: t.repo });
+  const base = execSync("git rev-parse HEAD", { cwd: t.repo, encoding: "utf8" }).trim();
+  assert.deepEqual(staleProseRefs(t.repo, base), []);
+  fs.writeFileSync(path.join(t.repo, "src-helper.ts"), "export function newHelperName() { return 1; }\n");
+  const hits = staleProseRefs(t.repo, base);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].symbol, "oldHelperName");
+  assert.ok(hits[0].referrers.some((r) => r.startsWith("REF.md:")));
+});
+
+test("rename sweep: deleted files are matched by basename, clean trees stay quiet", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { staleProseRefs } = await import("../extensions/pb/checkpoint.ts");
+  const { execSync } = await import("node:child_process");
+  fs.writeFileSync(path.join(t.repo, "legacy-helper.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(t.repo, "REF.md"), "see legacy-helper for details\n");
+  execSync("git add -A && git commit -qm base", { cwd: t.repo });
+  const base = execSync("git rev-parse HEAD", { cwd: t.repo, encoding: "utf8" }).trim();
+  fs.rmSync(path.join(t.repo, "legacy-helper.ts"));
+  const hits = staleProseRefs(t.repo, base);
+  assert.ok(hits.some((h) => h.symbol === "legacy-helper" && h.referrers.some((r) => r.startsWith("REF.md:"))));
+  assert.deepEqual(staleProseRefs(t.repo, undefined), []);
+});
+
+test("spec: the format checklist asks for prose inventory, real states and measured numbers", async () => {
+  const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
+  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
+    assert.match(p, /prose that describes the behavior/);
+    assert.match(p, /enumerate its real states/);
+    assert.match(p, /carries a measurement/);
+  }
+});
+
 test("planning prompts push back like a senior engineer", async () => {
   const { planPrompt, continuePlanPrompt, approachPrompt } = await import("../extensions/pb/prompts.ts");
   for (const p of [planPrompt("x", "true", "", "none"), continuePlanPrompt("s", "# S", ""), approachPrompt("y", "")]) {
@@ -3508,3 +4312,6 @@ test("planning prompts push back like a senior engineer", async () => {
     assert.match(p, /rabbit holes/);
   }
 });
+
+
+

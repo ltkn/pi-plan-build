@@ -45,6 +45,20 @@ function gitPath(cwd: string, name: string): string {
 
 const split0 = (s: string | undefined) => (s ?? "").split("\0").filter(Boolean);
 
+/**
+ * Excludes for the snapshot's `git add`: the pb ledger must never be captured.
+ * Most repos gitignore `.pi` wholesale (as recommended): naming an ignored path in an
+ * exclude makes `git add` exit 1 ("paths are ignored"), so the ledger exclude is only
+ * passed when it isn't already ignored (plain `git add -A` skips ignored files anyway).
+ */
+function addExcludes(cwd: string): string[] {
+  try {
+    return tryRun(cwd, ["check-ignore", "-q", ".pi/pb"]) !== undefined ? [] : [LEDGER_EXCLUDE];
+  } catch {
+    return [LEDGER_EXCLUDE];
+  }
+}
+
 /** Snapshot the working tree (ledger and huge untracked files excluded). undefined outside git or on failure. */
 export function snapshot(cwd: string, message: string): Snapshot | undefined {
   if (tryRun(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() !== "true") return;
@@ -58,7 +72,7 @@ export function snapshot(cwd: string, message: string): Snapshot | undefined {
         return false;
       }
     });
-    run(cwd, ["add", "-A", "--", ".", LEDGER_EXCLUDE, ...huge.map((f) => `:(exclude,literal)${f}`)], env);
+    run(cwd, ["add", "-A", "--", ".", ...addExcludes(cwd), ...huge.map((f) => `:(exclude,literal)${f}`)], env);
     const tree = run(cwd, ["write-tree"], env).trim();
     const parent = tryRun(cwd, ["rev-parse", "--verify", "-q", REF])?.trim();
     const commit = run(cwd, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", message], IDENT).trim();
@@ -140,6 +154,69 @@ export function dropCheckpoints(cwd: string): void {
 
 export function changedPaths(cwd: string, a: string, b: string, paths: string[] = []): string[] {
   return split0(tryRun(cwd, ["diff", "-z", "--name-only", "--no-renames", a, b, "--", ...paths]));
+}
+
+export interface StaleRef {
+  symbol: string;
+  referrers: string[];
+}
+
+/**
+ * Prose references to identifiers the diff removed: distinctive tokens (long enough that prose
+ * matches mean something) from removed lines, plus basenames of deleted files. Referrers are
+ * prose only (.md, .sql) as file:line, capped. Never blocks: intentional historical mentions
+ * are legitimate, so the reviewer judges hits as P2-candidates. Empty outside git, without a
+ * base, or when nothing stale is found.
+ */
+export function staleProseRefs(cwd: string, base: string | undefined): StaleRef[] {
+  if (!base) return [];
+  if (tryRun(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() !== "true") return [];
+  try {
+    const diff = tryRun(cwd, ["diff", "-U0", base, "--", ".", ":(exclude).pi"]) ?? "";
+    const added = new Set<string>();
+    const removed: string[] = [];
+    const toks = (line: string) => line.slice(1).match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? [];
+    for (const line of diff.split("\n")) {
+      if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) continue;
+      if (line.startsWith("+")) {
+        for (const t of toks(line)) added.add(t);
+        continue;
+      }
+      if (!line.startsWith("-")) continue; // context and headers are neither added nor removed
+      for (const t of toks(line)) removed.push(t);
+    }
+    const candidates = new Set<string>();
+    for (const t of removed) {
+      if (t.length >= 12 && !added.has(t)) candidates.add(t);
+    }
+    const deleted = split0(tryRun(cwd, ["diff", "-z", "--name-only", "--diff-filter=D", base, "--", ".", ":(exclude).pi"]));
+    for (const f of deleted) {
+      const stem = path.basename(f).replace(/\.[^.]*$/, "");
+      if (stem.length >= 4) candidates.add(stem);
+    }
+    const names = [...candidates].slice(0, 200);
+    if (!names.length) return [];
+    const out: StaleRef[] = [];
+    for (const symbol of names) {
+      // Literal match (-e keeps leading-dash symbols safe): the symbol is distinctive, not a pattern.
+      const hits = (tryRun(cwd, ["grep", "-n", "-F", "-e", symbol, "--", "*.md", "*.sql", ":(exclude).pi"]) ?? "")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => {
+          const i = l.indexOf(":");
+          const j = l.indexOf(":", i + 1);
+          return j > 0 ? l.slice(0, j) : l;
+        })
+        .slice(0, 10);
+      if (hits.length) {
+        out.push({ symbol, referrers: hits });
+        if (out.length >= 50) break;
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 /** Blob id of a path in a snapshot, or undefined if the path doesn't exist there. */

@@ -27,7 +27,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.28.0   # from git
+pi install git:github.com/ltkn/pi-plan-build@v1.29.0   # from git
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
@@ -220,7 +220,7 @@ the existing ones still run.
 | `.pi/pb/specs/<name>/spec.md` | the spec: written by `/pb:build` or `/pb:spec`, decisions added during the build |
 | `.pi/pb/specs/<name>/progress.json` | task states, the session the build runs in, the last review, harness-owned |
 | `.pi/pb/specs/<name>/checkpoints.json`, `events.jsonl` | undo points (files and conversation) and stats |
-| `.pi/pb/baseline.json`, `planning.json` | the last test baseline; planning sessions and their snapshots |
+| `.pi/pb/baseline.json`, `.pi/pb/planning/<session>.json` | the last test baseline; planning sessions and their snapshots (one file per session) |
 | `.pi/pb/explore.jsonl` | `pb_explore` usage per session |
 | `.pi/pb/specs/<name>/review.md` | the last review's result (also posted in the session) |
 | `.pi/pb/specs/<name>/sessions/`, `.pi/pb/sessions/` | the saved runs of the verifier, the explorer and the cartographer, to open with `pi --session <file>`; removed by `/pb:archive` |

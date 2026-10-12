@@ -9,5 +9,4 @@
 - Prefer the planning session's (`writtenIn`) baseline for fresh builds before the global fallback (`extensions/pb/index.ts:2101-2136`).
 - Document snapshots as the primary planning guard; keep the edit/write block as UX (`extensions/pb/index.ts:1168-1181`).
 - Pass explorer context explicitly instead of `plan: `-prefix sniffing (`extensions/pb/index.ts:636-719` pattern).
-- Prefer per-session files over shared read-modify-write maps for new state (`extensions/pb/store.ts:408-434`).
 - Unify the `.pi` exclude between snapshots and store helpers (`extensions/pb/checkpoint.ts:14`, `extensions/pb/store.ts:669-698`).

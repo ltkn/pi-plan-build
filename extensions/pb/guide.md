@@ -336,7 +336,7 @@ and skip this entirely.
 
 **Writing it is painless.** The questions belong to planning. What the
 discussion left open, Pi settles itself and records in Decisions as
-`Assumption: … because …`. They're listed when the spec is shown, and the
+`Assumption: <claim> — settles by <how>, because <reason>`. They're listed when the spec is shown, and the
 reviewer checks them. It asks you only about a choice that changes behaviour,
 an API or data that you didn't settle, all at once, and when `/pb:build` is
 writing the spec those questions count down too. A checkpoint asks nothing at
@@ -705,62 +705,63 @@ model call).
 
 ### After /pb:plan
 <!-- pb:tip plan.next -->
-**What now**
-- Answer the questions, push back on the recommendation, take your time.
-- Ready? `/pb:build` asks how to build, writes the spec, and builds · more: `/pb:help plan`
+**What now** — the plan is ready to discuss, nothing is built yet
+- React to the plan: agree, disagree, or answer its questions. Example: *"go with option B, but keep the old endpoint"*
+- Done discussing: `/pb:build` writes the spec and starts building. Example: `/pb:build --fresh` builds in a new session · more: `/pb:help plan`
 <!-- /pb -->
 
 ### After /pb:spec
 <!-- pb:tip spec.next -->
-**What now**
-- Read the spec in `.pi/pb/specs/`: the build follows it, and the reviewer checks against it.
-- Change something? Say it here and `/pb:spec` again · more: `/pb:help spec`
-- Next: `/pb:build` (here; `--fresh` for a new session)
+**What now** — the spec is written, nothing is built yet
+- Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
+- Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
+- Build it: `/pb:build` here, or `/pb:build --fresh` for a new session · more: `/pb:help spec`
 <!-- /pb -->
 
 ### Build paused
 <!-- pb:tip build.paused -->
-**What now**
-- Answer or discuss here, then `/pb:build` to continue (`/pb:build <guidance>` records it in the spec).
-- Code went wrong? `/pb:undo` · the spec is wrong? `/pb:spec {spec}` · more: `/pb:help stuck`
+**What now** — the build is paused, finished tasks stay done
+- Continue: answer or discuss here, then `/pb:build` to carry on. Example: `/pb:build keep going with the current approach` (your hint is recorded in the spec).
+- Code went wrong? Throw the attempt away with `/pb:undo`, then `/pb:build` tries again.
+- Spec went wrong? Rewrite it with `/pb:spec {spec}` · more: `/pb:help stuck`
 <!-- /pb -->
 
 ### Build paused: a task keeps failing
 <!-- pb:tip build.paused-attempts -->
-**What now** ({task} keeps failing its check)
-- Read the failure above. `/pb:build <hint or different approach>` gives {task} a fresh set of attempts.
-- Code went somewhere bad? `/pb:undo {task}`, then `/pb:build <what to do differently>` · more: `/pb:help stuck`
+**What now** — {task} failed its check too many times, the build is waiting
+- Steer it: say what to try differently and it retries with fresh attempts. Example: `/pb:build mock the clock instead of sleeping`
+- Throw this attempt away: `/pb:undo {task}` restores the files, then `/pb:build` tries again · more: `/pb:help stuck`
 <!-- /pb -->
 
 ### Build complete
 <!-- pb:tip build.done -->
-**What now**
-- Next: `/pb:review`, here in this session, so you can fix findings right away.
+**What now** — the build finished, every check passed
+- Review it: `/pb:review` here in this session, so you can fix findings right away.
 - Then commit (the message above is ready to paste), and `/pb:archive` · more: `/pb:help review`
 <!-- /pb -->
 
 ### Review passed
 <!-- pb:tip review.pass -->
-**What now**
-- Minor findings? Ask Pi to fix them here, then commit with the message above.
-- `/pb:archive` when it's merged; the next spec: `/pb:build` from your planning session.
+**What now** — the review passed, the change is ready to merge
+- Minor findings? Ask Pi to fix them here ("fix finding 2"), then commit with the message above.
+- Done: `/pb:archive` files the spec away; the next feature starts with `/pb:build` from its planning session.
 <!-- /pb -->
 
 ### Review found changes
 <!-- pb:tip review.changes -->
-**What now**
-- Ask Pi here to fix them ("fix findings 1 and 3"); it knows this code.
-- Then `/pb:review` again: it checks those findings and what changed · more: `/pb:help review`
+**What now** — the review found things to fix before merging
+- Fix them here: this session knows the code. Example: *"fix findings 1 and 3"*
+- Then `/pb:review` again — it checks only those findings and what changed · more: `/pb:help review`
 <!-- /pb -->
 
 ### Review without a verdict
 <!-- pb:tip review.other -->
-**What now**
-- Read the findings above; fix what's worth fixing here, then `/pb:review` again.
+**What now** — the review ended without a verdict, read what's above first
+- Fix what's worth fixing here, then `/pb:review` again.
 <!-- /pb -->
 
 ### After /pb:undo
 <!-- pb:tip undo.done -->
-**What now**
-- `/pb:build` continues from here. Changed your mind? `/pb:undo {id}` goes back.
+**What now** — undone to before {id}, that attempt is gone from the conversation
+- Carry on: `/pb:build` continues from here. Changed your mind? `/pb:undo {id}` goes back the other way.
 <!-- /pb -->

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.29.0
+
+- **`/pb:fix [ids]`**: fix review findings in a fresh fenced session — seed, fence and completion report, then `/pb:review` checks the delta. Unknown ids refused, never guessed; laps repeat to a cap of 3 then escalate as silent or stuck; spec-revision items never start a lap.
+- **Spec-review gate**: fresh eyes attack the ready spec's Decisions before the first task — P0/P1 block T1 until amended or rebutted (exactly once, never re-gated); P2/P3 travel on with the build for the code reviewer.
+- **Acceptance↔test mapping**: every `- Acceptance:` line on a tested task names its proof `(tests: …)` or its exemption `(non-testable: why)` — enforced at write time, and faked or dodged mappings are P1 at review. Tasks without a `Test:` line stay covered by the gate suite and never block docs or config changes.
+- **Store races closed**: planning sessions, review sessions, pending builds and fixes sessions are per-session files (migrated once from the legacy maps); `asked.json` is append-only. Parallel sessions stop clobbering each other's state.
+- **Clearer handoffs**: plan args are one-lined and capped with disclosure; near-miss spec names redirect instead of starting silent duplicate plans; planning gets a widget; `/pb:build` validates names, records trailing guidance, warns on a misplaced `--fresh`, confirms takeovers, and refuses a readable file under an invalid name; a mid-build review can no longer strand the build as reviewed; all What-now blocks rewritten in plain language with an example each.
+
 ## 1.28.0
 
 - **`/pb:approach [idea]`**: mid-discussion, hear how Pi would approach the implementation — understanding, seams, non-goals, test strategy, alternatives, risks, assumptions, open questions (listed, never asked). Chat only: nothing is written, so `/pb:spec` still does the settling. With an idea it expands that one; without, it infers the one from the discussion (or compares several with a recommendation)

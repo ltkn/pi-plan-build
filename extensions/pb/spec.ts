@@ -5,7 +5,7 @@
  *
  *   # <title>
  *   Status: planning | ready                 (optional; ready by default)
- *   Depends on: <spec name> | none
+ *   Depends on: <spec name> | none (a trailing note in parens is ignored)
  *   Verification: tests | build | none — <why, unless tests>
  *   New tests: yes | no — <why, if no>
  *
@@ -111,7 +111,7 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
   }
 
   const dep = header(md, "Depends on");
-  const dependsOn = dep && !/^none$/i.test(dep) ? dep : undefined;
+  const dependsOn = dep && !/^none(\s*\(|$)/i.test(dep) ? dep : undefined;
 
   for (const s of REQUIRED_SECTIONS) {
     const found = blanked.filter((l) => new RegExp(`^##\\s+${escapeReg(s)}\\s*:?\\s*$`, "i").test(l));
@@ -119,7 +119,7 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
     else if (found.length > 1) errors.push(`duplicate "## ${s}" section: keep one`);
   }
   if (status === "ready" && blanked.some((l) => /^##\s+Open questions\s*:?\s*$/i.test(l)))
-    errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions ("Assumption: … because …") or ask with pb_ask');
+    errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions ("Assumption: <claim> — settles by <how>, because <reason>") or ask with pb_ask');
 
   // Tasks: fence-aware, line-based. ## Tasks allows a trailing colon; ### T1 is case-insensitive
   // and normalized to T1; a ### line that looks like a task but doesn't parse is an error, not silence.

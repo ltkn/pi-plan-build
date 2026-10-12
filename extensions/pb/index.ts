@@ -24,7 +24,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { changedPaths, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot } from "./checkpoint.ts";
+import { changedPaths, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { notifyDesktop } from "./notify.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import {
@@ -53,6 +53,9 @@ import {
   reviewSessionPrompt,
   reviewerBrief,
   specPrompt,
+  specReviewBrief,
+  SPEC_REVIEWER_SYSTEM,
+  parseSpecReview,
   taskPrompt,
 } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapRepairPhase, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
@@ -62,10 +65,22 @@ import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionOf, setSection, setStatus, sharedTestCommands, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
+import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
 import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
+
+/** One-line display text for markers and session names: collapse whitespace, cap length. */
+const planTitle = (arg: string, n = 60) => {
+  const flat = arg.replace(/\s+/g, " ").trim();
+  return flat.length > n ? `${flat.slice(0, n - 3)}…` : flat;
+};
+
+/** Cap for the model copy of a /pb:plan description: generous; cap() itself discloses the cut. */
+const MODEL_ARG_CAP = 4000;
+
+/** Normalized form for catching near-miss spec names: case, underscores, trailing punctuation. */
+const normSpecArg = (arg: string) => arg.toLowerCase().replace(/_/g, "-").trim().replace(/[.!?…]+$/, "").trim();
 
 /** Coherence pays off once slices can drift: smaller builds skip the pass. */
 const COHERE_MIN_TASKS = 3;
@@ -103,6 +118,34 @@ const suspiciousCommand = (command: string) => {
   if (/\|/.test(cmd)) return true;
   return /\b(curl|wget)\b/.test(cmd);
 };
+
+/**
+ * Rewriting a finished spec keeps its done state (statuses carry by task id): warn when the
+ * new task list differs, so a new change on an old name doesn't silently inherit "done".
+ * Advisory only: revising a reviewed spec after findings is legitimate.
+ */
+const rewriteWarning = (name: string, prev: Progress | undefined, spec: ParsedSpec): string | undefined => {
+  if (!prev || !["built", "reviewed"].includes(prev.phase)) return undefined;
+  if (!(prev.tasks ?? []).some((t) => t.status === "done")) return undefined;
+  const same = spec.tasks.length === prev.tasks.length && spec.tasks.every((t) => prev.tasks.some((o) => o.id === t.id && o.title === t.title));
+  if (same) return undefined;
+  return `\`${name}\` was already ${prev.phase} with done tasks: they keep their status. If this is a new change rather than a revision, write a new spec instead — new specs start with all tasks todo`;
+};
+
+/**
+ * Acceptance lines on tasks with a Test: line must name their proof `(tests: ...)` or their
+ * exemption `(non-testable: ...)`, so uncovered lines can't slip to review unnoticed. Tasks
+ * without a Test: line are proven by the gate suite by construction. Readers stay lenient:
+ * only the write tools call this, so in-flight specs keep working.
+ */
+const acceptanceMarkerErrors = (spec: ParsedSpec): string[] =>
+  spec.tasks.flatMap((t) => {
+    if (!t.test) return [];
+    return t.text
+      .split("\n")
+      .filter((l) => /^\s*-\s*Acceptance:/.test(l) && !/\(tests:|\(non-testable:/.test(l))
+      .map((l) => `${t.id} ${l.trim()} — add (tests: ...) naming the proving tests, or (non-testable: reason)`);
+  });
 
 const specWarnings = (md: string, spec: ParsedSpec): string[] => {
   const redEligible = (t: SpecTask) => spec.gate === "tests" && spec.newTests && !/^\(refactor\)/i.test(t.title);
@@ -409,8 +452,11 @@ export default function pb(pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!SPEC_NAME.test(params.name)) throw new Error(`"${params.name}" is not a valid name: use short kebab-case, e.g. order-cancellation`);
+      if (params.name === "off") throw new Error(`"off" is reserved (/${cmd("plan")} off ends planning): pick another spec name.`);
       const { spec, errors } = parseSpec(params.content);
       if (!spec) throw new Error(`The spec doesn't parse:\n- ${errors.join("\n- ")}\nFix it and call pb_write_spec again.`);
+      const markerErrs = acceptanceMarkerErrors(spec);
+      if (markerErrs.length) throw new Error(`Acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
       const store = new Store(ctx.cwd);
       const prev = store.progress(params.name);
       store.writeSpec(params.name, params.content);
@@ -425,7 +471,10 @@ export default function pb(pi: ExtensionAPI) {
       });
       store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, status: spec.status, tokens: tokensOf(params.content) });
       const what = spec.status === "planning" ? "status planning" : `${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}`;
-      const notes = specWarnings(params.content, spec).map((w) => `\nNote: ${w}.`);
+      const warnings = [...specWarnings(params.content, spec)];
+      const rw = rewriteWarning(params.name, prev, spec);
+      if (rw) warnings.push(rw);
+      const notes = warnings.map((w) => `\nNote: ${w}.`);
       return reply(`Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${what}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}; ${sizeNote(tokensOf(params.content))}.${notes.join("")}`);
     },
   });
@@ -455,11 +504,17 @@ export default function pb(pi: ExtensionAPI) {
       if (params.status) md = setStatus(md, params.status as "planning" | "ready");
       const { spec, errors } = parseSpec(md);
       if (!spec) throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.join("\n- ")}`);
+      if ((params.section?.replace(/^#+\s*/, "").trim().toLowerCase() ?? "") === "tasks") {
+        const markerErrs = acceptanceMarkerErrors(spec);
+        if (markerErrs.length) throw new Error(`Not written: acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
+      }
       store.writeSpec(name, md);
       const prev = store.progress(name);
       store.saveProgress({ ...(prev ?? { spec: name, phase: "written" }), spec: name, tasks: syncTasks(spec, prev?.tasks), writtenIn: ctx.sessionManager.getSessionFile(), updatedAt: now() });
       store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md) });
-      const notes = params.section?.replace(/^#+\s*/, "").trim().toLowerCase() === "tasks" ? specWarnings(md, spec).map((w) => `\nNote: ${w}.`) : [];
+      const isTasks = params.section?.replace(/^#+\s*/, "").trim().toLowerCase() === "tasks";
+      const rw = isTasks ? rewriteWarning(name, prev, spec) : undefined;
+      const notes = isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])].map((w) => `\nNote: ${w}.`) : [];
       return reply(`Updated ${store.rel("specs", name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}; ${sizeNote(tokensOf(md))}.${notes.join("")}`);
     },
   });
@@ -476,7 +531,7 @@ export default function pb(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const { store, name, progress } = specOfSession(ctx);
       const md = name ? store.readSpec(name) : undefined;
-      if (!name || !md || !progress) throw new Error("This is not a pb build session.");
+      if (!name || !md || !progress) throw new Error("This is not a pb build session. In planning, decisions stay in the discussion and enter the spec via /pb:spec or /pb:build — carry on.");
       const entry = params.assumption ? `Assumption (build${progress.current ? `, ${progress.current}` : ""}): ${params.decision}` : params.decision;
       store.writeSpec(name, addDecision(md, entry));
       if (params.assumption) {
@@ -567,7 +622,7 @@ export default function pb(pi: ExtensionAPI) {
         const record = building
           ? ", record it with pb_record_decision (assumption: true)"
           : specWriting.has(session) || store.pendingBuild(session)
-            ? `, write it into the spec's Decisions as "Assumption: … because …"`
+            ? `, write it into the spec's Decisions as "Assumption: <claim> — settles by <how>, because <reason>"`
             : planning
               ? ", and tell the human it's an assumption to confirm (under open questions once there's a spec)"
               : "";
@@ -675,7 +730,7 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_try",
     label: "Try",
     description:
-      "When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. Several calls can run in parallel.",
+      "When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. Prefer local code, docs and local/test data first; a read-only production query only when local data cannot answer it (state why, table, row cap at most ~500 rows); never write, never notify. Several calls can run in parallel.",
     parameters: Type.Object({
       goal: Type.String({ description: "the question to settle by running, specific enough to probe in one go" }),
     }),
@@ -869,13 +924,34 @@ export default function pb(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "pb_fix_done",
+    label: "Fixes done",
+    description:
+      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Then stop: the home session runs /pb:review next to check the delta.",
+    parameters: Type.Object({
+      fixed: Type.Array(Type.String(), { description: "titles of the findings this lap fixed" }),
+      skipped: Type.Array(Type.String(), { description: "titles of findings that need a design decision (spec revision), not an edit" }),
+      tests: Type.String({ description: "test commands run and what each showed" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const store = new Store(ctx.cwd);
+      const session = ctx.sessionManager.getSessionFile();
+      const rec = store.fixSession(session);
+      if (!session || !rec) throw new Error("This is not a pb fixes session. Fix review findings only inside the session /pb:fix opened — carry on there, or run /pb:fix for a new one.");
+      store.event(rec.spec, { type: "fix", fixed: params.fixed, skipped: params.skipped, tests: params.tests });
+      store.clearFixSession(session);
+      return reply(`Recorded fix report for \`${rec.spec}\`: fixed ${params.fixed.length}, skipped ${params.skipped.length}. Reply briefly, then stop: run /pb:review back home to check the delta.`);
+    },
+  });
+
   /* --------------------------------- plan -------------------------------- */
-  /** Run the test suite in the background; its result is posted into the session when it's done. */
-  const startBaseline = (ctx: ExtensionContext, store: Store, command: string, say?: (content: string) => void) => {
+  /** Run the test suite in the background; its result is posted into the session when it's done. Returns whether it started (a second plan in the same session shares the one in flight). */
+  const startBaseline = (ctx: ExtensionContext, store: Store, command: string, say?: (content: string) => void): boolean => {
     const session = ctx.sessionManager.getSessionFile();
     // One baseline per session: re-planning here reuses the one in flight, a second planning session gets its own.
     if (session) {
-      if (baselineSessions.has(session)) return;
+      if (baselineSessions.has(session)) return false;
       baselineSessions.add(session);
     }
     const origin = session;
@@ -909,6 +985,7 @@ export default function pb(pi: ExtensionAPI) {
         checking -= 1;
         if (session) baselineSessions.delete(session);
       });
+    return true;
   };
 
   /** Why pb can't list what changed while planning when no snapshot was taken. */
@@ -941,6 +1018,7 @@ export default function pb(pi: ExtensionAPI) {
     const snap = existing ? undefined : checkpoints ? snapshot(ctx.cwd, "pb: start of planning") : undefined;
     store.setPlanning(session, true, existing ?? snap?.commit);
     store.detachSession(session);
+    ctx.ui.setWidget("pb-plan", ["planning · /pb:plan off"]);
     if (!existing && !snap?.commit) ctx.ui.notify(noSnapshotWarning(checkpoints), "warning");
     return true;
   };
@@ -1062,6 +1140,7 @@ export default function pb(pi: ExtensionAPI) {
         const session = c.sessionManager.getSessionFile();
         newSessionFile = session ?? undefined;
         if (session) ns.setPlanning(session, true, snap?.commit);
+        if (session) c.ui.setWidget("pb-plan", ["planning · /pb:plan off"]);
         if (!snap?.commit) c.ui.notify(noSnapshotWarning(checkpoints), "warning");
         // Same staleness check as /pb:plan: the map may have rotted since the old session.
         warnStaleMap(c);
@@ -1078,7 +1157,7 @@ export default function pb(pi: ExtensionAPI) {
         await c.sendMessage(
           {
             customType: "pb",
-            content: `▶ Planning **${name}** on, from ${ns.rel("specs", name, "spec.md")} (the project's files stay untouched).${baseline ? ` Running \`${testCmd}\` in the background for a baseline.` : ""}\nThis session: "plan: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\``,
+            content: `▶ Planning **${name}** on, from ${ns.rel("specs", name, "spec.md")} (the project's files stay untouched).${baseline ? ` Running \`${testCmd}\` in the background for a baseline.` : ""}\nThis session: "plan: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\` · \`/${cmd("plan")}\` off ends planning`,
             display: true,
           },
           { triggerTurn: false },
@@ -1108,8 +1187,7 @@ export default function pb(pi: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionFile();
       if (arg === "off") {
         if (!session || !store.planningSessions().includes(session)) return ctx.ui.notify("Not in planning mode.", "info");
-        if (!(await reviewPlanningChanges(ctx, store))) return;
-        store.setPlanning(session, false);
+        if (!(await liftPlanning(ctx, store))) return;
         return ctx.ui.notify("Planning mode off: Pi can change the project's files again.", "info");
       }
       if (!arg)
@@ -1128,9 +1206,21 @@ export default function pb(pi: ExtensionAPI) {
           "warning",
         );
       }
+      // A near-miss spec name silently starting a new plan costs a duplicate spec downstream:
+      // redirect in the same style as the phase-mismatch message above.
+      const near = normSpecArg(arg);
+      if (near !== arg && near !== "off" && SPEC_NAME.test(near)) {
+        const hit = store.specNames().filter((n) => n === near);
+        if (hit.length === 1 && store.readSpec(hit[0])) {
+          return ctx.ui.notify(
+            `\`${arg}\` isn't a spec name (spec names are lowercase with hyphens). Did you mean \`${hit[0]}\`? \`/${cmd("plan")} ${hit[0]}\` continues it; to plan something new, describe it in your own words.`,
+            "warning",
+          );
+        }
+      }
       // A name makes the planning session easy to find again in /resume, e.g. after a crash.
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
-      const title = arg.length > 60 ? `${arg.slice(0, 57)}…` : arg;
+      const title = planTitle(arg);
       const { cfg, testCmd } = commands(ctx.cwd, store);
 
       await offerStandards(ctx, store);
@@ -1143,10 +1233,10 @@ export default function pb(pi: ExtensionAPI) {
 
       // The baseline costs no tokens: the harness runs the suite while the discussion starts.
       const baseline = cfg.baseline && !!testCmd;
-      if (baseline) startBaseline(ctx, store, testCmd!);
+      const started = baseline ? startBaseline(ctx, store, testCmd!) : false;
       instruct(
-        `▶ /${cmd("plan")} — ${arg} (the project's files stay untouched)${baseline ? ` · running \`${testCmd}\` in the background for a baseline` : ""}\nThis session: "plan: ${title}" · back to it any time with /resume, or \`pi --session ${ctx.sessionManager.getSessionId()}\``,
-        planPrompt(arg, testCmd, standardsFor(ctx), baseline ? "running" : "none", store.extra("plan")),
+        `▶ /${cmd("plan")} — ${title} (the project's files stay untouched)${baseline ? (started ? ` · running \`${testCmd}\` in the background for a baseline` : ` · baseline already running — its result lands here`) : ""}\nThis session: "plan: ${title}" · back to it any time with /resume, or \`pi --session ${ctx.sessionManager.getSessionId()}\` · \`/${cmd("plan")}\` off ends planning`,
+        planPrompt(cap(arg, MODEL_ARG_CAP), testCmd, standardsFor(ctx), baseline ? "running" : "none", store.extra("plan")),
       );
     },
   });
@@ -1160,7 +1250,7 @@ export default function pb(pi: ExtensionAPI) {
         return ctx.ui.notify(`/${cmd("approach")} is for planning sessions: run /${cmd("plan")} first, then ask for the approach mid-discussion.`, "warning");
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const focus = args.trim();
-      const shown = focus.length > 60 ? `${focus.slice(0, 57)}…` : focus;
+      const shown = planTitle(focus);
       instruct(
         `▶ /${cmd("approach")}${shown ? ` — ${shown}` : ""} (chat only: nothing is written)`,
         approachPrompt(focus, standardsFor(ctx), store.extra("plan")),
@@ -1175,10 +1265,10 @@ export default function pb(pi: ExtensionAPI) {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       await offerStandards(ctx, store);
       if (!startPlanning(ctx, store)) return;
-      pi.setSessionName(`deps: ${args.trim() || "all"}`);
+      pi.setSessionName(`deps: ${planTitle(args.trim()) || "all"}`);
       // Same staleness check as /pb:plan: the investigation starts from the map.
       warnStaleMap(ctx);
-      instruct(`▶ /${cmd("deps")}${args.trim() ? ` — ${args.trim()}` : ""} (the project's files stay untouched)`, depsPrompt(args.trim()));
+      instruct(`▶ /${cmd("deps")}${args.trim() ? ` — ${planTitle(args.trim())}` : ""} (the project's files stay untouched)`, depsPrompt(args.trim()));
     },
   });
 
@@ -1338,7 +1428,7 @@ export default function pb(pi: ExtensionAPI) {
     store.saveProgress(p);
     store.event(p.spec, { type: "pause", why, task: p.current });
     showProgress(ctx, p);
-    say(`**⏸ Build paused** — ${reason}\n\n${tip(tipKey, { spec: p.spec, ...vars })}`);
+    say(`**⏸ Build paused** — ${reason}\n\nTo continue, run \`/${cmd("build")}\` (plain chat like "resume" won't re-attach the harness).\n\n${tip(tipKey, { spec: p.spec, ...vars })}`);
   };
 
   /**
@@ -1490,6 +1580,7 @@ export default function pb(pi: ExtensionAPI) {
     showProgress(ctx, p);
     // The plan may have been split into several specs: the others are still waiting.
     const rest = p.writtenIn ? store.specsOfPlanning(p.writtenIn) : [];
+    const stale = staleProseRefs(ctx.cwd, p.baseCommit);
     post(
       [
         `**✅ BUILD COMPLETE — ${p.spec}**${notices}`,
@@ -1502,6 +1593,7 @@ export default function pb(pi: ExtensionAPI) {
         p.unattended?.length ? `\nDecided without you (no answer in time):\n${p.unattended.map((c) => `- ${c}`).join("\n")}` : "",
         p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
         redNotes(spec, p).length ? `\nNew tests never seen failing (the review judges each):\n${redNotes(spec, p).map((n) => `- ${n}`).join("\n")}` : "",
+        stale.length ? `\nPossibly stale prose references (renamed or deleted identifiers still cited — intentional history is fine):\n${stale.map((s) => `- ${s.symbol}: ${s.referrers.join(", ")}`).join("\n")}` : "",
         "",
         commitBlock(commitMessage(store.readSpec(p.spec) ?? "")),
         "",
@@ -1935,7 +2027,7 @@ export default function pb(pi: ExtensionAPI) {
     const { cfg, buildCmd } = commands(ctx.cwd, store);
     if (buildModel && switching) await pi.setModel(buildModel as Parameters<typeof pi.setModel>[0]);
     p.session = session;
-    if (session) store.setPlanning(session, false);
+    if (!(await liftPlanning(ctx, store))) return;
     store.saveProgress(p);
     saveStartCheckpoint(ctx, store, name, p, cfg.checkpoints, restart);
     store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false });
@@ -2011,6 +2103,28 @@ export default function pb(pi: ExtensionAPI) {
    * instead (command context only: sessions can't be replaced from event handlers).
    * decided: the human already chose where (the spec-approval dialog).
    */
+  /**
+   * Fresh eyes on the plan before the first task: a spec-sized review that attacks Decisions,
+   * re-tests "Not doing X" rejections and flags unmeasured quantitative claims. Runs once ever
+   * per spec (a {type:"spec-review"} event): later starts skip it, so amendments never re-gate —
+   * the code reviewer audits those. Untouched specs built before this gate existed get it once.
+   */
+  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string): Promise<{ findings: Finding[]; block: boolean }> => {
+    const res = await runFresh({
+      cwd: ctx.cwd,
+      role: "spec-review",
+      systemPrompt: SPEC_REVIEWER_SYSTEM,
+      brief: specReviewBrief(name, md),
+      prompt: "Review the spec in the attached file.",
+      tools: ["read", "grep", "find", "ls", "bash"],
+      model: sessionModel(ctx),
+      sessionDir: store.sessionsDir("spec-review"),
+    });
+    const parsed = parseSpecReview(res.text);
+    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length });
+    return parsed;
+  };
+
   const startBuild = async (
     ctx: ExtensionContext,
     store: Store,
@@ -2022,6 +2136,17 @@ export default function pb(pi: ExtensionAPI) {
     const checked = await preBuildChecks(ctx, store, name, o);
     if (!checked) return;
     const { spec, md, cfg } = checked;
+
+    if (!readEvents(path.join(store.specDir(name), "events.jsonl")).some((e) => e.type === "spec-review")) {
+      const review = await runSpecReview(ctx, store, name, md);
+      if (review.findings.length) {
+        post(`**Spec review** — ${review.block ? "changes needed before T1" : "advisory findings"}:\n${review.findings.map((f, i) => findingLine(f, i + 1)).join("\n")}`);
+      }
+      if (review.block) {
+        ctx.ui.notify("Spec review blocks T1: amend the spec (or record a rebuttal in Decisions) and rebuild — no second gate runs after that.", "warning");
+        return;
+      }
+    }
 
     // Optionally build on another model (e.g. plan on a strong one, build on a local one).
     let buildModel: unknown;
@@ -2184,7 +2309,14 @@ export default function pb(pi: ExtensionAPI) {
     if (!ready.length) {
       // A question in chat, or the spec isn't ready yet: pb offers the build once it is.
       store.setPendingBuild(session);
-      return post(`No spec ready to build yet. Answer Pi's questions; once the spec is written, pb shows it and asks how to build.`);
+      const finished = store.specNames().filter((n) => {
+        const p = store.progress(n);
+        return !!p && p.writtenIn === session && ["built", "reviewed"].includes(p.phase ?? "");
+      });
+      const hint = finished.length
+        ? ` Note: ${finished.map((n) => `\`${n}\` is already ${store.progress(n)?.phase}`).join("; ")} — to change it again, write a new spec: rewriting a finished spec keeps its done state.`
+        : "";
+      return post(`No spec ready to build yet. Answer Pi's questions; once the spec is written, pb shows it and asks how to build.${hint}`);
     }
     showSpec(store, ready[0], ready, await dryRunTests(ctx, store, ready[0]));
     await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes });
@@ -2230,9 +2362,60 @@ export default function pb(pi: ExtensionAPI) {
     }
   };
 
+  /**
+   * Leave planning mode for a build (or for good): show files bash wrote while planning,
+   * then clear the planning state and its widget. False = the human cancelled.
+   */
+  const liftPlanning = async (ctx: ExtensionContext, store: Store): Promise<boolean> => {
+    const session = ctx.sessionManager.getSessionFile();
+    if (!session || !store.planningSessions().includes(session)) return true;
+    if (!(await reviewPlanningChanges(ctx, store))) return false;
+    store.setPlanning(session, false);
+    ctx.ui.setWidget("pb-plan", undefined);
+    return true;
+  };
+
+  /** Record trailing /pb:build words as a Decisions line, so nothing the human typed is dropped. False = it would leave the spec unparseable. */
+  const recordGuidance = (store: Store, name: string, text: string): boolean => {
+    if (!text.trim()) return true;
+    const md = store.readSpec(name);
+    if (!md) return true;
+    const updated = addDecision(md, text.trim());
+    if (!parseSpec(updated).spec) return false;
+    store.writeSpec(name, updated);
+    store.event(name, { type: "spec", update: "guidance" });
+    return true;
+  };
+
+  /** "3h ago" style staleness for a progress updatedAt ("2026-10-01 10:00:00"). */
+  const staleness = (updatedAt?: string): string => {
+    const ms = updatedAt ? Date.now() - new Date(updatedAt.replace(" ", "T")).getTime() : NaN;
+    if (!(ms >= 0)) return "with no recent activity";
+    const m = Math.floor(ms / 60000);
+    if (m < 1) return "active just now";
+    if (m < 60) return `active ${m} min ago`;
+    const h = Math.floor(m / 60);
+    return h < 48 ? `active ${h}h ago` : `active ${Math.floor(h / 24)}d ago`;
+  };
+
+  /**
+   * Another session may own this spec's build: confirm before two agents race it.
+   * The build command passes ["building"] (resuming a paused build is the normal path);
+   * /pb:review passes ["building", "paused"] (its finish-time restore would revert even a
+   * paused builder's files). Headless has no dialog: agree() goes on, as documented
+   * recovery must work there.
+   */
+  const confirmLiveBuild = async (ctx: ExtensionContext, store: Store, name: string | undefined, phases: Array<"building" | "paused">, action: string): Promise<boolean> => {
+    if (!name) return true;
+    const session = ctx.sessionManager.getSessionFile();
+    const pr = store.progress(name);
+    if (!pr || !(phases as string[]).includes(pr.phase) || pr.session === session) return true;
+    return agree(ctx, store, `\`${name}\` looks like it is building in another session (${staleness(pr.updatedAt)}). ${action}`);
+  };
+
   pi.registerCommand(cmd("build"), {
     description: "Build the planned feature here, task by task, each checked (writes the spec first if there isn't one). --fresh builds in a new session. In a paused build: continue, optionally with guidance",
-    getArgumentCompletions: specCompletions,
+    getArgumentCompletions: (prefix: string) => [{ value: "--fresh", label: "--fresh" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
@@ -2241,24 +2424,36 @@ export default function pb(pi: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionFile();
       const { cfg, buildCmd } = commands(ctx.cwd, store);
 
+      // The name is the only user string that reaches path.join: take it as a name only
+      // when it is a valid spec name. Anything else falls through to prose below — except a
+      // readable file under an invalid name, which is rejected instead of being built
+      // (or silently reinterpreted as a description).
+      if (words[0] && !SPEC_NAME.test(words[0])) {
+        const near = normSpecArg(words[0]);
+        const hit = near !== "off" && SPEC_NAME.test(near) ? store.specNames().filter((n) => n === near) : [];
+        if (hit.length === 1 && store.readSpec(hit[0])) {
+          return ctx.ui.notify(
+            `\`${words[0]}\` isn't a spec name (spec names are lowercase with hyphens). Did you mean \`${hit[0]}\`? \`/${cmd("build")} ${hit[0]}\` continues it; to start something else, describe it without a leading name.`,
+            "warning",
+          );
+        }
+        if (store.readSpec(words[0])) {
+          return ctx.ui.notify(`\`${words[0]}\` isn't a valid spec name (spec names are lowercase with hyphens). To build, name a spec exactly as written.`, "warning");
+        }
+      }
+
       // This session has an unfinished build: continue it — unless a different spec was named.
       const here = specOfSession(ctx);
-      const named = words[0] && store.readSpec(words[0]) ? words[0] : undefined;
+      const named = words[0] && SPEC_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
       if (here.name && here.progress && unfinishedPhase(here.progress.phase) && (!named || named === here.name)) {
         const p = here.progress;
+        if (fresh) ctx.ui.notify("`--fresh` only applies when starting a build: continuing here instead.", "warning");
         // Resuming lifts planning protection: a /pb:plan or /pb:deps after the pause turned it back on.
-        if (session) store.setPlanning(session, false);
+        if (!(await liftPlanning(ctx, store))) return;
         // The spec name itself isn't guidance: only what follows it is.
         const guidance = (named ? words.slice(1) : words).join(" ");
-        if (guidance) {
-          const md = store.readSpec(p.spec);
-          if (md) {
-            const updated = addDecision(md, guidance);
-            if (parseSpec(updated).spec) {
-              store.writeSpec(p.spec, updated);
-              store.event(p.spec, { type: "spec", update: "guidance" });
-            } else ctx.ui.notify("Guidance not recorded: it would leave the spec unparseable.", "warning");
-          }
+        if (guidance && !recordGuidance(store, p.spec, guidance)) {
+          ctx.ui.notify("Guidance not recorded: it would leave the spec unparseable.", "warning");
         }
         const from = guidance ? `\n\nFrom the human: ${guidance}` : "";
         if (p.current === "final") {
@@ -2319,7 +2514,7 @@ export default function pb(pi: ExtensionAPI) {
       // Which spec: a named one; else the ones this session wrote; else any ready one.
       const phaseOf = (n: string) => store.progress(n)?.phase ?? "written";
       const offered = store.specNames().filter((n) => phaseOf(n) === "written" || unfinishedPhase(phaseOf(n)));
-      let name = words[0] && store.readSpec(words[0]) ? words[0] : undefined;
+      let name = words[0] && SPEC_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
       if (!name) {
         const mine = offered.filter((n) => store.progress(n)?.writtenIn === session);
         const planning = !!session && store.planningSessions().includes(session);
@@ -2343,9 +2538,17 @@ export default function pb(pi: ExtensionAPI) {
         }
         if (!name) return;
       }
+      if (!(await confirmLiveBuild(ctx, store, name, ["building"], "Restart it here — finished tasks stay done?"))) return;
       if (loadSpec(store, name)?.spec.status === "planning") {
         // A checkpoint of an unfinished discussion: finish it (tasks, verification), then build it.
         return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec")).replace(/\s*After writing it, stop:[^\n]*/, ""));
+      }
+      if (words[0] === name && words.length > 1) {
+        // Trailing words with a named spec are guidance (as on resume); without a name
+        // they are the new spec's topic, not guidance.
+        if (!recordGuidance(store, name, words.slice(1).join(" "))) {
+          ctx.ui.notify("Guidance not recorded: it would leave the spec unparseable.", "warning");
+        }
       }
       await startBuild(ctx, store, name, fresh);
     },
@@ -2540,9 +2743,13 @@ export default function pb(pi: ExtensionAPI) {
     const p = run.name ? store.progress(run.name) : undefined;
     if (run.name && p) {
       store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ...checked.tokens, cost: checked.cost });
+      const remaining = p.tasks.filter((t) => t.status !== "done").map((t) => t.id);
       if (m.complete) {
         p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings.filter((f) => f.priority !== "P3") };
-        if (m.verdict === "pass") p.phase = "reviewed";
+        // A pass only finishes a finished build: with tasks still open the phase stays,
+        // or the next /pb:build strands and /pb:archive offers a half-built spec.
+        if (m.verdict === "pass" && !remaining.length) p.phase = "reviewed";
+        else if (m.verdict === "pass") m.text += `\n\nMid-build review: ${remaining.join(", ")} still to build — phase left as ${p.phase}.`;
       }
       p.reviewUnshown = true;
       store.saveProgress(p);
@@ -2622,8 +2829,32 @@ export default function pb(pi: ExtensionAPI) {
       const rest = args.replace(/(^|\s)--full(?=\s|$)/g, " ").trim();
       const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
 
-      // What to review: this session's spec; else a built one or the uncommitted change without a spec.
-      let name = specOfSession(ctx).name;
+      // done/continue only mean something inside a review session (handled above).
+      if (rest === "done" || rest === "continue") {
+        return ctx.ui.notify(`\`/${cmd("review")} ${rest}\` only works inside a review session: \`/${cmd("review")} done\` ends a pass there.`, "info");
+      }
+      // What to review: a named spec wins over this session's spec (as in /pb:build);
+      // without a name, this session's spec; else a built one or the uncommitted change.
+      const words = rest.split(/\s+/).filter(Boolean);
+      let name: string | undefined;
+      let focusRest = rest;
+      if (words[0]) {
+        const w = words[0];
+        if (SPEC_NAME.test(w) && store.readSpec(w)) {
+          name = w;
+          focusRest = words.slice(1).join(" ");
+        } else if (!SPEC_NAME.test(w)) {
+          const near = normSpecArg(w);
+          const hit = near !== "off" && SPEC_NAME.test(near) ? store.specNames().filter((n) => n === near) : [];
+          if (hit.length === 1 && store.readSpec(hit[0])) {
+            name = hit[0];
+            focusRest = words.slice(1).join(" ");
+          } else if (store.readSpec(w)) {
+            return ctx.ui.notify(`\`${w}\` isn't a valid spec name (spec names are lowercase with hyphens). To review, name a spec exactly as written.`, "warning");
+          }
+        }
+      }
+      if (!name) name = specOfSession(ctx).name;
       if (!name) {
         const built = store.specNames().filter((n) => ["built", "reviewed", "building", "paused"].includes(store.progress(n)?.phase ?? ""));
         const ADHOC = "The uncommitted change (no spec)";
@@ -2638,6 +2869,9 @@ export default function pb(pi: ExtensionAPI) {
       if (name && (!loaded || !p)) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse.`, "error");
       // A review that finished while you were elsewhere: show it first.
       if (name && p?.reviewUnshown) {
+        if (!fs.existsSync(store.reviewFile(name))) {
+          return ctx.ui.notify("The review's file is gone (was the spec archived?). Start a new review.", "warning");
+        }
         p.reviewUnshown = undefined;
         store.saveProgress(p);
         return post(fs.readFileSync(store.reviewFile(name), "utf8"));
@@ -2649,11 +2883,11 @@ export default function pb(pi: ExtensionAPI) {
 
       // Once per project: the model that built the change shares its blind spots; offer a different one.
       if (!cfg.reviewer.model && ctx.hasUI && !store.asked("reviewer-model")) {
-        store.markAsked("reviewer-model");
         const current = sessionModel(ctx);
         const registry = (ctx as { modelRegistry?: { getAvailable?(): { provider: string; id: string }[] } }).modelRegistry;
         const others = (registry?.getAvailable?.() ?? []).map((m) => `${m.provider}/${m.id}`).filter((m) => m !== current);
         if (others.length) {
+          store.markAsked("reviewer-model");
           const KEEP = `Keep ${current ?? "the session's model"}`;
           const choice = await ctx.ui.select(`The reviewer runs on ${current ?? "the session's model"}, which likely built this too. A different model family catches different mistakes:`, [KEEP, ...others]);
           if (choice && choice !== KEEP) {
@@ -2665,6 +2899,9 @@ export default function pb(pi: ExtensionAPI) {
       }
 
       const label = name ?? "the uncommitted change";
+      // Another session may be building this spec: confirm before the snapshot below arms
+      // the finish-time restore, which would put back that builder's in-flight files.
+      if (!(await confirmLiveBuild(ctx, store, name, ["building", "paused"], "Review it here anyway?"))) return;
       // The tree as the reviewer sees it: snapshotted before the harness's own check, so the
       // check's artifacts (coverage, caches) are put back with anything else the review changed.
       // The next review's delta starts here too.
@@ -2704,11 +2941,12 @@ export default function pb(pi: ExtensionAPI) {
         changed,
         stat: diffStat(ctx.cwd, base),
         check,
-        focus: name ? rest : "",
+        focus: name ? focusRest : "",
         previous,
         testChanges: p?.testChanges,
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
         designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
+        staleRefs: staleProseRefs(ctx.cwd, base),
       });
       // Only plain values from here on: `ctx` belongs to this session, which the first pass replaces.
       const run: ReviewRun = {
@@ -2726,6 +2964,156 @@ export default function pb(pi: ExtensionAPI) {
         passes: [],
       };
       await reviewNext(ctx, store, run);
+    },
+  });
+
+  /** Laps per finding set before the fix loop stops and escalates (S3 cap). */
+  const FIX_LAPS = 3;
+  /** Finish-nudges before a silent lap stops the loop (never retried: a second silent session doubles nothing). */
+  const FIX_NUDGES = 2;
+
+  /**
+   * One fixes lap: open a fenced session seeded with the remaining findings and wait for its
+   * pb_fix_done report. Returns the live lap session for chaining (like reviewNext: a session
+   * that opened a new one is stale afterwards) plus the report — or no report when the lap
+   * went silent (nudges unanswered) or its session never opened.
+   */
+  const runFixLap = async (
+    ctx: ExtensionCommandContext,
+    store: Store,
+    spec: string,
+    remaining: Finding[],
+  ): Promise<{ live: ExtensionCommandContext; report?: { fixed: string[]; skipped: string[]; tests: string } } | undefined> => {
+    const findings = remaining.map((f, i) => findingLine(f, i + 1)).join("\n");
+    const seed =
+      `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings}\n\n` +
+      `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line (full suite once at the end); new tests must be seen failing first. ` +
+      `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
+      `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +
+      `When done, call pb_fix_done with fixed ids (titles), skipped ids, and test results; then stop.`;
+    let live: ExtensionCommandContext | undefined;
+    const since = now();
+    const result = await ctx.newSession({
+      parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
+      setup: async (sm) => {
+        sm.appendSessionInfo(`fix: ${spec}`);
+      },
+      withSession: async (c) => {
+        const cc = c as ExtensionCommandContext;
+        live = cc;
+        const lapFile = cc.sessionManager.getSessionFile() ?? undefined;
+        if (lapFile) store.saveFixSession(lapFile, { spec, findings: remaining });
+        store.event(spec, { type: "fix-start", findings: remaining.map((f) => f.title) });
+        await c.sendMessage({ customType: "pb-fix", content: seed, display: true }, { triggerTurn: true });
+        for (let nudge = 0; nudge < FIX_NUDGES; nudge++) {
+          await cc.waitForIdle();
+          if (!lapFile || !store.fixSession(lapFile)) return; // reported
+          await c.sendMessage({ customType: "pb-fix", content: "Finish with pb_fix_done now: report fixed ids, skipped ids and test results, then stop.", display: false }, { triggerTurn: true });
+        }
+        await cc.waitForIdle();
+      },
+    }).catch(() => ({ cancelled: true as const }));
+    if (result.cancelled || !live) return undefined;
+    const reports = readEvents(path.join(store.specDir(spec), "events.jsonl")).filter(
+      (e) => (e as { type?: unknown }).type === "fix" && typeof (e as { at?: unknown }).at === "string" && ((e as { at: string }).at ?? "") >= since,
+    );
+    const last = reports.at(-1) as { fixed?: unknown; skipped?: unknown; tests?: unknown } | undefined;
+    if (!last || !Array.isArray(last.fixed)) return { live };
+    return { live, report: { fixed: last.fixed.filter((x): x is string => typeof x === "string"), skipped: Array.isArray(last.skipped) ? last.skipped.filter((x): x is string => typeof x === "string") : [], tests: typeof last.tests === "string" ? last.tests : "" } };
+  };
+
+  /**
+   * Unattended fix loop: lap until every finding is fixed or skipped-as-spec-revision, up to
+   * FIX_LAPS, then come home with the outcome. The human runs /pb:review next.
+   */
+  const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[]): Promise<void> => {
+    const home = ctx.sessionManager.getSessionFile() ?? undefined;
+    let live: ExtensionCommandContext = ctx;
+    let remaining = first;
+    const fixed: string[] = [];
+    const skipped: string[] = [];
+    let laps = 0;
+    let silent = false;
+    while (remaining.length && laps < FIX_LAPS) {
+      laps++;
+      const out = await runFixLap(live, store, spec, remaining);
+      if (!out) return; // its session never opened (cancelled): user is present, nothing to say
+      live = out.live;
+      if (!out.report) {
+        silent = true;
+        break;
+      }
+      fixed.push(...out.report.fixed);
+      skipped.push(...out.report.skipped);
+      const done = new Set([...fixed, ...skipped]);
+      remaining = remaining.filter((f) => !done.has(f.title));
+    }
+    const open = remaining.map((f) => f.title);
+    const skippedNote = skipped.length ? `; skipped as needing spec revision: ${skipped.join(", ")}` : "";
+    const summary = !open.length && !silent
+      ? `Fixes for \`${spec}\` complete in ${laps} lap(s): fixed ${fixed.join(", ") || "none"}${skippedNote}. Run /pb:review to check the delta.`
+      : silent
+        ? `Fix lap for \`${spec}\` went silent (no report after ${FIX_NUDGES} nudges). Fixed so far: ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.`
+        : `Fixes for \`${spec}\` stopped after ${laps} laps: fixed ${fixed.join(", ") || "none"}; still open: ${open.join(", ")}${skippedNote}.`;
+    try {
+      if (!home) throw new Error("no home session");
+      await live.switchSession(home, {
+        withSession: async (c) => {
+          await c.sendMessage({ customType: "pb", content: summary, display: true }, { triggerTurn: false });
+        },
+      });
+    } catch {
+      // Home is gone: the summary still lands in the spec's events for the next session to find.
+      store.event(spec, { type: "fix-summary", summary });
+    }
+  };
+
+  pi.registerCommand(cmd("fix"), {
+    description: "Fix review findings in a fresh fenced session: /pb:fix [finding ids]. No ids = all open findings. Run /pb:review afterwards: it checks only those findings and what changed",
+    handler: async (args, ctx) => {
+      const store = new Store(ctx.cwd);
+      const session = ctx.sessionManager.getSessionFile();
+      const words = args.trim().split(/\s+/).filter(Boolean);
+      // Spec: named, else this session's. Findings: all open, else the named ones.
+      let name = words[0] && SPEC_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
+      const ids = name ? words.slice(1) : words;
+      if (!name) name = specOfSession(ctx).name;
+      if (!name && session) {
+        // A planning session that wrote the spec but never built it: its writtenIn names it.
+        const mine = store.specNames().filter((n) => store.progress(n)?.writtenIn === session);
+        if (mine.length === 1) name = mine[0];
+        else if (mine.length > 1) return ctx.ui.notify(`Several specs here (${mine.join(", ")}): name one: \`/${cmd("fix")} <spec> [ids].`, "warning");
+      }
+      if (!name) return ctx.ui.notify(`No spec here: run /${cmd("fix")} from a build or review session, or name a spec.`, "warning");
+      const open = store.progress(name)?.review?.findings ?? [];
+      if (!open.length) return ctx.ui.notify(`\`${name}\` has no open review findings to fix.`, "info");
+      let picked = open;
+      if (ids.length) {
+        const misses: string[] = [];
+        picked = [];
+        for (const id of ids) {
+          const hit = /^\d+$/.test(id)
+            ? open[Number(id) - 1]
+            : open.filter((f) => f.title.toLowerCase().includes(id.toLowerCase())).length === 1
+              ? open.filter((f) => f.title.toLowerCase().includes(id.toLowerCase()))[0]
+              : undefined;
+          if (!hit || picked.includes(hit)) {
+            if (!hit) misses.push(id);
+            continue;
+          }
+          picked.push(hit);
+        }
+        if (misses.length || !picked.length) {
+          return ctx.ui.notify(
+            `No such finding${misses.length === 1 ? "" : "s"}: ${(misses.length ? misses : ids).join(", ")}. Open findings for \`${name}\`:${open.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
+            "warning",
+          );
+        }
+      }
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      const cctx = ctx as ExtensionCommandContext;
+      if (typeof cctx.newSession !== "function") return ctx.ui.notify("This Pi can't open sessions: fix the findings here instead.", "warning");
+      await driveFix(cctx, store, name!, picked);
     },
   });
 
