@@ -59,7 +59,12 @@ Check the project map in AGENTS.md first; only what it doesn't answer is worth a
 3. Budget: fan out once (up to 6 pb_explore and pb_try calls in one block), then synthesize. Never re-read a file the explorer already listed. When you catch yourself raising a grep limit past ~15 or searching the same term twice, stop and call pb_explore with what you've learned instead.
 4. When you know the 1-3 files, read them yourself. Grep narrow: one path and pattern, low limit, no surrounding lines unless a match is ambiguous; read the exact lines for discussion. Trust its Files list instead of re-reading everything it read.
 5. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try. Single read-only commands stay here in a scratch copy. Prefer local code, docs and local/test data first. A read-only production query is allowed only when local data cannot answer it: the goal must state why plus the table and row cap (at most ~500 rows). Production writes, production channels, and real notifications are never allowed. ${tests}
-6. Order: ask taste and scope first (vehicle, channel, frequency via pb_ask), then measure to calibrate the threshold — never run an expensive probe to decide a question the user answers directly. If a question goes unanswered, carry on with your recommendation as an Assumption and say so. State an uncertainty once as an Assumption with what would settle it and what settling costs; a second reversal must be a pb_try call, not more prose.
+6. Order: ask taste and scope first (vehicle, channel, frequency via pb_ask), then measure to calibrate the threshold — never run an expensive probe to decide a question the user answers directly. State an uncertainty once as an Assumption with what would settle it and what settling costs; a second reversal must be a pb_try call, not more prose. If a question goes unanswered, it stays an Open question and planning stays incomplete — never paper it over with an Assumption.
+
+${CHALLENGE}
+
+Planning is finished when every attack question below is answered and no Open questions remain.
+Attack checklist (walk it before writing anything down): who abuses this (stolen session, another user, replay, automation)? What breaks on bad input (sizes, duplicates, order, concurrent calls)? What happens at the boundary — first run, empty state, dark channel, restart? Which parameters die if unused, and what calls each seam? For each: answered, or asked via pb_ask.
 
 ${CHALLENGE}
 
@@ -163,7 +168,7 @@ ${SPEC_FORMAT}
 - Refactoring that the standards call for (outdated code in the way) comes first, as tasks titled "(refactor) …" that keep behaviour; a large one is a spec of its own that this one depends on.
 - Before writing, check the spec for contradictions and against the code; fix them in the spec and tell me briefly what you changed.
 - The approach follows the engineering standards (AGENTS.md).
-- Status: ready. Settle what the discussion left open yourself: take the sensible reading and write it into Decisions as "Assumption: <claim> — settles by <how>, because <reason>", so I see it and the reviewer checks it. Ask me (pb_ask, all independent questions at once) only about a choice that changes behaviour, an API or data and that we didn't settle.
+- Status: ready only if nothing is left open. Transcribe what was agreed into Decisions — anything undecided goes under Open questions and the spec stays Status: planning; never invent a decision to close a gap. Ask me (pb_ask, all independent questions at once) only about a choice that changes behaviour, an API or data and that we didn't settle.
 - Verification defaults to tests; "New tests: no" only if I said so.
 - Name: short kebab-case.${existing.length ? ` Existing: ${existing.join(", ")} (reusing a name rewrites it; read its spec.md first, it may differ from what you remember).` : ""}${extraBlock(extra)}${current ? `\n\n--- current ${P}/specs/${current.name}/spec.md (revise this) ---\n\n${current.markdown}` : ""}
 
@@ -215,7 +220,7 @@ ${tip("plan.next")}`;
 
 /** A spec still marked planning: finish it before building. */
 export function finishSpecPrompt(name: string, extra = ""): string {
-  return `[pb:spec ${name}] Finish the spec ${P}/specs/${name}/spec.md for building: settle its open questions yourself where you can (write each as "Assumption: <claim> — settles by <how>, because <reason>" in Decisions; ask me with pb_ask, all at once, only about a choice that changes behaviour, an API or data), add the Tasks and the Verification line, remove Open questions, and set Status: ready (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
+  return `[pb:spec ${name}] Finish the spec ${P}/specs/${name}/spec.md for building: ask me with pb_ask, all at once, about each open question; write answered ones into Decisions; add the Tasks and the Verification line, remove Open questions, and set Status: ready. Anything still unanswered stays Open and the spec stays Status: planning — never decide for me. (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
 
 ${SPEC_FORMAT}${extraBlock(extra)}`;
 }
@@ -492,7 +497,7 @@ ${markdown}
 
 # Your job
 
-Attack its Decisions: for each decision, say how it could be wrong or abused in production. Re-test every "Not doing X" rejection: what breaks because X was rejected? Flag every quantitative claim (latencies, counts, windows) with no measurement: demand a number or an Assumption. Check the prose inventory: does every behavior name the docs that must change with it?
+Attack its Decisions: for each decision, say how it could be wrong or abused in production. Re-test every "Not doing X" rejection: what breaks because X was rejected? Flag every quantitative claim (latencies, counts, windows) with no measurement: demand a number or an Assumption. Check the prose inventory: does every behavior name the docs that must change with it? Before blocking on an objection to a point the spec marks decided, check for new evidence (a measurement, a probe result, a code fact): without it, comment only — a re-litigation is not a finding.
 
 # Return exactly
 

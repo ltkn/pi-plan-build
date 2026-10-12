@@ -70,6 +70,10 @@ import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
 
+/** What the pb_ask dialog promises: plain words, one trade-off per option, a reasoned recommendation. */
+export const ASK_DESCRIPTION =
+  "Ask the human one question and wait for the answer, without stopping your work: a choice between options, or an open question. In a pb build the answer is recorded in the spec's Decisions. Ask only what you can't sensibly decide yourself. Ask independent questions together; ask a question that depends on another's answer only after you have that answer. Phrase every question in plain words a non-expert can follow: one line per option with its trade-off, and your recommendation with one plain reason why — short enough to read in a dialog.";
+
 /** One-line display text for markers and session names: collapse whitespace, cap length. */
 const planTitle = (arg: string, n = 60) => {
   const flat = arg.replace(/\s+/g, " ").trim();
@@ -545,8 +549,7 @@ export default function pb(pi: ExtensionAPI) {
   pi.registerTool({
     name: "pb_ask",
     label: "Ask",
-    description:
-      "Ask the human one question and wait for the answer, without stopping your work: a choice between options, or an open question. In a pb build the answer is recorded in the spec's Decisions. Ask only what you can't sensibly decide yourself. Ask independent questions together; ask a question that depends on another's answer only after you have that answer.",
+    description: ASK_DESCRIPTION,
     parameters: Type.Object({
       question: Type.String({ description: "one precise question" }),
       options: Type.Optional(Type.Array(Type.String(), { description: "2 to 4 answers to choose from; the human can always type another" })),
@@ -597,11 +600,15 @@ export default function pb(pi: ExtensionAPI) {
         answer = inp.result;
       }
       if (!answer?.trim()) {
+        // Silence is not consent before anything is built: in planning (or while the spec
+        // is being written) an unanswered question stays an open question, and planning stays
+        // incomplete. Only a build already underway goes on with the recommendation.
+        const stayedOpen = !building && (planning || specWriting.has(session) || store.pendingBuild(session));
         // The dialog is gone; the question stays in the chat, to answer whenever the human is back.
         const KEPT = ` The question stays in the chat${lettered.length ? `, its options lettered (${lettered.map((o) => o.replace(/ \(recommended\)$/, "")).join("; ")})` : ""}: if the human answers later, by letter or in words, follow their answer.`;
         post(
           [
-            `**Unanswered question** (${timedOut ? `no answer within ${Math.max(1, Math.round(timeoutMs / 60_000))} min` : "the dialog was closed"}; Pi went on with ${params.recommended ? `its recommendation, ${params.recommended}` : "the sensible reading"}):`,
+            `**Unanswered question** (${timedOut ? `no answer within ${Math.max(1, Math.round(timeoutMs / 60_000))} min` : "the dialog was closed"}; ${stayedOpen ? "nothing was decided — the question stays open" : `Pi went on with ${params.recommended ? `its recommendation, ${params.recommended}` : "the sensible reading"}`}):`,
             "",
             params.question,
             ...(lettered.length ? ["", ...lettered] : []),
@@ -621,12 +628,8 @@ export default function pb(pi: ExtensionAPI) {
         }
         const record = building
           ? ", record it with pb_record_decision (assumption: true)"
-          : specWriting.has(session) || store.pendingBuild(session)
-            ? `, write it into the spec's Decisions as "Assumption: <claim> — settles by <how>, because <reason>"`
-            : planning
-              ? ", and tell the human it's an assumption to confirm (under open questions once there's a spec)"
-              : "";
-        return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: take the sensible reading${timedOut && params.recommended ? ` (your recommendation: ${params.recommended})` : ""}${record} and carry on.${KEPT}`);
+          : "";
+        return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: ${stayedOpen ? "leave this undecided — record it under Open questions and do not take a reading or write it as an Assumption. Planning stays incomplete until it is answered." : `take the sensible reading${timedOut && params.recommended ? ` (your recommendation: ${params.recommended})` : ""}${record} and carry on.`}${KEPT}`);
       }
       if (building) {
         // Human answers are decisions, not assumptions: they live in the spec's Decisions for the

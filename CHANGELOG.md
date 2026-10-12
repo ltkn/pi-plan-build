@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.29.2
+
+- **Planning ends decided, specs transcribe.** An unanswered question in planning (or while the spec is being written) stays an open question — silence is never recorded as an Assumption, and planning stays incomplete. Spec writers may only transcribe what was agreed; anything undecided keeps the spec at `Status: planning`.
+- **Plain questions, honest gates.** `pb_ask` dialogs use plain words, one trade-off line per option, one plain reason for the recommendation. Planning carries an attack-checklist exit criteria, and the spec-review gate defers to decided points absent new evidence.
+
 ## 1.29.1
 
 - README catches up with 1.29.0: `/pb:fix` in the command list, the spec-review gate in the flow, acceptance markers in the spec example, and the per-session state files on disk. No code changes.

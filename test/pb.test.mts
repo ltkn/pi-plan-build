@@ -3604,10 +3604,10 @@ test("build: Esc on the first dialog cancels; a spec that isn't written yet is o
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
-test("spec writing settles small things as assumptions; the checkpoint asks nothing; questions while writing count down", async () => {
+test("spec writing leaves undecided questions open; the checkpoint asks nothing; questions while writing count down", async () => {
   const { specPrompt, checkpointPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
-  assert.match(specPrompt("", []), /Settle what the discussion left open yourself[\s\S]*"Assumption: <claim> — settles by <how>, because <reason>"[\s\S]*only about a choice that changes behaviour, an API or data/);
-  assert.match(finishSpecPrompt("x"), /settle its open questions yourself where you can/);
+  assert.match(specPrompt("", []), /Transcribe what was agreed[\s\S]*anything undecided goes under Open questions and the spec stays Status: planning[\s\S]*never invent a decision[\s\S]*only about a choice that changes behaviour, an API or data/);
+  assert.match(finishSpecPrompt("x"), /ask me with pb_ask, all at once, about each open question[\s\S]*Anything still unanswered stays Open and the spec stays Status: planning/);
   assert.match(checkpointPrompt(80, []), /Don't ask me anything now: what's undecided goes into Open questions/);
 
   const t = setup({ verify: "true", askTimeoutSec: 0.001 });
@@ -3626,7 +3626,7 @@ test("spec writing settles small things as assumptions; the checkpoint asks noth
   t.selects.push("Build here as soon as the spec is written (keeps our discussion; the cache stays warm)", "<timeout>");
   await t.run("build");
   assert.equal(t.dialogTimeouts.at(-1), 1); // the question counted down, though no build was running yet
-  assert.match(answer!.content![0].text, /No answer in time: take the sensible reading \(your recommendation: POST\), write it into the spec's Decisions as "Assumption/);
+  assert.match(answer!.content![0].text, /No answer in time: leave this undecided — record it under Open questions and do not take a reading or write it as an Assumption\. Planning stays incomplete until it is answered\./);
   assert.match(t.posts.find((p) => p.startsWith("**Spec written"))!, /Settled without asking you \(the review checks them\):\n- Assumption: cancelling twice is a no-op/);
   assert.equal(t.progress("order-cancellation").phase, "built");
 
@@ -3857,7 +3857,7 @@ test("extra instructions: added to each role's prompt, global ones first, pb's o
   assert.equal(new Store(u.repo).extra("plan"), ""); // nothing set: nothing added
 });
 
-test("pb_ask counts down while planning too: unanswered, the recommendation is taken as an assumption to confirm", async () => {
+test("pb_ask counts down while planning too: unanswered, the question stays open and planning stays incomplete", async () => {
   const t = setup({ askTimeoutSec: 0.001 });
   process.chdir(t.repo);
   t.selects.push("No thanks");
@@ -3865,9 +3865,17 @@ test("pb_ask counts down while planning too: unanswered, the recommendation is t
   t.selects.push("<timeout>");
   const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
   assert.equal(t.dialogTimeouts.at(-1), 1);
-  assert.match(r.content![0].text, /No answer in time: take the sensible reading \(your recommendation: event\), and tell the human it's an assumption to confirm[\s\S]*The question stays in the chat, its options lettered \(A\. mail; B\. event\): if the human answers later, by letter or in words, follow their answer\./);
-  // The dialog is gone, the question isn't: it stays in the chat with its options, lettered for a short answer.
-  assert.equal(t.posts.at(-1), "**Unanswered question** (no answer within 1 min; Pi went on with its recommendation, event):\n\nMail or event?\n\nA. mail\nB. event (recommended)\n\nTo answer, type it here any time (a letter is enough): if Pi is working, it reads it after its current step.");
+  assert.match(r.content![0].text, /No answer in time: leave this undecided — record it under Open questions and do not take a reading or write it as an Assumption\. Planning stays incomplete until it is answered\./);
+  assert.doesNotMatch(r.content![0].text, /recorded as an assumption/);
+  // The dialog is gone, the question isn't: it stays in the chat with its options, lettered for a short answer — and nothing was decided.
+  assert.equal(t.posts.at(-1), "**Unanswered question** (no answer within 1 min; nothing was decided — the question stays open):\n\nMail or event?\n\nA. mail\nB. event (recommended)\n\nTo answer, type it here any time (a letter is enough): if Pi is working, it reads it after its current step.");
+});
+
+test("pb_ask questions are phrased in plain words, with trade-offs and a reasoned recommendation", async () => {
+  const { ASK_DESCRIPTION } = await import("../extensions/pb/index.ts");
+  assert.match(ASK_DESCRIPTION, /plain words/);
+  assert.match(ASK_DESCRIPTION, /one line per option.*trade-off|trade-off.*one line per option/);
+  assert.match(ASK_DESCRIPTION, /recommendation.*plain reason|plain reason.*recommendation/);
 });
 
 test("pb_ask: a dialog closed before its time is kept in the chat too; an answered one isn't", async () => {
@@ -3881,8 +3889,8 @@ test("pb_ask: a dialog closed before its time is kept in the chat too; an answer
   assert.equal(t.posts.length, posted);
   t.selects.push("<timeout>");
   const r = await t.callTool("pb_ask", { question: "Which name?", options: ["a", "b"] });
-  assert.match(r.content![0].text, /^The human dismissed the question: take the sensible reading[\s\S]*The question stays in the chat/);
-  assert.match(t.posts.at(-1)!, /^\*\*Unanswered question\*\* \(the dialog was closed; Pi went on with the sensible reading\):\n\nWhich name\?\n\nA\. a\nB\. b\n/);
+  assert.match(r.content![0].text, /^The human dismissed the question: leave this undecided — record it under Open questions and do not take a reading or write it as an Assumption\. Planning stays incomplete until it is answered\.[\s\S]*The question stays in the chat/);
+  assert.match(t.posts.at(-1)!, /^\*\*Unanswered question\*\* \(the dialog was closed; nothing was decided — the question stays open\):\n\nWhich name\?\n\nA\. a\nB\. b\n/);
 });
 
 test("pb_ask: terminal activity restarts the countdown — idle time, not wall time", async () => {
@@ -3906,7 +3914,7 @@ test("pb_ask: terminal activity restarts the countdown — idle time, not wall t
   assert.equal(settled, false); // 2.5s elapsed but 1s idle: an absolute timeout would have fired
   const r = await p;
   assert.equal(settled, true);
-  assert.match(r.content![0].text, /No answer in time: take the sensible reading/);
+  assert.match(r.content![0].text, /No answer in time: leave this undecided/);
   assert.ok(t.posts.some((x) => x.startsWith("**Unanswered question**")));
 });
 
@@ -3918,7 +3926,7 @@ test("pb_ask: silence still times out the dialog", async () => {
   (t.runtime().ctx as any).mode = "tui";
   t.selects.push("<hang>");
   const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
-  assert.match(r.content![0].text, /No answer in time: take the sensible reading/);
+  assert.match(r.content![0].text, /No answer in time: leave this undecided/);
   assert.ok(t.posts.some((x) => x.startsWith("**Unanswered question**")));
 });
 
@@ -4311,6 +4319,22 @@ test("planning prompts push back like a senior engineer", async () => {
     assert.match(p, /guide like a mentor/);
     assert.match(p, /rabbit holes/);
   }
+});
+
+test("plan ends decided: the exit criteria demand answered attack questions and no open leftovers", async () => {
+  const { planPrompt } = await import("../extensions/pb/prompts.ts");
+  const p = planPrompt("x", "true", "", "none");
+  assert.match(p, /attack/i);
+  assert.match(p, /abuse|threat/i);
+  assert.match(p, /no open questions|nothing.*undecided|undecided.*nothing/i);
+  assert.match(p, /planning.*(not finished|incomplete)|not.*done until/i);
+});
+
+test("spec review defers to points the spec marks decided, absent new evidence", async () => {
+  const { specReviewBrief } = await import("../extensions/pb/prompts.ts");
+  const b = specReviewBrief("s", "# S\n\n## Decisions\n- d\n");
+  assert.match(b, /check for new evidence/);
+  assert.match(b, /comment only/);
 });
 
 
