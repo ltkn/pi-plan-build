@@ -7,7 +7,7 @@
  */
 import { tip } from "./help.ts";
 import type { ParsedSpec, SpecTask } from "./spec.ts";
-import { type Finding, PB_DIR, type Progress } from "./store.ts";
+import { type Finding, PB_DIR, type Progress, type TaskProgress } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
 
@@ -134,13 +134,13 @@ New tests: yes | no — <why>
 
 ## Goal
 ## Findings
-What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Probes kept as Commands with their Conclusion (tried X via \`command\`, got Y). Dead ends too: what was tried or ruled out, and why.
+What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Every bullet cites its evidence: a path (file:line), a probe (command plus conclusion), or a constraint. Probes kept as Commands with their Conclusion (tried X via \`command\`, got Y). Dead ends too: what was tried or ruled out, and why.
 ## Decisions
-Each decision with its reason, as it stands now: no dates, no history, not who decided. Rejected ideas as "Not doing X, because …", so they aren't reconsidered. Settled guesses as "Assumption: <claim> — settles by <how>, because <reason>", so the reviewer can discharge them. Every quantitative claim (latencies, counts, windows) carries a measurement (command plus result) or is written as such an Assumption.
+Each decision with its reason, as it stands now: no dates, no history, not who decided. Every bullet carries its reason (because …); rejected ideas as "Not doing X, because …", so they aren't reconsidered. Settled guesses as "Assumption: <claim> — settles by <how>, because <reason>", so the reviewer can discharge them. Every quantitative claim (latencies, counts, windows) carries a measurement (command plus result) or is written as such an Assumption.
 ## Contracts
-No later step sees the whole change at once: tasks are built one by one. So pin here every seam the tasks share — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. Pin exactly these, as they must end up; leave everything behind them to the build. When the change adds or alters nothing other code, clients or stored data depend on, leave this section out. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown.
+No later step sees the whole change at once: tasks are built one by one. So pin here every seam the tasks share — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. Tasks sharing a seam (the same Test: command or a shared file) without this section are rejected; truly independent tasks need none, though a one-line "independent" section is always accepted. Pin exactly these, as they must end up; leave everything behind them to the build. When the change adds or alters nothing other code, clients or stored data depend on, leave this section out. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown.
 ## Threats and abuse
-Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. The acceptance criteria then include the abuse cases.
+Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A ready spec that is sensitive in Goal or Tasks without this section is rejected: add it. The acceptance criteria then include the abuse cases.
 ## Open questions
 Only while Status is planning: what's undecided, the options still being weighed with what was found for and against each, and where the discussion stands.
 ## Tasks
@@ -185,10 +185,11 @@ ${specs.length ? `Update ${specs.map((n) => `${P}/specs/${n}/spec.md`).join(", "
 }
 
 /** What a planning session is reset to: its spec(s), the plan as it stands, and the last exchange word for word. */
-export function checkpointSummary(specs: { name: string; markdown: string }[], last?: { human?: string; answer?: string }): string {
+export function checkpointSummary(specs: { name: string; markdown: string }[], last?: { human?: string; answer?: string }, request?: string): string {
   const cut = (t: string) => (t.length > 6000 ? `${t.slice(0, 6000)}\n…[cut]` : t);
   return [
     `[pb plan checkpoint] The planning conversation was reset to its spec${specs.length > 1 ? "s" : ""} to free context. Continue from here: the spec is the plan as it stands, and its open questions are where we were. Planning mode is still on: the project's files stay untouched until /pb:build.`,
+    ...(request ? [`\nOriginal request: ${cut(request)}`] : []),
     ...specs.map((s) => `\n--- ${P}/specs/${s.name}/spec.md ---\n\n${s.markdown}`),
     ...(last?.human || last?.answer
       ? ["\n--- the last exchange before the checkpoint, word for word ---", ...(last.human ? ["", `Human: ${cut(last.human)}`] : []), ...(last.answer ? ["", `Assistant: ${cut(last.answer)}`] : [])]
@@ -242,7 +243,7 @@ export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each =
 - Don't commit or discard changes with git, and leave .pi/ alone.
 - Never touch production (data, channels, notifications); a prod read-only query only with why + table + cap ~500 rows.
 - Tests quiet, full log to a temp file outside the project; failures back only.
-- Finish each task with pb_task_done: ${gateLine(spec, buildCmd, each)}. It gives you the next task.${extraBlock(extra)}`;
+- Finish each task with pb_task_done (changed/caveat/rejected/open): ${gateLine(spec, buildCmd, each)}. It gives you the next task.${extraBlock(extra)}`;
 }
 
 /**
@@ -263,7 +264,7 @@ export function taskPrompt(task: SpecTask, attempt: number, max: number, check: 
 
 ${task.text}
 
-${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red saying which acceptance lines each failing test proves. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}(Comments: the code as it is; no history, dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""}. If it can't be done properly, status "blocked" with why.`;
+${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red saying which acceptance lines each failing test proves. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}(Comments: the code as it is; no history, dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""} plus changed/caveat/rejected/open (each required: what changed, what the next task must respect, what was tried and discarded, what is still unchecked — "none" where there is genuinely nothing). If it can't be done properly, status "blocked" with why.`;
 }
 
 export function continuePrompt(task: SpecTask): string {
@@ -279,7 +280,7 @@ export function coherePrompt(base: string | undefined, attempt: number, max: num
 
 Read the whole change of this feature (\`${diff}\`, plus untracked files from git status), looking only for what task slicing leaves behind: duplicated helpers or logic across tasks, dead code a slice made redundant, and inconsistent naming or error handling. Consolidate what is worth consolidating, strictly within what the spec's Goal, Decisions, Contracts and Acceptance allow: change no behaviour, API, or data, and never weaken an existing test.
 
-When done, call pb_task_done with task "cohere". If it can't be done properly, status "blocked" with why. If there is nothing worth consolidating, say so and finish done anyway.`;
+When done, call pb_task_done with task "cohere" plus changed/caveat/rejected/open ("none" where there is genuinely nothing). If it can't be done properly, status "blocked" with why. If there is nothing worth consolidating, say so and finish done anyway.`;
 }
 
 export function fixText(taskId: string, what: string, output: string, attempt: number, max: number, last: boolean): string {
@@ -292,6 +293,23 @@ export function fixText(taskId: string, what: string, output: string, attempt: n
 export function nudgePrompt(taskId: string): string {
   return `[pb:build] You stopped without finishing ${taskId === "final" ? "the final check" : taskId}. Carry on and finish with pb_task_done; if it can't be done properly, pb_task_done with status "blocked"; if you need a decision, pb_ask.`;
 }
+
+/**
+ * One finished task in a state summary: what it changed, plus the hooks a later task can
+ * catch on (caveat, rejected, open) — "none" values stay out to keep the context lean.
+ * Specs written before hooks existed carry only summary, which renders as the change.
+ */
+const isNone = (v: string | undefined) => !v || /^(none|n\/a|-|nothing)\.?$/i.test(v.trim());
+const doneLine = (t: TaskProgress): string => {
+  const changed = (t.changed ?? t.summary ?? "").replace(/\s+/g, " ").trim();
+  if (!changed) return "";
+  const hooks = [
+    ["caveat", t.caveat],
+    ["rejected", t.rejected],
+    ["open", t.open],
+  ].flatMap(([k, v]) => (v && !isNone(v) ? [`${k}: ${v.replace(/\s+/g, " ").trim()}`] : []));
+  return ` — ${[changed, ...hooks].join(" · ")}`;
+};
 
 /**
  * What a build session is reset or compacted to: everything the build needs, from what the harness knows.
@@ -321,7 +339,7 @@ export function buildStateSummary(o: {
     o.mechanics,
     "",
     "Tasks:",
-    ...p.tasks.map((t) => `- ${t.id} ${t.title}: ${t.status}${t.id === p.current ? " (current)" : ""}${t.summary && t.status === "done" ? ` — ${t.summary.replace(/\s+/g, " ")}` : ""}`),
+    ...p.tasks.map((t) => `- ${t.id} ${t.title}: ${t.status}${t.id === p.current ? " (current)" : ""}${t.status === "done" ? doneLine(t) : ""}`),
   ];
   if (p.assumptions?.length) lines.push("", "Assumptions made so far (in the spec's Decisions):", ...p.assumptions.map((a) => `- ${a}`));
   if (o.changed?.length) lines.push("", `Files ${p.current} has changed so far:`, ...o.changed.map((f) => `- ${f}`));
@@ -355,6 +373,8 @@ Report the findings with the pb_report_findings tool: one call with all of them 
 - P1 fix before merging: an unmet acceptance criterion or decision, a bug, missing tests for new behaviour (unless the spec says no new tests), a weakened test, a risky change outside scope, a workaround where a proper fix belongs.
 - P2 worth fixing: conventions, clarity, comments, a second-best choice.
 - P3 nit.
+Merge findings with the same concrete fix before reporting: same file and line plus the same action means one finding at the highest priority, its title naming each symptom — never two findings for one fix.
+When the code is right and only the spec's framing is imprecise, report P3 with a proposed rewording, not P2: ask which reasonable reader would call the code wrong — if the code matches at least one reasonable reading of the spec, it's a note for the author, not a defect. A change that violates every reasonable reading keeps its priority.
 Pre-existing issues are at most P2. Report only what the author would want to fix, each with file, line and a concrete fix.
 
 Then reply briefly in markdown: the acceptance checklist when there is a spec, and anything worth knowing that isn't a finding. Don't repeat the findings.`;
@@ -376,7 +396,7 @@ For every entry point the change adds or alters (API routes, UI actions, command
 - Configuration: security-relevant defaults, migrations and permissions (grants, roles, public access).
 - The spec's Threats and abuse, if any: each abuse really prevented, and tested.
 
-Report only problems someone could actually use or hit, with pb_report_findings: in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. No findings is a fine result. Then reply with one line.`;
+Report only problems someone could actually use or hit, with pb_report_findings: in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. Merge findings with the same concrete fix into one at the highest priority, its title naming each symptom. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. No findings is a fine result. Then reply with one line.`;
 
 /** The first message of a review session: its role, the brief, and how the session works. */
 export function reviewSessionPrompt(role: "review" | "abuse", brief: string, extra = ""): string {
@@ -416,6 +436,8 @@ export interface ReviewBrief {
   designNote?: string;
   /** identifiers the diff removed that prose still cites (file:line each): P2 candidates, history excepted */
   staleRefs?: Array<{ symbol: string; referrers: string[] }>;
+  /** the spec was edited by hand after writing: gates were bypassed visibly, judge its shape too */
+  humanOverride?: string;
 }
 
 /**
@@ -476,6 +498,7 @@ export function reviewerBrief(o: ReviewBrief): string {
       ? ["", "## New tests never seen failing", "", "Judge each: does its acceptance still have a test that checks it?", ...o.redNotes.map((n) => `- ${n}`)]
       : []),
     ...(o.designNote ? ["", "## Design provenance", "", o.designNote] : []),
+    ...(o.humanOverride ? ["", "## Human override", "", o.humanOverride] : []),
     ...(o.staleRefs?.length
       ? ["", "## Possibly stale prose references", "", "These identifiers vanished from the code but are still cited in prose; judge each as a P2 candidate (intentional history is fine):", ...o.staleRefs.map((s) => `- ${s.symbol}: ${s.referrers.join(", ")}`)]
       : []),
@@ -497,7 +520,7 @@ ${markdown}
 
 # Your job
 
-Attack its Decisions: for each decision, say how it could be wrong or abused in production. Re-test every "Not doing X" rejection: what breaks because X was rejected? Flag every quantitative claim (latencies, counts, windows) with no measurement: demand a number or an Assumption. Check the prose inventory: does every behavior name the docs that must change with it? Before blocking on an objection to a point the spec marks decided, check for new evidence (a measurement, a probe result, a code fact): without it, comment only — a re-litigation is not a finding.
+Attack its Decisions: for each decision, say how it could be wrong or abused in production. Re-test every "Not doing X" rejection: what breaks because X was rejected? Flag every quantitative claim (latencies, counts, windows) with no measurement: demand a number or an Assumption. Probe the empty paths: for every behavior the spec describes, ask what it does when there is nothing to do (empty input, all dependencies down, no reportable case) — if the spec is silent, flag it (P1 when a stale artifact would linger for the user, else P2), demanding defined behavior or an Assumption. Check the prose inventory: does every behavior name the docs that must change with it? Before blocking on an objection to a point the spec marks decided, check for new evidence (a measurement, a probe result, a code fact): without it, comment only — a re-litigation is not a finding.
 
 # Return exactly
 

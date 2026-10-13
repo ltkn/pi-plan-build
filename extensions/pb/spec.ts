@@ -118,7 +118,7 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
     if (!found.length) errors.push(`missing the "## ${s}" section`);
     else if (found.length > 1) errors.push(`duplicate "## ${s}" section: keep one`);
   }
-  if (status === "ready" && blanked.some((l) => /^##\s+Open questions\s*:?\s*$/i.test(l)))
+  if (status === "ready" && blanked.some((l) => /^##\s+Open questions\s*:?\s*$/i.test(l)) && sectionOf(md, "Open questions").trim())
     errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions ("Assumption: <claim> — settles by <how>, because <reason>") or ask with pb_ask');
 
   // Tasks: fence-aware, line-based. ## Tasks allows a trailing colon; ### T1 is case-insensitive
@@ -149,7 +149,7 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
     const hasTestLine = /^\s*[-*]\s*Test:/im.test(text);
     const test = text.match(/^\s*[-*]\s*Test:\s*`([^`]+)`/m)?.[1].trim();
     if (hasTestLine && !test) errors.push(`${id} has a Test: line without \`command\`: write it as "- Test: \`<command>\`"`);
-    if (ready && !/^\s*[-*]\s*Acceptance:/im.test(text)) errors.push(`${id} has no "- Acceptance:" line`);
+    if (ready && !/^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/im.test(text)) errors.push(`${id} has no "- Acceptance:" line`);
     return { id, title, text, test };
   });
   const ids = tasks.map((t) => t.id);
@@ -281,3 +281,177 @@ export const sectionOf = (md: string, name: string): string => {
   const end = rel < 0 ? lines.length : idx + 1 + rel;
   return lines.slice(idx + 1, end).join("\n").trim();
 };
+
+/* ------------------------- senior-enforcement gates ------------------------- */
+
+/**
+ * Senior-enforcement semantic gates: mechanically checkable shape rules that turn
+ * senior prompt asks into write-time rejections. Readers stay lenient: only the
+ * write tools call these, so in-flight and grandfathered specs keep working.
+ * Planning specs are exempt: gates bite only on transition to ready.
+ */
+
+const hasSection = (md: string, name: string): boolean => {
+  const blanked = blankFenced(md);
+  return blanked.some((l) => new RegExp(`^##\\s+${escapeReg(name)}\\s*:?\\s*$`, "i").test(l));
+};
+
+/** Bullets of a section (fence-aware, "-" or "*" markers). */
+const sectionBullets = (md: string, name: string): string[] => {
+  const body = sectionOf(md, name);
+  if (!body) return [];
+  let inFence = false;
+  const out: string[] = [];
+  for (const line of body.split("\n")) {
+    if (/^(\s*)```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (/^\s*[-*]\s+\S/.test(line)) out.push(line.trim());
+  }
+  return out;
+};
+
+/**
+ * High-signal product keywords for the write-time Threats gate. Deliberately
+ * narrower than the reviewer's auto-mode heuristic: generic words (status,
+ * limit, address, email, job, role) stay reviewer-level, not write-time blocks.
+ * Scanned in Goal plus Tasks only, so meta-discussion in Findings/Decisions
+ * about the gate itself never triggers it.
+ */
+const SENSITIVE_WRITE = /\b(auth\w*|login|logout|sign-?in|password|passwd|credential|secret|api[_-]?key|token|jwt|oauth|saml|sso|permission|privilege|admin|payment|billing|invoice|refund|webhook|upload|download|session|cookie|csrf|cors|endpoint|route)\b/i;
+
+/** A ready spec whose Goal or Tasks look sensitive must carry Threats plus abuse-case acceptance. */
+export function threatsErrors(md: string, spec: ParsedSpec): string[] {
+  if (spec.status !== "ready") return [];
+  if (hasSection(md, "Threats") || hasSection(md, "Threats and abuse")) return [];
+  const scope = [sectionOf(md, "Goal"), spec.tasks.map((t) => t.text).join("\n")].join("\n");
+  const hit = scope.split("\n").find((l) => SENSITIVE_WRITE.test(l.replace(/`[^`]*`/g, "")));
+  if (!hit) return [];
+  const word = hit.replace(/`[^`]*`/g, "").match(SENSITIVE_WRITE)![0];
+  return [`ready spec mentions "${word}" in Goal/Tasks but has no "## Threats and abuse": add who can reach it, what they must prove, how it could be abused, what prevents each abuse, and cover the abuse cases in Acceptance`];
+}
+
+/**
+ * Quantitative claims with units or bounded counts (latencies, counts, windows,
+ * limits, retries) must carry a measurement (a backtick command on the line) or
+ * be an Assumption with a settler. Bare task ids (T1), file names, and line
+ * ranges carry no units and never trigger. Scanned in Decisions, Contracts, and
+ * Tasks.
+ */
+const QUANTITY = /\b\d+(\.\d+)?\s*(ms|s\b|sec|secs|seconds?|minutes?|mins?|hours?|days?|rows?|reqs?|rps|qps|%|percent|mb|gb|kb)\b|\bp(50|90|95|99)\b|\b\d+\s*(attempts|retries|times|connections|threads|workers|requests)\b|\b(at least|at most|max|maximum|min|minimum|up to|over|under|fewer than|more than|within)\s+\d+\b/i;
+const SUBSECOND = /\bsub-?seconds?\b/i;
+
+export function quantitativeErrors(md: string, spec: ParsedSpec): string[] {
+  if (spec.status !== "ready") return [];
+  const out: string[] = [];
+  for (const section of ["Decisions", "Contracts"] as const) {
+    for (const line of sectionBullets(md, section)) {
+      if (!QUANTITY.test(line) && !SUBSECOND.test(line)) continue;
+      if (/assumption:/i.test(line) && /settles?\s+by/i.test(line)) continue;
+      if (/`[^`]+`/.test(line)) continue;
+      out.push(`${section} quantitative claim without measurement or Assumption: "${line}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
+    }
+  }
+  for (const t of spec.tasks) {
+    for (const line of t.text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || /^###\s/.test(trimmed)) continue;
+      if (!QUANTITY.test(trimmed) && !SUBSECOND.test(trimmed)) continue;
+      if (/assumption:/i.test(trimmed) && /settles?\s+by/i.test(trimmed)) continue;
+      if (/`[^`]+`/.test(trimmed)) continue;
+      out.push(`${t.id} quantitative claim without measurement or Assumption: "${trimmed}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
+    }
+  }
+  return out;
+}
+
+/** File-like tokens in a task (backtick paths and dotted filenames), for seam-overlap detection. */
+const taskFiles = (text: string): Set<string> => {
+  const out = new Set<string>();
+  for (const m of text.matchAll(/`([^`]+)`/g)) {
+    const inner = m[1].trim();
+    if (/[./]/.test(inner)) out.add(inner.toLowerCase());
+  }
+  for (const m of text.matchAll(/(?<![\w./-])([\w.-]+\.[\w]{1,5})(?![\w])/g)) out.add(m[1].toLowerCase());
+  return out;
+};
+
+/**
+ * Whether the tasks share a seam: the same Test: command, or a file-like token
+ * named by more than one task. Disjoint tasks (different commands, different
+ * files) carry no shared seam; missing Contracts there stays advisory.
+ */
+export function sharesSeam(spec: ParsedSpec): boolean {
+  if (sharedTestCommands(spec).length) return true;
+  const seen = new Map<string, string>();
+  for (const t of spec.tasks) {
+    for (const f of taskFiles(t.text)) {
+      const owner = seen.get(f);
+      if (owner !== undefined && owner !== t.id) return true;
+      if (owner === undefined) seen.set(f, t.id);
+    }
+  }
+  return false;
+}
+
+/**
+ * A multi-task behavioural spec whose tasks share a seam must pin it in
+ * Contracts. Disjoint tasks (no shared command, no shared file) need no
+ * Contracts section: the existing advisory warning covers them.
+ */
+export function contractsErrors(md: string, spec: ParsedSpec): string[] {
+  if (spec.status !== "ready") return [];
+  if (spec.tasks.length < 2) return [];
+  if (hasSection(md, "Contracts")) return [];
+  const behavioural = spec.tasks.some((t) => t.test || (/acceptance:/i.test(t.text) && !/^\(refactor\)/i.test(t.title)));
+  if (!behavioural) return [];
+  if (spec.gate === "none" && spec.tasks.every((t) => !t.test)) return [];
+  if (!sharesSeam(spec)) return [];
+  return [`${spec.tasks.length} tasks share a seam but have no ## Contracts: pin every seam they share (signatures, API and errors, data, events, and which task owns each side)`];
+}
+
+/**
+ * Findings bullets (when the section exists) must cite checkable evidence: a
+ * path (file:line), a pathed file (with a slash and an extension, so and/or
+ * never counts), or a backtick probe (command plus conclusion). Bare words
+ * alone ("baseline", "measured") never count: evidence must point somewhere.
+ * Catches unevidenced senior prose without judging its truth, which stays the
+ * reviewer's job.
+ */
+const EVIDENCE = /(`[^`]+`|[A-Za-z0-9_./-]+\.[a-z]{1,5}:\d+|[\w.-]+\/[\w./-]*\.[\w]{1,5})/;
+
+export function findingsEvidenceErrors(md: string, spec: ParsedSpec): string[] {
+  if (spec.status !== "ready") return [];
+  if (!hasSection(md, "Findings")) return [];
+  return sectionBullets(md, "Findings")
+    .filter((l) => !EVIDENCE.test(l))
+    .map((l) => `Findings line without evidence: "${l}" — cite a path (file:line), a probe (command plus conclusion), or a constraint`);
+}
+
+/**
+ * Decisions bullets (when the section exists) must carry a reason: because, an
+ * em/en dash or arrow reasoning marker, "so that", an explicit Rationale, or a
+ * settled guess in Assumption form. A bare colon never counts ("Use X: yes"
+ * states no reason). Rejected ideas ("Not doing X") need the same.
+ */
+const REASON = /(because|—|–|→|so that|rationale|assumption:)/i;
+
+export function decisionsEvidenceErrors(md: string, spec: ParsedSpec): string[] {
+  if (spec.status !== "ready") return [];
+  if (!hasSection(md, "Decisions")) return [];
+  return sectionBullets(md, "Decisions")
+    .filter((l) => !REASON.test(l))
+    .map((l) => `Decisions line without a reason: "${l}" — add its reason (because …), or write guesses as "Assumption: <claim> — settles by <how>, because <reason>"`);
+}
+
+/** All senior-enforcement gates for a ready spec; empty when planning or clean. */
+export function semanticErrors(md: string, spec: ParsedSpec): string[] {
+  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...findingsEvidenceErrors(md, spec), ...decisionsEvidenceErrors(md, spec)];
+}
+
+/** The Threats/numbers/Contracts subset: what a Tasks-section update re-checks. */
+export function taskScopeSemanticErrors(md: string, spec: ParsedSpec): string[] {
+  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec)];
+}

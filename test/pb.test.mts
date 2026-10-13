@@ -410,12 +410,14 @@ Cancel orders.
 ## Out of scope
 Refunds.
 ## Decisions
-- Only PENDING orders can be cancelled.
+- Only PENDING orders can be cancelled, because the state machine only allows that transition.
 - Not doing soft delete, because audit lives elsewhere.
 ## Context
 src/order.ts holds the model.
 ## Acceptance criteria
 - T1.txt and T2.txt exist.
+## Contracts
+- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.
 ## Tasks
 ${
   opts.tasks ??
@@ -445,7 +447,7 @@ const diligent: Script = async (text, tool) => {
     await tool("pb_tests_red", { task, tests: `${task}.txt exists` });
     fs.writeFileSync(`${task}.txt`, "x");
   }
-  await tool("pb_task_done", { task, status: "done", summary: `did ${task}` });
+  await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: "none" });
 };
 
 /** A spec written as if a /pb:plan came first: its one-time standards offer is already answered. */
@@ -508,6 +510,27 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   assert.match(t.notes.at(-1)!, /Describe what you want, in your own words/);
   await t.run("spec");
   assert.match(t.instructions.at(-1)!, /with the pb_write_spec tool[\s\S]*Not doing X, because[\s\S]*as tasks titled "\(refactor\) …" that keep behaviour/);
+});
+
+test("plan: the marker keeps the full request verbatim, and the record keeps it for the checkpoint", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const asked = "let admins cancel pending orders\nand notify the customer by mail";
+  await t.run("plan", asked);
+  assert.match(t.posts.at(-1)!, /> let admins cancel pending orders\n> and notify the customer by mail/);
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  assert.equal(new Store(t.repo).planning(session)?.request, asked);
+  // Re-saving without an explicit request preserves it (snapshots refresh, the seed survives).
+  new Store(t.repo).setPlanning(session, true, "abc123");
+  assert.equal(new Store(t.repo).planning(session)?.request, asked);
+});
+
+test("plan: the checkpoint summary keeps the original request", async () => {
+  const { checkpointSummary } = await import("../extensions/pb/prompts.ts");
+  const specs = [{ name: "x", markdown: "# X\n\n## Goal\ng\n" }];
+  assert.match(checkpointSummary(specs, undefined, "cancel pending orders"), /Original request: cancel pending orders/);
+  assert.doesNotMatch(checkpointSummary(specs), /Original request/);
 });
 
 test("plan mode stays with its session, not with the build session", async () => {
@@ -953,13 +976,13 @@ test("red then green: a task's new tests are seen failing first; refactors and n
     const task = taskOf(text) ?? (text.includes("Continue task T1") ? "T1" : undefined);
     if (task === "T1" && !said.length) {
       fs.writeFileSync("T1.txt", "x"); // the change first
-      said.push((await tool("pb_task_done", { task, status: "done", summary: "done" })).content![0].text);
+      said.push((await tool("pb_task_done", { task, status: "done", changed: "done", caveat: "none", rejected: "none", open: "none" })).content![0].text);
       said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
       fs.rmSync("T1.txt"); // set aside, as told
       said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
       said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
       fs.writeFileSync("T1.txt", "x");
-      return void (await tool("pb_task_done", { task, status: "done", summary: "done" }));
+      return void (await tool("pb_task_done", { task, status: "done", changed: "done", caveat: "none", rejected: "none", open: "none" }));
     }
     if (task === "T2") said.push((await tool("pb_tests_red", { task, tests: "none" })).content![0].text);
     return diligent(text, tool);
@@ -979,7 +1002,7 @@ test("red then green: a task's new tests are seen failing first; refactors and n
   u.agent.script = async (text, tool) => {
     const task = taskOf(text);
     if (task && task !== "final") fs.writeFileSync(`${task}.txt`, "x");
-    if (task) await tool("pb_task_done", { task, status: "done", summary: "done" });
+    if (task) await tool("pb_task_done", { task, status: "done", changed: "done", caveat: "none", rejected: "none", open: "none" });
   };
   await u.run("build");
   assert.equal(u.progress("order-cancellation").phase, "built"); // no new tests: nothing to see failing
@@ -1009,7 +1032,7 @@ Create T2.txt.
       if (task === "T1") said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
       fs.writeFileSync(`${task}.txt`, "x");
     }
-    if (task) return void (await tool("pb_task_done", { task, status: "done", summary: `did ${task}` }));
+    if (task) return void (await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: "none" }));
   };
   await t.run("build");
   assert.match(said[0], /^Seen failing: `test -f T1\.txt`/);
@@ -1076,7 +1099,7 @@ Create T2.txt.
       fs.writeFileSync(`${task}.txt`, "x");
       if (task === "T1") fs.writeFileSync("both.txt", "x"); // more than its slice: T2's command passes
     }
-    if (task) return void (await tool("pb_task_done", { task, status: "done", summary: `did ${task}` }));
+    if (task) return void (await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: "none" }));
   };
   await t.run("build");
   assert.match(said[0], /^Seen failing: `test -f both\.txt`/); // T1 proved it
@@ -1119,7 +1142,7 @@ test("build: coherence pass runs on 3+ task builds and is skipped on smaller one
   await written(t, SPEC({ tasks: THREE_TASKS }));
   const seen: string[] = [];
   t.agent.script = withCohere(seen, async (_text, tool) => {
-    await tool("pb_task_done", { task: "cohere", status: "done", summary: "nothing to consolidate" });
+    await tool("pb_task_done", { task: "cohere", status: "done", changed: "nothing to consolidate", caveat: "none", rejected: "none", open: "none" });
   });
   await t.run("build");
   const p = t.progress("order-cancellation");
@@ -1143,7 +1166,7 @@ test("build: pausing mid-coherence resumes the pass instead of stranding the bui
   t.agent.script = withCohere([], async (_text, tool) => {
     coheres++;
     if (coheres === 1) return; // stop without finishing: nudge, then pause
-    await tool("pb_task_done", { task: "cohere", status: "done", summary: "consolidated on retry" });
+    await tool("pb_task_done", { task: "cohere", status: "done", changed: "consolidated on retry", caveat: "none", rejected: "none", open: "none" });
   });
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "paused");
@@ -1161,7 +1184,7 @@ test("build: undoing the coherence pass restores files and the pass re-runs", as
   t.agent.script = withCohere([], async (_text, tool) => {
     coheres++;
     if (coheres === 1) fs.appendFileSync("T1.txt", "# consolidated\n");
-    await tool("pb_task_done", { task: "cohere", status: "done", summary: coheres === 1 ? "consolidated" : "nothing left" });
+    await tool("pb_task_done", { task: "cohere", status: "done", changed: coheres === 1 ? "consolidated" : "nothing left", caveat: "none", rejected: "none", open: "none" });
   });
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "built");
@@ -1185,11 +1208,11 @@ test("build: without a shared proven command, a passing task still wedges honest
       said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
       fs.writeFileSync("T1.txt", "x");
       fs.writeFileSync("T2.txt", "x"); // more than its slice, under a different command
-      return void (await tool("pb_task_done", { task, status: "done", summary: "did T1 and T2's bit" }));
+      return void (await tool("pb_task_done", { task, status: "done", changed: "did T1 and T2's bit", caveat: "none", rejected: "none", open: "none" }));
     }
     if (task === "T2") {
       said.push((await tool("pb_tests_red", { task, tests: "T2.txt exists" })).content![0].text);
-      said.push((await tool("pb_task_done", { task, status: "done", summary: "nothing left" })).content![0].text);
+      said.push((await tool("pb_task_done", { task, status: "done", changed: "nothing left", caveat: "none", rejected: "none", open: "none" })).content![0].text);
       return void (await tool("pb_task_done", { task, status: "blocked", summary: "T1 already did it; my command passes and no earlier task proved it" }));
     }
     return diligent(text, tool);
@@ -1260,6 +1283,10 @@ test("spec: Status: ready can't have Open questions; planning can", async () => 
   assert.match(parseSpec(`${SPEC()}## Open questions\n- undecided\n`).errors.join("; "), /can't have "## Open questions"/);
   assert.deepEqual(parseSpec(SPEC().replace("# Order cancellation\n", "# Order cancellation\nStatus: planning\n") + "## Open questions\n- undecided\n").errors, []);
   assert.match((await t.callTool("pb_write_spec", { name: "x", content: `${SPEC()}## Open questions\n- undecided\n` })).error!, /can't have "## Open questions"/);
+  // An empty header carries no undecided questions: treated as absent, not rejected.
+  assert.deepEqual(parseSpec(`${SPEC()}## Open questions\n`).errors, []);
+  assert.deepEqual(parseSpec(`${SPEC()}## Open questions:\n   \n`).errors, []);
+  assert.equal((await t.callTool("pb_write_spec", { name: "y", content: `${SPEC()}## Open questions\n` })).error, undefined);
 });
 
 test("spec: a behaviour task without Test:, or with a no-op one, warns — refactors stay quiet", async () => {
@@ -1273,25 +1300,195 @@ test("spec: a behaviour task without Test:, or with a no-op one, warns — refac
   assert.match(noop, /Note: T1's Test: `true` always passes — the build will wedge demanding red/);
 });
 
-test("spec: writing tasks without Contracts, or with a shared Test:, warns — advisory only", async () => {
+test("spec: shared seams without Contracts are rejected, disjoint ones warn; shared Test: warns — advisory only", async () => {
   const t = setup();
   process.chdir(t.repo);
-  const noContracts = (await t.callTool("pb_write_spec", { name: "a", content: SPEC() })).content![0].text;
-  assert.match(noContracts, /\nNote: 2 tasks and no ## Contracts: pin every seam they share \(and which task owns each side\); if truly independent, ignore this\./);
-  const withContracts = (await t.callTool("pb_write_spec", { name: "b", content: SPEC().replace("## Tasks", "## Contracts\n- x\n## Tasks") })).content![0].text;
-  assert.doesNotMatch(withContracts, /Note: 2 tasks/);
+  const withContracts = (await t.callTool("pb_write_spec", { name: "a", content: SPEC() })).content![0].text;
+  assert.doesNotMatch(withContracts, /no ## Contracts/);
+  const stripped = SPEC().replace("## Contracts\n- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.\n", "");
+  const disjoint = (await t.callTool("pb_write_spec", { name: "b", content: stripped })).content![0].text;
+  assert.match(disjoint, /no ## Contracts/); // disjoint tasks: advisory warning only
+  const sharedNoContracts = SPEC({ tasks: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `test -f shared.txt`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `test -f shared.txt`" }).replace("## Contracts\n- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.\n", "");
+  assert.match((await t.callTool("pb_write_spec", { name: "b2", content: sharedNoContracts })).error!, /share a seam/);
   const shared = (await t.callTool("pb_write_spec", {
     name: "c",
     content: SPEC({ tasks: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `true`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `true`" }),
   })).content![0].text;
   assert.match(shared, /\nNote: `true` is the Test: of T1, T2: the later auto-proceed as pre-green once the earlier proves it/);
-  assert.doesNotMatch(noContracts, /is the Test: of/); // distinct commands: nothing shared
-  // A Tasks edit re-warns; anything else stays quiet.
+  assert.doesNotMatch(withContracts, /is the Test: of/); // distinct commands: nothing shared
+  // A Tasks edit re-warns on sharing; anything else stays quiet.
   const tasks = (await t.callTool("pb_update_spec", { name: "a", section: "Tasks", content: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `true`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `true`\n\n### T3: c\n- Acceptance: c (tests: T3)\n- Test: `true`" })).content![0].text;
-  assert.match(tasks, /Note: 3 tasks and no ## Contracts/);
   assert.match(tasks, /Note: `true` is the Test: of T1, T2, T3/);
   const decisions = (await t.callTool("pb_update_spec", { name: "a", section: "Decisions", content: "- d" })).content![0].text;
   assert.doesNotMatch(decisions, /Note:/);
+});
+
+test("spec: senior gates reject sensitive-without-Threats, unmeasured numbers, and missing Contracts", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { parseSpec } = await import("../extensions/pb/spec.ts");
+  const sensitive = `# Admin login
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Let admins log in with a password.
+## Decisions
+- Use password login, because the existing session store supports it.
+## Contracts
+- T1 owns the login form.
+## Tasks
+### T1: login works
+- Acceptance: login succeeds (tests: login)
+- Test: \`test -f login.txt\`
+`;
+  assert.deepEqual(parseSpec(sensitive).errors, []); // readers stay lenient
+  assert.match((await t.callTool("pb_write_spec", { name: "sensitive", content: sensitive })).error!, /no "## Threats and abuse"/);
+  const withThreats = sensitive.replace("## Tasks", "## Threats and abuse\n- Only admins reach the login; abuse by replay is prevented by the session nonce.\n## Tasks").replace("- Acceptance: login succeeds (tests: login)", "- Acceptance: login succeeds (tests: login)\n- Acceptance: replayed logins are rejected (tests: replay)");
+  assert.equal((await t.callTool("pb_write_spec", { name: "sensitive-ok", content: withThreats })).error, undefined);
+
+  const slow = `# Fast list
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+List orders.
+## Decisions
+- Paginate the list, because unbounded reads risk timeouts.
+## Contracts
+- T1 owns the list.
+## Tasks
+### T1: fast list
+Responds within 200ms.
+- Acceptance: responds fast (tests: speed)
+- Test: \`test -f fast.txt\`
+`;
+  assert.match((await t.callTool("pb_write_spec", { name: "slow", content: slow })).error!, /quantitative claim without measurement or Assumption/);
+  const measured = slow.replace("Responds within 200ms.", "Responds within 200ms via `npm test` (got 120ms).");
+  assert.equal((await t.callTool("pb_write_spec", { name: "measured", content: measured })).error, undefined);
+  const assumed = slow.replace("Responds within 200ms.", "- Assumption: p95 under 200ms — settles by `npm run bench`, because the profiler shows it.");
+  assert.equal((await t.callTool("pb_write_spec", { name: "assumed", content: assumed })).error, undefined);
+
+  // Tasks-scope updates re-check; other sections stay quiet.
+  await t.callTool("pb_write_spec", { name: "scoped", content: SPEC() });
+  assert.equal((await t.callTool("pb_update_spec", { name: "scoped", section: "Tasks", content: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `test -f a.txt`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `test -f b.txt`" })).error, undefined); // has Contracts: task-scope passes
+  const stripped = SPEC().replace("## Contracts\n- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.\n", "");
+  await t.callTool("pb_write_spec", { name: "planning-scoped", content: stripped.replace("# Order cancellation", "# Order cancellation\nStatus: planning") });
+  assert.equal((await t.callTool("pb_update_spec", { name: "planning-scoped", section: "Tasks", content: "### T1: a\n- Acceptance: a" })).error, undefined); // planning exempt
+});
+
+test("spec: senior evidence requires Findings citations and Decisions reasons; planning stays exempt", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const noEvidence = `# Slow page
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Speed up the page.
+## Findings
+- The code is slow.
+## Decisions
+- Paginate the list, because unbounded reads risk timeouts.
+## Contracts
+- T1 owns the list.
+## Tasks
+### T1: fast page
+- Acceptance: loads fast (tests: speed)
+- Test: \`test -f fast.txt\`
+`;
+  assert.match((await t.callTool("pb_write_spec", { name: "noev", content: noEvidence })).error!, /Findings line without evidence/);
+  const noReason = noEvidence.replace("## Findings\n- The code is slow.", "## Findings\n- `src/page.ts:12` holds the model.").replace("- Paginate the list, because unbounded reads risk timeouts.", "- Paginate the list.");
+  assert.match((await t.callTool("pb_write_spec", { name: "noreason", content: noReason })).error!, /Decisions line without a reason/);
+  const good = noEvidence.replace("- The code is slow.", "- `src/page.ts:12` holds the model; baseline `npm test` green.");
+  assert.equal((await t.callTool("pb_write_spec", { name: "good", content: good })).error, undefined);
+  const planning = noEvidence.replace("# Slow page", "# Slow page\nStatus: planning");
+  assert.equal((await t.callTool("pb_write_spec", { name: "planning-ev", content: planning })).error, undefined);
+  const root = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "TODO.md");
+  assert.ok(!fs.existsSync(root), "TODO.md is removed; the spec is the source of truth");
+});
+
+test("spec: senior shape is strict about bare words, bare colons, and counts", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const bareWords = `# Slow page
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Speed up the page.
+## Findings
+- The baseline is green.
+## Decisions
+- Paginate the list, because unbounded reads risk timeouts.
+## Contracts
+- T1 owns the list.
+## Tasks
+### T1: fast page
+- Acceptance: loads fast (tests: speed)
+- Test: \`test -f fast.txt\`
+`;
+  assert.match((await t.callTool("pb_write_spec", { name: "barewords", content: bareWords })).error!, /Findings line without evidence/);
+  const bareConclusion = bareWords.replace("- The baseline is green.", "- Conclusion: it is fast.");
+  assert.match((await t.callTool("pb_write_spec", { name: "bareconclusion", content: bareConclusion })).error!, /Findings line without evidence/);
+  const bareColon = bareWords
+    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
+    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Scope: the list.");
+  assert.match((await t.callTool("pb_write_spec", { name: "barecolon", content: bareColon })).error!, /Decisions line without a reason/);
+  const retries = bareWords
+    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
+    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Allows 3 retries.");
+  assert.match((await t.callTool("pb_write_spec", { name: "retries", content: retries })).error!, /quantitative claim without measurement or Assumption/);
+  const p95 = bareWords
+    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
+    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- p95 latency is fine.");
+  assert.match((await t.callTool("pb_write_spec", { name: "p95", content: p95 })).error!, /quantitative claim without measurement or Assumption/);
+  const measuredCount = bareWords
+    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
+    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Allows 3 retries via `npm test`, because the suite flakes, got 1 flake in 20 runs.");
+  assert.equal((await t.callTool("pb_write_spec", { name: "measuredcount", content: measuredCount })).error, undefined);
+});
+
+test("spec: senior override: human edits save visibly and the build advises instead of blocking", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  t.agent.script = async (text, tool) => {
+    if (/pb_write_spec tool/.test(text)) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
+    return diligent(text, tool);
+  };
+  t.selects.push("Show me the spec first", "Edit the spec first", "Build here (keeps our discussion; the cache stays warm)");
+  t.editors.push(SPEC().replace("- Only PENDING orders can be cancelled, because the state machine only allows that transition.", "- Only PENDING orders can be cancelled."));
+  await t.run("build");
+  assert.ok(t.notes.some((n) => /human override/.test(n))); // the hand-edit saved visibly, not silently
+  assert.ok(t.events("order-cancellation").some((e: any) => e.override === true));
+  assert.equal(t.progress("order-cancellation").phase, "built"); // advisory, never blocking
+  assert.match(t.posts.at(-1)!, /Spec-shape advisory/); // build-start advisory in the summary
+});
+
+test("spec: senior review carries the human-override note", async () => {
+  const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
+  const withNote = reviewerBrief({ changed: [], stat: "", check: "ok", focus: "", humanOverride: "Hand-edited." });
+  assert.match(withNote, /## Human override[\s\S]*Hand-edited\./);
+  const without = reviewerBrief({ changed: [], stat: "", check: "ok", focus: "" });
+  assert.doesNotMatch(without, /Human override/);
+});
+
+test("stale sessions read as gone without throwing, live ones as present", async () => {
+  const { sessionGone } = await import("../extensions/pb/index.ts");
+  assert.equal(sessionGone({ hasUI: true }), false);
+  assert.equal(
+    sessionGone({
+      get hasUI(): boolean {
+        throw new Error("This extension ctx is stale after session replacement or reload.");
+      },
+    }),
+    true,
+  );
 });
 
 test("spec: showing it runs each red-eligible Test: once, for approval — small changes skip it", async () => {
@@ -1321,7 +1518,7 @@ test("build: a failing check goes back to the agent, and passes on the next atte
     if (text.includes("Task T1") && lazy) {
       lazy = false; // first attempt forgets the file
       await tool("pb_tests_red", { task: "T1", tests: "T1.txt exists" });
-      return void (await tool("pb_task_done", { task: "T1", status: "done", summary: "claimed" }));
+      return void (await tool("pb_task_done", { task: "T1", status: "done", changed: "claimed", caveat: "none", rejected: "none", open: "none" }));
     }
     return diligent(text, tool);
   };
@@ -1338,7 +1535,7 @@ test("build: after the last attempt it pauses; /pb:build resumes with a fresh se
     const task = text.match(/(?:Task|check for) (T\d+)/)?.[1];
     if (task === "T1" && !give) {
       await tool("pb_tests_red", { task, tests: "T1.txt exists" });
-      return void (await tool("pb_task_done", { task, status: "done", summary: "claimed" }));
+      return void (await tool("pb_task_done", { task, status: "done", changed: "claimed", caveat: "none", rejected: "none", open: "none" }));
     }
     return diligent(text, tool);
   };
@@ -1414,7 +1611,7 @@ test("build: without a UI, a question pauses the build; answering costs the task
   await t.run("build");
   assert.match(t.posts.at(-1)!, /Build paused\*\* — T2 question: Which file name\?/);
   await t.run("build", "call it T2.txt");
-  assert.ok(t.instructions.some((i) => /^\[pb:build\] Continue task T2: second file\. Finish it with pb_task_done\.\n\nFrom the human: call it T2\.txt$/.test(i)));
+  assert.ok(t.instructions.some((i) => /^\[pb:build\] Continue task T2: second file\. Finish it with pb_task_done\.\n\nTouched so far[\s\S]*- T1: T1\.txt[\s\S]*\n\nFrom the human: call it T2\.txt$/.test(i)));
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "built");
   assert.equal(p.tasks.find((x: any) => x.id === "T2").attempts, 1);
@@ -1447,6 +1644,60 @@ test("build: pb_task_done must name the current task", async () => {
   };
   await t.run("build");
   assert.equal(err, "The current task is T1, not T2.");
+});
+
+test("build: pb_task_done reports changed/caveat/rejected/open; missing hooks are rejected", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  let hooksErr: string | undefined;
+  let blockedErr: string | undefined;
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T1")) {
+      hooksErr ??= (await tool("pb_task_done", { task: "T1", status: "done", changed: "x" })).error;
+      blockedErr ??= (await tool("pb_task_done", { task: "T1", status: "blocked" })).error;
+    }
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.match(hooksErr!, /needs caveat, rejected, open/);
+  assert.match(blockedErr!, /needs summary/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("build: the next task is told what finished tasks touched", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  let second = "";
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text);
+    if (!task) return;
+    if (task !== "final") {
+      await tool("pb_tests_red", { task, tests: `${task}.txt exists` });
+      fs.writeFileSync(`${task}.txt`, "x");
+    }
+    const r = await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: "none" });
+    if (task === "T1") second = r.content![0].text;
+  };
+  await t.run("build");
+  assert.doesNotMatch(t.instructions[0], /Touched so far/); // nothing finished before the first task
+  assert.match(second, /Touched so far[\s\S]*- T1: T1\.txt/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("build state summaries show hooks and hide nones", async () => {
+  const { buildStateSummary } = await import("../extensions/pb/prompts.ts");
+  const p = {
+    spec: "x",
+    phase: "building",
+    current: "T2",
+    tasks: [
+      { id: "T1", title: "first", status: "done", attempts: 1, changed: "did T1", caveat: "T2 must keep the hook", rejected: "none", open: "none" },
+      { id: "T2", title: "second", status: "doing", attempts: 1 },
+    ],
+  } as any;
+  const s = buildStateSummary({ p, mechanics: "m", current: "next", reason: "reset" });
+  assert.match(s, /- T1 first: done — did T1 · caveat: T2 must keep the hook/);
+  assert.doesNotMatch(s, /rejected: none/);
 });
 
 test("build: verification none runs no checks; no new tests reaches the agent", async () => {
@@ -2205,7 +2456,7 @@ test("stats: tasks, first try, checks, pauses, review, and the build session's t
     if (text.includes("Task T1") && lazy) {
       lazy = false;
       await tool("pb_tests_red", { task: "T1", tests: "T1.txt exists" });
-      return void (await tool("pb_task_done", { task: "T1", status: "done", summary: "claimed" }));
+      return void (await tool("pb_task_done", { task: "T1", status: "done", changed: "claimed", caveat: "none", rejected: "none", open: "none" }));
     }
     return diligent(text, tool);
   };
@@ -2369,7 +2620,7 @@ test("prompts: short mechanics plus your standards; a minimal spec is enough", a
   assert.match(mech, /take the sensible reading, record it with pb_record_decision \(assumption: true\)[\s\S]*Ask with pb_ask only/);
   assert.match(mech, /leave \.pi\/ alone/);
   assert.match(mech, /Tests quiet, full log to a temp file/);
-  assert.match(mech, /Finish each task with pb_task_done: it runs the task's Test: command \(a compile when there is none\)/);
+  assert.match(mech, /Finish each task with pb_task_done \(changed\/caveat\/rejected\/open\): it runs the task's Test: command \(a compile when there is none\)/);
   assert.match(mech, /Change or remove an existing test only when what it covers changes; never skip or weaken one/);
   assert.ok(buildMechanics(parseSpec(SPEC()).spec!, null).length < 1150);
 
@@ -4178,6 +4429,22 @@ test("spec: acceptance lines on tested tasks name their proof or exemption, or w
   assert.equal((await t.callTool("pb_write_spec", { name: "d", content: commandless })).error, undefined); // no Test: line: gate suite proves it, no marker needed
   const retasked = await t.callTool("pb_update_spec", { name: "b", section: "Tasks", content: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`" });
   assert.match(retasked.error!, /T1.*T1\.txt exists/); // Tasks rewrites are held to the same rule
+  // Qualified variants count as acceptance lines: a label must not smuggle a line past the gate.
+  const bareVariant = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance (abuse): T1.txt survives replays\n- Test: `test -f T1.txt`" });
+  assert.match((await t.callTool("pb_write_spec", { name: "e", content: bareVariant })).error!, /T1.*Acceptance \(abuse\)/);
+  const markedVariant = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance (abuse): T1.txt survives replays (tests: T1)\n- Test: `test -f T1.txt`" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "f", content: markedVariant })).error, undefined);
+});
+
+test("spec: a declared doc-only task with exempted lines gets no missing-Test nudge", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const docOnly = SPEC({ tasks: "### T1: docs for the banner\nNaming the prose that must follow the behaviour; doc-only, no test command.\n- Acceptance: javadoc updated (non-testable: prose)" });
+  const w = (await t.callTool("pb_write_spec", { name: "a", content: docOnly })).content![0].text;
+  assert.doesNotMatch(w, /adds behaviour but has no Test/);
+  // Without the declaration the nudge stays: the reviewer then judges the tests at the end.
+  const vague = SPEC({ tasks: "### T1: misc polish\nSmall behaviour touch-ups.\n- Acceptance: polish applied" });
+  assert.match((await t.callTool("pb_write_spec", { name: "b", content: vague })).content![0].text, /adds behaviour but has no Test/);
 });
 
 test("spec review: advisory findings are posted and the build proceeds", async () => {
@@ -4232,7 +4499,61 @@ test("spec review: the brief attacks decisions and demands an exact verdict", as
   assert.match(b, /Attack its Decisions/);
   assert.match(b, /Not doing/);
   assert.match(b, /quantitative claim/);
+  assert.match(b, /nothing to do/);
   assert.match(b, /VERDICT: (block|pass)/);
+});
+
+test("spec review: an empty-path P1 blocks the build before T1", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "empty";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.match(t.posts.at(-1)!, /changes needed before T1/);
+  assert.match(t.posts.at(-1)!, /stale banner/);
+  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // never launched
+});
+
+test("review: the prompts merge same-fix findings and calibrate framing", async () => {
+  const { REVIEWER_SYSTEM, ATTACKER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  assert.match(REVIEWER_SYSTEM, /same concrete fix/);
+  assert.match(REVIEWER_SYSTEM, /reasonable reader/);
+  assert.match(ATTACKER_SYSTEM, /same concrete fix/);
+});
+
+test("review: findings with the same concrete fix merge; distinct ones stay split", async () => {
+  const { mergeFindings } = await import("../extensions/pb/review.ts");
+  const dupes = [
+    { priority: "P2", file: "a.ts", line: 93, title: "two lists can drift", fix: "Make one list the source of truth with ordering in the list and membership derived from it" },
+    { priority: "P3", file: "a.ts", line: 93, title: "second copy of membership", fix: "One list as source of truth: ordering in the list, membership derived from it" },
+  ];
+  const merged = mergeFindings(dupes as any);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].priority, "P2");
+  assert.match(merged[0].title, /two lists can drift \/ second copy of membership/);
+  const distinct = [
+    { priority: "P1", file: "a.ts", line: 251, title: "race reports an unrefreshed paste", fix: "Add snapshot_id to paste rows and require it to equal the reported snapshot" },
+    { priority: "P2", file: "a.ts", line: 251, title: "gate on updatedAt instead", fix: "Read set rows and require max updatedAt at or after the snapshot time" },
+  ];
+  assert.equal(mergeFindings(distinct as any).length, 2); // different prescriptions stay split
+  assert.equal(
+    mergeFindings([
+      { priority: "P2", file: "a.ts", line: 1, title: "x" },
+      { priority: "P2", file: "a.ts", line: 1, title: "y" },
+    ] as any).length,
+    2,
+  ); // no fix text: never merge
+  assert.equal(
+    mergeFindings([
+      { priority: "P2", title: "x", fix: "do the same thing" },
+      { priority: "P2", title: "y", fix: "do the same thing" },
+    ] as any).length,
+    2,
+  ); // no file: never merge
 });
 
 test("review: the brief carries stale prose references for judgment, absent when clean", async () => {
@@ -4260,7 +4581,7 @@ test("build: a rename that orphans a prose citation is flagged at completion", a
       fs.writeFileSync("src-helper.ts", "export function newHelperName() { return 1; }\n");
       fs.writeFileSync("T1.txt", "x");
     }
-    if (task && task !== "final") await tool("pb_task_done", { task, status: "done", summary: "did it" });
+    if (task && task !== "final") await tool("pb_task_done", { task, status: "done", changed: "did it", caveat: "none", rejected: "none", open: "none" });
   };
   await t.run("build", "order-cancellation");
   assert.match(t.posts.at(-1)!, /oldHelperName: REF\.md:1/);

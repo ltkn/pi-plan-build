@@ -23,10 +23,12 @@ if (sys.includes("ATTACKER")) {
   say([call("report_findings", { findings: [] })]);
   say([{ type: "text", text: "Done." }]);
 } else if (sys.includes("SPEC REVIEWER")) {
-  // MOCK_SPEC_REVIEW=block: a P0 plus a block verdict; =advisory: a P2 that travels on.
+  // MOCK_SPEC_REVIEW=block: a P0 plus a block verdict; =advisory: a P2 that travels on;
+  // =empty: a P1 on a silent empty path plus a block verdict.
   const mode = process.env.MOCK_SPEC_REVIEW;
   if (mode === "block") say([{ type: "text", text: "[P0] Decisions — unguarded transition\nFix: guard it\n\nVERDICT: block" }]);
   else if (mode === "advisory") say([{ type: "text", text: "[P2] Contracts — unmeasured window\nFix: measure it\n\nVERDICT: pass" }]);
+  else if (mode === "empty") say([{ type: "text", text: "[P1] Tasks — silent flush leaves a stale banner standing\nFix: reconcile it\n\nVERDICT: block" }]);
   else say([{ type: "text", text: "VERDICT: pass" }]);
 } else if (sys.includes("REVIEWER")) {
   if (process.env.MOCK_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_BRIEF_OUT, brief);

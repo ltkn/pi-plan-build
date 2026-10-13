@@ -119,3 +119,49 @@ export function sensitiveGround(o: { spec?: string; files: string[]; diff: strin
   return line ? `the diff mentions "${line.slice(1).trim().match(words)![0]}"` : undefined;
 }
 
+/** Noise words for comparing two fixes: shared filler must not count as overlap. */
+const FIX_STOPWORDS = new Set(
+  "a,an,the,to,of,in,on,and,or,for,with,that,this,it,as,at,by,be,is,are,was,were,so,either,neither,not,no,nor,than,then,from,into,over,under,its,their,they,them,you,your,our,will,would,should,could,can,just,only,also,when,what,which,who,how,all,any,each,per,such,via,using,use,add,made,keep,left,still,more,most,between,without,within".split(","),
+);
+
+/** Significant tokens of a fix: lowercased, split on non-alphanumerics and snake_case, filler dropped. */
+const fixTokens = (fix?: string): Set<string> =>
+  new Set((fix ?? "").toLowerCase().split(/[\W_]+/).filter((w) => w.length > 1 && !FIX_STOPWORDS.has(w)));
+
+/**
+ * Merge findings with the same concrete fix: same file and line, plus fix prescriptions
+ * that substantially overlap (near-duplicate fixes for one defect, e.g. filed twice at
+ * different priorities). Keeps the highest priority (with its prescription) and joins titles,
+ * so nothing reported is lost — only the duplication. Findings without a file, without a
+ * fix, or with genuinely different prescriptions stay split: the model is separately
+ * instructed to merge same-defect findings itself (which also covers same defect with a
+ * different fix); this backstop catches identical prescriptions the instruction missed.
+ */
+export function mergeFindings(findings: Finding[]): Finding[] {
+  const rank = { P0: 0, P1: 1, P2: 2, P3: 3 } as const;
+  const out: Finding[] = [];
+  for (const f of findings) {
+    const ft = fixTokens(f.fix);
+    const same =
+      f.file === undefined
+        ? undefined
+        : out.find((o) => {
+            if (o.file !== f.file || (o.line ?? -1) !== (f.line ?? -1)) return false;
+            const ot = fixTokens(o.fix);
+            if (!ft.size || !ot.size) return false;
+            const inter = [...ft].filter((w) => ot.has(w)).length;
+            return inter / Math.min(ft.size, ot.size) >= 0.5;
+          });
+    if (!same) {
+      out.push({ ...f });
+      continue;
+    }
+    if (rank[f.priority] < rank[same.priority]) {
+      same.priority = f.priority;
+      same.fix = f.fix;
+    }
+    if (!same.title.includes(f.title)) same.title = `${same.title} / ${f.title}`;
+  }
+  return out;
+}
+

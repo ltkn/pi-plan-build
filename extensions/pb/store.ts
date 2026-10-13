@@ -144,8 +144,16 @@ export interface TaskProgress {
   title: string;
   status: TaskStatus;
   attempts: number;
-  /** what the agent reported when it finished the task */
+  /** why it can't be done (blocked only; the pause message carries it) */
   summary?: string;
+  /** what the task changed (done only; required by pb_task_done) */
+  changed?: string;
+  /** what the next task must respect (done only; required, "none" when nothing) */
+  caveat?: string;
+  /** what was tried and discarded (done only; required, "none" when nothing) */
+  rejected?: string;
+  /** what is still unchecked (done only; required, "none" when nothing) */
+  open?: string;
   /** the task's new tests, seen failing before the change (pb_tests_red): its first line */
   red?: string;
   /** the Test: command that was seen failing for red, so a rewritten command re-requires proof */
@@ -404,7 +412,9 @@ export class Store {
 
   /**
    * Planning sessions (project files read-only, see the tool_call guard), with a snapshot of the tree when
-   * planning began and the entry the last checkpoint reset from (what /pb:compact undo goes back to).
+   * planning began, the verbatim request that started it (so the checkpoint summary keeps what was
+   * asked even after a long discussion), and the entry the last checkpoint reset from (what
+   * /pb:compact undo goes back to).
    *
    * One file per session under planning/ (atomic single-file writes via writeFile, no read-modify-write),
    * so parallel planners can't clobber each other. The legacy planning.json map (array or object form) is
@@ -417,17 +427,18 @@ export class Store {
     return path.join(this.planningDir(), `${createHash("sha1").update(sessionFile).digest("hex")}.json`);
   }
   /** Legacy planning.json entries (array or map form), frozen: migrated on first write, never written. */
-  private legacyPlanningMap(): Record<string, { snapshot?: string; checkpointFrom?: string }> {
+  private legacyPlanningMap(): Record<string, { snapshot?: string; checkpointFrom?: string; request?: string }> {
     const raw = readJson<string[] | Record<string, unknown>>(path.join(this.root, "planning.json"));
     if (Array.isArray(raw)) return Object.fromEntries(raw.filter((s) => typeof s === "string").map((s) => [s, {}]));
     if (!raw || typeof raw !== "object") return {};
-    const out: Record<string, { snapshot?: string; checkpointFrom?: string }> = {};
+    const out: Record<string, { snapshot?: string; checkpointFrom?: string; request?: string }> = {};
     for (const [k, v] of Object.entries(raw)) {
       if (typeof k !== "string" || !k || typeof v !== "object" || v === null) continue;
-      const rec = v as { snapshot?: unknown; checkpointFrom?: unknown };
+      const rec = v as { snapshot?: unknown; checkpointFrom?: unknown; request?: unknown };
       out[k] = {
         ...(typeof rec.snapshot === "string" ? { snapshot: rec.snapshot } : {}),
         ...(typeof rec.checkpointFrom === "string" ? { checkpointFrom: rec.checkpointFrom } : {}),
+        ...(typeof rec.request === "string" ? { request: rec.request } : {}),
       };
     }
     return out;
@@ -447,7 +458,7 @@ export class Store {
     }
     fs.rmSync(legacy, { force: true });
   }
-  private planningMap(): Record<string, { snapshot?: string; checkpointFrom?: string }> {
+  private planningMap(): Record<string, { snapshot?: string; checkpointFrom?: string; request?: string }> {
     const out = this.legacyPlanningMap();
     let files: string[] = [];
     try {
@@ -457,11 +468,12 @@ export class Store {
     }
     for (const f of files) {
       if (!f.endsWith(".json")) continue;
-      const rec = readJson<{ session?: unknown; snapshot?: unknown; checkpointFrom?: unknown }>(path.join(this.planningDir(), f));
+      const rec = readJson<{ session?: unknown; snapshot?: unknown; checkpointFrom?: unknown; request?: unknown }>(path.join(this.planningDir(), f));
       if (typeof rec?.session !== "string" || !rec.session) continue;
       out[rec.session] = {
         ...(typeof rec.snapshot === "string" ? { snapshot: rec.snapshot } : {}),
         ...(typeof rec.checkpointFrom === "string" ? { checkpointFrom: rec.checkpointFrom } : {}),
+        ...(typeof rec.request === "string" ? { request: rec.request } : {}),
       };
     }
     return out;
@@ -469,27 +481,29 @@ export class Store {
   planningSessions(): string[] {
     return Object.keys(this.planningMap());
   }
-  planning(sessionFile: string): { snapshot?: string; checkpointFrom?: string } | undefined {
+  planning(sessionFile: string): { snapshot?: string; checkpointFrom?: string; request?: string } | undefined {
     return this.planningMap()[sessionFile];
   }
-  setPlanning(sessionFile: string, on: boolean, snapshot?: string): void {
+  setPlanning(sessionFile: string, on: boolean, snapshot?: string, request?: string): void {
     this.migratePlanning();
     const file = this.planningFile(sessionFile);
     if (!on) {
       fs.rmSync(file, { force: true });
       return;
     }
-    const prev = readJson<{ snapshot?: unknown; checkpointFrom?: unknown }>(file) ?? {};
+    const prev = readJson<{ snapshot?: unknown; checkpointFrom?: unknown; request?: unknown }>(file) ?? {};
     const rec: Record<string, unknown> = { session: sessionFile };
     const snap = snapshot ?? (typeof prev.snapshot === "string" ? prev.snapshot : undefined);
     if (snap !== undefined) rec.snapshot = snap;
     if (typeof prev.checkpointFrom === "string") rec.checkpointFrom = prev.checkpointFrom;
+    const req = request ?? (typeof prev.request === "string" ? prev.request : undefined);
+    if (req !== undefined) rec.request = req;
     writeFile(file, `${JSON.stringify(rec, null, 2)}\n`);
   }
   setCheckpointFrom(sessionFile: string, entry: string | undefined): void {
     this.migratePlanning();
     const file = this.planningFile(sessionFile);
-    const prev = readJson<{ snapshot?: unknown; checkpointFrom?: unknown }>(file);
+    const prev = readJson<{ snapshot?: unknown; checkpointFrom?: unknown; request?: unknown }>(file);
     if (!prev) return;
     writeFile(file, `${JSON.stringify({ session: sessionFile, ...prev, checkpointFrom: entry }, null, 2)}\n`);
   }

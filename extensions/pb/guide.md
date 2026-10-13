@@ -381,7 +381,9 @@ model, uncached); `/pb:build --fresh` asks for one directly: a new session
 named "build: <spec>", seeded with the spec, on your model and thinking level.
 
 1. **The tasks.** Each task is built the same way: tests first, then the
-   behaviour, then `pb_task_done`, which hands out the next one — the whole
+   behaviour, then `pb_task_done` — reporting what changed plus the caveats,
+   rejections and open items later tasks can catch on — which hands out the
+   next one, naming the files finished tasks touched. The whole
    build is one uninterrupted run, so the prompt cache stays warm. How the shape
    is arrived at is the build's: the compiler and the tests give the feedback,
    task by task, where each step is checked by something real. The first task
@@ -426,7 +428,7 @@ build's state, written by pb, not by a model.
 `checkpointAt` (75% of its window, always before Pi would compact), pb resets it
 right there, between two tasks, where nothing is half-done. The build goes on
 from a summary pb writes itself: the build's rules, every task with its
-summary, the assumptions, the spec and the next task. No summarizing model call,
+report (what changed, and the caveats, rejections and open items later tasks can catch on), the assumptions, the spec and the next task. No summarizing model call,
 and nothing of the finished task is needed any more. Should a single task still
 run into Pi's own compaction, pb writes that summary too, adding the files the
 task has changed so far and the files read before, so it carries on instead of
@@ -550,11 +552,15 @@ clarity, comments), **P3** a nit. **P0 and P1 findings get a second look**: a
 separate verifier checks each against the code, and the ones it rejects are
 listed as dismissed, with its evidence, instead of costing you a fix cycle
 (`"reviewer": {"verify": false}` skips it). Any confirmed P0 or P1 means
-*changes needed*.
+*changes needed*. Findings with the same concrete fix are reported once, at
+the highest priority. When the code is right and only the spec's framing is
+imprecise, that's a P3 note with a proposed rewording, not a defect.
 
 The findings land in the session you ran it from; run it **in the build
 session** and fix them right there: that session knows the code it just wrote.
-The next `/pb:review` is a **follow-up**: it checks the previous findings and
+Or fix them in a fresh fenced session: `/pb:fix [ids]` takes P0–P2 finding
+ids (no ids = all open ones); P3 nits never block and are fixed by hand or
+ignored. The next `/pb:review` is a **follow-up**: it checks the previous findings and
 looks only at what changed since (`--full` reviews everything again). If
 nothing changed, it says so and costs nothing.
 
@@ -750,7 +756,7 @@ model call).
 ### Review found changes
 <!-- pb:tip review.changes -->
 **What now** — the review found things to fix before merging
-- Fix them here: this session knows the code. Example: *"fix findings 1 and 3"*
+- Fix them in a fresh fenced session: `/pb:fix 1 4 5` takes finding ids (P0–P2 only; P3 nits fix by hand or ignore), no ids fixes all open ones — or fix them here, this session knows the code. Example: *"fix findings 1 and 3"*
 - Then `/pb:review` again — it checks only those findings and what changed · more: `/pb:help review`
 <!-- /pb -->
 

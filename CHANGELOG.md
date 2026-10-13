@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.29.3
+
+- **Senior shape at write time.** Ready specs are held to mechanically checkable senior rules: Threats-and-abuse when Goal/Tasks look sensitive, measurements or `Assumption:` form for quantitative claims, Contracts when tasks share a seam (disjoint slices stay advisory), evidence per Findings bullet, a reason per Decisions bullet. Planning checkpoints stay exempt and readers stay lenient, so in-flight specs keep working.
+- **Review quality.** Same-fix findings merge into one (highest priority, every symptom titled) in the prompts and deterministically in the harness; spec-framing nits calibrate to P3 via the reasonable-reader test; the spec-review gate probes empty paths (silent on "nothing to do" now blocks load-bearing gaps pre-build). The verifier and map widgets went activity-only.
+- **Build reports with hooks.** `pb_task_done` reports `changed/caveat/rejected/open` (each required, `"none"` when genuinely nothing); state summaries show the hooks and hide nones. Each task prompt names the files finished tasks touched, harness-computed from checkpoints.
+- **Surviving real sessions.** Long awaits (spec review, dry runs, dialogs) end quietly instead of throwing stale-context errors when the human moved on; human spec edits save visibly as overrides the reviewer sees; `/pb:plan` keeps the verbatim request in the transcript and the checkpoint; `/pb:fix` documents its P0–P2 scope everywhere it appears.
+
 ## 1.29.2
 
 - **Planning ends decided, specs transcribe.** An unanswered question in planning (or while the spec is being written) stays an open question — silence is never recorded as an Assumption, and planning stays incomplete. Spec writers may only transcribe what was agreed; anything undecided keeps the spec at `Status: planning`.

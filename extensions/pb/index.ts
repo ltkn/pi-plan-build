@@ -60,9 +60,9 @@ import {
 } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapRepairPhase, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
-import { REVIEW_TOOLS, fromProse, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
+import { REVIEW_TOOLS, fromProse, mergeFindings, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionOf, setSection, setStatus, sharedTestCommands, tokensOf } from "./spec.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, taskScopeSemanticErrors, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
@@ -85,6 +85,22 @@ const MODEL_ARG_CAP = 4000;
 
 /** Normalized form for catching near-miss spec names: case, underscores, trailing punctuation. */
 const normSpecArg = (arg: string) => arg.toLowerCase().replace(/_/g, "-").trim().replace(/[.!?…]+$/, "").trim();
+
+/**
+ * True when an extension context's session is gone (replaced or reloaded while awaiting):
+ * probes one guarded property, never throws. After a long await (a fresh-model run, a dialog
+ * with a timeout, a suite run) the human may have moved on; a dead session must end the run
+ * quietly — state in .pi/pb is already saved, and rerunning the command resumes from it —
+ * instead of throwing a stale-context error.
+ */
+export const sessionGone = (ctx: Pick<ExtensionContext, "hasUI">): boolean => {
+  try {
+    void ctx.hasUI;
+    return false;
+  } catch {
+    return true;
+  }
+};
 
 /** Coherence pays off once slices can drift: smaller builds skip the pass. */
 const COHERE_MIN_TASKS = 3;
@@ -138,16 +154,18 @@ const rewriteWarning = (name: string, prev: Progress | undefined, spec: ParsedSp
 
 /**
  * Acceptance lines on tasks with a Test: line must name their proof `(tests: ...)` or their
- * exemption `(non-testable: ...)`, so uncovered lines can't slip to review unnoticed. Tasks
- * without a Test: line are proven by the gate suite by construction. Readers stay lenient:
- * only the write tools call this, so in-flight specs keep working.
+ * exemption `(non-testable: ...)`, so uncovered lines can't slip to review unnoticed. Qualified
+ * variants (`Acceptance (abuse):`, `Acceptance (race):`) count as acceptance lines too: a label
+ * must not smuggle a line past the gate. Tasks without a Test: line are proven by the gate suite
+ * by construction. Readers stay lenient: only the write tools call this, so in-flight specs keep working.
  */
+const acceptanceLine = /^\s*-\s*Acceptance(\s*\([^)]*\))?:/m;
 const acceptanceMarkerErrors = (spec: ParsedSpec): string[] =>
   spec.tasks.flatMap((t) => {
     if (!t.test) return [];
     return t.text
       .split("\n")
-      .filter((l) => /^\s*-\s*Acceptance:/.test(l) && !/\(tests:|\(non-testable:/.test(l))
+      .filter((l) => acceptanceLine.test(l) && !/\(tests:|\(non-testable:/.test(l))
       .map((l) => `${t.id} ${l.trim()} — add (tests: ...) naming the proving tests, or (non-testable: reason)`);
   });
 
@@ -161,12 +179,15 @@ const specWarnings = (md: string, spec: ParsedSpec): string[] => {
       ? [`${spec.tasks.length} tasks and no ## Contracts: pin every seam they share (and which task owns each side); if truly independent, ignore this`]
       : [];
   const untestable = spec.tasks.flatMap((t) => {
-    if (!redEligible(t) || !/^\s*-\s*Acceptance:/m.test(t.text)) return [];
+    if (!redEligible(t) || !acceptanceLine.test(t.text)) return [];
     if (t.test) {
       if (noopCommand(t.test)) return [`${t.id}'s Test: \`${t.test}\` always passes — the build will wedge demanding red; omit Test: (disclosed to the reviewer) or write a command that fails without the change`];
       if (suspiciousCommand(t.test)) return [`${t.id}'s Test: \`${t.test}\` chains shells or reaches the network — it runs with your privileges, so review it before building; the dry-run below doesn't execute it`];
       return [];
     }
+    // A declared doc-only task whose every acceptance line is already exempted needs no nudge:
+    // the reviewer judges whether the exemption is legitimate, as with any (non-testable:) line.
+    if (/doc-only|prose-only/i.test(t.text) && t.text.split("\n").filter((l) => acceptanceLine.test(l)).every((l) => /\(non-testable:/.test(l))) return [];
     return [`${t.id} adds behaviour but has no Test:: add a targeted command, or leave it out and the reviewer judges its tests at the end`];
   });
   return [...shared, ...contracts, ...untestable];
@@ -272,8 +293,31 @@ export default function pb(pi: ExtensionAPI) {
           preGreen = earlierId;
         }
       }
-      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, red, redCommand, redShared: sharing.get(t.id), preGreen };
+      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, changed: prev?.changed, caveat: prev?.caveat, rejected: prev?.rejected, open: prev?.open, red, redCommand, redShared: sharing.get(t.id), preGreen };
     });
+  };
+
+  /**
+   * Files finished tasks changed, from their checkpoints: what the current task inherits and
+   * must not redo. Harness-computed from snapshots (never the model's claim), so a task that
+   * changed nothing outside its slice shows up here. Empty outside git or without checkpoints.
+   */
+  const touchedSuffix = (ctx: ExtensionContext, store: Store, p: Progress, currentId: string): string => {
+    if (!store.config().checkpoints) return "";
+    let cps: ReturnType<Store["checkpoints"]> = [];
+    try {
+      cps = store.checkpoints(p.spec);
+    } catch {
+      return "";
+    }
+    const lines: string[] = [];
+    for (const t of p.tasks) {
+      if (t.id === currentId || t.status !== "done") continue;
+      const files = cps.find((c) => c.id === t.id)?.files ?? [];
+      if (!files.length) continue;
+      lines.push(`- ${t.id}: ${files.slice(0, 12).join(", ")}${files.length > 12 ? `, +${files.length - 12} more` : ""}`);
+    }
+    return lines.length ? `\n\nTouched so far, by finished tasks (re-read what you need; don't redo it, and flag a file outside the task's slice):\n${lines.join("\n")}` : "";
   };
 
   /** What the agent is told for a step of the build: a spec task. */
@@ -281,7 +325,7 @@ export default function pb(pi: ExtensionAPI) {
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     const tp = p.tasks.find((t) => t.id === task.id);
     const red = needsRed(spec, task);
-    return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.red);
+    return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.red) + touchedSuffix(ctx, store, p, task.id);
   };
 
   /**
@@ -367,10 +411,16 @@ export default function pb(pi: ExtensionAPI) {
   /**
    * A dialog that goes on without you: after askTimeoutSec idle (with a countdown), `fallback`
    * is taken and noted in `notes`, so a build started before you walk away doesn't wait all night.
-   * Esc still cancels (undefined).
+   * Esc still cancels (undefined). A replaced session also reads as dismissed (undefined): every
+   * caller already treats that as stop, so a moved-on human never gets a stale-context error.
    */
   const choose = async (ctx: ExtensionContext, store: Store, title: string, options: string[], fallback: string, notes?: string[]): Promise<string | undefined> => {
-    if (!ctx.hasUI) return fallback;
+    try {
+      if (!ctx.hasUI) return fallback;
+    } catch (e) {
+      if (!sessionGone(ctx)) throw e;
+      return undefined;
+    }
     // It goes on without you: tell you, in case you're in another window.
     if (store.config().notify) notifyDesktop("pb: your choice", title);
     const ms = store.config().askTimeoutSec * 1000;
@@ -461,6 +511,8 @@ export default function pb(pi: ExtensionAPI) {
       if (!spec) throw new Error(`The spec doesn't parse:\n- ${errors.join("\n- ")}\nFix it and call pb_write_spec again.`);
       const markerErrs = acceptanceMarkerErrors(spec);
       if (markerErrs.length) throw new Error(`Acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
+      const semErrs = semanticErrors(params.content, spec);
+      if (semErrs.length) throw new Error(`The spec needs senior shape before it is ready:\n- ${semErrs.join("\n- ")}\nFix it and call pb_write_spec again.`);
       const store = new Store(ctx.cwd);
       const prev = store.progress(params.name);
       store.writeSpec(params.name, params.content);
@@ -508,9 +560,22 @@ export default function pb(pi: ExtensionAPI) {
       if (params.status) md = setStatus(md, params.status as "planning" | "ready");
       const { spec, errors } = parseSpec(md);
       if (!spec) throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.join("\n- ")}`);
-      if ((params.section?.replace(/^#+\s*/, "").trim().toLowerCase() ?? "") === "tasks") {
+      const sectionName = params.section?.replace(/^#+\s*/, "").trim().toLowerCase() ?? "";
+      if (sectionName === "tasks") {
         const markerErrs = acceptanceMarkerErrors(spec);
         if (markerErrs.length) throw new Error(`Not written: acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
+      }
+      // Tasks edits re-check the task-scoped gates (Threats, numbers, Contracts);
+      // a transition into ready re-checks the full senior shape. Other section
+      // edits on an already-ready spec stay quiet so build-time notes keep flowing.
+      const prevMd = store.readSpec(name) ?? "";
+      const wasReady = parseSpec(prevMd).spec?.status === "ready";
+      if (spec.status === "ready" && sectionName === "tasks") {
+        const taskErrs = taskScopeSemanticErrors(md, spec);
+        if (taskErrs.length) throw new Error(`Not written: the spec needs senior shape before it is ready:\n- ${taskErrs.join("\n- ")}`);
+      } else if (spec.status === "ready" && !wasReady && params.status === "ready") {
+        const semErrs = semanticErrors(md, spec);
+        if (semErrs.length) throw new Error(`Not written: the spec needs senior shape before it is ready:\n- ${semErrs.join("\n- ")}`);
       }
       store.writeSpec(name, md);
       const prev = store.progress(name);
@@ -843,11 +908,15 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_task_done",
     label: "Task done",
     description:
-      'In a pb build: finish the task the harness gave you. status done: the harness runs the task\'s check and answers with the failure to fix, or the next task. status blocked: it can\'t be done properly (say why); the build pauses for the human.',
+      'In a pb build: finish the task the harness gave you. status done: the harness runs the task\'s check and answers with the failure to fix, or the next task — report changed (what you changed), caveat (what the next task must respect), rejected (what you tried and discarded) and open (what is still unchecked), each required, "none" where there is genuinely nothing. status blocked: it can\'t be done properly (summary says why); the build pauses for the human.',
     parameters: Type.Object({
       task: Type.String({ description: 'the task id, e.g. "T2" (or "final" for the final check)' }),
       status: StringEnum(["done", "blocked"]),
-      summary: Type.String({ description: "what you changed and why, and what you checked with what result" }),
+      summary: Type.Optional(Type.String({ description: 'blocked only: why it can\'t be done properly' })),
+      changed: Type.Optional(Type.String({ description: "done only: what you changed" })),
+      caveat: Type.Optional(Type.String({ description: 'done only: what the next task must respect ("none" when nothing)' })),
+      rejected: Type.Optional(Type.String({ description: 'done only: what you tried and discarded ("none" when nothing)' })),
+      open: Type.Optional(Type.String({ description: 'done only: what is still unchecked ("none" when nothing)' })),
     }),
     executionMode: "sequential",
     async execute(_id, params, signal, _onUpdate, ctx) {
@@ -855,7 +924,23 @@ export default function pb(pi: ExtensionAPI) {
       if (!p || p.phase !== "building") throw new Error("No pb build is running in this session.");
       if (params.task !== p.current) throw new Error(`The current task is ${p.current ?? "none"}, not ${params.task}.`);
       const tp = p.tasks.find((t) => t.id === p.current);
-      if (tp) tp.summary = params.summary;
+      const blank = (v: unknown) => typeof v !== "string" || !v.trim();
+      if (params.status === "blocked") {
+        if (blank(params.summary)) throw new Error(`status "blocked" needs summary: why it can't be done properly.`);
+        if (tp) tp.summary = (params.summary as string).trim();
+      } else {
+        const missing = (["changed", "caveat", "rejected", "open"] as const).filter((k) => blank(params[k]));
+        if (missing.length)
+          throw new Error(
+            `status "done" needs ${missing.join(", ")}: report what changed, what the next task must respect, what was tried and discarded, and what is still unchecked (write "none" where there is genuinely nothing).`,
+          );
+        if (tp) {
+          tp.changed = (params.changed as string).trim();
+          tp.caveat = (params.caveat as string).trim();
+          tp.rejected = (params.rejected as string).trim();
+          tp.open = (params.open as string).trim();
+        }
+      }
       const loaded = loadSpec(store, p.spec);
       if (!loaded) {
         pauseBuild(ctx, store, p, `${store.rel("specs", p.spec, "spec.md")} no longer parses; fix it, then /${cmd("build")}.`, "build.paused", "spec");
@@ -911,7 +996,7 @@ export default function pb(pi: ExtensionAPI) {
           tp.preGreen = earlier.id;
           store.saveProgress(p);
           return reply(
-            `\`${task.test}\` already passes: ${earlier.id} (done, same Test: command) proved it and its change satisfies it — red is impossible for ${p.current} now. Confirm ${p.current}'s acceptance holds on top of ${earlier.id}'s change (read the code and tests; don't rerun the command), say so in your summary, then pb_task_done. This run proves nothing of ${p.current}'s own tests; the reviewer is told.`,
+            `\`${task.test}\` already passes: ${earlier.id} (done, same Test: command) proved it and its change satisfies it — red is impossible for ${p.current} now. Confirm ${p.current}'s acceptance holds on top of ${earlier.id}'s change (read the code and tests; don't rerun the command), say so in your changed, then pb_task_done. This run proves nothing of ${p.current}'s own tests; the reviewer is told.`,
           );
         }
         return reply(
@@ -1008,7 +1093,7 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   /** Start planning mode for this session (the snapshot shows later what changed while it was on). */
-  const startPlanning = (ctx: ExtensionContext, store: Store): boolean => {
+  const startPlanning = (ctx: ExtensionContext, store: Store, request?: string): boolean => {
     const session = ctx.sessionManager.getSessionFile();
     if (!session) {
       // Every planning guard keys off the session file (edit/write block, undo snapshots, checkpointing): without it,
@@ -1019,7 +1104,9 @@ export default function pb(pi: ExtensionAPI) {
     const existing = store.planning(session)?.snapshot;
     const checkpoints = store.config().checkpoints;
     const snap = existing ? undefined : checkpoints ? snapshot(ctx.cwd, "pb: start of planning") : undefined;
-    store.setPlanning(session, true, existing ?? snap?.commit);
+    // The verbatim request is recorded (an explicit arg wins, otherwise whatever is already there survives),
+    // so the checkpoint summary keeps what was asked even after a long discussion.
+    store.setPlanning(session, true, existing ?? snap?.commit, request ?? store.planning(session)?.request);
     store.detachSession(session);
     ctx.ui.setWidget("pb-plan", ["planning · /pb:plan off"]);
     if (!existing && !snap?.commit) ctx.ui.notify(noSnapshotWarning(checkpoints), "warning");
@@ -1142,7 +1229,7 @@ export default function pb(pi: ExtensionAPI) {
         const snap = checkpoints ? snapshot(c.cwd, "pb: start of planning") : undefined;
         const session = c.sessionManager.getSessionFile();
         newSessionFile = session ?? undefined;
-        if (session) ns.setPlanning(session, true, snap?.commit);
+        if (session) ns.setPlanning(session, true, snap?.commit, store.planning(oldSession ?? "")?.request);
         if (session) c.ui.setWidget("pb-plan", ["planning · /pb:plan off"]);
         if (!snap?.commit) c.ui.notify(noSnapshotWarning(checkpoints), "warning");
         // Same staleness check as /pb:plan: the map may have rotted since the old session.
@@ -1173,7 +1260,7 @@ export default function pb(pi: ExtensionAPI) {
     });
     if (result.cancelled) {
       store.clearCarry(); // its handover must not leak into a later, unrelated new session
-      ctx.ui.notify("Cancelled.", "info");
+      if (!sessionGone(ctx)) ctx.ui.notify("Cancelled.", "info");
       return;
     }
     if (oldSession && newSessionFile && oldSession !== newSessionFile && store.planning(oldSession) && store.specsOfPlanning(oldSession).length === 0) {
@@ -1229,7 +1316,7 @@ export default function pb(pi: ExtensionAPI) {
       await offerStandards(ctx, store);
 
       // After the standards offer: its AGENTS.md isn't a change made while planning.
-      if (!startPlanning(ctx, store)) return;
+      if (!startPlanning(ctx, store, arg)) return;
       pi.setSessionName(`plan: ${title}`);
       // A cheap staleness check of the project map, no model call: paths it names that are gone.
       warnStaleMap(ctx);
@@ -1238,7 +1325,7 @@ export default function pb(pi: ExtensionAPI) {
       const baseline = cfg.baseline && !!testCmd;
       const started = baseline ? startBaseline(ctx, store, testCmd!) : false;
       instruct(
-        `▶ /${cmd("plan")} — ${title} (the project's files stay untouched)${baseline ? (started ? ` · running \`${testCmd}\` in the background for a baseline` : ` · baseline already running — its result lands here`) : ""}\nThis session: "plan: ${title}" · back to it any time with /resume, or \`pi --session ${ctx.sessionManager.getSessionId()}\` · \`/${cmd("plan")}\` off ends planning`,
+        `▶ /${cmd("plan")} — ${title} (the project's files stay untouched)${baseline ? (started ? ` · running \`${testCmd}\` in the background for a baseline` : ` · baseline already running — its result lands here`) : ""}\nThis session: "plan: ${title}" · back to it any time with /resume, or \`pi --session ${ctx.sessionManager.getSessionId()}\` · \`/${cmd("plan")}\` off ends planning\n\n${arg.split("\n").map((l) => `> ${l}`).join("\n")}`,
         planPrompt(cap(arg, MODEL_ARG_CAP), testCmd, standardsFor(ctx), baseline ? "running" : "none", store.extra("plan")),
       );
     },
@@ -1267,7 +1354,7 @@ export default function pb(pi: ExtensionAPI) {
       const store = new Store(ctx.cwd);
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       await offerStandards(ctx, store);
-      if (!startPlanning(ctx, store)) return;
+      if (!startPlanning(ctx, store, args.trim() ? `/pb:deps ${args.trim()}` : "/pb:deps")) return;
       pi.setSessionName(`deps: ${planTitle(args.trim()) || "all"}`);
       // Same staleness check as /pb:plan: the investigation starts from the map.
       warnStaleMap(ctx);
@@ -1319,7 +1406,15 @@ export default function pb(pi: ExtensionAPI) {
       store.writeSpec(name, edited);
       const prev = store.progress(name);
       if (prev) store.saveProgress({ ...prev, tasks: syncTasks(spec, prev.tasks), edited: true });
-      store.event(name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, by: "human" });
+      // Human edits save on parse alone: the human is the guardrail here, not the
+      // model. Senior-shape drift is reported visibly (never silently bypassed).
+      const shapeAdvisory = semanticErrors(edited, spec);
+      store.event(name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, by: "human", ...(shapeAdvisory.length ? { override: true, issues: shapeAdvisory.length } : {}) });
+      if (shapeAdvisory.length)
+        return ctx.ui.notify(
+          `Saved ${store.rel("specs", name, "spec.md")} with human override: ${shapeAdvisory.length} senior-shape note(s) bypassed (the reviewer still judges truth):\n- ${shapeAdvisory.join("\n- ")}`,
+          "warning",
+        );
       return ctx.ui.notify(`Saved ${store.rel("specs", name, "spec.md")}.`, "info");
     }
   };
@@ -1544,7 +1639,7 @@ export default function pb(pi: ExtensionAPI) {
     const cps = store.checkpoints(p.spec);
     const cp = cps.find((c) => c.id === p.current);
     if (cp) {
-      cp.summary = `${p.current} ✓ · ${(cp.files ?? []).length} files · ${(tp?.summary ?? "").replace(/\s+/g, " ")}`;
+      cp.summary = `${p.current} ✓ · ${(cp.files ?? []).length} files · ${(tp?.changed ?? tp?.summary ?? "").replace(/\s+/g, " ")}`;
       store.saveCheckpoints(p.spec, cps);
     }
     const notices = found.length ? `\n⚠ ${found.join("\n⚠ ")}` : "";
@@ -1735,7 +1830,7 @@ export default function pb(pi: ExtensionAPI) {
       }
       return {
         entries: [
-          { type: "compaction" as const, summary: checkpointSummary(specs, pending.last), firstKeptEntryId: null, details: { pb: "checkpoint", specs: planned } },
+          { type: "compaction" as const, summary: checkpointSummary(specs, pending.last, store.planning(session)?.request), firstKeptEntryId: null, details: { pb: "checkpoint", specs: planned } },
           {
             type: "custom_message" as const,
             customType: "pb",
@@ -1867,7 +1962,7 @@ export default function pb(pi: ExtensionAPI) {
         for (const n of planned) store.event(n, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, planning: true });
         return {
           compaction: {
-            summary: checkpointSummary(planned.map((n) => ({ name: n, markdown: store.readSpec(n) ?? "" }))),
+            summary: checkpointSummary(planned.map((n) => ({ name: n, markdown: store.readSpec(n) ?? "" })), undefined, store.planning(session)?.request),
             firstKeptEntryId: ev.preparation.firstKeptEntryId,
             tokensBefore: ev.preparation.tokensBefore,
           },
@@ -1965,6 +2060,13 @@ export default function pb(pi: ExtensionAPI) {
       if (!(await agree(ctx, store, baselineQuestion(store.baseline(ctx.sessionManager.getSessionFile() ?? undefined)!), notes))) return undefined;
     }
     if (!o.checked && !(await reviewPlanningChanges(ctx, store, notes))) return undefined;
+    // Post-ready drift (e.g. via human edits, which save on parse alone) is advisory
+    // here, never blocking: the human sees it now, the reviewer judges it later.
+    const shapeAdvisory = semanticErrors(md, spec);
+    if (shapeAdvisory.length) {
+      notes.push(`Spec-shape advisory (build proceeds):\n${shapeAdvisory.map((e) => `- ${e}`).join("\n")}`);
+      ctx.ui.notify(`Spec-shape advisory: ${shapeAdvisory.length} senior-shape note(s); listed in the build summary for the reviewer to judge.`, "warning");
+    }
     if (!cfg.checkpoints) ctx.ui.notify("Checkpoints are off: this build runs without undo points, and without the test-tampering checks.", "warning");
     return { spec, md, cfg, buildCmd };
   };
@@ -2096,7 +2198,7 @@ export default function pb(pi: ExtensionAPI) {
     });
     if (result.cancelled) {
       store.clearCarry(); // its handover must not leak into a later, unrelated new session
-      ctx.ui.notify("Build cancelled.", "info");
+      if (!sessionGone(ctx)) ctx.ui.notify("Build cancelled.", "info");
     }
   };
 
@@ -2124,7 +2226,7 @@ export default function pb(pi: ExtensionAPI) {
       sessionDir: store.sessionsDir("spec-review"),
     });
     const parsed = parseSpecReview(res.text);
-    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length });
+    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length, reported: parsed.findings });
     return parsed;
   };
 
@@ -2142,6 +2244,7 @@ export default function pb(pi: ExtensionAPI) {
 
     if (!readEvents(path.join(store.specDir(name), "events.jsonl")).some((e) => e.type === "spec-review")) {
       const review = await runSpecReview(ctx, store, name, md);
+      if (sessionGone(ctx)) return; // replaced while it ran: the verdict is recorded, rerunning resumes from it
       if (review.findings.length) {
         post(`**Spec review** — ${review.block ? "changes needed before T1" : "advisory findings"}:\n${review.findings.map((f, i) => findingLine(f, i + 1)).join("\n")}`);
       }
@@ -2301,13 +2404,18 @@ export default function pb(pi: ExtensionAPI) {
     instruct(marker, `${prompt}\n\nAfter writing it, stop: the build starts by itself.`);
     // Wait for the spec here, in the command: the run starts right after this handler hands it over.
     // Capped: on timeout the pending offer below picks the spec up once it is written.
+    // The human may move on while waiting: a dead session ends the wait quietly (nothing is
+    // consumed, so a later /pb:build still offers the spec).
     try {
       for (let i = 0; i < 40 && ctx.isIdle(); i++) await new Promise((r) => setTimeout(r, 50));
       if (cfg.specWaitSec > 0) await Promise.race([ctx.waitForIdle(), sleep(cfg.specWaitSec * 1000)]);
       else await ctx.waitForIdle();
+    } catch (e) {
+      if (!sessionGone(ctx)) throw e;
     } finally {
       if (session) specWriting.delete(session);
     }
+    if (sessionGone(ctx)) return;
     const ready = readySpecs(store, session, since);
     if (!ready.length) {
       // A question in chat, or the spec isn't ready yet: pb offers the build once it is.
@@ -2321,7 +2429,9 @@ export default function pb(pi: ExtensionAPI) {
         : "";
       return post(`No spec ready to build yet. Answer Pi's questions; once the spec is written, pb shows it and asks how to build.${hint}`);
     }
-    showSpec(store, ready[0], ready, await dryRunTests(ctx, store, ready[0]));
+    const dry = await dryRunTests(ctx, store, ready[0]);
+    if (sessionGone(ctx)) return; // replaced during the dry run: a later /pb:build still offers the spec
+    showSpec(store, ready[0], ready, dry);
     await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes });
   };
 
@@ -2337,7 +2447,13 @@ export default function pb(pi: ExtensionAPI) {
     const loaded = loadSpec(store, name);
     if (!loaded) return true;
     const { spec } = loaded;
-    showSpec(store, name, names, await dryRunTests(ctx, store, name));
+    const dry = await dryRunTests(ctx, store, name);
+    if (sessionGone(ctx)) {
+      // Replaced during the dry run: offer again on a later turn instead of dying mid-offer.
+      if (session) store.setPendingBuild(session);
+      return true;
+    }
+    showSpec(store, name, names, dry);
     if (!ctx.hasUI) {
       post(tip("spec.next"));
       return true;
@@ -2354,6 +2470,11 @@ export default function pb(pi: ExtensionAPI) {
     for (;;) {
       // Unanswered, it builds here: a fresh session can't be opened from here, only from a command.
       const choice = await choose(ctx, store, `Build ${name} now? ${spec.tasks.length} tasks`, preferFresh ? [FRESH, HERE, EDIT, LATER] : [HERE, FRESH, EDIT, LATER], HERE, notes);
+      if (sessionGone(ctx)) {
+        // Replaced while deciding: offer again on a later turn instead of dying mid-offer.
+        if (session) store.setPendingBuild(session);
+        return true;
+      }
       if (choice === EDIT) {
         await editSpec(ctx, store, name);
         continue;
@@ -2507,7 +2628,7 @@ export default function pb(pi: ExtensionAPI) {
           ? `${buildIntro(p.spec, loaded.spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : loaded.md, store.extra("build"))}\n\n${t.prompt}`
           : again
             ? t.prompt
-            : continuePrompt(t.task);
+            : continuePrompt(t.task) + touchedSuffix(ctx, store, p, cur);
         return instruct(t.marker, body + from);
       }
 
@@ -2721,8 +2842,7 @@ export default function pb(pi: ExtensionAPI) {
   const reviewFinish = async (from: ExtensionCommandContext, store: Store, run: ReviewRun): Promise<void> => {
     const cfg = store.config();
     const widget = (t?: string[]) => safely(() => from.ui.setWidget("pb-review", t));
-    let textNow = "";
-    const all = allFindings(run);
+    const all = mergeFindings(allFindings(run));
     const checked =
       cfg.reviewer.verify === false
         ? { findings: all, dismissed: [], error: undefined as string | undefined, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 }
@@ -2734,10 +2854,9 @@ export default function pb(pi: ExtensionAPI) {
             model: run.model,
             thinking: run.thinking,
             sessionDir: run.name ? store.specSessionsDir(run.name, "verifier") : store.sessionsDir("verifier"),
-            onActivity: (a) => widget([`pb review ${run.label} — verifying P0/P1 findings`, `  ↳ ${a}`, ...tail(textNow).map((l) => `  │ ${l}`)]),
-            onText: (t) => {
-              textNow = t;
-            },
+            // Activity only, never the verifier's streaming prose: the verdict lands in the session,
+            // and the saved run holds the whole transcript for audit.
+            onActivity: (a) => widget([`pb review ${run.label} — verifying P0/P1 findings`, `  ↳ ${a}`]),
           });
     widget(undefined);
     const after = run.before ? snapshot(run.cwd, `pb: after review ${run.label}`) : undefined;
@@ -2949,6 +3068,7 @@ export default function pb(pi: ExtensionAPI) {
         testChanges: p?.testChanges,
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
         designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
+        humanOverride: p?.edited ? "This spec was edited by hand after writing, so write-time gates were bypassed visibly rather than silently: judge its shape (Threats, measurements, Contracts, evidence, reasons) as well as its truth." : undefined,
         staleRefs: staleProseRefs(ctx.cwd, base),
       });
       // Only plain values from here on: `ctx` belongs to this session, which the first pass replaces.
@@ -3072,7 +3192,7 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   pi.registerCommand(cmd("fix"), {
-    description: "Fix review findings in a fresh fenced session: /pb:fix [finding ids]. No ids = all open findings. Run /pb:review afterwards: it checks only those findings and what changed",
+    description: "Fix P0-P2 review findings in a fresh fenced session: /pb:fix [finding ids]. No ids = all open findings (P3 nits are never open: fix those by hand). Run /pb:review afterwards: it checks only those findings and what changed",
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
@@ -3108,7 +3228,7 @@ export default function pb(pi: ExtensionAPI) {
         }
         if (misses.length || !picked.length) {
           return ctx.ui.notify(
-            `No such finding${misses.length === 1 ? "" : "s"}: ${(misses.length ? misses : ids).join(", ")}. Open findings for \`${name}\`:${open.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
+            `No such finding${misses.length === 1 ? "" : "s"}: ${(misses.length ? misses : ids).join(", ")}. \`/pb:fix\` takes P0–P2 ids (P3 nits are never open: fix those by hand). Open findings for \`${name}\`:${open.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
             "warning",
           );
         }
@@ -3152,9 +3272,8 @@ export default function pb(pi: ExtensionAPI) {
     const abort = new AbortController();
     const canEsc = ctx.hasUI && ctx.mode === "tui" && typeof ctx.ui.onTerminalInput === "function";
     const unsubEsc = canEsc ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
-    let textNow = "";
     const render = (phase: string, activity?: string) =>
-      safely(() => ctx.ui.setWidget("pb-map", [`pb map — ${phase}${canEsc ? "   (Esc to stop)" : ""}`, ...(activity ? [`  ↳ ${activity}`] : []), ...tail(textNow).map((l) => `  │ ${l}`)]));
+      safely(() => ctx.ui.setWidget("pb-map", [`pb map — ${phase}${canEsc ? "   (Esc to stop)" : ""}`, ...(activity ? [`  ↳ ${activity}`] : [])]));
     let mapSession: string | undefined;
     const cartographer = (brief: string, phase: string) =>
       runFresh({
@@ -3168,11 +3287,9 @@ export default function pb(pi: ExtensionAPI) {
         model: cfg.explorer.model ?? sessionModel(ctx),
         thinking: cfg.explorer.thinking ?? "max",
         signal: abort.signal,
+        // Activity only, never the cartographer's streaming prose: the proposed map arrives
+        // via the approve step, and the saved run holds the whole transcript for audit.
         onActivity: (a) => render(phase, a),
-        onText: (t) => {
-          textNow = t;
-          render(phase);
-        },
         sessionDir: store.sessionsDir("cartographer"),
       }).then((r) => {
         mapSession = r.sessionFile ?? mapSession;
