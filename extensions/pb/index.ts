@@ -6,7 +6,7 @@
   *   /pb:approach [idea]    in planning: hear how Pi would approach it (chat only: no writes, no dialogs)
  *   /pb:compact [undo]     planning: write the plan to its spec and reset to it; build: compact to the build's state
  *   /pb:spec [which]       write or revise the spec(s) from the discussion
- *   /pb:build [name]       build a spec here (--fresh: in a new session); resumes after a pause
+ *   /pb:build [name]       build a spec here (--fresh: in a new session; --force: skip the spec review); resumes after a pause
  *   /pb:review [focus]     fresh, independent review against the spec, or of any uncommitted change
  *   /pb:deps [scope]       check dependencies and propose upgrades, as a change of their own
  *   /pb:undo [id]          restore the files, and rewind the conversation, to before a task
@@ -20,11 +20,12 @@
  * outranks the model's own "done", and fresh eyes against anchoring. pb has since
  * deviated far from it; see the README's credits.
  */
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { changedPaths, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
+import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { notifyDesktop } from "./notify.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import {
@@ -62,7 +63,7 @@ import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, mergeFindings, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, taskScopeSemanticErrors, tokensOf } from "./spec.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewGate, taskScopeSemanticErrors, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
@@ -185,10 +186,11 @@ const specWarnings = (md: string, spec: ParsedSpec): string[] => {
       if (suspiciousCommand(t.test)) return [`${t.id}'s Test: \`${t.test}\` chains shells or reaches the network — it runs with your privileges, so review it before building; the dry-run below doesn't execute it`];
       return [];
     }
-    // A declared doc-only task whose every acceptance line is already exempted needs no nudge:
-    // the reviewer judges whether the exemption is legitimate, as with any (non-testable:) line.
-    if (/doc-only|prose-only/i.test(t.text) && t.text.split("\n").filter((l) => acceptanceLine.test(l)).every((l) => /\(non-testable:/.test(l))) return [];
-    return [`${t.id} adds behaviour but has no Test:: add a targeted command, or leave it out and the reviewer judges its tests at the end`];
+    // A declared doc-only task (doc-only, documentation-only, prose-only) whose every acceptance
+    // line is already exempted needs no nudge: the reviewer judges whether the exemption is
+    // legitimate, as with any (non-testable:) line.
+    if (/doc(?:s|umentation)?[- ]only|prose[- ]only/i.test(t.text) && t.text.split("\n").filter((l) => acceptanceLine.test(l)).every((l) => /\(non-testable:/.test(l))) return [];
+    return [`${t.id} adds behaviour but has no Test: line — add a targeted command, or leave it out and the reviewer judges its tests at the end`];
   });
   return [...shared, ...contracts, ...untestable];
 };
@@ -258,6 +260,29 @@ export default function pb(pi: ExtensionAPI) {
     const md = store.readSpec(name);
     const spec = md ? parseSpec(md).spec : undefined;
     return md && spec ? { md, spec } : undefined;
+  };
+
+  /**
+   * Append one Decisions line to a spec, or refuse with the reason. The result must still parse: a
+   * writer that doesn't recognise a heading its readers accept once produced a duplicate section.
+   * The one write path for decisions, assumptions and /pb:build guidance.
+   */
+  const appendDecision = (store: Store, name: string, text: string, update: "decisions" | "guidance" = "decisions"): string | undefined => {
+    const md = store.readSpec(name);
+    if (!md) return `no spec "${name}"`;
+    const updated = addDecision(md, text);
+    const errors = parseSpec(updated).errors;
+    if (errors.length) return `the spec wouldn't parse afterwards: ${errors.join("; ")}`;
+    store.writeSpec(name, updated);
+    store.event(name, { type: "spec", update });
+    return undefined;
+  };
+
+  /** Put back what a fresh run (explorer, trier) changed; a guard that couldn't run is said out loud. */
+  const revertFreshRun = (ctx: ExtensionContext, what: string, before: Snapshot | undefined, after: Snapshot | undefined) => {
+    if (!before || !after || before.tree === after.tree) return;
+    const r = restore(ctx.cwd, after.commit, before.commit);
+    if (r.guardFailed) ctx.ui.notify(`Couldn't check what ${what} changed (the guard snapshot failed), so nothing was put back: check the working tree yourself.`, "warning");
   };
 
   /** Keep task statuses by id when a spec is (re)written; new tasks start as todo. */
@@ -480,11 +505,21 @@ export default function pb(pi: ExtensionAPI) {
   /**
    * Mid-task compactions with no forward progress in a row, by session: the thrash guard's memory.
    * In-memory (a crash just delays it); a task boundary is progress by construction, so only the
-   * Pi-compaction path reads it.
+   * Pi-compaction path reads it. `findings` counts what a review pass has reported, so findings
+   * written between two compactions count as progress even when nothing new was read.
    */
-  const compactStalls = new Map<string, { task?: string; changed: string[]; read: string[]; tokens: number; strikes: number }>();
-  /** Compacting this often with nothing changed, read, or shrunk means stuck, not long: pause instead of looping. */
+  const compactStalls = new Map<string, { task?: string; changed: string[]; read: string[]; tokens: number; strikes: number; findings?: number }>();
+  /** How many sessions' stall state is kept; older ones are dropped so a long-lived process doesn't grow. */
+  const STALL_MEMORY = 64;
+  /** Compacting this often with nothing changed, read, shrunk or reported means stuck, not long: pause instead of looping. */
   const COMPACT_STALL_LIMIT = 3;
+  const rememberStall = (session: string, stall: { task?: string; changed: string[]; read: string[]; tokens: number; strikes: number; findings?: number }) => {
+    compactStalls.set(session, stall);
+    for (const k of compactStalls.keys()) {
+      if (compactStalls.size <= STALL_MEMORY) break;
+      if (k !== session) compactStalls.delete(k);
+    }
+  };
   // Set by /pb:undo while it rewinds the conversation: the branch summary pb supplies instead of an LLM's.
   let undoSummary: string | undefined;
   // A task boundary happened in this turn: the moment pruning is allowed.
@@ -501,7 +536,7 @@ export default function pb(pi: ExtensionAPI) {
     description:
       "Write or rewrite a pb feature spec (.pi/pb/specs/<name>/spec.md). Use it when the user runs /pb:spec or /pb:build asks for the spec. The content must follow the spec format the user's instructions give; the tool rejects a spec that doesn't parse and says why.",
     parameters: Type.Object({
-      name: Type.String({ description: "short kebab-case name, e.g. order-cancellation" }),
+      name: Type.String({ description: "short kebab-case spec name (the folder under .pi/pb/specs/, not a path), e.g. order-cancellation" }),
       content: Type.String({ description: "the complete spec in markdown" }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -565,17 +600,18 @@ export default function pb(pi: ExtensionAPI) {
         const markerErrs = acceptanceMarkerErrors(spec);
         if (markerErrs.length) throw new Error(`Not written: acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
       }
-      // Tasks edits re-check the task-scoped gates (Threats, numbers, Contracts);
-      // a transition into ready re-checks the full senior shape. Other section
-      // edits on an already-ready spec stay quiet so build-time notes keep flowing.
+      // A call that makes the spec ready re-checks the full senior shape, whatever else it wrote
+      // in the same call (findings and decisions evidence included). A Tasks edit on an already-ready
+      // spec re-checks the task-scoped gates; other section edits stay quiet so build-time notes flow.
       const prevMd = store.readSpec(name) ?? "";
       const wasReady = parseSpec(prevMd).spec?.status === "ready";
-      if (spec.status === "ready" && sectionName === "tasks") {
-        const taskErrs = taskScopeSemanticErrors(md, spec);
-        if (taskErrs.length) throw new Error(`Not written: the spec needs senior shape before it is ready:\n- ${taskErrs.join("\n- ")}`);
-      } else if (spec.status === "ready" && !wasReady && params.status === "ready") {
+      const becameReady = spec.status === "ready" && !wasReady && params.status === "ready";
+      if (becameReady) {
         const semErrs = semanticErrors(md, spec);
         if (semErrs.length) throw new Error(`Not written: the spec needs senior shape before it is ready:\n- ${semErrs.join("\n- ")}`);
+      } else if (spec.status === "ready" && sectionName === "tasks") {
+        const taskErrs = taskScopeSemanticErrors(md, spec);
+        if (taskErrs.length) throw new Error(`Not written: the spec needs senior shape before it is ready:\n- ${taskErrs.join("\n- ")}`);
       }
       store.writeSpec(name, md);
       const prev = store.progress(name);
@@ -602,7 +638,8 @@ export default function pb(pi: ExtensionAPI) {
       const md = name ? store.readSpec(name) : undefined;
       if (!name || !md || !progress) throw new Error("This is not a pb build session. In planning, decisions stay in the discussion and enter the spec via /pb:spec or /pb:build — carry on.");
       const entry = params.assumption ? `Assumption (build${progress.current ? `, ${progress.current}` : ""}): ${params.decision}` : params.decision;
-      store.writeSpec(name, addDecision(md, entry));
+      const refused = appendDecision(store, name, entry);
+      if (refused) throw new Error(`Not recorded: ${refused}. Fix the spec (pb_update_spec) and record the decision again.`);
       if (params.assumption) {
         progress.assumptions = [...(progress.assumptions ?? []), entry];
         store.saveProgress(progress);
@@ -684,26 +721,26 @@ export default function pb(pi: ExtensionAPI) {
         if (timedOut && building && params.recommended) {
           const minutes = Math.round(timeoutMs / 60_000);
           const entry = `Assumption (build, ${p!.current}, no answer within ${minutes} min): ${params.question.replace(/\s+$/, "")} → ${params.recommended}`;
-          const md = store.readSpec(name!);
-          if (md) store.writeSpec(name!, addDecision(md, entry));
+          const refused = appendDecision(store, name!, entry);
           p!.assumptions = [...(p!.assumptions ?? []), entry];
           store.saveProgress(p!);
           store.event(name!, { type: "ask", task: p!.current, timedOut: true });
-          return reply(`No answer within ${minutes} min: go on with your recommendation (${params.recommended}); it's recorded as an assumption for the review.${KEPT}`);
+          return reply(`No answer within ${minutes} min: go on with your recommendation (${params.recommended}); ${refused ? `the spec wouldn't take it (${refused}) — it stays among the build's assumptions in the build summary; record it with pb_record_decision once the spec parses` : "it's recorded as an assumption for the review"}.${KEPT}`);
         }
         const record = building
           ? ", record it with pb_record_decision (assumption: true)"
           : "";
         return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: ${stayedOpen ? "leave this undecided — record it under Open questions and do not take a reading or write it as an Assumption. Planning stays incomplete until it is answered." : `take the sensible reading${timedOut && params.recommended ? ` (your recommendation: ${params.recommended})` : ""}${record} and carry on.`}${KEPT}`);
       }
+      let recorded = "";
       if (building) {
         // Human answers are decisions, not assumptions: they live in the spec's Decisions for the
         // reviewer. p.assumptions is only for builder-made choices (timeout recommendations above).
-        const md = store.readSpec(name!);
-        if (md) store.writeSpec(name!, addDecision(md, `${params.question.replace(/\s+$/, "")} → ${answer.trim()}`));
+        const refused = appendDecision(store, name!, `${params.question.replace(/\s+$/, "")} → ${answer.trim()}`);
         store.event(name!, { type: "ask", task: p!.current });
+        recorded = refused ? ` (the spec wouldn't take it: ${refused} — record it with pb_record_decision)` : " (recorded in the spec's Decisions)";
       }
-      return reply(`The human answered: ${answer.trim()}${building ? " (recorded in the spec's Decisions)" : ""}`);
+      return reply(`The human answered: ${answer.trim()}${recorded}`);
     },
   });
 
@@ -784,7 +821,7 @@ export default function pb(pi: ExtensionAPI) {
         }
       });
       const after = snapshot(ctx.cwd, "pb: after explore");
-      if (before && after && before.tree !== after.tree) restore(ctx.cwd, after.commit, before.commit);
+      revertFreshRun(ctx, "the explorer", before, after);
       store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
       if (res.aborted) throw new Error("Exploration stopped. Narrow the question to one area or split it across two calls in one block; what was already read is listed above.");
       if (!res.text.trim()) throw new Error(`The explorer produced no answer${res.error ? `: ${res.error}` : ""}`);
@@ -867,7 +904,7 @@ export default function pb(pi: ExtensionAPI) {
         }
       });
       const after = snapshot(ctx.cwd, "pb: after try");
-      if (before && after && before.tree !== after.tree) restore(ctx.cwd, after.commit, before.commit);
+      revertFreshRun(ctx, "the trier", before, after);
       store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
       if (res.aborted) throw new Error("Probe stopped. Split the goal into smaller steps or bound it (fewer rows, less work); rerun the smaller probe.");
       if (!res.text.trim()) throw new Error(`The trier produced no answer${res.error ? `: ${res.error}` : ""}`);
@@ -1141,9 +1178,13 @@ export default function pb(pi: ExtensionAPI) {
     const RESTORE = "Restore them to how they were when planning began";
     const choice = await choose(ctx, store, `These project files changed while planning: ${list}`, [KEEP, RESTORE, "Cancel"], KEEP, notes);
     if (choice === RESTORE) {
-      const restored = restore(ctx.cwd, cur.commit, snap, files);
-      ctx.ui.notify(`Restored ${restored.length} file(s).`, "info");
-      const skipped = files.filter((f) => !restored.includes(f));
+      const r = restore(ctx.cwd, cur.commit, snap, files);
+      if (r.guardFailed) {
+        ctx.ui.notify("Nothing was put back: the guard snapshot failed, so changes made meanwhile can't be told apart from the planning changes. Check the files yourself, then try again.", "error");
+        return false;
+      }
+      ctx.ui.notify(`Restored ${r.restored.length} file(s).`, "info");
+      const skipped = files.filter((f) => !r.restored.includes(f));
       if (skipped.length) ctx.ui.notify(`Left alone because they changed again since: ${skipped.slice(0, 5).join(", ")}${skipped.length > 5 ? ", …" : ""}`, "warning");
     } else if (choice !== KEEP) return false;
     else if (!ctx.hasUI) ctx.ui.notify(`Kept files changed while planning: ${list}`, "warning");
@@ -1383,6 +1424,7 @@ export default function pb(pi: ExtensionAPI) {
 
   pi.registerCommand(cmd("spec"), {
     description: "Write the spec for what we planned (one per feature); run it again to revise. Optional: which feature",
+    getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
       const which = args.trim();
@@ -1942,8 +1984,20 @@ export default function pb(pi: ExtensionAPI) {
       const review = store.reviewSession(session);
       const run = review ? store.reviewRun() : undefined;
       if (review && run) {
-        // A review session: reset to its role, the brief verbatim, and the findings so far.
-        if (run.name) store.event(run.name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, review: review.role });
+        // A review session: reset to its role, the brief verbatim, the findings so far, and the
+        // files read — plus a wrap-up directive when compactions repeat with nothing new read.
+        const ops = (ev.preparation as { fileOps?: { read?: Iterable<string>; edited?: Iterable<string>; written?: Iterable<string> } }).fileOps;
+        const read = ops?.read ? [...ops.read] : undefined;
+        const tokens = ev.preparation.tokensBefore;
+        // Findings reported between two compactions are progress too: the end of a review is
+        // reading done, writing findings and running checks, which reads nothing new.
+        const findings = [...run.passes.flatMap((x) => x.findings), ...(review.findings ?? [])].length;
+        const prev = session ? compactStalls.get(session) : undefined;
+        const progressed = !prev || (read?.some((f) => !prev.read.includes(f)) ?? false) || findings > (prev.findings ?? 0) || tokens < prev.tokens;
+        const strikes = progressed ? 0 : (prev?.strikes ?? 0) + 1;
+        if (session) rememberStall(session, { task: `review:${review.role}`, changed: [], read: read ?? [], tokens, strikes, findings });
+        const wrapUp = strikes >= COMPACT_STALL_LIMIT;
+        if (run.name) store.event(run.name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, review: review.role, ...(run.id ? { run: run.id } : {}), ...(wrapUp ? { thrash: true } : {}) });
         return {
           compaction: {
             summary: reviewStateSummary({
@@ -1951,6 +2005,8 @@ export default function pb(pi: ExtensionAPI) {
               role: review.role,
               brief: run.brief,
               findings: [...run.passes.flatMap((x) => x.findings), ...(review.findings ?? [])],
+              read,
+              wrapUp,
             }),
             firstKeptEntryId: ev.preparation.firstKeptEntryId,
             tokensBefore: ev.preparation.tokensBefore,
@@ -1993,7 +2049,7 @@ export default function pb(pi: ExtensionAPI) {
     const progressed =
       !prev || prev.task !== p.current || (changed?.some((f) => !prev.changed.includes(f)) ?? false) || (read?.some((f) => !prev.read.includes(f)) ?? false) || tokens < prev.tokens;
     const strikes = progressed ? 0 : (prev?.strikes ?? 0) + 1;
-    if (session) compactStalls.set(session, { task: p.current, changed: changed ?? [], read: read ?? [], tokens, strikes });
+    if (session) rememberStall(session, { task: p.current, changed: changed ?? [], read: read ?? [], tokens, strikes });
     if (strikes >= COMPACT_STALL_LIMIT && p.phase === "building") {
       pauseBuild(
         ctx,
@@ -2003,6 +2059,10 @@ export default function pb(pi: ExtensionAPI) {
         "build.paused",
         "thrash",
       );
+      // The pause is the whole answer: a compaction here would hand the model a step prompt for a
+      // build the harness now refuses to continue. A resume starts the guard over.
+      if (session) compactStalls.delete(session);
+      return { cancel: true };
     }
     return {
       compaction: {
@@ -2014,6 +2074,9 @@ export default function pb(pi: ExtensionAPI) {
   });
 
   pi.on("session_before_tree", () => (undoSummary ? { summary: { summary: undoSummary } } : undefined));
+
+  // Best-effort: this process's private index files are inert but not git's business to keep.
+  pi.on("session_shutdown", (_e, ctx) => cleanupIndexes(ctx.cwd));
 
   // Keep the cache warm while a check runs: the agent certainly continues afterwards.
   pi.on("cache_warming_decision", () => (checking > 0 ? { action: "warm" as const } : undefined));
@@ -2210,23 +2273,26 @@ export default function pb(pi: ExtensionAPI) {
    */
   /**
    * Fresh eyes on the plan before the first task: a spec-sized review that attacks Decisions,
-   * re-tests "Not doing X" rejections and flags unmeasured quantitative claims. Runs once ever
-   * per spec (a {type:"spec-review"} event): later starts skip it, so amendments never re-gate —
-   * the code reviewer audits those. Untouched specs built before this gate existed get it once.
+   * re-tests "Not doing X" rejections and flags unmeasured quantitative claims. A pass covers
+   * exactly the text it saw, hash and all, on its {type:"spec-review"} event: a later start
+   * re-runs it when the text changed (the earlier findings first, to judge), re-posts a standing
+   * block instead of re-running, and --force skips it as recorded acceptance. Only the way into a
+   * build gates; resumes after T1 started never do, however the spec has changed since.
    */
-  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string): Promise<{ findings: Finding[]; block: boolean }> => {
+  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string, prior: Finding[] = []): Promise<{ findings: Finding[]; block: boolean }> => {
+    const hash = specHash(md);
     const res = await runFresh({
       cwd: ctx.cwd,
       role: "spec-review",
       systemPrompt: SPEC_REVIEWER_SYSTEM,
-      brief: specReviewBrief(name, md),
-      prompt: "Review the spec in the attached file.",
+      brief: specReviewBrief(name, md, prior),
+      prompt: prior.length ? "Review the spec again in the attached file, judging the earlier findings first." : "Review the spec in the attached file.",
       tools: ["read", "grep", "find", "ls", "bash"],
       model: sessionModel(ctx),
       sessionDir: store.sessionsDir("spec-review"),
     });
     const parsed = parseSpecReview(res.text);
-    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length, reported: parsed.findings });
+    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length, reported: parsed.findings, hash, followUp: prior.length > 0 });
     return parsed;
   };
 
@@ -2235,22 +2301,60 @@ export default function pb(pi: ExtensionAPI) {
     store: Store,
     name: string,
     fresh: boolean,
-    o: { decided?: boolean; checked?: boolean; notes?: string[] } = {},
+    o: { decided?: boolean; checked?: boolean; notes?: string[]; force?: boolean } = {},
   ): Promise<void> => {
     const notes = o.notes ?? [];
     const checked = await preBuildChecks(ctx, store, name, o);
     if (!checked) return;
     const { spec, md, cfg } = checked;
 
-    if (!readEvents(path.join(store.specDir(name), "events.jsonl")).some((e) => e.type === "spec-review")) {
-      const review = await runSpecReview(ctx, store, name, md);
-      if (sessionGone(ctx)) return; // replaced while it ran: the verdict is recorded, rerunning resumes from it
-      if (review.findings.length) {
-        post(`**Spec review** — ${review.block ? "changes needed before T1" : "advisory findings"}:\n${review.findings.map((f, i) => findingLine(f, i + 1)).join("\n")}`);
-      }
-      if (review.block) {
-        ctx.ui.notify("Spec review blocks T1: amend the spec (or record a rebuttal in Decisions) and rebuild — no second gate runs after that.", "warning");
+    // The review gates only the way into a build: once T1 has started, the spec changes as the
+    // build runs (Design, Decisions) and a resume or restart must not re-litigate those.
+    // Findings of any priority stop the build here, so the review is read before anything builds.
+    const phase = store.progress(name)?.phase ?? "written";
+    if (phase === "written") {
+      const hash = specHash(md);
+      const gate = specReviewGate(readEvents(path.join(store.specDir(name), "events.jsonl")), hash);
+      if (o.force && gate.action !== "skip") {
+        const accepted = gate.action === "repost" ? gate.findings : [];
+        store.event(name, { type: "spec-review", verdict: "forced", hash, findings: accepted.length, reported: accepted });
+        post(
+          accepted.length
+            ? `**Spec review forced** — building the spec as it stands; ${accepted.length} standing finding${accepted.length === 1 ? "" : "s"} recorded as accepted.`
+            : "**Spec review forced** — building the spec without a review of this text.",
+        );
+      } else if (gate.action === "repost") {
+        post(`**Spec review** — changes needed before T1 (the spec is unchanged since that review):\n${gate.findings.map((f, i) => findingLine(f, i + 1)).join("\n")}`);
+        ctx.ui.notify(
+          `Spec review still blocks T1: the spec hasn't changed since it was reviewed. Amend it (or record a rebuttal in Decisions) and rebuild — the next pass judges your change; /${cmd("build")} --force builds it as it stands.`,
+          "warning",
+        );
         return;
+      } else if (gate.action === "review") {
+        const review = await runSpecReview(ctx, store, name, md, gate.prior);
+        if (sessionGone(ctx)) return; // replaced while it ran: the verdict is recorded, rerunning resumes from it
+        if (store.readSpec(name) !== md) {
+          ctx.ui.notify(`The spec changed while it was under review: run /${cmd("build")} again and the new text will be reviewed.`, "warning");
+          return;
+        }
+        if (review.findings.length) {
+          post(`**Spec review** — ${review.block ? "changes needed before T1" : "advisory findings"}:\n${review.findings.map((f, i) => findingLine(f, i + 1)).join("\n")}`);
+        }
+        if (review.block) {
+          ctx.ui.notify(
+            `Spec review blocks T1: amend the spec (or record a rebuttal in Decisions) and rebuild — the next pass judges your change; /${cmd("build")} --force builds it as it stands.`,
+            "warning",
+          );
+          return;
+        }
+        // Advisory findings pause here too: the point is to read the review before anything builds.
+        if (review.findings.length) {
+          ctx.ui.notify(
+            `Spec review passed with ${review.findings.length} advisory finding${review.findings.length === 1 ? "" : "s"}: read them, then /${cmd("build")} again to build as it stands (the recorded pass covers this text, so nothing is re-reviewed), or amend the spec and let the next pass judge the change.`,
+            "warning",
+          );
+          return;
+        }
       }
     }
 
@@ -2344,7 +2448,7 @@ export default function pb(pi: ExtensionAPI) {
 
   /** The spec's recorded assumptions (Decisions lines starting "Assumption"), as written while writing it. */
   const assumptionsOf = (md: string) => {
-    const decisions = md.split(/^##\s+Decisions\s*$/im)[1]?.split(/^##\s+(?!#)/m)[0] ?? "";
+    const decisions = md.split(sectionHeading("Decisions"))[1]?.split(/^##\s+(?!#)/m)[0] ?? "";
     return [...decisions.matchAll(/^\s*-\s*(Assumption(?! \(build)[^\n]*)/gm)].map((m) => m[1].trim());
   };
 
@@ -2377,7 +2481,7 @@ export default function pb(pi: ExtensionAPI) {
    * except pb_ask questions, which go on with the recommendation after askTimeoutSec.
    */
   const specWriting = new Set<string>();
-  const specThenBuild = async (ctx: ExtensionCommandContext, store: Store, marker: string, prompt: string) => {
+  const specThenBuild = async (ctx: ExtensionCommandContext, store: Store, marker: string, prompt: string, force = false) => {
     const session = ctx.sessionManager.getSessionFile();
     const { cfg, testCmd } = commands(ctx.cwd, store);
     const notes: string[] = [];
@@ -2432,7 +2536,7 @@ export default function pb(pi: ExtensionAPI) {
     const dry = await dryRunTests(ctx, store, ready[0]);
     if (sessionGone(ctx)) return; // replaced during the dry run: a later /pb:build still offers the spec
     showSpec(store, ready[0], ready, dry);
-    await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes });
+    await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes, force });
   };
 
   /** After /pb:build asked for the spec: once it's written, show it and ask how to go on. */
@@ -2499,16 +2603,10 @@ export default function pb(pi: ExtensionAPI) {
     return true;
   };
 
-  /** Record trailing /pb:build words as a Decisions line, so nothing the human typed is dropped. False = it would leave the spec unparseable. */
+  /** Record trailing /pb:build words as a Decisions line, so nothing the human typed is dropped. False = nothing was written (no spec, or it wouldn't parse); the callers warn. */
   const recordGuidance = (store: Store, name: string, text: string): boolean => {
     if (!text.trim()) return true;
-    const md = store.readSpec(name);
-    if (!md) return true;
-    const updated = addDecision(md, text.trim());
-    if (!parseSpec(updated).spec) return false;
-    store.writeSpec(name, updated);
-    store.event(name, { type: "spec", update: "guidance" });
-    return true;
+    return !appendDecision(store, name, text.trim(), "guidance");
   };
 
   /** "3h ago" style staleness for a progress updatedAt ("2026-10-01 10:00:00"). */
@@ -2538,20 +2636,20 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   pi.registerCommand(cmd("build"), {
-    description: "Build the planned feature here, task by task, each checked (writes the spec first if there isn't one). --fresh builds in a new session. In a paused build: continue, optionally with guidance",
-    getArgumentCompletions: (prefix: string) => [{ value: "--fresh", label: "--fresh" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
+    description: "Build the planned feature here, task by task, each checked (writes the spec first if there isn't one). --fresh builds in a new session, --force builds an unreviewed spec as it stands. In a paused build: continue, optionally with guidance",
+    getArgumentCompletions: (prefix: string) => [{ value: "--fresh", label: "--fresh" }, { value: "--force", label: "--force" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
       const fresh = /(^|\s)--fresh(\s|$)/.test(args);
-      const words = args.replace(/(^|\s)--fresh(?=\s|$)/g, " ").trim().split(/\s+/).filter(Boolean);
+      const force = /(^|\s)--force(\s|$)/.test(args);
+      const words = args.replace(/(^|\s)--(fresh|force)(?=\s|$)/g, " ").trim().split(/\s+/).filter(Boolean);
       const session = ctx.sessionManager.getSessionFile();
       const { cfg, buildCmd } = commands(ctx.cwd, store);
 
-      // The name is the only user string that reaches path.join: take it as a name only
-      // when it is a valid spec name. Anything else falls through to prose below — except a
-      // readable file under an invalid name, which is rejected instead of being built
-      // (or silently reinterpreted as a description).
+      // The name is the only user string that reaches path.join, and store.specDir refuses anything
+      // that isn't a valid spec name (or a folder already under specs/). Here the arg counts as a
+      // name only when valid; a path-like or legacy-named arg is refused, not read or reinterpreted.
       if (words[0] && !SPEC_NAME.test(words[0])) {
         const near = normSpecArg(words[0]);
         const hit = near !== "off" && SPEC_NAME.test(near) ? store.specNames().filter((n) => n === near) : [];
@@ -2561,7 +2659,7 @@ export default function pb(pi: ExtensionAPI) {
             "warning",
           );
         }
-        if (store.readSpec(words[0])) {
+        if (/[/\\]/.test(words[0]) || store.readSpec(words[0])) {
           return ctx.ui.notify(`\`${words[0]}\` isn't a valid spec name (spec names are lowercase with hyphens). To build, name a spec exactly as written.`, "warning");
         }
       }
@@ -2572,6 +2670,7 @@ export default function pb(pi: ExtensionAPI) {
       if (here.name && here.progress && unfinishedPhase(here.progress.phase) && (!named || named === here.name)) {
         const p = here.progress;
         if (fresh) ctx.ui.notify("`--fresh` only applies when starting a build: continuing here instead.", "warning");
+        if (force) ctx.ui.notify("`--force` only applies when starting a build: continuing here instead.", "warning");
         // Resuming lifts planning protection: a /pb:plan or /pb:deps after the pause turned it back on.
         if (!(await liftPlanning(ctx, store))) return;
         // The spec name itself isn't guidance: only what follows it is.
@@ -2644,7 +2743,7 @@ export default function pb(pi: ExtensionAPI) {
         const planning = !!session && store.planningSessions().includes(session);
         if (!mine.length && (planning || !offered.length)) {
           // No spec from this discussion yet: write it first, then build it.
-          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec")));
+          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec")), force);
         }
         const pool = mine.length ? mine : offered;
         const labelOf = (n: string) => {
@@ -2665,7 +2764,7 @@ export default function pb(pi: ExtensionAPI) {
       if (!(await confirmLiveBuild(ctx, store, name, ["building"], "Restart it here — finished tasks stay done?"))) return;
       if (loadSpec(store, name)?.spec.status === "planning") {
         // A checkpoint of an unfinished discussion: finish it (tasks, verification), then build it.
-        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec")).replace(/\s*After writing it, stop:[^\n]*/, ""));
+        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec")).replace(/\s*After writing it, stop:[^\n]*/, ""), force);
       }
       if (words[0] === name && words.length > 1) {
         // Trailing words with a named spec are guidance (as on resume); without a name
@@ -2674,7 +2773,7 @@ export default function pb(pi: ExtensionAPI) {
           ctx.ui.notify("Guidance not recorded: it would leave the spec unparseable.", "warning");
         }
       }
-      await startBuild(ctx, store, name, fresh);
+      await startBuild(ctx, store, name, fresh, { force });
     },
   });
 
@@ -2800,7 +2899,10 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   /** The review's message: verdict, findings, what was dismissed or put back, and the sessions. */
-  const reviewMessage = (run: ReviewRun, o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; restored: string[]; partial: boolean; verificationFailed?: string }) => {
+  const reviewMessage = (
+    run: ReviewRun,
+    o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; restored: string[]; restoreGuardFailed?: boolean; partial: boolean; verificationFailed?: string; thrash?: boolean },
+  ) => {
     const findings = [...o.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
     const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
     const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left);
@@ -2819,6 +2921,8 @@ export default function pb(pi: ExtensionAPI) {
       ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),
       ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
       ...(o.restored.length ? ["", `⚠ Files changed during the review were put back: ${o.restored.join(", ")}`] : []),
+      ...(o.restoreGuardFailed ? ["", "⚠ Files changed during the review couldn't be told apart from work that moved on meanwhile (the guard snapshot failed), so nothing was put back: check the working tree."] : []),
+      ...(o.thrash ? ["", "⚠ A review pass compacted repeatedly without new reads and wrapped up early: treat its findings as a partial pass."] : []),
       ...(o.verificationFailed ? ["", `⚠ The second look at the blocking findings couldn't run (${o.verificationFailed}): they are reported unconfirmed.`] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
       ...(run.name && !o.partial ? ["", commitBlock(commitMessage(new Store(run.cwd).readSpec(run.name) ?? ""))] : []),
@@ -2860,8 +2964,10 @@ export default function pb(pi: ExtensionAPI) {
           });
     widget(undefined);
     const after = run.before ? snapshot(run.cwd, `pb: after review ${run.label}`) : undefined;
-    const restored = run.before && after && run.before.tree !== after.tree ? restore(run.cwd, after.commit, run.before.commit) : [];
-    const m = reviewMessage(run, { findings: checked.findings, dismissed: checked.dismissed, restored, partial: false, verificationFailed: checked.error?.split("\n")[0] });
+    const reverted = run.before && after && run.before.tree !== after.tree ? restore(run.cwd, after.commit, run.before.commit) : { restored: [], guardFailed: false };
+    // A stall from an earlier run of this spec must not mark this one: the events carry the run id.
+    const thrash = run.name && run.id ? readEvents(path.join(store.specDir(run.name), "events.jsonl")).some((e) => e.type === "compact" && e.run === run.id && (e as { thrash?: unknown }).thrash === true) : false;
+    const m = reviewMessage(run, { findings: checked.findings, dismissed: checked.dismissed, restored: reverted.restored, restoreGuardFailed: reverted.guardFailed, partial: false, verificationFailed: checked.error?.split("\n")[0], thrash });
     const p = run.name ? store.progress(run.name) : undefined;
     if (run.name && p) {
       store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ...checked.tokens, cost: checked.cost });
@@ -2962,6 +3068,10 @@ export default function pb(pi: ExtensionAPI) {
       let focusRest = rest;
       if (words[0]) {
         const w = words[0];
+        // A word that names an existing spec is that spec; one readable under a legacy name is
+        // refused. Anything else — path-like words included, which specDir's guard keeps out of
+        // paths anyway — falls through as intent text below, unlike /pb:build where it would
+        // become a new spec's topic.
         if (SPEC_NAME.test(w) && store.readSpec(w)) {
           name = w;
           focusRest = words.slice(1).join(" ");
@@ -3051,8 +3161,8 @@ export default function pb(pi: ExtensionAPI) {
         previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since };
       }
 
-      // The abuse pass: on every review by default (reviewer.security "always"), or on sensitive ground ("auto").
-      const mode = cfg.reviewer.security ?? "always";
+      // The abuse pass: on sensitive ground by default (reviewer.security "auto"), or on every review ("always").
+      const mode = cfg.reviewer.security ?? "auto";
       const diffText = mode === "auto" ? gitDiff(ctx.cwd, base) : "";
       const security =
         mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changed, diff: diffText + untrackedText(ctx.cwd, changed) });
@@ -3074,6 +3184,7 @@ export default function pb(pi: ExtensionAPI) {
       // Only plain values from here on: `ctx` belongs to this session, which the first pass replaces.
       const run: ReviewRun = {
         cwd: ctx.cwd,
+        id: randomUUID(),
         name,
         label,
         brief,
@@ -3491,7 +3602,8 @@ export default function pb(pi: ExtensionAPI) {
         .filter(Boolean)
         .join("\n");
       if (ctx.hasUI && !(await ctx.ui.confirm(`Undo to before ${target.id === "start" ? "the build" : target.id}?`, summary))) return;
-      restore(ctx.cwd, cur.commit, target.commit);
+      const reverted = restore(ctx.cwd, cur.commit, target.commit);
+      if (reverted.guardFailed) return ctx.ui.notify("Nothing was undone: the guard snapshot for the drift check failed (is git healthy?). Your files are as they were; try again.", "error");
 
       // The conversation goes back too, so the discarded attempt doesn't anchor the next one;
       // everything before that point is still in the prompt cache.

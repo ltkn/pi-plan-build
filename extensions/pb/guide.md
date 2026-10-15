@@ -17,10 +17,12 @@ step Pi shows a short **What now** block; `/pb:help <topic>` posts any section b
 2. **`/pb:build`**: first it asks, while you're here, how to go on once the
    spec is written: build here, build in a fresh session, or show you the spec
    first. Then Pi writes a short **spec** from the discussion (goal, findings,
-   decisions, tasks) and, unless you wanted to see it, the build starts by
-   itself, so you can walk away. The tasks then run one by one, and the
-   harness runs the full test suite after the last one; a failure goes back to
-   Pi to fix.
+   decisions, tasks); the build reviews the spec itself before the first task —
+   fresh eyes, read-only — and any finding stops it for you to read: P0/P1 to
+   amend or rebut, P2/P3 to decide on (see `/pb:help spec`). Run `/pb:build`
+   again to go on. A clean review starts by itself, so you can walk away. The
+   tasks then run one by one, and the harness runs the full test suite after the
+   last one; a failure goes back to Pi to fix.
 3. **`/pb:review`**: a fresh reviewer compares the change with the spec and
    your standards; blocking findings get a second look before you see them.
    Fix them right there, `/pb:review` again (it looks only at what changed),
@@ -348,6 +350,21 @@ shown in the session for later. Shown first, you choose: build here, build in a
 fresh session, **edit the spec first** (in an editor; it's saved only when it
 still parses, and the build then gets your version), or not now.
 
+**Before the first task, the spec gets a review of its own.** A build runs one
+whenever the current text hasn't passed: a fresh, read-only pass that attacks
+every Decision, re-tests each "Not doing X" rejection and flags unmeasured
+numbers and undefined empty paths. Any finding stops the build before the
+first task so you can read it. A P0 or P1 means amend the spec (or record a
+rebuttal in Decisions) and run `/pb:build` again: the next pass judges each
+earlier finding against the new text before it looks at the rest, and it
+keeps stopping until it passes. P2/P3 are advisory: amend the spec if you
+agree and the next pass judges the change, or run `/pb:build` again
+unchanged — the recorded pass covers that text, so the build starts at T1
+without re-reviewing. `/pb:build --force` builds the spec as it stands
+instead, recording the skip (with any standing findings) as accepted. Only
+the way into a build is gated: once the first task has started, spec edits
+are the code reviewer's to judge, not re-reviewed at plan level.
+
 - **Threats and abuse.** When a change adds or alters an entry point, touches
   a trust boundary (authentication, authorization, credentials, sensitive data,
   external input) or has rules someone gains from breaking (money, quantities,
@@ -379,6 +396,10 @@ more than half full (`freshAbove`) or when `buildModel` names another model
 (switching models mid-conversation re-sends the whole conversation to the new
 model, uncached); `/pb:build --fresh` asks for one directly: a new session
 named "build: <spec>", seeded with the spec, on your model and thinking level.
+
+Before the first task, the spec gets its own fresh-eyes review (see
+`/pb:help spec`): any finding stops the build there for you to read, and
+`/pb:build --force` builds it as it stands instead.
 
 1. **The tasks.** Each task is built the same way: tests first, then the
    behaviour, then `pb_task_done` — reporting what changed plus the caveats,
@@ -564,7 +585,7 @@ ignored. The next `/pb:review` is a **follow-up**: it checks the previous findin
 looks only at what changed since (`--full` reviews everything again). If
 nothing changed, it says so and costs nothing.
 
-**The adversarial pass, on every review.** A second fresh session, "review:
+**The adversarial pass, when the change looks sensitive.** A second fresh session, "review:
 <spec> · adversarial", has a single job: break the change. For every entry point it adds or alters and
 every rule it enforces, it looks for:
 
@@ -585,20 +606,21 @@ every rule it enforces, it looks for:
 
 It proposes fixes at the boundary or as invariants, not checks scattered through
 the code. Its findings, marked "Adversarial:", get the same second look as the rest.
-`"reviewer": {"security": "always" | "auto" | "off"}`: `always` is the default;
-`auto` runs it only when the spec has Threats and abuse or the change touches
-auth, entry points, money, quantities or state (a broad guess); `off` never.
+`"reviewer": {"security": "always" | "auto" | "off"}`: `auto` is the default;
+it runs the pass only when the spec has Threats and abuse or the change touches
+auth, entry points, money, quantities or state (a broad guess); `always` runs it
+on every review; `off` never.
 
 **Without a spec**, `/pb:review [what the change is meant to do]` reviews the
 uncommitted change against that intent and your standards: useful for any
 change you made with Pi without the rest of the flow.
 
-**Inside the review.** The spec pass, and then the adversarial pass, each run
+**Inside the review.** The spec pass, and the adversarial pass when one is due, each run
 in a real Pi session you're in: you watch everything natively, and you can
 interrupt it or ask it something ("why is 3 a P1?"). Its model is read-only: it
 can't edit or write files, and anything its commands change is put back. A pass
 ends when it has reported its findings and stops, or at `/pb:review done`. When
-the spec pass is done, pb asks whether to run the adversarial pass now
+the spec pass is done and an adversarial pass is due, pb asks whether to run it now
 (unanswered, after `askTimeoutSec`, it runs; skipped, the result says so), and
 finally takes you back to your session with the result. Asking questions is
 fine; arguing it out of a finding makes it less independent. Both sessions stay
@@ -721,7 +743,7 @@ model call).
 **What now** — the spec is written, nothing is built yet
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
-- Build it: `/pb:build` here, or `/pb:build --fresh` for a new session · more: `/pb:help spec`
+- Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — the build reviews the spec first: a finding stops it before the first task · more: `/pb:help spec`
 <!-- /pb -->
 
 ### Build paused

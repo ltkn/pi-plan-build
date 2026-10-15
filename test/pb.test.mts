@@ -16,7 +16,7 @@ import { test } from "node:test";
 process.env.PI_PB_PI_COMMAND = path.join(path.dirname(new URL(import.meta.url).pathname), "mock-pi.mjs");
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const { default: pb } = await import("../extensions/pb/index.ts");
-const { parseSpec, addDecision, needsRed, redExemption } = await import("../extensions/pb/spec.ts");
+const { parseSpec, addDecision, needsRed, redExemption, specReviewGate } = await import("../extensions/pb/spec.ts");
 
 type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
 type Tool = (name: string, params: object) => Promise<Result>;
@@ -491,6 +491,15 @@ test("spec: decisions are added under Decisions, before the next section", () =>
   assert.match(md, /- Not doing soft delete, because audit lives elsewhere\.\n- Cancelling twice is a no-op\.\n\n## Context/);
 });
 
+test("spec: a colon heading is the same section to writers and readers, never a second one", () => {
+  const colon = SPEC().replace("## Decisions\n", "## Decisions:\n");
+  const md = addDecision(colon, "Cancelling twice is a no-op.");
+  assert.equal((md.match(/^##\s+Decisions\s*:?\s*$/gim) ?? []).length, 1); // one heading, not one per writer
+  assert.match(md, /- Cancelling twice is a no-op\.\n\n## Context/);
+  assert.equal(parseSpec(md).spec?.status, "ready"); // and it still parses
+  assert.deepEqual(parseSpec(md).errors, []);
+});
+
 /* --------------------------------- plan and spec --------------------------------- */
 
 test("plan: investigation is free, project files are protected until /pb:plan off; spec asks for pb_write_spec", async () => {
@@ -639,8 +648,61 @@ test("restore: files changed since the snapshot are left alone, not clobbered", 
   fs.writeFileSync(path.join(t.repo, "a.txt"), "drift");
   const restored = restore(t.repo, s2.commit, s1.commit, ["a.txt", "b.txt"]);
   assert.equal(fs.readFileSync(path.join(t.repo, "a.txt"), "utf8"), "drift"); // kept: it changed again
-  assert.deepEqual(restored, ["b.txt"]); // B matches s2, so it was removed back to its s1 state (absent)
+  assert.deepEqual(restored, { restored: ["b.txt"], guardFailed: false }); // B matches s2, so it was removed back to its s1 state (absent)
   assert.ok(!fs.existsSync(path.join(t.repo, "b.txt")));
+});
+
+test("restore: a guard that can't be taken leaves the worktree alone instead of clobbering", async () => {
+  const t = setup();
+  const { snapshot, restore, snapshotIndex } = await import("../extensions/pb/checkpoint.ts");
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "v1");
+  const s1 = snapshot(t.repo, "s1")!;
+  fs.rmSync(path.join(t.repo, "a.txt"));
+  const s2 = snapshot(t.repo, "s2")!;
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "changed again after s2");
+  // The guard's index can't be written (a directory sits where the file belongs): the snapshot it
+  // needs fails. Without a guard there is no way to tell the drift above from a clean tree.
+  const index = snapshotIndex(t.repo);
+  fs.rmSync(index, { force: true });
+  fs.mkdirSync(index, { recursive: true });
+  const r = restore(t.repo, s2.commit, s1.commit, ["a.txt"]);
+  assert.equal(r.guardFailed, true);
+  assert.deepEqual(r.restored, []);
+  assert.equal(fs.readFileSync(path.join(t.repo, "a.txt"), "utf8"), "changed again after s2"); // not clobbered with v1
+  fs.rmSync(index, { recursive: true, force: true });
+});
+
+test("restore: outside git it fails closed too, rather than pretending nothing was wrong", async () => {
+  const { restore } = await import("../extensions/pb/checkpoint.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-nogit-"));
+  fs.writeFileSync(path.join(dir, "a.txt"), "mine");
+  try {
+    const r = restore(dir, "1111111", "2222222", ["a.txt"]);
+    assert.equal(r.guardFailed, true);
+    assert.deepEqual(r.restored, []);
+    assert.equal(fs.readFileSync(path.join(dir, "a.txt"), "utf8"), "mine");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("snapshot: an unusable shared index from an older pb never breaks this process's checkpoints", async () => {
+  const t = setup();
+  const { snapshot } = await import("../extensions/pb/checkpoint.ts");
+  // Older versions kept one index per repo; here something nefarious left a directory in its place.
+  fs.mkdirSync(path.join(t.repo, ".git", "pb-index"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "x");
+  assert.ok(snapshot(t.repo, "after")); // the snapshot never touches that path
+});
+
+test("checkpoints: this process's index files are cleaned up when the session shuts down", async () => {
+  const t = setup();
+  const { snapshot, snapshotIndex } = await import("../extensions/pb/checkpoint.ts");
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "x");
+  assert.ok(snapshot(t.repo, "after"));
+  assert.ok(fs.existsSync(snapshotIndex(t.repo)));
+  await t.fire("session_shutdown", { reason: "quit" });
+  assert.ok(!fs.existsSync(snapshotIndex(t.repo)));
 });
 
 test("plan: re-planning the same session while its baseline is running doesn't start a second one", async () => {
@@ -1250,6 +1312,10 @@ test("spec: design provenance states where the Design comes from", async () => {
     "Design provenance: from the plan, untouched by the build.",
   );
   assert.equal(
+    designProvenance("# T\n\n## Design:\n- shape\n", [{ at: "t0", type: "build-start" }]),
+    "Design provenance: from the plan, untouched by the build.", // a colon heading is the same section
+  );
+  assert.equal(
     designProvenance(md, [
       { at: "t0", type: "spec", update: "Design" },
       { at: "t1", type: "build-start" },
@@ -1294,7 +1360,7 @@ test("spec: a behaviour task without Test:, or with a no-op one, warns — refac
   process.chdir(t.repo);
   const tasks = "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (tests: T2)\n- Test: `true`";
   const w = (await t.callTool("pb_write_spec", { name: "a", content: SPEC({ tasks }) })).content![0].text;
-  assert.match(w, /Note: T1 adds behaviour but has no Test:: add a targeted command, or leave it out/);
+  assert.match(w, /Note: T1 adds behaviour but has no Test: line — add a targeted command, or leave it out/);
   assert.doesNotMatch(w, /T2/); // a refactor is exempt: nothing to warn
   const noop = (await t.callTool("pb_write_spec", { name: "b", content: SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `true`" }) })).content![0].text;
   assert.match(noop, /Note: T1's Test: `true` always passes — the build will wedge demanding red/);
@@ -1439,6 +1505,10 @@ Speed up the page.
     .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
     .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Scope: the list.");
   assert.match((await t.callTool("pb_write_spec", { name: "barecolon", content: bareColon })).error!, /Decisions line without a reason/);
+  const reasonLabel = bareWords
+    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
+    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Paginate the list. Reason: unbounded reads risk timeouts.");
+  assert.equal((await t.callTool("pb_write_spec", { name: "reasonlabel", content: reasonLabel })).error, undefined); // an explicit Reason: label counts
   const retries = bareWords
     .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
     .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Allows 3 retries.");
@@ -1568,6 +1638,28 @@ test("build: ambiguities become recorded assumptions; questions are asked withou
   assert.match(spec, /- Assumption \(build, T1\): Follow the layout rules over the mockup/);
   assert.match(spec, /- Which file name\? → T2\.txt/);
   assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Choices the build made where the spec was unclear[\s\S]*Assumption \(build, T1\): Follow the layout rules/);
+});
+
+test("build: a colon Decisions heading takes decisions, answers and guidance without wrecking the spec", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("## Decisions\n", "## Decisions:\n") });
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T1")) await tool("pb_record_decision", { decision: "Follow the layout rules over the mockup: the rules are marked exact.", assumption: true });
+    if (text.includes("Task T2")) await tool("pb_ask", { question: "Which file name?", options: ["t2.txt", "T2.txt"], recommended: "T2.txt" });
+    return diligent(text, tool);
+  };
+  t.selects.push("T2.txt (recommended)");
+  await t.run("build", "order-cancellation use a helper for the email");
+  const spec = t.read(".pi/pb/specs/order-cancellation/spec.md");
+  assert.equal((spec.match(/^##\s+Decisions\s*:?\s*$/gim) ?? []).length, 1); // no duplicate heading appeared
+  assert.match(spec, /- Assumption \(build, T1\): Follow the layout rules/);
+  assert.match(spec, /- Which file name\? → T2\.txt/);
+  assert.match(spec, /- use a helper for the email/);
+  assert.deepEqual(parseSpec(spec).errors, []);
+  assert.match(t.posts.at(-1)!, /Choices the build made where the spec was unclear[\s\S]*Assumption \(build, T1\): Follow the layout rules/);
 });
 
 test("build: an unanswered question goes on with the recommendation after askTimeoutSec, recorded as an assumption", async () => {
@@ -2195,6 +2287,17 @@ test("review: security off never runs the adversarial pass", async () => {
   assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
 });
 
+test("review: by default the adversarial pass runs only on sensitive ground", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /✅ PASS/);
+  assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
+  assert.doesNotMatch(t.posts.at(-1)!, /adversarial/);
+});
+
 test("status: a build running elsewhere is shown by session id, not file path", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -2242,7 +2345,7 @@ test("review: when the second look can't run, the findings are reported unconfir
 });
 
 test("review: a fresh review session with the spec first and the diff; you're brought back with the result", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -2266,7 +2369,7 @@ test("review: a fresh review session with the spec first and the diff; you're br
 });
 
 test("review: the review session is read-only for its model; /pb:review done ends a pass; a pass you leave can be continued", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -2307,7 +2410,7 @@ test("review: the review session is read-only for its model; /pb:review done end
 });
 
 test("review: every pass session is gated (reporting tool present, editing blocked)", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -2334,7 +2437,7 @@ test("review: every pass session is gated (reporting tool present, editing block
 });
 
 test("review: reopening an interrupted review session, /pb:review continue picks it up there", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -2359,7 +2462,7 @@ test("review: reopening an interrupted review session, /pb:review continue picks
 });
 
 test("review: the adversarial pass is asked for when the review is done; skipped, the result says so; unanswered, it runs", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -2369,7 +2472,7 @@ test("review: the adversarial pass is asked for when the review is done; skipped
   assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
   assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS · P0 0 · P1 0 · P2 1 · P3 1 · adversarial pass skipped/);
 
-  const u = setup({ verify: "true", askTimeoutSec: 0.001 });
+  const u = setup({ verify: "true", askTimeoutSec: 0.001, reviewer: { security: "always" } });
   await written(u);
   u.agent.script = diligent;
   await u.run("build");
@@ -2377,6 +2480,92 @@ test("review: the adversarial pass is asked for when the review is done; skipped
   await u.run("review");
   assert.ok([...u.names.values()].includes("review: order-cancellation · adversarial"));
   assert.match(u.posts.at(-1)!, /with an adversarial pass/);
+});
+
+test("review: compaction resets to role, brief, findings and files read; stalls wrap up", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  store.saveReviewSession(session, { role: "review", spec: "order-cancellation", findings: [{ priority: "P2", title: "name it" }] });
+  store.saveReviewRun({ cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] } as any);
+  const prep = (reads: string[], tokens: number) => ({ firstKeptEntryId: "e1", tokensBefore: tokens, fileOps: { read: new Set(reads), edited: new Set(), written: new Set() } });
+  const [r1] = (await t.fire("session_before_compact", { preparation: prep(["a.ts", "b.ts"], 50000), reason: "threshold" })) as any[];
+  assert.match(
+    r1.compaction.summary,
+    /\[pb review state: order-cancellation\] This review session was compacted[\s\S]*Files read before this point[\s\S]*- a\.ts[\s\S]*--- brief ---[\s\S]*BRIEF[\s\S]*--- findings so far ---[\s\S]*name it/,
+  );
+  assert.doesNotMatch(r1.compaction.summary, /report findings with what you have/);
+  // Same reads at the same size three more times: the fourth wraps up instead of circling.
+  await t.fire("session_before_compact", { preparation: prep(["a.ts", "b.ts"], 50000), reason: "threshold" });
+  await t.fire("session_before_compact", { preparation: prep(["a.ts", "b.ts"], 50000), reason: "threshold" });
+  const [r4] = (await t.fire("session_before_compact", { preparation: prep(["a.ts", "b.ts"], 50000), reason: "threshold" })) as any[];
+  assert.match(r4.compaction.summary, /report findings with what you have and stop/);
+  // New reads reset the count.
+  const [r5] = (await t.fire("session_before_compact", { preparation: prep(["a.ts", "b.ts", "c.ts"], 50000), reason: "threshold" })) as any[];
+  assert.doesNotMatch(r5.compaction.summary, /report findings with what you have/);
+});
+
+test("review: findings reported between compactions count as progress, so writing is not mistaken for circling", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  store.saveReviewRun({ cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] } as any);
+  // The files read and the size stay the same; the only thing moving is the findings list, which is
+  // exactly what a review does once reading is done.
+  const prep = { firstKeptEntryId: "e1", tokensBefore: 50000, fileOps: { read: new Set(["a.ts"]), edited: new Set(), written: new Set() } };
+  let r: any;
+  for (let i = 0; i < 4; i++) {
+    store.saveReviewSession(session, {
+      role: "review",
+      spec: "order-cancellation",
+      findings: Array.from({ length: i + 1 }, (_, n) => ({ priority: "P2", title: `finding ${n}` })),
+    });
+    [r] = (await t.fire("session_before_compact", { preparation: prep, reason: "threshold" })) as any[];
+  }
+  assert.doesNotMatch(r.compaction.summary, /report findings with what you have/);
+});
+
+test("review: a stall from an earlier run never marks a later review of the same spec", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  // An earlier review of this spec wrapped up early; its event stays in the spec's history for good.
+  fs.appendFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/events.jsonl"),
+    `${JSON.stringify({ at: "2026-01-01 00:00:00", type: "compact", thrash: true, run: "an-earlier-review-run" })}\n`,
+  );
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /✅ PASS/);
+  assert.doesNotMatch(t.posts.at(-1)!, /wrapped up early/);
+});
+
+test("review: a stall in this very run is still reported in its result", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  const { Store } = await import("../extensions/pb/store.ts");
+  t.reviewer.script = true; // drive the review session by hand
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:review]")) {
+      const run = new Store(t.repo).reviewRun()!;
+      assert.ok(run.id); // every run carries the id its compact events are stamped with
+      fs.appendFileSync(
+        path.join(t.repo, ".pi/pb/specs/order-cancellation/events.jsonl"),
+        `${JSON.stringify({ at: "now", type: "compact", thrash: true, run: run.id })}\n`,
+      );
+      await tool("pb_report_findings", { findings: [] });
+      return;
+    }
+    return diligent(text, tool);
+  };
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /✅ PASS[\s\S]*wrapped up early/);
 });
 
 test("review: a follow-up looks at the previous findings and what changed since", async () => {
@@ -2435,6 +2624,13 @@ test("review: works without a spec, on the uncommitted change and its intent", a
   assert.match(briefOf(t), /--- brief ---\n\n# No spec[\s\S]*Intent: greet more warmly[\s\S]*## Changed files\n\nREADME/);
   assert.match(t.posts.at(-1)!, /Review of the uncommitted change\*\* — ✅ PASS/);
   assert.doesNotMatch(t.posts.at(-1)!, /Commit message/); // no spec to write it from
+  // A path-like first word is intent text here, never refused: specDir's guard keeps it out of
+  // paths, and the arg is documented as free text (only /pb:build refuses those).
+  const before = t.posts.at(-1);
+  await t.run("review", "src/README warm the greeting");
+  assert.equal(t.notes.filter((n) => /isn't a valid spec name/.test(n)).length, 0);
+  assert.notEqual(t.posts.at(-1), before); // a fresh result, not the previous review's
+  assert.match(briefOf(t), /Intent: src\/README warm the greeting/); // the whole line went through as intent
 });
 
 test("review: files changed during the review are put back", async () => {
@@ -2449,7 +2645,7 @@ test("review: files changed during the review are put back", async () => {
 });
 
 test("stats: tasks, first try, checks, pauses, review, and the build session's tokens and cache", async () => {
-  const t = setup({ taskChecks: "each",  verify: "true" });
+  const t = setup({ taskChecks: "each",  verify: "true", reviewer: { security: "always" } });
   await written(t);
   let lazy = true;
   t.agent.script = async (text, tool) => {
@@ -2574,6 +2770,29 @@ test("archive moves a finished spec out of .pi/pb/, and stats still see it", asy
   assert.doesNotMatch(execSync("git status --porcelain", { cwd: t.repo, encoding: "utf8" }), /pb-archive/);
   await t.run("stats", "all");
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2/);
+});
+
+test("archive: a name collision never moves the spec into a folder that already exists", async () => {
+  const t = setup();
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  store.writeSpec("collision", SPEC());
+  const archiveRoot = path.join(t.repo, ".pi/pb-archive");
+  // Fill every name this second's stamp could take (base, -2 … -99), and the neighbouring seconds'
+  // too (a slow filesystem can tick the clock between stamping and archiving): the older loop
+  // capped at -99, then renamed onto whatever already sat there.
+  const stamp = (offsetSec: number) => new Date(Date.now() + offsetSec * 1000).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const taken = new Set<string>();
+  for (const offset of [-2, -1, 0, 1, 2]) {
+    for (let i = 0; i < 99; i++) {
+      const dir = path.join(archiveRoot, `${stamp(offset)}-collision${i === 0 ? "" : `-${i + 1}`}`);
+      fs.mkdirSync(dir, { recursive: true });
+      taken.add(dir);
+    }
+  }
+  const dest = store.archive("collision");
+  assert.ok(!taken.has(dest), `archived into ${dest}, a name that already existed`);
+  assert.ok(fs.existsSync(path.join(dest, "spec.md")));
 });
 
 test("help: every What-now block the code uses exists in the guide, and /pb:help lists the topics", async () => {
@@ -2801,6 +3020,36 @@ test("pb_update_spec changes one section or the status, and writes nothing that 
   assert.match((await t.callTool("pb_update_spec", { name: "nope", section: "Goal", content: "x" })).error!, /No spec "nope"/);
 });
 
+test("pb_update_spec: writing Tasks and ready in one call still runs the full senior gates", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  // A planning spec that passes the task-scoped gates (Threats, numbers, Contracts: one task, no
+  // seam) but whose Decisions line has no reason — only the full gates catch that.
+  const planning = `# Order cancellation
+Status: planning
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Cancel orders.
+## Findings
+- src/order.ts:12 holds the state machine.
+## Decisions
+- Only PENDING orders can be cancelled.
+## Tasks
+`;
+  assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: planning })).error, undefined);
+  const r = await t.callTool("pb_update_spec", {
+    name: "order-cancellation",
+    section: "Tasks",
+    content: "### T1: first step\nCap the list.\n- Acceptance: the list is capped (tests: T1)\n- Test: `test -f T1.txt`",
+    status: "ready",
+  });
+  assert.match(r.error!, /Not written: the spec needs senior shape[\s\S]*Decisions line without a reason/);
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /Status: planning/); // nothing was written
+});
+
 test("spec size is reported, with a gentle note (never a rejection) when it's long", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -2913,9 +3162,10 @@ test("compaction: compacting the same task over and over with no progress pauses
   const t = setup({ verify: "true" });
   await written(t);
   const prep = { firstKeptEntryId: "e3", tokensBefore: 90000 };
+  let fourth: any;
   t.agent.script = async (text, tool) => {
     if (text.includes("Task T1")) {
-      for (let i = 0; i < 4; i++) await t.fire("session_before_compact", { preparation: prep, reason: "threshold" });
+      for (let i = 0; i < 4; i++) fourth = await t.fire("session_before_compact", { preparation: prep, reason: "threshold" });
       return; // the build paused underneath: nothing more to do this run
     }
     return diligent(text, tool);
@@ -2925,6 +3175,8 @@ test("compaction: compacting the same task over and over with no progress pauses
   assert.equal(p.phase, "paused");
   assert.match(t.posts.at(-1)!, /\*\*⏸ Build paused\*\* — compacted 3 times during T1 without getting anywhere[\s\S]*What now/);
   assert.deepEqual(t.events("order-cancellation").filter((e) => e.type === "pause").map((e) => e.why), ["thrash"]);
+  // No compaction either: its summary would hand the model a step for a build the harness refuses.
+  assert.deepEqual(fourth, [{ cancel: true }]);
   // And it resumes where it paused: the guard counts forward progress, not compactions.
   t.agent.script = async (text, tool) => diligent(text.includes("Continue task") ? text.replace("Continue task", "Task") : text, tool);
   await t.run("build");
@@ -4076,7 +4328,7 @@ test("extra instructions: added to each role's prompt, global ones first, pb's o
   fs.mkdirSync(path.dirname(global), { recursive: true });
   fs.writeFileSync(global, JSON.stringify({ extra: { plan: "Global: think about rollout.", build: "Global: keep functions short." } }));
   try {
-    const t = setup({ verify: "true", extra: { plan: "Project: mind the i18n keys.", spec: "Always include a rollout task.", review: "Check the i18n keys.", adversarial: "Try the admin API." } });
+    const t = setup({ verify: "true", reviewer: { security: "always" }, extra: { plan: "Project: mind the i18n keys.", spec: "Always include a rollout task.", review: "Check the i18n keys.", adversarial: "Try the admin API." } });
     process.chdir(t.repo);
     t.selects.push("No thanks");
     await t.run("plan", "x");
@@ -4234,7 +4486,7 @@ test("fresh calls are saved as sessions to open afterwards, and stream their tex
   assert.ok(seen.length > 2 && r.text.startsWith(seen.at(-1)!.slice(0, 20))); // grows piece by piece
   assert.equal(seen.at(-1), r.text);
 
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -4442,12 +4694,14 @@ test("spec: a declared doc-only task with exempted lines gets no missing-Test nu
   const docOnly = SPEC({ tasks: "### T1: docs for the banner\nNaming the prose that must follow the behaviour; doc-only, no test command.\n- Acceptance: javadoc updated (non-testable: prose)" });
   const w = (await t.callTool("pb_write_spec", { name: "a", content: docOnly })).content![0].text;
   assert.doesNotMatch(w, /adds behaviour but has no Test/);
+  const documented = SPEC({ tasks: "### T1: docs for the banner\nUpdate the design doc; documentation-only change, no test command.\n- Acceptance: design doc updated (non-testable: prose)" });
+  assert.doesNotMatch((await t.callTool("pb_write_spec", { name: "c", content: documented })).content![0].text, /adds behaviour but has no Test/); // "documentation-only" is the same declaration
   // Without the declaration the nudge stays: the reviewer then judges the tests at the end.
   const vague = SPEC({ tasks: "### T1: misc polish\nSmall behaviour touch-ups.\n- Acceptance: polish applied" });
   assert.match((await t.callTool("pb_write_spec", { name: "b", content: vague })).content![0].text, /adds behaviour but has no Test/);
 });
 
-test("spec review: advisory findings are posted and the build proceeds", async () => {
+test("spec review: advisory findings stop the build until you run it again", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
@@ -4457,8 +4711,13 @@ test("spec review: advisory findings are posted and the build proceeds", async (
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
   }
-  assert.ok(t.posts.some((p) => /unmeasured window/.test(p))); // advisory findings posted
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // not blocked
+  assert.match(t.posts.at(-1)!, /advisory findings/);
+  assert.match(t.posts.at(-1)!, /unmeasured window/); // shown before anything builds
+  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // the build waits for you
+  assert.ok(t.notes.some((n) => /advisory finding/.test(n)));
+  await t.run("build", "order-cancellation"); // unchanged: the recorded pass skips straight to T1
+  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
+  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1); // no re-review
 });
 
 test("spec review: P0 findings stop the build before T1 with the findings shown", async () => {
@@ -4477,7 +4736,7 @@ test("spec review: P0 findings stop the build before T1 with the findings shown"
   assert.equal(t.progress("order-cancellation").phase, "written"); // untouched
 });
 
-test("spec review: after amendment the build proceeds with no second gate", async () => {
+test("spec review: after amendment the build re-reviews and proceeds on the pass", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
@@ -4487,10 +4746,152 @@ test("spec review: after amendment the build proceeds with no second gate", asyn
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
   }
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist.", mode: "append" });
-  await t.run("build", "order-cancellation");
+  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
+  const briefOut = path.join(t.repo, "follow-up-brief.md");
+  process.env.MOCK_SPEC_BRIEF_OUT = briefOut;
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_BRIEF_OUT;
+  }
   assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // proceeds
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1); // exactly one gate, ever
+  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
+  assert.deepEqual(reviews.map((e) => e.verdict), ["block", "pass"]); // the amendment is reviewed again
+  assert.equal(reviews[1].followUp, true);
+  assert.match(t.read("follow-up-brief.md"), /Earlier findings/); // the follow-up carries the prior finding
+  assert.match(t.read("follow-up-brief.md"), /unguarded transition/);
+});
+
+test("spec review: an unchanged blocked spec re-posts the standings instead of re-running", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "block";
+  try {
+    await t.run("build", "order-cancellation");
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1); // no second pass burns
+  assert.equal(t.posts.filter((p) => /changes needed before T1/.test(p)).length, 2); // the standing findings are shown again
+  assert.ok(t.notes.some((n) => /hasn't changed since it was reviewed/.test(n)));
+  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // still blocked
+});
+
+test("spec review: --force builds a blocked spec as it stands and records the acceptance", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "block";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  await t.run("build", "order-cancellation --force");
+  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // builds
+  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
+  assert.deepEqual(reviews.map((e) => e.verdict), ["block", "forced"]);
+  assert.equal(reviews[1].reported.length, 1); // the standing finding is recorded as accepted
+  assert.ok(t.posts.some((p) => /recorded as accepted/.test(p)));
+});
+
+test("spec review: --force on an unreviewed spec skips the gate", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "block"; // would block if the review ran
+  try {
+    await t.run("build", "--force");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // built without a review
+  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
+  assert.deepEqual(reviews.map((e) => e.verdict), ["forced"]);
+  assert.equal(reviews[0].findings, 0);
+  assert.ok(t.posts.some((p) => /without a review of this text/.test(p)));
+});
+
+test("spec review: restarting a started build never re-gates, however the spec changed", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("build", "order-cancellation"); // the review passes with a finding and stops for you
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  await t.run("build", "order-cancellation"); // build as it stands: the recorded pass skips the gate
+  assert.ok(t.instructions.length > 0); // the build is underway
+  // The build's own spec writes change the text; a restart must not re-litigate them.
+  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Assumption: recorded after the start, because the build had begun.", mode: "append" });
+  const p = JSON.parse(t.read(".pi/pb/specs/order-cancellation/progress.json"));
+  p.session = "another-session.jsonl"; // the build is owned elsewhere; this session restarts it
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"), JSON.stringify(p));
+  process.env.MOCK_SPEC_REVIEW = "block"; // a re-gate here would stop the restart
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1);
+  assert.ok(!t.posts.some((x) => /changes needed before T1/.test(x)));
+  assert.ok(t.instructions.length > 1); // the restart went through
+});
+
+test("spec review: a spec edited while the review runs is not built on the stale pass", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_EDIT = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_EDIT;
+  }
+  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // nothing built
+  assert.ok(t.notes.some((n) => /changed while it was under review/.test(n)));
+});
+
+test("spec review gate: a pass covers only the text it saw", () => {
+  const pass = { type: "spec-review", verdict: "pass", hash: "h" };
+  assert.deepEqual(specReviewGate([pass], "h"), { action: "skip" });
+  assert.deepEqual(specReviewGate([pass], "h2"), { action: "review", prior: [] });
+  assert.deepEqual(specReviewGate([], "h"), { action: "review", prior: [] });
+});
+
+test("spec review gate: a standing block is re-posted, not re-run", () => {
+  const f = { priority: "P1", title: "unguarded transition", fix: "guard it" };
+  const block = { type: "spec-review", verdict: "block", hash: "h", reported: [f] };
+  const pass = { type: "spec-review", verdict: "pass", hash: "h" };
+  assert.deepEqual(specReviewGate([block], "h"), { action: "repost", findings: [f] });
+  assert.deepEqual(specReviewGate([block], "h2"), { action: "review", prior: [f] });
+  assert.deepEqual(specReviewGate([pass, block], "h"), { action: "repost", findings: [f] }); // the last verdict rules
+  assert.deepEqual(specReviewGate([block, pass], "h"), { action: "skip" });
+});
+
+test("spec review gate: a forced event settles nothing and no hash means no coverage", () => {
+  const f = { priority: "P1", title: "unguarded transition", fix: "guard it" };
+  const block = { type: "spec-review", verdict: "block", hash: "h", reported: [f] };
+  const forced = { type: "spec-review", verdict: "forced", hash: "h" };
+  assert.deepEqual(specReviewGate([block, forced], "h"), { action: "repost", findings: [f] });
+  assert.deepEqual(specReviewGate([{ type: "spec-review", verdict: "pass" }], "h"), { action: "review", prior: [] }); // pre-hash events don't cover
+});
+
+test("spec review: a follow-up brief carries the earlier findings to judge first", async () => {
+  const { specReviewBrief } = await import("../extensions/pb/prompts.ts");
+  const md = "# Order cancellation\n\n## Decisions\n- Only PENDING orders can be cancelled.\n";
+  const fresh = specReviewBrief("order-cancellation", md);
+  assert.doesNotMatch(fresh, /Earlier findings/);
+  const followUp = specReviewBrief("order-cancellation", md, [{ priority: "P0", title: "unguarded transition", fix: "guard it" }]);
+  assert.match(followUp, /Earlier findings/);
+  assert.match(followUp, /unguarded transition/);
+  assert.match(followUp, /Fix: guard it/);
+  assert.match(followUp, /still stands/); // each earlier finding is judged, not assumed
+  assert.match(followUp, /Attack its Decisions/); // and the whole spec is still reviewed
 });
 
 test("spec review: the brief attacks decisions and demands an exact verdict", async () => {
@@ -4625,6 +5026,14 @@ test("spec: the format checklist asks for prose inventory, real states and measu
     assert.match(p, /prose that describes the behavior/);
     assert.match(p, /enumerate its real states/);
     assert.match(p, /carries a measurement/);
+  }
+});
+
+test("spec: the format teaches the acceptance proof markers and doc-only acceptance lines", async () => {
+  const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
+  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
+    assert.match(p, /each carries its proof marker \(tests:/);
+    assert.match(p, /A doc-only task carries no Test: line — its acceptance lines still say what to check, marked \(non-testable:/);
   }
 });
 

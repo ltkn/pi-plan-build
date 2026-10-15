@@ -6,7 +6,7 @@
  * in your Pi sessions; the explorer, the reviewer and the verifier are separate, fresh calls.
  */
 import { tip } from "./help.ts";
-import type { ParsedSpec, SpecTask } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, sectionHeading } from "./spec.ts";
 import { type Finding, PB_DIR, type Progress, type TaskProgress } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
@@ -146,12 +146,12 @@ Only while Status is planning: what's undecided, the options still being weighed
 ## Tasks
 ### T1: <the outcome, e.g. "a pending order can be cancelled">
 What must be true when it's done, and anything the build must know; not how to build it.
-- Acceptance: <one behaviour, as a test would check it>   (one line each, abuse cases included: they are the tests to write)
+- Acceptance: <one behaviour, as a test would check it>   (one line each, abuse cases included: they are the tests to write; each carries its proof marker (tests: <the tests that prove it>) or its exemption (non-testable: <why>))
 - Test: \`<command that runs this task's tests>\`   (for a task that adds behaviour)
 
 The spec pins what the change must do and how we'll know: Goal, Decisions, Contracts and Acceptance bind the build. How to build it is left to the build, which settles the shape task by task — the compiler and the tests giving feedback — and records what it settles on in "## Design". So don't write "## Design" yourself, and don't prescribe classes, methods or steps unless they are a Contract. Put what tasks share in Contracts: that is the shape the build must not invent.
 
-One task, unless a slice is worth reviewing on its own; then vertical slices, each leaving the code working and tested, never a split by layer or a closing "add tests" task. A task that adds no behaviour (wiring, configuration, a "(refactor) …") has no Test: line. Name the prose that describes the behavior being changed (map sections, javadoc, schema comments, guides); updating it is a Task, and doc-only tasks carry no Test: line — never an afterthought.
+One task, unless a slice is worth reviewing on its own; then vertical slices, each leaving the code working and tested, never a split by layer or a closing "add tests" task. A task that adds no behaviour (wiring, configuration, a "(refactor) …") has no Test: line. Name the prose that describes the behavior being changed (map sections, javadoc, schema comments, guides); updating it is a Task, never an afterthought. A doc-only task carries no Test: line — its acceptance lines still say what to check, marked (non-testable: <why>).
 
 Add "## Out of scope" or "## Acceptance criteria" only when they help.
 
@@ -379,7 +379,7 @@ Pre-existing issues are at most P2. Report only what the author would want to fi
 
 Then reply briefly in markdown: the acceptance checklist when there is a spec, and anything worth knowing that isn't a finding. Don't repeat the findings.`;
 
-/** The abuse pass: one fresh call whose only job is to break the change, on every review by default. */
+/** The abuse pass: one fresh call whose only job is to break the change, on sensitive ground by default (reviewer.security "auto"). */
 export const ATTACKER_SYSTEM = `You are an ATTACKER in a fresh session, working for the defenders: find how this change can be abused or broken before someone else does. You did not build it and are not shown how it was built.
 
 Do not modify any file. Use read/grep/find/ls and bash only for inspection; never run git commands that change the working tree or index. Ignore .pi/ except the spec you are given.
@@ -447,7 +447,7 @@ export interface ReviewBrief {
  * Undefined when the spec has no Design section. One line for the reviewer: how hard to look for drift.
  */
 export function designProvenance(markdown: string, events: Array<Record<string, unknown>>): string | undefined {
-  if (!/^##\s+Design\s*$/im.test(markdown)) return undefined;
+  if (!sectionHeading("Design").test(markdown)) return undefined;
   const at = (e: Record<string, unknown>) => (typeof e.at === "string" ? e.at : "");
   const buildStart = events.find((e) => e.type === "build-start");
   const writes = events.filter((e) => e.type === "spec" && typeof e.update === "string" && /^design$/i.test(e.update));
@@ -512,13 +512,22 @@ export function reviewerBrief(o: ReviewBrief): string {
 
 export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review a feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. Read the spec and the code it points to (read/grep/find/ls only, no writes). Your findings must be checkable against the spec alone. Be concise: conclusion first. Your answer is all that goes back.`;
 
-/** What a spec review is asked, and the exact shape its answer must take. */
-export function specReviewBrief(name: string, markdown: string): string {
+/** What a spec review is asked, and the exact shape its answer must take. `prior`: the earlier findings a follow-up must judge first. */
+export function specReviewBrief(name: string, markdown: string, prior: Finding[] = []): string {
+  const followUp = prior.length
+    ? `# Earlier findings
+
+The previous pass reported these findings and the build was stopped. For each: judge from the current spec alone whether it still stands, and report again only the ones that do (same title). Then review the current spec as a whole — a finding the spec no longer deserves is not a finding, and no new evidence reopens a point the spec marks decided.
+
+${prior.map((f, i) => findingLine(f, i + 1)).join("\n")}
+
+`
+    : "";
   return `# Spec under review: ${name}
 
 ${markdown}
 
-# Your job
+${followUp}# Your job
 
 Attack its Decisions: for each decision, say how it could be wrong or abused in production. Re-test every "Not doing X" rejection: what breaks because X was rejected? Flag every quantitative claim (latencies, counts, windows) with no measurement: demand a number or an Assumption. Probe the empty paths: for every behavior the spec describes, ask what it does when there is nothing to do (empty input, all dependencies down, no reportable case) — if the spec is silent, flag it (P1 when a stale artifact would linger for the user, else P2), demanding defined behavior or an Assumption. Check the prose inventory: does every behavior name the docs that must change with it? Before blocking on an objection to a point the spec marks decided, check for new evidence (a measurement, a probe result, a code fact): without it, comment only — a re-litigation is not a finding.
 
@@ -550,12 +559,16 @@ export function parseSpecReview(text: string): SpecReviewResult {
 
 /**
  * What a review session is reset to when Pi compacts it: its role, the brief verbatim (the complete
- * baseline, as the spec is for a build), and the findings so far, so nothing decided is re-derived.
+ * baseline, as the spec is for a build), the findings so far, and the files read, so nothing decided
+ * is re-derived and nothing read is re-read blind. A stalled session (repeated compactions with
+ * nothing new read) is told to wrap up with what it has instead of starting another reading round.
  */
-export function reviewStateSummary(o: { label: string; role: "review" | "abuse"; brief: string; findings: Finding[] }): string {
+export function reviewStateSummary(o: { label: string; role: "review" | "abuse"; brief: string; findings: Finding[]; read?: string[]; wrapUp?: boolean }): string {
   return [
     `[pb review state: ${o.label}] This ${o.role === "review" ? "review" : "abuse-pass"} session was compacted. The brief below is the complete baseline: re-read any files you need from it, and carry on where the findings leave off.`,
     "",
+    ...(o.wrapUp ? ["Compacted repeatedly without reading anything new: report findings with what you have and stop — do not start another reading round.", ""] : []),
+    ...(o.read?.length ? ["Files read before this point (read again what you need):", ...o.read.slice(0, 40).map((f) => `- ${f}`), ""] : []),
     "--- brief ---",
     "",
     o.brief,

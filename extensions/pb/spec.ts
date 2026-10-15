@@ -19,7 +19,8 @@
  *   - Acceptance: <checkable>
  *   - Test: `<targeted test command>`        (optional)
  */
-import type { Gate } from "./store.ts";
+import { createHash } from "node:crypto";
+import type { Finding, Gate } from "./store.ts";
 
 export interface SpecTask {
   id: string;
@@ -69,6 +70,13 @@ const headerBlock = (md: string): string => {
 
 const escapeReg = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/**
+ * The one section-heading matcher: "## <name>", case-insensitive, with an optional trailing
+ * colon (planners write both). Writers and readers share it; when they drift, a heading the
+ * reader accepts becomes a second section to the writer.
+ */
+export const sectionHeading = (name: string) => new RegExp(`^##\\s+${escapeReg(name)}\\s*:?\\s*$`, "im");
+
 const header = (md: string, label: string) => headerBlock(md).match(new RegExp(`^\\s{0,3}${escapeReg(label)}:\\s*(.+)$`, "im"))?.[1].trim();
 const splitReason = (v: string) => {
   const m = v.match(/^(.*?)\s*[—–]\s*(.+)$/) ?? v.match(/^(.*?)\s+-\s+(.+)$/);
@@ -114,17 +122,17 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
   const dependsOn = dep && !/^none(\s*\(|$)/i.test(dep) ? dep : undefined;
 
   for (const s of REQUIRED_SECTIONS) {
-    const found = blanked.filter((l) => new RegExp(`^##\\s+${escapeReg(s)}\\s*:?\\s*$`, "i").test(l));
+    const found = blanked.filter((l) => sectionHeading(s).test(l));
     if (!found.length) errors.push(`missing the "## ${s}" section`);
     else if (found.length > 1) errors.push(`duplicate "## ${s}" section: keep one`);
   }
-  if (status === "ready" && blanked.some((l) => /^##\s+Open questions\s*:?\s*$/i.test(l)) && sectionOf(md, "Open questions").trim())
+  if (status === "ready" && sectionOf(md, "Open questions").trim())
     errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions ("Assumption: <claim> — settles by <how>, because <reason>") or ask with pb_ask');
 
   // Tasks: fence-aware, line-based. ## Tasks allows a trailing colon; ### T1 is case-insensitive
   // and normalized to T1; a ### line that looks like a task but doesn't parse is an error, not silence.
   const lines = md.split("\n");
-  const tasksIdx = blanked.findIndex((l) => /^##\s+Tasks\s*:?\s*$/i.test(l));
+  const tasksIdx = blanked.findIndex((l) => sectionHeading("Tasks").test(l));
   const tasksEndRel = tasksIdx < 0 ? -1 : blanked.slice(tasksIdx + 1).findIndex((l) => /^##\s+(?!#)/.test(l));
   const tasksEnd = tasksIdx < 0 ? -1 : tasksEndRel < 0 ? lines.length : tasksIdx + 1 + tasksEndRel;
   const tasksLines = tasksIdx < 0 ? [] : lines.slice(tasksIdx + 1, tasksEnd);
@@ -168,10 +176,10 @@ export function setSection(md: string, section: string, body: string, mode: "rep
   const name = section.replace(/^#+\s*/, "").trim();
   const lines = md.split("\n");
   const blanked = blankFenced(md);
-  const idx = blanked.findIndex((l) => new RegExp(`^##\\s+${escapeReg(name)}\\s*:?\\s*$`, "i").test(l));
+  const idx = blanked.findIndex((l) => sectionHeading(name).test(l));
   const text = body.trim();
   if (idx < 0) {
-    const tasksIdx = blanked.findIndex((l) => /^##\s+Tasks\s*:?\s*$/i.test(l));
+    const tasksIdx = blanked.findIndex((l) => sectionHeading("Tasks").test(l));
     const block = `## ${name}\n${text}\n\n`;
     if (tasksIdx < 0 || name.toLowerCase() === "tasks") return `${md.trimEnd()}\n\n${block.trimEnd()}\n`;
     const at = lines.slice(0, tasksIdx).join("\n").length + (tasksIdx > 0 ? 1 : 0);
@@ -211,7 +219,7 @@ export const tokensOf = (text: string) => Math.round(text.length / 4);
 /** Add a decision under "## Decisions" (created if missing), so it survives compaction and reaches the reviewer. */
 export function addDecision(md: string, decision: string): string {
   const line = `- ${decision.trim().replace(/\n+/g, " ")}`;
-  const m = md.match(/^##\s+Decisions\s*$/im);
+  const m = md.match(sectionHeading("Decisions"));
   if (!m || m.index === undefined) return `${md.trimEnd()}\n\n## Decisions\n\n${line}\n`;
   const start = m.index + m[0].length;
   const next = md.slice(start).search(/^##\s+/m);
@@ -275,7 +283,7 @@ export const buildTask = (spec: ParsedSpec, id: string | undefined) => spec.task
 export const sectionOf = (md: string, name: string): string => {
   const lines = md.split("\n");
   const blanked = blankFenced(md);
-  const idx = blanked.findIndex((l) => new RegExp(`^##\\s+${escapeReg(name)}\\s*:?\\s*$`, "i").test(l));
+  const idx = blanked.findIndex((l) => sectionHeading(name).test(l));
   if (idx < 0) return "";
   const rel = blanked.slice(idx + 1).findIndex((l) => /^##\s+(?!#)/.test(l));
   const end = rel < 0 ? lines.length : idx + 1 + rel;
@@ -293,7 +301,7 @@ export const sectionOf = (md: string, name: string): string => {
 
 const hasSection = (md: string, name: string): boolean => {
   const blanked = blankFenced(md);
-  return blanked.some((l) => new RegExp(`^##\\s+${escapeReg(name)}\\s*:?\\s*$`, "i").test(l));
+  return blanked.some((l) => sectionHeading(name).test(l));
 };
 
 /** Bullets of a section (fence-aware, "-" or "*" markers). */
@@ -432,11 +440,11 @@ export function findingsEvidenceErrors(md: string, spec: ParsedSpec): string[] {
 
 /**
  * Decisions bullets (when the section exists) must carry a reason: because, an
- * em/en dash or arrow reasoning marker, "so that", an explicit Rationale, or a
- * settled guess in Assumption form. A bare colon never counts ("Use X: yes"
- * states no reason). Rejected ideas ("Not doing X") need the same.
+ * em/en dash or arrow reasoning marker, "so that", an explicit Rationale or
+ * Reason:, or a settled guess in Assumption form. A bare colon never counts
+ * ("Use X: yes" states no reason). Rejected ideas ("Not doing X") need the same.
  */
-const REASON = /(because|—|–|→|so that|rationale|assumption:)/i;
+const REASON = /(because|—|–|→|so that|rationale|reason(?:s|ing)?:|assumption:)/i;
 
 export function decisionsEvidenceErrors(md: string, spec: ParsedSpec): string[] {
   if (spec.status !== "ready") return [];
@@ -454,4 +462,25 @@ export function semanticErrors(md: string, spec: ParsedSpec): string[] {
 /** The Threats/numbers/Contracts subset: what a Tasks-section update re-checks. */
 export function taskScopeSemanticErrors(md: string, spec: ParsedSpec): string[] {
   return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec)];
+}
+
+/** A review answers for the exact markdown it saw: a pass stops covering the spec the moment the text changes. */
+export const specHash = (markdown: string) => createHash("sha256").update(markdown).digest("hex");
+
+export type SpecReviewGate =
+  | { action: "skip" }
+  | { action: "repost"; findings: Finding[] }
+  | { action: "review"; prior: Finding[] };
+
+/**
+ * What a build start owes the spec review, from its {type:"spec-review"} events and the current
+ * text's hash: a pass on this text skips it, a block on this text is re-posted (a re-run would
+ * re-find the same), and anything else runs — with the last verdict's findings first, to judge.
+ */
+export function specReviewGate(events: Array<Record<string, unknown>>, hash: string): SpecReviewGate {
+  const last = events.filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block")).at(-1);
+  if (!last) return { action: "review", prior: [] };
+  const findings = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
+  if (last.hash !== hash) return { action: "review", prior: findings };
+  return last.verdict === "pass" ? { action: "skip" } : { action: "repost", findings };
 }

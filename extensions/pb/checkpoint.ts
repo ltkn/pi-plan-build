@@ -43,6 +43,25 @@ function gitPath(cwd: string, name: string): string {
   return path.resolve(cwd, run(cwd, ["rev-parse", "--git-path", name]).trim());
 }
 
+/**
+ * This process's snapshot index. One per process, not one per repository: parallel pb sessions (a review
+ * next to a build) would otherwise fight over one index lock, and a lost lock means a lost checkpoint.
+ * A leftover file from a killed process is inert (`dropCheckpoints` clears this process's, best-effort).
+ */
+export const snapshotIndex = (cwd: string) => gitPath(cwd, `pb-index-${process.pid}`);
+/** This process's scratch index for restore: written and deleted inside one call. */
+export const restoreIndex = (cwd: string) => gitPath(cwd, `pb-restore-index-${process.pid}`);
+
+/**
+ * The environment for a private index, seeded from HEAD when it doesn't exist yet (git needs a
+ * readable index for `ls-files` and `add`); seeding fails harmlessly outside a repo with commits.
+ */
+function indexEnv(cwd: string, file: string): Record<string, string> {
+  const env = { GIT_INDEX_FILE: file };
+  if (!fs.existsSync(file)) tryRun(cwd, ["read-tree", "HEAD"], env);
+  return env;
+}
+
 const split0 = (s: string | undefined) => (s ?? "").split("\0").filter(Boolean);
 
 /**
@@ -63,8 +82,7 @@ function addExcludes(cwd: string): string[] {
 export function snapshot(cwd: string, message: string): Snapshot | undefined {
   if (tryRun(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() !== "true") return;
   try {
-    const env = { GIT_INDEX_FILE: gitPath(cwd, "pb-index") };
-    if (!fs.existsSync(env.GIT_INDEX_FILE)) tryRun(cwd, ["read-tree", "HEAD"], env); // seed for speed; fails harmlessly without commits
+    const env = indexEnv(cwd, snapshotIndex(cwd));
     const huge = split0(tryRun(cwd, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", LEDGER_EXCLUDE], env)).filter((f) => {
       try {
         return fs.statSync(path.join(cwd, f)).size > MAX_UNTRACKED_BYTES;
@@ -125,7 +143,7 @@ export async function inWorktree<T>(cwd: string, fn: (dir: string) => Promise<T>
 export function skippedLargeFiles(cwd: string, sinceMs?: number): string[] {
   if (tryRun(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() !== "true") return [];
   try {
-    const env = { GIT_INDEX_FILE: gitPath(cwd, "pb-index") };
+    const env = indexEnv(cwd, snapshotIndex(cwd));
     return split0(tryRun(cwd, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", LEDGER_EXCLUDE], env)).filter((f) => {
       try {
         const st = fs.statSync(path.join(cwd, f));
@@ -147,9 +165,19 @@ export function commitTime(cwd: string, commit: string): number | undefined {
   return Number.isFinite(secs) && secs > 0 ? secs * 1000 : undefined;
 }
 
+/** Delete this process's private index files (best-effort; they are inert if left behind). */
+export function cleanupIndexes(cwd: string): void {
+  try {
+    for (const f of [snapshotIndex(cwd), restoreIndex(cwd), gitPath(cwd, "pb-index"), gitPath(cwd, "pb-restore-index")]) fs.rmSync(f, { force: true });
+  } catch {
+    // Not a git repository (or git is unhappy): there is nothing to clean up.
+  }
+}
+
 /** Forget pb's checkpoints; git garbage-collects the objects later. */
 export function dropCheckpoints(cwd: string): void {
   tryRun(cwd, ["update-ref", "-d", REF]);
+  cleanupIndexes(cwd);
 }
 
 export function changedPaths(cwd: string, a: string, b: string, paths: string[] = []): string[] {
@@ -229,24 +257,37 @@ function content(cwd: string, commit: string, p: string): string | undefined {
 }
 
 /**
+ * What a restore did. `guardFailed` means the worktree was left exactly as it was: without the
+ * guard snapshot there is no way to tell a file that still matches `from` from one that moved on.
+ */
+export interface RestoreResult {
+  /** paths put back to their state in `to` */
+  restored: string[];
+  /** the drift guard couldn't be taken: nothing was put back (fail closed) */
+  guardFailed: boolean;
+}
+
+/**
  * Make the working tree match `to` (optionally only for `paths`), given that it currently matches `from`.
  * Only the differing files are written or deleted; HEAD and your index are left alone. Returns the paths changed.
  * Files that no longer match `from` are left alone rather than clobbered: the worktree moved on since `from`
- * was recorded (another session, a save-time formatter), and overwriting it would lose that.
+ * was recorded (another session, a save-time formatter), and overwriting it would lose that. When even the
+ * guard snapshot can't be taken, nothing is restored and `guardFailed` says so.
  */
-export function restore(cwd: string, from: string, to: string, paths: string[] = []): string[] {
+export function restore(cwd: string, from: string, to: string, paths: string[] = []): RestoreResult {
   const entries = split0(tryRun(cwd, ["diff", "-z", "--name-status", "--no-renames", from, to, "--", ...paths]));
   const write: string[] = [];
   const remove: string[] = [];
   for (let i = 0; i + 1 < entries.length; i += 2) (entries[i] === "D" ? remove : write).push(entries[i + 1]);
   const current = snapshot(cwd, "pb: restore guard");
-  const drifted = current ? new Set(changedPaths(cwd, from, current.commit, [...write, ...remove])) : new Set<string>();
+  if (!current) return { restored: [], guardFailed: true };
+  const drifted = new Set(changedPaths(cwd, from, current.commit, [...write, ...remove]));
   const keep = (f: string) => !drifted.has(f);
   const toRemove = remove.filter(keep);
   const toWrite = write.filter(keep);
   for (const f of toRemove) fs.rmSync(path.join(cwd, f), { force: true });
   if (toWrite.length) {
-    const env = { GIT_INDEX_FILE: gitPath(cwd, "pb-restore-index") };
+    const env = { GIT_INDEX_FILE: restoreIndex(cwd) };
     try {
       run(cwd, ["read-tree", to], env);
       run(cwd, ["checkout-index", "-f", "-z", "--stdin"], env, toWrite.join("\0"));
@@ -254,7 +295,7 @@ export function restore(cwd: string, from: string, to: string, paths: string[] =
       fs.rmSync(env.GIT_INDEX_FILE, { force: true });
     }
   }
-  return [...toWrite, ...toRemove];
+  return { restored: [...toWrite, ...toRemove], guardFailed: false };
 }
 
 /* ------------------------------- detection ------------------------------- */

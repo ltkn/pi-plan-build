@@ -117,10 +117,11 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   the spec's `review.md`.
 - **Fresh eyes on the plan, too.** Before the first task, a spec-sized review
   attacks the spec's Decisions, re-tests every "Not doing X", and flags
-  unmeasured numbers — P0/P1 findings stop the build until amended or rebutted,
-  exactly once. And every acceptance line names its proof, so uncovered lines
-  can't slip to review unnoticed (prose that can't be tested says so, and never
-  blocks).
+  unmeasured numbers — any finding stops the build for you to read: P0/P1 to
+  amend (every amendment is re-reviewed, earlier findings judged first) or
+  `/pb:build --force` to build it as it stands. And every acceptance line names
+  its proof, so uncovered lines can't slip to review unnoticed (prose that
+  can't be tested says so, and never blocks).
 - **Fresh eyes where they pay.** The reviewer never saw the build's reasoning,
   and judges the spec too: a faithful build of a wrong plan is still wrong. It
   reports findings through a tool; a second fresh call double-checks the
@@ -215,7 +216,7 @@ the existing ones still run.
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, the planning and reviewer guards |
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
-| `reviewer` | `{"verify": true, "security": "always"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "always"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`always`, asked for after the spec pass; `auto`: when the change looks sensitive; `off`) |
+| `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always`, asked for after the spec pass; `off`) |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |

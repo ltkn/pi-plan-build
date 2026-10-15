@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.30.0
+
+- **The spec review keeps stopping.** Any finding stops the build before T1, so the review is read before anything builds: P0/P1 to amend (or rebut in Decisions), P2/P3 to decide on. Running `/pb:build` again judges each earlier finding against the new text first, then reviews the rest — stop, amend, rebuild, until the text passes. Unchanged text re-posts the standings instead of paying for the same review twice, and `/pb:build --force` builds the spec as it stands, recording the skip (standing findings included) as accepted.
+- **Only the way into a build is gated.** Once T1 has started, spec edits are the code reviewer's to judge — a resume or restart never re-litigates them. A pass answers for the exact text it saw: a spec edited while it was under review is re-reviewed, not built on the stale verdict.
+- **Quieter reviews by default.** The adversarial pass defaults to `auto` — it runs when the change looks sensitive; `"reviewer": {"security": "always"}` runs it on every review, `off` never.
+- **Restores fail closed.** When the guard snapshot can't be taken, nothing is put back — planning drift, `/pb:undo` and review cleanup say so instead of pretending the tree was clean.
+- **Parallel sessions stop fighting over the index.** Snapshots and restores use a private git index per process, cleaned up on shutdown; a shared index left by an older pb is inert.
+- **Interrupted reviews carry on honestly.** A compacted review resets to its role, the brief, the findings and the files read; findings written between compactions count as progress, so writing is not mistaken for circling; a session compacting with nothing new wraps up with what it has; and a stall from an earlier run never marks a later review of the same spec.
+- **Writers and readers agree, and failed writes say so.** One section-heading matcher, so `## Decisions:` takes decisions, answers and build guidance the same way everywhere; a call that makes the spec ready runs the full senior gates, whatever else it wrote; "documentation-only" tasks count as doc-only; `Reason:` counts as a reason; and text the spec can't take (a timed-out answer, guidance that would break the parse) is reported with how to record it, instead of vanishing.
+- **Spec names can't reach paths.** The one place a name becomes a path validates it (`..` and separators refused; legacy names already on disk stay readable), `/pb:build` and `/pb:review` refuse path-like arguments, and an archive collision never lands in a folder that already exists.
+
 ## 1.29.3
 
 - **Senior shape at write time.** Ready specs are held to mechanically checkable senior rules: Threats-and-abuse when Goal/Tasks look sensitive, measurements or `Assumption:` form for quantitative claims, Contracts when tasks share a seam (disjoint slices stay advisory), evidence per Findings bullet, a reason per Decisions bullet. Planning checkpoints stay exempt and readers stay lenient, so in-flight specs keep working.

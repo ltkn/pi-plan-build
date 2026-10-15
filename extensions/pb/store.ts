@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { SPEC_NAME } from "./spec.ts";
 import { agentDir } from "./standards.ts";
 
 export const PREFIX = "pb";
@@ -35,8 +36,8 @@ export interface Config {
   checkpoints: boolean;
   /**
    * The fresh reviewer: model and thinking level (unset = your session's), whether a second call double-checks
-   * P0/P1 findings, and when an abuse pass tries to break the change ("always"; "auto": on ground that looks
-   * sensitive; "off").
+   * P0/P1 findings, and when an abuse pass tries to break the change ("auto", the default: on ground that
+   * looks sensitive; "always"; "off").
    */
   reviewer: { model?: string; thinking?: string; verify?: boolean; security?: "auto" | "always" | "off"; idleSec?: number };
   /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
@@ -78,7 +79,7 @@ export const DEFAULT_CONFIG: Config = {
   specWaitSec: 0,
   testOutputCap: 4000,
   checkpoints: true,
-  reviewer: { verify: true, security: "always" },
+  reviewer: { verify: true, security: "auto" },
   freshAbove: 50,
   baseline: true,
   explorer: {},
@@ -109,7 +110,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
       model: typeof (reviewerRaw as { model?: unknown }).model === "string" ? (reviewerRaw as { model: string }).model : undefined,
       thinking: typeof (reviewerRaw as { thinking?: unknown }).thinking === "string" ? (reviewerRaw as { thinking: string }).thinking : undefined,
       verify: bool((reviewerRaw as { verify?: unknown }).verify, true),
-      security: security === "auto" || security === "always" || security === "off" ? security : "always",
+      security: security === "auto" || security === "always" || security === "off" ? security : "auto",
       idleSec: typeof (reviewerRaw as { idleSec?: unknown }).idleSec === "number" ? (reviewerRaw as { idleSec: number }).idleSec : undefined,
     },
     freshAbove: num((raw as { freshAbove?: unknown }).freshAbove, DEFAULT_CONFIG.freshAbove),
@@ -257,6 +258,8 @@ export interface ReviewSessionState {
 /** A review in progress, kept on disk so it can be continued after an interruption. */
 export interface ReviewRun {
   cwd: string;
+  /** Identifies this run in the spec's compact events, so a stall in one review never marks the next. */
+  id?: string;
   name?: string;
   label: string;
   brief: string;
@@ -353,7 +356,14 @@ export class Store {
 
   /* --------------------------------- specs --------------------------------- */
 
+  /**
+   * A spec's directory, and the one place a spec name becomes a path (every spec file goes
+   * through here). The name must be a valid spec name, or one already on disk: older specs
+   * whose folder name today's rule rejects stay readable. Anything else — ".", "..", a path
+   * separator — throws instead of reaching path.join.
+   */
   specDir(name: string): string {
+    if (!SPEC_NAME.test(name) && !this.specNames().includes(name)) throw new Error(`"${name}" is not a valid spec name: use short kebab-case, e.g. order-cancellation`);
     return path.join(this.root, "specs", name);
   }
   specNames(): string[] {
@@ -838,7 +848,7 @@ export class Store {
     if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, "*\n");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     let dest = path.join(this.archiveRoot, `${stamp}-${name}`);
-    for (let i = 2; fs.existsSync(dest) && i < 100; i++) dest = path.join(this.archiveRoot, `${stamp}-${name}-${i}`);
+    for (let i = 2; fs.existsSync(dest); i++) dest = path.join(this.archiveRoot, `${stamp}-${name}-${i}`);
     fs.renameSync(src, dest);
     return dest;
   }

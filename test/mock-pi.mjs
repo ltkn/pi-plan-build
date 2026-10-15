@@ -25,6 +25,9 @@ if (sys.includes("ATTACKER")) {
 } else if (sys.includes("SPEC REVIEWER")) {
   // MOCK_SPEC_REVIEW=block: a P0 plus a block verdict; =advisory: a P2 that travels on;
   // =empty: a P1 on a silent empty path plus a block verdict.
+  // MOCK_SPEC_BRIEF_OUT captures the brief; MOCK_SPEC_EDIT simulates the human editing the spec mid-review.
+  if (process.env.MOCK_SPEC_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_SPEC_BRIEF_OUT, brief);
+  if (process.env.MOCK_SPEC_EDIT) fs.appendFileSync(process.env.MOCK_SPEC_EDIT, "- Note: edited while the review ran.\n");
   const mode = process.env.MOCK_SPEC_REVIEW;
   if (mode === "block") say([{ type: "text", text: "[P0] Decisions — unguarded transition\nFix: guard it\n\nVERDICT: block" }]);
   else if (mode === "advisory") say([{ type: "text", text: "[P2] Contracts — unmeasured window\nFix: measure it\n\nVERDICT: pass" }]);
