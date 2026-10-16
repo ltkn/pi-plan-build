@@ -21,6 +21,10 @@ export interface Config {
   verify: string | null;
   /** Compile/typecheck command: the check for a task without its own Test: line, and the "build" gate. "auto" detects; null disables. */
   build: string | null;
+  /** Lint command: "auto" uses package.json's lint script when present (other stacks set it explicitly); null disables. Runs at the final gate, after the suite. */
+  lint: string | null;
+  /** Extra project commands (e.g. standards scripts): explicit commands only, run at the final gate after lint. */
+  extraChecks: string[];
   verifyTimeoutSec: number;
   /** Fix attempts per task (or for the final check) before the build pauses for you. */
   maxAttempts: number;
@@ -72,6 +76,8 @@ export type Role = (typeof ROLES)[number];
 export const DEFAULT_CONFIG: Config = {
   verify: "auto",
   build: "auto",
+  lint: "auto",
+  extraChecks: [],
   verifyTimeoutSec: 900,
   maxAttempts: 3,
   taskChecks: "end",
@@ -99,6 +105,10 @@ function sanitizeConfig(raw: Partial<Config>): Config {
   return {
     verify: strOrNull((raw as { verify?: unknown }).verify, DEFAULT_CONFIG.verify),
     build: strOrNull((raw as { build?: unknown }).build, DEFAULT_CONFIG.build),
+    lint: strOrNull((raw as { lint?: unknown }).lint, DEFAULT_CONFIG.lint),
+    extraChecks: Array.isArray((raw as { extraChecks?: unknown }).extraChecks)
+      ? ((raw as { extraChecks: unknown[] }).extraChecks.filter((x): x is string => typeof x === "string").slice(0, 10))
+      : [],
     verifyTimeoutSec: num((raw as { verifyTimeoutSec?: unknown }).verifyTimeoutSec, DEFAULT_CONFIG.verifyTimeoutSec),
     maxAttempts: Math.max(1, Math.floor(num((raw as { maxAttempts?: unknown }).maxAttempts, DEFAULT_CONFIG.maxAttempts))),
     taskChecks: (raw as { taskChecks?: unknown }).taskChecks === "each" ? "each" : "end",
@@ -159,6 +169,8 @@ export interface TaskProgress {
   red?: string;
   /** the Test: command that was seen failing for red, so a rewritten command re-requires proof */
   redCommand?: string;
+  /** content fingerprint of the test files seen failing, so edited/swapped tests re-require proof */
+  redFiles?: Record<string, string>;
   /** tasks needing red that run the very same Test: command: one run doesn't prove each task's own tests */
   redShared?: string;
   /** pre-green: the command already passed, proven by the done earlier task named here — red was impossible */
@@ -243,6 +255,10 @@ export interface Checkpoint {
 
 export interface Baseline extends VerifyResult {
   head?: string;
+  /** lint's result when the baseline ran it (null = no lint command): red warns, never blocks alone */
+  lint?: VerifyResult | null;
+  /** project checks' results, in config order */
+  extra?: VerifyResult[];
 }
 
 export interface ReviewSessionState {

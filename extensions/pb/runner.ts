@@ -60,7 +60,10 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
   // Same resolution strategy as Pi's own subagent example.
   const script = process.argv[1];
   if (script && !script.startsWith("/$bunfs/root/") && fs.existsSync(script)) {
-    return { command: process.execPath, args: [script, ...args] };
+    // The extension may be embedded in another JS host (a different CLI, a test runner):
+    // only reuse the entry script when it is Pi's own, otherwise the host would get Pi's args.
+    const base = path.basename(script).toLowerCase();
+    if (/^pi(\.(mjs|cjs|js|ts|exe))?$/.test(base)) return { command: process.execPath, args: [script, ...args] };
   }
   const exe = path.basename(process.execPath).toLowerCase();
   if (!/^(node|bun)(\.exe)?$/.test(exe)) return { command: process.execPath, args };
@@ -109,7 +112,8 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
   try {
     res.exitCode = await new Promise<number>((resolve) => {
       const inv = piInvocation(args);
-      const proc = spawn(inv.command, inv.args, { cwd: o.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+      const posix = process.platform !== "win32";
+      const proc = spawn(inv.command, inv.args, { cwd: o.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], detached: posix });
       let buf = "";
       let stderr = "";
       let closed = false;
@@ -189,14 +193,17 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
         if (closed) return;
         res.aborted = true;
         try {
-          proc.kill("SIGTERM");
+          // Kill the whole process group so grandchildren don't outlive the abort (verify.ts kills the same way).
+          if (posix && proc.pid) process.kill(-proc.pid, "SIGTERM");
+          else proc.kill("SIGTERM");
         } catch {
           /* ignore */
         }
         setTimeout(() => {
           if (!closed) {
             try {
-              proc.kill("SIGKILL");
+              if (posix && proc.pid) process.kill(-proc.pid, "SIGKILL");
+              else proc.kill("SIGKILL");
             } catch {
               /* ignore */
             }

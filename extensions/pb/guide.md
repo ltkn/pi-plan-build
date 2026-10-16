@@ -422,7 +422,9 @@ Before the first task, the spec gets its own fresh-eyes review (see
 **A check after every task** (`"taskChecks": "each"`): the harness also runs each
 task's `Test:` command (a compile when it has none) when the task is done. It
 catches a broken task earlier, but makes every task leave the build green on
-its own, which slices work unnaturally and costs a run per task.
+its own, which slices work unnaturally and costs a run per task. With `"end"`
+each task is still compiled when done (when a compile command exists), and the
+final gate additionally runs `lint` and `extraChecks` when configured.
 
 The spec's Goal, Decisions, Contracts and Acceptance bind the build: changing
 one takes a `pb_ask`. How to build it is the build's: a better way found while
@@ -503,13 +505,17 @@ the run is recorded and handed to the reviewer as proving nothing of the
 task's own. And a task with no `Test:` command, a refactor, or a spec with
 `New tests: no` or `Verification: build` has no red proof by construction.
 Rewriting a task's `Test:` command drops its proof: the new command must be
-seen failing again. Each case is listed at the end of the build and handed to the reviewer as
+seen failing again — as must edited, swapped or weakened test files, which the
+proof is fingerprinted against. Each case is listed at the end of the build and handed to the reviewer as
 partly proven or unproven — give a task its own targeted command where you
 can, and when tasks share one, make it fail at each task's turn (a conjunction
-over per-task artifacts, so each task still has something to prove).
+over per-task artifacts, so each task still has something to prove). Proof
+markers must name real tests (a file in the repo or a test it contains;
+`T1`-style means the task's own run), or writing is rejected.
 
 The commands come from `.pi/pb/config.json` (`"verify"` and `"build"`, `"auto"`
-detects Maven, Gradle, npm/TypeScript, Cargo, Go and pytest).
+detects Maven, Gradle, npm/TypeScript, Cargo, Go and pytest; `"lint"` uses
+package.json's `lint` script, `"extraChecks"` runs project commands after it).
 
 **New tests: whether tasks add tests.** `yes` by default. `New tests: no —
 <why>` is yours to set: the build adds no tests, the existing ones still run,
@@ -558,7 +564,10 @@ reasoning. It checks
 every acceptance criterion with evidence, the decisions (including rejected
 alternatives and the build's assumptions), `(refactor)` tasks for unchanged
 behaviour, the existing tests the build changed, the tasks whose new tests
-carry no proof (with why each), and where the spec's Design comes from (how
+carry no proof (with why each), unresolvable `(tests: …)` proof names (a named
+test that proves nothing is a faked mapping), the fix laps' own reports on a
+follow-up (claims plus test results, judged as evidence), acceptance lines
+that moved during the build, and where the spec's Design comes from (how
 hard to look for drift between Design, Decisions and code), comments, your
 standards and security, and reports each finding through a tool, not as prose
 to be parsed.

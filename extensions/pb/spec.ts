@@ -279,6 +279,27 @@ export function redSharing(spec: ParsedSpec): Map<string, string> {
 /** A step of the build by id: a spec task. */
 export const buildTask = (spec: ParsedSpec, id: string | undefined) => spec.tasks.find((t) => t.id === id);
 
+/**
+ * `(tests: ...)` proof references named on one task's acceptance lines. A `T1`-style entry means
+ * the task's own Test: run; a path-like entry names a file; anything else must occur verbatim in
+ * the test files (a test or file name) — a named test that proves nothing is a faked mapping.
+ */
+export function testRefsOf(taskText: string): string[] {
+  const refs: string[] = [];
+  for (const line of taskText.split("\n")) {
+    if (!/^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/.test(line)) continue;
+    for (const m of line.matchAll(/\(tests:\s*([^)]+)\)/gi)) {
+      for (const e of m[1].split(/[,;]/).map((s) => s.trim()).filter(Boolean)) refs.push(e);
+    }
+  }
+  return refs;
+}
+
+/** A `T1`-style entry: the task's own Test: command run proves it, no file to resolve. */
+export const ownTestRef = (entry: string) => /^T\d+$/i.test(entry.trim());
+/** A path-like entry: must exist in the repo. */
+export const pathTestRef = (entry: string) => /[/\\]/.test(entry) || /\.[A-Za-z0-9]+$/.test(entry.trim());
+
 /** A section's body, trimmed ("" when missing). Fence-aware; name is literal. */
 export const sectionOf = (md: string, name: string): string => {
   const lines = md.split("\n");

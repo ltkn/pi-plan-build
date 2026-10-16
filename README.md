@@ -184,8 +184,10 @@ Acceptance bind the build. Contracts pin every seam the tasks share, since no
 later step sees the whole change at once. Each task writes its tests first
 (seen failing), then the behaviour; the first task that settles a shape the
 later ones build on records it in `## Design`. Each Acceptance line is one
-behaviour, a test to write — with `(tests: …)` naming its proof, or
-`(non-testable: …)` saying why no test can (docs and config stay unblocked).
+behaviour, a test to write — with `(tests: …)` naming its proof (a `T1`-style
+entry means the task's own `Test:` run, anything else must resolve to a file
+or test in the repo), or `(non-testable: …)` saying why no test can (docs and
+config stay unblocked).
 
 `## Out of scope` and `## Acceptance criteria` are optional: a spec is as long
 as the change needs and no longer. Pi points to code instead of copying it;
@@ -196,7 +198,9 @@ own; one planning session can produce several (`Depends on:` orders them).
 **Checks and tests are separate choices.** `Verification` decides what the
 harness runs after the last task: `tests` (the full suite), `build` (compile or
 typecheck only) or `none`. With `taskChecks: "each"`, it also runs each task's
-`Test:` command (a compile when it has none). `New tests: no` tells the build not to add tests for this feature while
+`Test:` command (a compile when it has none); with `"end"`, each task is still
+compiled when done (when a compile command exists). After the suite, the final
+gate also runs `lint` and `extraChecks` when configured. `New tests: no` tells the build not to add tests for this feature while
 the existing ones still run.
 
 ## Configuration
@@ -206,7 +210,9 @@ the existing ones still run.
 | Key | Default | Meaning |
 |---|---|---|
 | `verify` | `"auto"` | test command; detects `./mvnw`/`mvn -B -q test`, gradle, npm, cargo, go, pytest; `null` disables |
-| `build` | `"auto"` | compile/typecheck command: for `Verification: build`, and a task without a `Test:` line under `taskChecks: "each"` |
+| `build` | `"auto"` | compile/typecheck command: for `Verification: build`, a task without a `Test:` line, and the per-task compile under `taskChecks: "end"` |
+| `lint` | `"auto"` | lint command from package.json's `lint` script (other stacks set it explicitly); runs at the final gate after the suite |
+| `extraChecks` | `[]` | extra project commands (e.g. standards scripts), run at the final gate after lint |
 | `verifyTimeoutSec` | 900 | |
 | `maxAttempts` | 3 | failed checks (the final one, or a task's) before the build pauses |
 | `taskChecks` | `"end"` | `"end"`: the full check after the last task; `"each"`: also a check after every task |

@@ -51,6 +51,25 @@ export function resolveBuild(setting: string | null, cwd: string): string | null
   return setting;
 }
 
+/** Lint command: package.json's lint script when present (explicit `lint` covers every other stack). */
+export function detectLint(cwd: string): string | null {
+  const has = (f: string) => fs.existsSync(path.join(cwd, f));
+  if (!has("package.json")) return null;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
+    if (pkg.scripts?.lint && !/no lint specified/.test(pkg.scripts.lint)) return "npm run lint --silent";
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+export function resolveLint(setting: string | null, cwd: string): string | null {
+  if (setting === null || setting === "" || setting === "none") return null;
+  if (setting === "auto") return detectLint(cwd);
+  return setting;
+}
+
 const SIGNAL = /(\[ERROR\]|FAIL|Tests run:.*(Failures|Errors): [1-9]|BUILD FAILURE|COMPILATION ERROR|Exception|AssertionError|expected|panicked|error\[|error:|timeout|timed out|killed|OOM|out of memory)/i;
 
 function summarize(output: string, limit: number): string {
@@ -71,7 +90,7 @@ export async function runVerify(
   // shell:true is intentional: Test: lines are shell commands (`test -f`, `npm test --silent`,
   // `go build ./... && go vet ./...`). They come from the spec you approved, and the build's
   // agent can already run bash — this grants it no new privilege. Suspicious chaining (`;`, `|`,
-  // `$`, backticks, curl/wget) is flagged in specWarnings and skipped by the pre-approval dry-run.
+  // `&&`, `&`, `$`, backticks, curl/wget) is flagged in specWarnings and skipped by the pre-approval dry-run.
   const started = Date.now();
   const effectiveTimeoutSec = Math.max(1, Math.floor(timeoutSec || 0) || 1);
   let out = "";

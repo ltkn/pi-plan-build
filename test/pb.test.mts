@@ -1072,6 +1072,170 @@ test("red then green: a task's new tests are seen failing first; refactors and n
   assert.doesNotMatch(u.instructions[0], /Skeleton/);
 });
 
+test("red proof is bound to the test files: editing them after red re-requires proof", async () => {
+  const t = setup({ verify: "true" });
+  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (tests: T2)\n- Test: `true`" }));
+  const said: string[] = [];
+  let weakened = false;
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text) ?? (text.includes("Continue task T1") ? "T1" : undefined);
+    if (task === "T1" && !weakened) {
+      fs.writeFileSync("T1.test.mjs", "assert equal(a, 1)\n");
+      said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
+      fs.writeFileSync("T1.test.mjs", "assert true\n"); // weaken after the proof
+      fs.writeFileSync("T1.txt", "x");
+      weakened = true;
+      said.push((await tool("pb_task_done", { task, status: "done", changed: "done", caveat: "none", rejected: "none", open: "none" })).content![0].text);
+      fs.rmSync("T1.txt"); // set aside, as told
+      said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
+      fs.writeFileSync("T1.txt", "x");
+      return void (await tool("pb_task_done", { task, status: "done", changed: "done", caveat: "none", rejected: "none", open: "none" }));
+    }
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.match(said[0], /^Seen failing: `test -f T1\.txt`/);
+  assert.match(said[1], /tests changed since they were seen failing[\s\S]*pb_tests_red again/);
+  assert.match(said[2], /^Seen failing: `test -f T1\.txt`/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("spec review leaves the project untouched: stray writes are put back", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const planted = path.join(t.repo, "REVIEW_WAS_HERE");
+  process.env.MOCK_SPEC_BRIEF_OUT = planted;
+  try {
+    t.agent.script = diligent;
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_BRIEF_OUT;
+  }
+  assert.ok(!fs.existsSync(planted));
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("build: with taskChecks end, each task is still compiled when a build command exists", async () => {
+  const t = setup({ verify: "true", build: "false" });
+  await written(t);
+  const said: string[] = [];
+  let done = false;
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text);
+    if (task === "T1" && !done) {
+      done = true;
+      said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
+      fs.writeFileSync("T1.txt", "x");
+      said.push((await tool("pb_task_done", { task, status: "done", changed: "done", caveat: "none", rejected: "none", open: "none" })).content![0].text);
+    }
+  };
+  await t.run("build");
+  assert.match(said[0], /^Seen failing/);
+  assert.match(said[1], /The check for T1 failed[\s\S]*`false`/); // the per-task compile, not the suite
+});
+
+test("final gate: lint runs after the suite and fails the build like any check", async () => {
+  const t = setup({ verify: "true", build: null, lint: "false" });
+  await written(t);
+  const said: string[] = [];
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text);
+    if (!task) return;
+    if (task !== "final") {
+      await tool("pb_tests_red", { task, tests: `${task}.txt exists` });
+      fs.writeFileSync(`${task}.txt`, "x");
+    }
+    said.push((await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: "none" })).content![0].text);
+  };
+  await t.run("build");
+  assert.match(said.at(-1)!, /The final check failed[\s\S]*`false`/);
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+});
+
+test("final gate: extraChecks run after lint; the summary lists changed files by task", async () => {
+  const t = setup({ verify: "true", build: null, lint: "true", extraChecks: ["false"] });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "paused"); // suite and lint passed, the project check failed
+  const u = setup({ verify: "true", build: null, lint: "true" });
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  assert.equal(u.progress("order-cancellation").phase, "built");
+  assert.match(u.posts.at(-1)!, /Changed files, by task[\s\S]*T1: T1\.txt/);
+});
+
+test("plan: a red lint baseline warns before building but never blocks alone", async () => {
+  const t = setup({ verify: "true", lint: "false", baseline: true });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
+  assert.match(t.posts.find((p) => p.startsWith("**Baseline**"))!, /lint `false`/);
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.ok(t.notes.some((n) => /Lint\/project checks already failed when planning began/)); // warning, no dialog
+  assert.ok(!t.selectTitles.some((x) => x.startsWith("The test suite already failed"))); // the suite was green
+  assert.equal(t.progress("order-cancellation").phase, "paused"); // the final gate still fails on lint
+});
+
+test("final gate: when the last task already ran the suite, only the extra gates re-run", async () => {
+  const suite = "sh -c 'echo run >> count.txt; test -f T1.txt'";
+  const t = setup({ verify: suite, taskChecks: "each", lint: "true" });
+  await written(t, SPEC({ tasks: "### T1: only file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `" + suite + "`" }));
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  // Red proof plus the task's own check ran the suite; the final step must add only lint.
+  assert.equal(fs.readFileSync(path.join(t.repo, "count.txt"), "utf8").split("\n").filter(Boolean).length, 2);
+  const lintRuns = t.events("order-cancellation").filter((e: any) => e.type === "check" && e.command === "true");
+  assert.equal(lintRuns.length, 1);
+});
+
+test("lint: auto-detects package.json's lint script; explicit and none resolve", async () => {
+  const { detectLint, resolveLint } = await import("../extensions/pb/verify.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-lint-"));
+  assert.equal(detectLint(dir), null);
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { lint: "eslint ." } }));
+  assert.equal(detectLint(dir), "npm run lint --silent");
+  assert.equal(resolveLint("auto", dir), "npm run lint --silent");
+  assert.equal(resolveLint("none", dir), null);
+  assert.equal(resolveLint(null, dir), null);
+  assert.equal(resolveLint("./mvnw checkstyle:check", dir), "./mvnw checkstyle:check");
+});
+
+test("spec: testRefsOf parses proof names; own and path entries classify", async () => {
+  const { testRefsOf, ownTestRef, pathTestRef } = await import("../extensions/pb/spec.ts");
+  assert.deepEqual(testRefsOf("- Acceptance: x (tests: T1, src/a.spec.ts)\n- Acceptance: y (tests: cancels order)"), ["T1", "src/a.spec.ts", "cancels order"]);
+  assert.ok(ownTestRef("T1") && ownTestRef("t2"));
+  assert.ok(!ownTestRef("login"));
+  assert.ok(pathTestRef("src/a.spec.ts") && pathTestRef("a.ts"));
+  assert.ok(!pathTestRef("cancels order"));
+});
+
+test("review brief: fix reports, mapping notes and acceptance drift render as sections", async () => {
+  const { reviewerBrief, acceptanceDrift } = await import("../extensions/pb/prompts.ts");
+  assert.equal(acceptanceDrift("# T", []), undefined); // no build-start: nothing to compare
+  const tasks = ["### T1: a\n- Acceptance: a works (tests: T1)"];
+  assert.equal(acceptanceDrift(tasks.join("\n"), [{ type: "build-start", taskTexts: tasks }]), undefined);
+  const drift = acceptanceDrift("- Acceptance: a works (tests: T1)\n- Acceptance: b works (tests: T1)", [{ type: "build-start", taskTexts: tasks }]);
+  assert.match(drift!, /Acceptance drift during build[\s\S]*added\/reworded during build: - Acceptance: b works/);
+  const reword = acceptanceDrift("- Acceptance: a works well (tests: T1)", [{ type: "build-start", taskTexts: tasks }]);
+  assert.match(reword!, /reworded.*proofs unchanged/);
+  const brief = reviewerBrief({
+    changed: [],
+    stat: "",
+    check: "ok",
+    focus: "",
+    fixReports: [{ fixed: ["guard clause"], skipped: [], tests: "npm test green" }],
+    mappingNotes: ["T1 (tests: ghost) names nothing"],
+  });
+  assert.match(brief, /## What the fix laps reported[\s\S]*Lap 1 fixed: guard clause[\s\S]*Lap 1 tests: npm test green/);
+  assert.match(brief, /## Acceptance proof mapping[\s\S]*ghost/);
+  assert.match(reviewerBrief({ changed: [], stat: "", check: "ok", focus: "", acceptanceDrift: drift }), /## Acceptance drift during build/);
+});
+
 test("build: a task with no Test: command gets no red proof, and that is recorded and handed to the reviewer", async () => {
   const t = setup({ verify: "true" });
   await written(
@@ -1364,6 +1528,8 @@ test("spec: a behaviour task without Test:, or with a no-op one, warns — refac
   assert.doesNotMatch(w, /T2/); // a refactor is exempt: nothing to warn
   const noop = (await t.callTool("pb_write_spec", { name: "b", content: SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `true`" }) })).content![0].text;
   assert.match(noop, /Note: T1's Test: `true` always passes — the build will wedge demanding red/);
+  const chained = (await t.callTool("pb_write_spec", { name: "c", content: SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt && echo done`" }) })).content![0].text;
+  assert.match(chained, /chains shells or reaches the network/); // && is chaining too, and skips the pre-approval dry-run
 });
 
 test("spec: shared seams without Contracts are rejected, disjoint ones warn; shared Test: warns — advisory only", async () => {
@@ -1406,12 +1572,12 @@ Let admins log in with a password.
 - T1 owns the login form.
 ## Tasks
 ### T1: login works
-- Acceptance: login succeeds (tests: login)
+- Acceptance: login succeeds (tests: T1)
 - Test: \`test -f login.txt\`
 `;
   assert.deepEqual(parseSpec(sensitive).errors, []); // readers stay lenient
   assert.match((await t.callTool("pb_write_spec", { name: "sensitive", content: sensitive })).error!, /no "## Threats and abuse"/);
-  const withThreats = sensitive.replace("## Tasks", "## Threats and abuse\n- Only admins reach the login; abuse by replay is prevented by the session nonce.\n## Tasks").replace("- Acceptance: login succeeds (tests: login)", "- Acceptance: login succeeds (tests: login)\n- Acceptance: replayed logins are rejected (tests: replay)");
+  const withThreats = sensitive.replace("## Tasks", "## Threats and abuse\n- Only admins reach the login; abuse by replay is prevented by the session nonce.\n## Tasks").replace("- Acceptance: login succeeds (tests: T1)", "- Acceptance: login succeeds (tests: T1)\n- Acceptance: replayed logins are rejected (tests: T1)");
   assert.equal((await t.callTool("pb_write_spec", { name: "sensitive-ok", content: withThreats })).error, undefined);
 
   const slow = `# Fast list
@@ -1428,7 +1594,7 @@ List orders.
 ## Tasks
 ### T1: fast list
 Responds within 200ms.
-- Acceptance: responds fast (tests: speed)
+- Acceptance: responds fast (tests: T1)
 - Test: \`test -f fast.txt\`
 `;
   assert.match((await t.callTool("pb_write_spec", { name: "slow", content: slow })).error!, /quantitative claim without measurement or Assumption/);
@@ -1463,7 +1629,7 @@ Speed up the page.
 - T1 owns the list.
 ## Tasks
 ### T1: fast page
-- Acceptance: loads fast (tests: speed)
+- Acceptance: loads fast (tests: T1)
 - Test: \`test -f fast.txt\`
 `;
   assert.match((await t.callTool("pb_write_spec", { name: "noev", content: noEvidence })).error!, /Findings line without evidence/);
@@ -1495,7 +1661,7 @@ Speed up the page.
 - T1 owns the list.
 ## Tasks
 ### T1: fast page
-- Acceptance: loads fast (tests: speed)
+- Acceptance: loads fast (tests: T1)
 - Test: \`test -f fast.txt\`
 `;
   assert.match((await t.callTool("pb_write_spec", { name: "barewords", content: bareWords })).error!, /Findings line without evidence/);
@@ -4686,6 +4852,20 @@ test("spec: acceptance lines on tested tasks name their proof or exemption, or w
   assert.match((await t.callTool("pb_write_spec", { name: "e", content: bareVariant })).error!, /T1.*Acceptance \(abuse\)/);
   const markedVariant = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance (abuse): T1.txt survives replays (tests: T1)\n- Test: `test -f T1.txt`" });
   assert.equal((await t.callTool("pb_write_spec", { name: "f", content: markedVariant })).error, undefined);
+  // An asterisk bullet is the same acceptance line: it must carry its proof marker too.
+  const bareStar = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n* Acceptance: T1.txt exists\n- Test: `test -f T1.txt`" });
+  assert.match((await t.callTool("pb_write_spec", { name: "g", content: bareStar })).error!, /T1.*T1\.txt exists/);
+  const markedStar = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n* Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "h", content: markedStar })).error, undefined);
+  // Proof names must resolve: a missing file and an unknown test name are rejected.
+  const missingFile = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: no/such.spec.ts)\n- Test: `test -f T1.txt`" });
+  assert.match((await t.callTool("pb_write_spec", { name: "i", content: missingFile })).error!, /not in the repo/);
+  const unknownTest = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: does-not-exist-anywhere)\n- Test: `test -f T1.txt`" });
+  assert.match((await t.callTool("pb_write_spec", { name: "j", content: unknownTest })).error!, /found in no test file/);
+  // A name contained in a test file resolves.
+  fs.writeFileSync("exists.test.mjs", "test('T1.txt exists', () => {})\n");
+  const namedTest = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1.txt exists)\n- Test: `test -f T1.txt`" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "k", content: namedTest })).error, undefined);
 });
 
 test("spec: a declared doc-only task with exempted lines gets no missing-Test nudge", async () => {
@@ -4747,7 +4927,8 @@ test("spec review: after amendment the build re-reviews and proceeds on the pass
     delete process.env.MOCK_SPEC_REVIEW;
   }
   await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-  const briefOut = path.join(t.repo, "follow-up-brief.md");
+  const briefOut = path.join(os.tmpdir(), `pb-spec-followup-${process.pid}.md`);
+  if (fs.existsSync(briefOut)) fs.rmSync(briefOut);
   process.env.MOCK_SPEC_BRIEF_OUT = briefOut;
   try {
     await t.run("build", "order-cancellation");
@@ -4758,8 +4939,8 @@ test("spec review: after amendment the build re-reviews and proceeds on the pass
   const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
   assert.deepEqual(reviews.map((e) => e.verdict), ["block", "pass"]); // the amendment is reviewed again
   assert.equal(reviews[1].followUp, true);
-  assert.match(t.read("follow-up-brief.md"), /Earlier findings/); // the follow-up carries the prior finding
-  assert.match(t.read("follow-up-brief.md"), /unguarded transition/);
+  assert.match(fs.readFileSync(briefOut, "utf8"), /Earlier findings/); // the follow-up carries the prior finding
+  assert.match(fs.readFileSync(briefOut, "utf8"), /unguarded transition/);
 });
 
 test("spec review: an unchanged blocked spec re-posts the standings instead of re-running", async () => {

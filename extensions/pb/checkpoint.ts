@@ -6,6 +6,7 @@
  * and spotting files changed while they should have stayed untouched.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -130,6 +131,28 @@ export async function inWorktree<T>(cwd: string, fn: (dir: string) => Promise<T>
       } catch {
         // Best-effort: the worktree still builds, just without the borrowed dir.
       }
+    }
+    // Untracked local files the suite may need (env, config): a worktree at HEAD has none of
+    // them, so a suite that needs them fails environmentally — a false red. Copy them over
+    // best-effort (small files only, pb state excluded); ignored dot-env files are needed too.
+    try {
+      const untracked = split0(tryRun(cwd, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", LEDGER_EXCLUDE]));
+      const dotenv = [".env", ".env.local", ".env.test"].filter((f) => fs.existsSync(path.join(cwd, f)));
+      for (const f of new Set([...untracked, ...dotenv])) {
+        if (f.startsWith(".pi/") || SHARED_DIRS.some((d) => f === d || f.startsWith(`${d}/`))) continue;
+        try {
+          const src = path.join(cwd, f);
+          const st = fs.statSync(src);
+          if (!st.isFile() || st.size > MAX_UNTRACKED_BYTES) continue;
+          const dst = path.join(dir, f);
+          fs.mkdirSync(path.dirname(dst), { recursive: true });
+          if (!fs.existsSync(dst)) fs.copyFileSync(src, dst);
+        } catch {
+          // Best-effort: the worktree still runs, just without that file.
+        }
+      }
+    } catch {
+      // Best-effort: the worktree still runs without the local files.
     }
     return await fn(dir);
   } finally {
@@ -307,6 +330,64 @@ const TEST_CASE =
 const SKIP = /@Disabled\b|@Ignore\b|\.skip\s*\(|\b(?:xit|xdescribe|xtest|describe\.skip|it\.skip|test\.skip)\s*\(|pytest\.mark\.skip(?:if)?|@unittest\.skip|\bt\.Skip(?:Now|f)?\(|#\[ignore\]|\.todo\s*\(|\bAssume\b/g;
 
 const count = (s: string, re: RegExp) => (s.match(re) ?? []).length;
+
+/**
+ * Content fingerprint of the working tree's test files (tracked + untracked, pb state
+ * excluded), so a red proof can be bound to the tests that were seen failing. undefined
+ * outside git; callers then keep the previous behaviour (command-bound proof only).
+ */
+export function fingerprintTestFiles(cwd: string): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  for (const f of listTestFiles(cwd)) {
+    try {
+      const full = path.join(cwd, f);
+      const st = fs.statSync(full);
+      if (!st.isFile() || st.size > MAX_UNTRACKED_BYTES) continue;
+      out[f] = createHash("sha256").update(fs.readFileSync(full)).digest("hex").slice(0, 16);
+    } catch {
+      // Unreadable: skip rather than fail the proof.
+    }
+  }
+  return isGitRepo(cwd) ? out : undefined;
+}
+
+/** Test files in the working tree (tracked + untracked, pb state excluded). Empty outside git. */
+export function listTestFiles(cwd: string): string[] {
+  if (!isGitRepo(cwd)) return [];
+  const tracked = split0(tryRun(cwd, ["ls-files", "-z", "--", ".", LEDGER_EXCLUDE]));
+  const untracked = split0(tryRun(cwd, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", LEDGER_EXCLUDE]));
+  return [...new Set([...tracked, ...untracked])].filter((f) => TEST_FILE.test(f));
+}
+
+/** Whether a string occurs verbatim in some test file (names the test a proof marker cites). */
+export function searchTestFiles(cwd: string, needle: string): boolean {
+  const n = needle.trim();
+  if (!n) return false;
+  for (const f of listTestFiles(cwd)) {
+    try {
+      const full = path.join(cwd, f);
+      const st = fs.statSync(full);
+      if (!st.isFile() || st.size > 1_000_000) continue;
+      const buf = fs.readFileSync(full);
+      if (buf.includes(0)) continue;
+      if (buf.toString("utf8").includes(n)) return true;
+    } catch {
+      // Unreadable: skip.
+    }
+  }
+  return false;
+}
+
+const isGitRepo = (cwd: string) => tryRun(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() === "true";
+
+/** Test files added, removed or content-changed between a red fingerprint and now. */
+export function changedTestFiles(before: Record<string, string>, after: Record<string, string> | undefined): string[] {
+  if (!after) return [];
+  const changed: string[] = [];
+  for (const [f, h] of Object.entries(after)) if (before[f] !== h) changed.push(f);
+  for (const f of Object.keys(before)) if (!(f in after)) changed.push(f);
+  return [...new Set(changed)];
+}
 
 export interface Flag {
   kind: "lost-work" | "tampering";

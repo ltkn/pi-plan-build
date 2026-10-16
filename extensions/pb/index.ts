@@ -25,7 +25,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
+import { type Snapshot, changedPaths, changedTestFiles, cleanupIndexes, commitTime, dropCheckpoints, fingerprintTestFiles, inWorktree, inspectChanges, restore, searchTestFiles, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { notifyDesktop } from "./notify.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import {
@@ -39,6 +39,7 @@ import {
   checkpointSummary,
   coherePrompt,
   reviewStateSummary,
+  acceptanceDrift,
   designProvenance,
   continuePlanPrompt,
   continuePrompt,
@@ -53,6 +54,7 @@ import {
   planPrompt,
   reviewSessionPrompt,
   reviewerBrief,
+  reportRegister,
   specPrompt,
   specReviewBrief,
   SPEC_REVIEWER_SYSTEM,
@@ -63,11 +65,11 @@ import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, mergeFindings, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, parseSpec, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewGate, taskScopeSemanticErrors, tokensOf } from "./spec.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewGate, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
-import { resolveBuild, resolveVerify, runVerify } from "./verify.ts";
+import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
+import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
 
@@ -137,6 +139,8 @@ const suspiciousCommand = (command: string) => {
   const cmd = command.trim();
   if (/[;`$<>]/.test(cmd)) return true;
   if (/\|/.test(cmd)) return true;
+  if (/&&|\n/.test(cmd)) return true;
+  if (/(^|\s)&(\s|$)/.test(cmd)) return true;
   return /\b(curl|wget)\b/.test(cmd);
 };
 
@@ -160,7 +164,7 @@ const rewriteWarning = (name: string, prev: Progress | undefined, spec: ParsedSp
  * must not smuggle a line past the gate. Tasks without a Test: line are proven by the gate suite
  * by construction. Readers stay lenient: only the write tools call this, so in-flight specs keep working.
  */
-const acceptanceLine = /^\s*-\s*Acceptance(\s*\([^)]*\))?:/m;
+const acceptanceLine = /^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/m;
 const acceptanceMarkerErrors = (spec: ParsedSpec): string[] =>
   spec.tasks.flatMap((t) => {
     if (!t.test) return [];
@@ -169,6 +173,34 @@ const acceptanceMarkerErrors = (spec: ParsedSpec): string[] =>
       .filter((l) => acceptanceLine.test(l) && !/\(tests:|\(non-testable:/.test(l))
       .map((l) => `${t.id} ${l.trim()} — add (tests: ...) naming the proving tests, or (non-testable: reason)`);
   });
+
+/**
+ * `(tests: ...)` entries that resolve to nothing: a path-like entry must exist in the repo,
+ * any other entry (that isn't the task's own `Tn` id) must occur verbatim in the test files.
+ * A named test that proves nothing is a faked mapping, so writers are held to resolvable names
+ * and the reviewer judges stragglers as P1 candidates.
+ */
+const unresolvedMappings = (spec: ParsedSpec, cwd: string): Array<{ task: string; entry: string; reason: string }> => {
+  const out: Array<{ task: string; entry: string; reason: string }> = [];
+  for (const t of spec.tasks) {
+    if (!t.test) continue;
+    for (const entry of testRefsOf(t.text)) {
+      if (ownTestRef(entry)) continue;
+      if (pathTestRef(entry)) {
+        if (!fs.existsSync(path.join(cwd, entry.trim()))) out.push({ task: t.id, entry, reason: `names \`${entry.trim()}\`, which is not in the repo` });
+        continue;
+      }
+      if (!searchTestFiles(cwd, entry)) out.push({ task: t.id, entry, reason: `names "${entry}", found in no test file` });
+    }
+  }
+  return out;
+};
+const acceptanceMappingErrors = (spec: ParsedSpec, cwd: string): string[] =>
+  unresolvedMappings(spec, cwd).map((m) => `${m.task} (tests: ${m.entry}) — ${m.reason}`);
+
+/** Unresolved proof references for the reviewer: stragglers past the write-time gate (hand edits). */
+const mappingNotes = (spec: ParsedSpec, cwd: string): string[] =>
+  unresolvedMappings(spec, cwd).map((m) => `${m.task} (tests: ${m.entry}) ${m.reason}`);
 
 const specWarnings = (md: string, spec: ParsedSpec): string[] => {
   const redEligible = (t: SpecTask) => spec.gate === "tests" && spec.newTests && !/^\(refactor\)/i.test(t.title);
@@ -253,8 +285,17 @@ export default function pb(pi: ExtensionAPI) {
 
   const commands = (cwd: string, store: Store) => {
     const cfg = store.config();
-    return { cfg, testCmd: resolveVerify(cfg.verify, cwd), buildCmd: resolveBuild(cfg.build, cwd) };
+    return {
+      cfg,
+      testCmd: resolveVerify(cfg.verify, cwd),
+      buildCmd: resolveBuild(cfg.build, cwd),
+      lintCmd: resolveLint(cfg.lint, cwd),
+      extraCmds: cfg.extraChecks.filter((c) => c.trim() && c !== "none"),
+    };
   };
+
+  /** Extra final-gate commands after the suite/compile: lint, then the project's own checks. */
+  const finalExtras = (lintCmd: string | null, extraCmds: string[]): string[] => [...(lintCmd ? [lintCmd] : []), ...extraCmds];
 
   const loadSpec = (store: Store, name: string): { md: string; spec: ParsedSpec } | undefined => {
     const md = store.readSpec(name);
@@ -296,6 +337,7 @@ export default function pb(pi: ExtensionAPI) {
       const redKept = prev?.red && prev?.redCommand !== undefined ? prev.redCommand === t.test : undefined;
       const red = redKept ? prev!.red : undefined;
       const redCommand = redKept ? prev!.redCommand : undefined;
+      const redFiles = redKept ? prev!.redFiles : undefined;
       // A pre-green pointer is valid only when the earlier task still exists before this one,
       // still runs the same command, and still holds its own proof.
       let preGreen: string | undefined;
@@ -318,7 +360,7 @@ export default function pb(pi: ExtensionAPI) {
           preGreen = earlierId;
         }
       }
-      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, changed: prev?.changed, caveat: prev?.caveat, rejected: prev?.rejected, open: prev?.open, red, redCommand, redShared: sharing.get(t.id), preGreen };
+      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, changed: prev?.changed, caveat: prev?.caveat, rejected: prev?.rejected, open: prev?.open, red, redCommand, redFiles, redShared: sharing.get(t.id), preGreen };
     });
   };
 
@@ -343,6 +385,30 @@ export default function pb(pi: ExtensionAPI) {
       lines.push(`- ${t.id}: ${files.slice(0, 12).join(", ")}${files.length > 12 ? `, +${files.length - 12} more` : ""}`);
     }
     return lines.length ? `\n\nTouched so far, by finished tasks (re-read what you need; don't redo it, and flag a file outside the task's slice):\n${lines.join("\n")}` : "";
+  };
+
+  /**
+   * Per-task changed files for the final surfaces (the completion summary and the final-failure
+   * brief): what each task changed, from its checkpoint. Same data as touchedSuffix, but every
+   * task including the last — the final check has no next task whose prompt would carry it.
+   * Empty outside git or without checkpoints.
+   */
+  const changedFilesSection = (store: Store, p: Progress): string => {
+    if (!store.config().checkpoints) return "";
+    let cps: ReturnType<Store["checkpoints"]> = [];
+    try {
+      cps = store.checkpoints(p.spec);
+    } catch {
+      return "";
+    }
+    const lines: string[] = [];
+    for (const t of p.tasks) {
+      if (t.id === "final") continue;
+      const files = cps.find((c) => c.id === t.id)?.files ?? [];
+      if (!files.length) continue;
+      lines.push(`- ${t.id}: ${files.slice(0, 12).join(", ")}${files.length > 12 ? `, +${files.length - 12} more` : ""}`);
+    }
+    return lines.length ? `\nChanged files, by task (from checkpoints, not the model's report):\n${lines.join("\n")}` : "";
   };
 
   /** What the agent is told for a step of the build: a spec task. */
@@ -488,7 +554,9 @@ export default function pb(pi: ExtensionAPI) {
   const checkCommand = (spec: ParsedSpec, task: SpecTask | undefined, testCmd: string | null, buildCmd: string | null, final: boolean, each: boolean) => {
     if (spec.gate === "none") return null;
     if (final) return spec.gate === "tests" ? testCmd : buildCmd;
-    if (!each) return null;
+    // Without per-task checks the harness still compiles each task (when a compile command
+    // exists): type drift then fails fast at the task, inside the same pb_task_done call.
+    if (!each) return buildCmd;
     return spec.gate === "tests" ? (task?.test ?? buildCmd) : buildCmd;
   };
 
@@ -549,6 +617,8 @@ export default function pb(pi: ExtensionAPI) {
       const semErrs = semanticErrors(params.content, spec);
       if (semErrs.length) throw new Error(`The spec needs senior shape before it is ready:\n- ${semErrs.join("\n- ")}\nFix it and call pb_write_spec again.`);
       const store = new Store(ctx.cwd);
+      const mapErrs = acceptanceMappingErrors(spec, ctx.cwd);
+      if (mapErrs.length) throw new Error(`Acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\nName a file in the repo or a test the test files contain (a T1-style entry means the task's own Test: run).`);
       const prev = store.progress(params.name);
       store.writeSpec(params.name, params.content);
       store.saveProgress({
@@ -599,6 +669,8 @@ export default function pb(pi: ExtensionAPI) {
       if (sectionName === "tasks") {
         const markerErrs = acceptanceMarkerErrors(spec);
         if (markerErrs.length) throw new Error(`Not written: acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
+        const mapErrs = acceptanceMappingErrors(spec, ctx.cwd);
+        if (mapErrs.length) throw new Error(`Not written: acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\nName a file in the repo or a test the test files contain (a T1-style entry means the task's own Test: run).`);
       }
       // A call that makes the spec ready re-checks the full senior shape, whatever else it wrote
       // in the same call (findings and decisions evidence included). A Tasks edit on an already-ready
@@ -945,7 +1017,7 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_task_done",
     label: "Task done",
     description:
-      'In a pb build: finish the task the harness gave you. status done: the harness runs the task\'s check and answers with the failure to fix, or the next task — report changed (what you changed), caveat (what the next task must respect), rejected (what you tried and discarded) and open (what is still unchecked), each required, "none" where there is genuinely nothing. status blocked: it can\'t be done properly (summary says why); the build pauses for the human.',
+      'In a pb build: finish the task the harness gave you. status done: the harness runs the task\'s check and answers with the failure to fix, or the next task — report changed (what you changed), caveat (what the next task must respect), rejected (what you tried and discarded) and open (what is still unchecked), each required, "none" where there is genuinely nothing. status blocked: it can\'t be done properly (summary says why); the build pauses for the human. ' + reportRegister,
     parameters: Type.Object({
       task: Type.String({ description: 'the task id, e.g. "T2" (or "final" for the final check)' }),
       status: StringEnum(["done", "blocked"]),
@@ -993,6 +1065,20 @@ export default function pb(pi: ExtensionAPI) {
         store.saveProgress(p);
         return reply(`${p.current}'s new tests were never seen failing, so nothing shows they test the change. Call pb_tests_red: if you already made the change, set it aside first (the tests must fail without it), then put it back.`);
       }
+      if (tp?.red && tp.redFiles) {
+        // The proof belongs to the test content seen failing: edited, swapped or weakened tests
+        // re-require proof, like a rewritten Test: command does.
+        const changed = changedTestFiles(tp.redFiles, fingerprintTestFiles(ctx.cwd));
+        if (changed.length) {
+          tp.red = undefined;
+          tp.redCommand = undefined;
+          tp.redFiles = undefined;
+          store.saveProgress(p);
+          return reply(
+            `${p.current}'s tests changed since they were seen failing (${changed.slice(0, 5).join(", ")}${changed.length > 5 ? ", …" : ""}), so that run proves nothing about the current tests. Call pb_tests_red again: if you already made the change, set it aside first, then put it back.`,
+          );
+        }
+      }
       return await checkAndAdvance(ctx, store, p, loaded.spec, signal);
     },
   });
@@ -1015,6 +1101,15 @@ export default function pb(pi: ExtensionAPI) {
       const task = spec?.tasks.find((t) => t.id === p.current);
       const tp = p.tasks.find((t) => t.id === p.current);
       if (!spec || !task?.test || !tp || !needsRed(spec, task)) return reply(`${params.task} doesn't need this: finish it with pb_task_done.`);
+      if (tp.redFiles) {
+        const changed = changedTestFiles(tp.redFiles, fingerprintTestFiles(ctx.cwd));
+        if (changed.length) {
+          tp.red = undefined;
+          tp.redCommand = undefined;
+          tp.redFiles = undefined;
+          store.saveProgress(p);
+        }
+      }
       if (tp.red) return reply(`Already seen failing (${tp.red}). Make the change, then pb_task_done.`);
       if (tp.preGreen) return reply(`Already satisfied by ${tp.preGreen}: confirm ${params.task}'s acceptance holds on top of that change, then pb_task_done.`);
       const cfg = store.config();
@@ -1042,9 +1137,10 @@ export default function pb(pi: ExtensionAPI) {
       }
       tp.red = r.summary.split("\n")[0];
       tp.redCommand = task.test;
+      tp.redFiles = fingerprintTestFiles(ctx.cwd);
       store.saveProgress(p);
       return reply(
-        `Seen failing: \`${task.test}\`\n\n${r.summary}\n\nCheck that each fails for the reason you expect (the missing behaviour, not a typo or an unrelated error); fix any that don't, without calling this again. Then make the change and finish with pb_task_done.`,
+        `Seen failing: \`${task.test}\`\n\n${r.summary}\n\nCheck that each fails for the reason you expect (the missing behaviour, not a typo or an unrelated error). If you edit the tests after this, call pb_tests_red again so the new content is seen failing. Then make the change and finish with pb_task_done.`,
       );
     },
   });
@@ -1053,7 +1149,7 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_fix_done",
     label: "Fixes done",
     description:
-      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Then stop: the home session runs /pb:review next to check the delta.",
+      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Then stop: the home session runs /pb:review next to check the delta. " + reportRegister,
     parameters: Type.Object({
       fixed: Type.Array(Type.String(), { description: "titles of the findings this lap fixed" }),
       skipped: Type.Array(Type.String(), { description: "titles of findings that need a design decision (spec revision), not an edit" }),
@@ -1086,10 +1182,23 @@ export default function pb(pi: ExtensionAPI) {
     // artifacts (coverage, caches) may show up as planning changes — reviewPlanningChanges will list them.
     if (!head) ctx.ui.notify("Not a git repo, so the baseline runs in the working copy; its test artifacts may show as planning changes.", "warning");
     // In a worktree at the captured HEAD: the planner's own builds in the working copy can't collide with it.
+    // Lint and the project's own checks ride along, so a red final gate never surprises: red there
+    // warns (it never blocks alone), red suite blocks via the usual question.
+    const { lintCmd, extraCmds } = commands(ctx.cwd, store);
     checking += 1;
-    void inWorktree(ctx.cwd, (dir) => runVerify(command, dir, cfg.verifyTimeoutSec, cfg.testOutputCap), head ?? "HEAD")
-      .then((r) => {
-        store.saveBaseline({ ...r, head }, origin ?? undefined);
+    void inWorktree(
+      ctx.cwd,
+      async (dir) => {
+        const r = await runVerify(command, dir, cfg.verifyTimeoutSec, cfg.testOutputCap);
+        const lint = lintCmd ? await runVerify(lintCmd, dir, cfg.verifyTimeoutSec, cfg.testOutputCap) : null;
+        const extra: VerifyResult[] = [];
+        for (const cmd of extraCmds) extra.push(await runVerify(cmd, dir, cfg.verifyTimeoutSec, cfg.testOutputCap));
+        return { r, lint, extra };
+      },
+      head ?? "HEAD",
+    )
+      .then(({ r, lint, extra }) => {
+        store.saveBaseline({ ...r, head, lint, extra }, origin ?? undefined);
         const poster =
           say ??
           ((content: string) => {
@@ -1101,7 +1210,10 @@ export default function pb(pi: ExtensionAPI) {
             post(content);
           });
         try {
-          poster(`**Baseline** (the test suite on the last commit): ${r.ok ? r.summary : `${r.summary}\n\nThe final check runs the whole suite, so it fails until this is fixed.`}`);
+          const extras = [...(lint ? [`lint \`${lintCmd}\` → ${lint.summary.split("\n")[0]}`] : []), ...extra.map((e) => `\`${e.command}\` → ${e.summary.split("\n")[0]}`)];
+          poster(
+            `**Baseline** (the test suite on the last commit): ${r.ok ? r.summary : `${r.summary}\n\nThe final check runs the whole suite, so it fails until this is fixed.`}${extras.length ? `\n\nAlso ran for the final gate:\n- ${extras.join("\n- ")}` : ""}`,
+          );
         } catch {
           // the session was replaced meanwhile: baseline.json still has the result
         }
@@ -1542,9 +1654,10 @@ export default function pb(pi: ExtensionAPI) {
     const each = cfg.taskChecks === "each";
     const tp = p.tasks.find((t) => t.id === p.current);
     const task = loaded ? buildTask(loaded.spec, p.current) : undefined;
+    const finalFiles = p.current === "final" ? changedFilesSection(store, p) : "";
     const current =
       p.current === "final"
-        ? fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", tp?.attempts ?? 1, cfg.maxAttempts, false)
+        ? fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", tp?.attempts ?? 1, cfg.maxAttempts, false) + (finalFiles ? `\n${finalFiles}` : "")
         : p.current === COHERE_TASK_ID
           ? coherePrompt(p.baseCommit, tp?.attempts ?? 1, cfg.maxAttempts)
           : task && loaded
@@ -1612,15 +1725,19 @@ export default function pb(pi: ExtensionAPI) {
     const cfg = store.config();
     const tp = p.tasks.find((t) => t.id === p.current);
     const attempts = tp?.attempts ?? 1;
+    // The final check has no next task whose prompt would carry the file context, so the
+    // failure brief carries it: per-task changed files, harness-computed from checkpoints.
+    const finalFiles = p.current === "final" ? changedFilesSection(store, p) : "";
+    const withFiles = (t: string) => (finalFiles ? `${t}\n${finalFiles}` : t);
     if (attempts >= cfg.maxAttempts) {
       if (tp) tp.status = "doing";
       pauseBuild(ctx, store, p, `${p.current} still fails after ${attempts} attempts.`, "build.paused-attempts", "attempts", { task: p.current ?? "" });
-      return stop(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true));
+      return stop(withFiles(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true)));
     }
     if (tp) tp.attempts += 1;
     store.saveProgress(p);
     showProgress(ctx, p);
-    return reply(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false));
+    return reply(withFiles(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false)));
   };
 
   const checkAndAdvance = async (
@@ -1629,9 +1746,10 @@ export default function pb(pi: ExtensionAPI) {
     p: Progress,
     spec: ParsedSpec,
     signal: AbortSignal | undefined,
+    o: { suiteDone?: boolean } = {},
   ): Promise<ReturnType<typeof reply> | ReturnType<typeof stop>> => {
     const final = p.current === "final";
-    const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+    const { cfg, testCmd, buildCmd, lintCmd, extraCmds } = commands(ctx.cwd, store);
     const each = cfg.taskChecks === "each";
     const task = spec.tasks.find((t) => t.id === p.current);
     const tp = p.tasks.find((t) => t.id === p.current);
@@ -1639,8 +1757,12 @@ export default function pb(pi: ExtensionAPI) {
 
     let failure: string | undefined;
     let what = "";
+    // o.suiteDone: the suite passed as the previous step's own check with no work since (the
+    // final step was pushed because the last task already ran it) — run only the extra gates.
+    // Inferred from lastVerify instead would go stale across later tasks, so callers say so.
     const ran = checkCommand(spec, task, testCmd, buildCmd, final, each);
-    if (ran) {
+    const suiteDone = !!final && !!ran && !!o.suiteDone;
+    if (ran && !suiteDone) {
       showProgress(ctx, p, `checking ${final ? "everything" : p.current}: ${ran}`);
       p.lastVerify = await withChecking(() => runVerify(ran, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
       store.saveProgress(p);
@@ -1651,6 +1773,27 @@ export default function pb(pi: ExtensionAPI) {
       if (p.lastVerify.ok === false) {
         failure = p.lastVerify.summary;
         what = `\`${ran}\``;
+      }
+    }
+    if (!failure && final) {
+      // Lint and the project's own checks gate the end of the build, after the suite: a style,
+      // unused or type finding then fails the final check like any other failure. lastVerify
+      // keeps the suite's result, so the completion summary still names it.
+      for (const cmd of finalExtras(lintCmd, extraCmds)) {
+        showProgress(ctx, p, `checking final: ${cmd}`);
+        const r = await withChecking(() => runVerify(cmd, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
+        if (signal?.aborted) {
+          pauseBuild(ctx, store, p, `you stopped the check of ${p.current}.`, "build.paused", "stopped");
+          return stop("The check was stopped: the build is paused. Stop here.");
+        }
+        store.event(p.spec, { type: "check", task: "final", attempt: tp?.attempts ?? 1, ok: r.ok !== false, command: cmd, notices: [] });
+        if (r.ok === false) {
+          p.lastVerify = r;
+          store.saveProgress(p);
+          failure = r.summary;
+          what = `\`${cmd}\``;
+          break;
+        }
       }
     }
     store.event(p.spec, { type: "check", task: p.current, attempt: tp?.attempts ?? 1, ok: !failure, command: ran, notices: found });
@@ -1703,13 +1846,17 @@ export default function pb(pi: ExtensionAPI) {
       return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts)}`);
     }
     // Every task done: one full check, unless the last task's check was that already.
+    // With extra final gates (lint, project checks) the final step still runs even then.
     const endCmd = checkCommand(spec, undefined, testCmd, buildCmd, true, each);
-    if (!final && endCmd && ran !== endCmd) {
+    const { lintCmd, extraCmds } = commands(ctx.cwd, store);
+    const extras = finalExtras(lintCmd, extraCmds);
+    if (!final && ((endCmd && ran !== endCmd) || extras.length)) {
       p.current = "final";
       p.tasks.push({ id: "final", title: `Final check: ${spec.gate === "tests" ? "full suite" : "compile"}`, status: "doing", attempts: 1 });
       store.saveProgress(p);
-      const r = await checkAndAdvance(ctx, store, p, spec, signal);
-      return { ...r, content: text(`${passed}\nRunning \`${endCmd}\`…\n\n${r.content[0].text}`) };
+      const suiteDone = !!endCmd && ran === endCmd;
+      const r = await checkAndAdvance(ctx, store, p, spec, signal, { suiteDone });
+      return { ...r, content: text(`${passed}\nRunning \`${endCmd ?? extras[0]}\`…\n\n${r.content[0].text}`) };
     }
     p.tasks = p.tasks.filter((t) => t.id !== "final");
     p.phase = "built";
@@ -1721,6 +1868,7 @@ export default function pb(pi: ExtensionAPI) {
     // The plan may have been split into several specs: the others are still waiting.
     const rest = p.writtenIn ? store.specsOfPlanning(p.writtenIn) : [];
     const stale = staleProseRefs(ctx.cwd, p.baseCommit);
+    const changedFiles = changedFilesSection(store, p);
     post(
       [
         `**✅ BUILD COMPLETE — ${p.spec}**${notices}`,
@@ -1730,8 +1878,14 @@ export default function pb(pi: ExtensionAPI) {
         "```",
         `Check: ${p.lastVerify?.summary.split("\n")[0] ?? `none (verification ${spec.gate})`}`,
         p.assumptions?.length ? `\nChoices the build made where the spec was unclear (in the spec's Decisions; the review checks them):\n${p.assumptions.map((a) => `- ${a}`).join("\n")}` : "",
-        p.unattended?.length ? `\nDecided without you (no answer in time):\n${p.unattended.map((c) => `- ${c}`).join("\n")}` : "",
+        (p.unattended ?? []).filter((c) => !c.startsWith("Spec-shape advisory")).length
+          ? `\nDecided without you (no answer in time):\n${(p.unattended ?? []).filter((c) => !c.startsWith("Spec-shape advisory")).map((c) => `- ${c}`).join("\n")}`
+          : "",
+        (p.unattended ?? []).filter((c) => c.startsWith("Spec-shape advisory")).length
+          ? `\nAdvised (not asked — the build proceeded and the review judges):\n${(p.unattended ?? []).filter((c) => c.startsWith("Spec-shape advisory")).map((c) => `- ${c}`).join("\n")}`
+          : "",
         p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
+        changedFiles ? `\n${changedFiles}` : "",
         redNotes(spec, p).length ? `\nNew tests never seen failing (the review judges each):\n${redNotes(spec, p).map((n) => `- ${n}`).join("\n")}` : "",
         stale.length ? `\nPossibly stale prose references (renamed or deleted identifiers still cited — intentional history is fine):\n${stale.map((s) => `- ${s.symbol}: ${s.referrers.join(", ")}`).join("\n")}` : "",
         "",
@@ -2122,6 +2276,7 @@ export default function pb(pi: ExtensionAPI) {
     if (!o.checked && spec.gate === "tests" && baselineApplies(ctx, store, testCmd)) {
       if (!(await agree(ctx, store, baselineQuestion(store.baseline(ctx.sessionManager.getSessionFile() ?? undefined)!), notes))) return undefined;
     }
+    if (!o.checked) baselineExtraWarning(ctx, store, testCmd);
     if (!o.checked && !(await reviewPlanningChanges(ctx, store, notes))) return undefined;
     // Post-ready drift (e.g. via human edits, which save on parse alone) is advisory
     // here, never blocking: the human sees it now, the reviewer judges it later.
@@ -2198,7 +2353,7 @@ export default function pb(pi: ExtensionAPI) {
     if (!(await liftPlanning(ctx, store))) return;
     store.saveProgress(p);
     saveStartCheckpoint(ctx, store, name, p, cfg.checkpoints, restart);
-    store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false });
+    store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false, taskTexts: spec.tasks.map((t) => t.text) });
     const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
     const cohereFirst = first === COHERE_TASK_ID;
     if (cohereFirst) beginCohereEntry(ctx, store, p);
@@ -2233,7 +2388,7 @@ export default function pb(pi: ExtensionAPI) {
         store.saveProgress(p);
         saveStartCheckpoint(c, store, name, p, cfg.checkpoints, restart);
         if (!cfg.checkpoints) c.ui.notify("Checkpoints are off: this build runs without undo points, and without the test-tampering checks.", "warning");
-        store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: true });
+        store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: true, taskTexts: spec.tasks.map((t) => t.text) });
         const cohereFirst = first === COHERE_TASK_ID;
         if (cohereFirst) beginCohereEntry(c, store, p);
         const task = cohereFirst ? null : beginTask(c, store, p, first, { intro: true });
@@ -2281,16 +2436,24 @@ export default function pb(pi: ExtensionAPI) {
    */
   const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string, prior: Finding[] = []): Promise<{ findings: Finding[]; block: boolean }> => {
     const hash = specHash(md);
-    const res = await runFresh({
-      cwd: ctx.cwd,
-      role: "spec-review",
-      systemPrompt: SPEC_REVIEWER_SYSTEM,
-      brief: specReviewBrief(name, md, prior),
-      prompt: prior.length ? "Review the spec again in the attached file, judging the earlier findings first." : "Review the spec in the attached file.",
-      tools: ["read", "grep", "find", "ls", "bash"],
-      model: sessionModel(ctx),
-      sessionDir: store.sessionsDir("spec-review"),
-    });
+    // The reviewer gets bash for inspection but must leave the project untouched, like the
+    // explorer: snapshot before and put back afterwards, so a stray write can't leak into the build.
+    const reviewBefore = snapshot(ctx.cwd, "pb: before spec-review");
+    let res: Awaited<ReturnType<typeof runFresh>>;
+    try {
+      res = await runFresh({
+        cwd: ctx.cwd,
+        role: "spec-review",
+        systemPrompt: SPEC_REVIEWER_SYSTEM,
+        brief: specReviewBrief(name, md, prior),
+        prompt: prior.length ? "Review the spec again in the attached file, judging the earlier findings first." : "Review the spec in the attached file.",
+        tools: ["read", "grep", "find", "ls", "bash"],
+        model: sessionModel(ctx),
+        sessionDir: store.sessionsDir("spec-review"),
+      });
+    } finally {
+      revertFreshRun(ctx, "the spec reviewer", reviewBefore, snapshot(ctx.cwd, "pb: after spec-review"));
+    }
     const parsed = parseSpecReview(res.text);
     store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length, reported: parsed.findings, hash, followUp: prior.length > 0 });
     return parsed;
@@ -2409,24 +2572,31 @@ export default function pb(pi: ExtensionAPI) {
     const cfg = store.config();
     const commands = [...new Set(loaded.spec.tasks.filter((t) => needsRed(loaded.spec, t) && t.test).map((t) => t.test!))];
     if (!commands.length) return [];
-    const results: Array<{ command: string; result: string; line: string }> = [];
-    for (const command of commands) {
-      if (suspiciousCommand(command)) {
-        results.push({ command, result: "unknown", line: "not run here: chains shells or reaches the network — review before building" });
-        continue;
+    // The dry-run executes real Test: commands in the working copy: their artifacts (coverage,
+    // caches) must not show up afterwards as planning changes, so put back whatever they wrote.
+    const dryBefore = snapshot(ctx.cwd, "pb: before dry-run");
+    try {
+      const results: Array<{ command: string; result: string; line: string }> = [];
+      for (const command of commands) {
+        if (suspiciousCommand(command)) {
+          results.push({ command, result: "unknown", line: "not run here: chains shells or reaches the network — review before building" });
+          continue;
+        }
+        const r = await withChecking(() => runVerify(command, ctx.cwd, Math.min(cfg.verifyTimeoutSec, DRY_RUN_TIMEOUT_SEC), cfg.testOutputCap));
+        const line = r.summary.split("\n")[0];
+        const result = r.ok ? "pass" : /TIMEOUT|ENOENT|not found|No such file/i.test(r.summary) ? "unknown" : "fail";
+        results.push({ command, result, line });
       }
-      const r = await withChecking(() => runVerify(command, ctx.cwd, Math.min(cfg.verifyTimeoutSec, DRY_RUN_TIMEOUT_SEC), cfg.testOutputCap));
-      const line = r.summary.split("\n")[0];
-      const result = r.ok ? "pass" : /TIMEOUT|ENOENT|not found|No such file/i.test(r.summary) ? "unknown" : "fail";
-      results.push({ command, result, line });
+      store.event(name, { type: "dryrun", results: results.map(({ command, result }) => ({ command, result })) });
+      const describe: Record<string, (c: string, l: string) => string> = {
+        fail: (c) => `✗ \`${c}\` fails (expected: nothing built yet — if it fails for the wrong reason, like no runner, fix the command)`,
+        pass: (c) => `⚠ \`${c}\` passes before the build: the behaviour may already exist (re-slice?) or the tests don't cover it yet (carry on — the build still requires red)`,
+        unknown: (c, l) => `? \`${c}\` couldn't run here (${l}) — unknown, not a verdict`,
+      };
+      return ["", `Test commands, run once before you approve:`, ...results.map((r) => `- ${describe[r.result](r.command, r.line)}`)];
+    } finally {
+      revertFreshRun(ctx, "the dry-run", dryBefore, snapshot(ctx.cwd, "pb: after dry-run"));
     }
-    store.event(name, { type: "dryrun", results: results.map(({ command, result }) => ({ command, result })) });
-    const describe: Record<string, (c: string, l: string) => string> = {
-      fail: (c) => `✗ \`${c}\` fails (expected: nothing built yet — if it fails for the wrong reason, like no runner, fix the command)`,
-      pass: (c) => `⚠ \`${c}\` passes before the build: the behaviour may already exist (re-slice?) or the tests don't cover it yet (carry on — the build still requires red)`,
-      unknown: (c, l) => `? \`${c}\` couldn't run here (${l}) — unknown, not a verdict`,
-    };
-    return ["", `Test commands, run once before you approve:`, ...results.map((r) => `- ${describe[r.result](r.command, r.line)}`)];
   };
 
   const showSpec = (store: Store, name: string, names: string[] = [name], extra: string[] = []) => {
@@ -2461,6 +2631,17 @@ export default function pb(pi: ExtensionAPI) {
 
   const baselineQuestion = (b: { summary: string; at: string }) =>
     `The test suite already failed when planning began (${b.summary.split("\n")[0]}, ${b.at}): the final check runs it, so it fails too unless that's fixed. Build anyway?`;
+
+  /**
+   * Lint/project checks red at baseline warn only, never block: the baseline alone must not stop
+   * a build — only an actual final-gate failure sends the agent back. Same-commit only, like the suite.
+   */
+  const baselineExtraWarning = (ctx: ExtensionContext, store: Store, testCmd: string | null | undefined) => {
+    const b = store.baseline(ctx.sessionManager.getSessionFile() ?? undefined);
+    if (!b || b.command !== testCmd || (b.head && b.head !== gitHead(ctx.cwd))) return;
+    const red = [...(b.lint && b.lint.ok === false ? [`lint \`${b.lint.command}\` (${b.lint.summary.split("\n")[0]})`] : []), ...(b.extra ?? []).filter((e) => e.ok === false).map((e) => `\`${e.command}\` (${e.summary.split("\n")[0]})`)];
+    if (red.length) ctx.ui.notify(`Lint/project checks already failed when planning began (${red.join("; ")}): the final gate runs them too, so it fails until that's fixed.`, "warning");
+  };
 
   /** The specs this session has written, ready to build, first those nothing else among them depends on. */
   const readySpecs = (store: Store, session: string | undefined, since = "") => {
@@ -2609,9 +2790,9 @@ export default function pb(pi: ExtensionAPI) {
     return !appendDecision(store, name, text.trim(), "guidance");
   };
 
-  /** "3h ago" style staleness for a progress updatedAt ("2026-10-01 10:00:00"). */
+  /** "3h ago" style staleness for a progress updatedAt ("2026-10-01 10:00:00", UTC like Store.now()). */
   const staleness = (updatedAt?: string): string => {
-    const ms = updatedAt ? Date.now() - new Date(updatedAt.replace(" ", "T")).getTime() : NaN;
+    const ms = updatedAt ? Date.now() - new Date(`${updatedAt.replace(" ", "T")}Z`).getTime() : NaN;
     if (!(ms >= 0)) return "with no recent activity";
     const m = Math.floor(ms / 60000);
     if (m < 1) return "active just now";
@@ -2688,7 +2869,8 @@ export default function pb(pi: ExtensionAPI) {
           p.pause = undefined;
           store.saveProgress(p);
           showProgress(ctx, p);
-          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false) + from);
+          const finalFiles = changedFilesSection(store, p);
+          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false) + (finalFiles ? `\n${finalFiles}` : "") + from);
         }
         if (p.current === COHERE_TASK_ID) {
           const cc = p.tasks.find((t) => t.id === COHERE_TASK_ID);
@@ -3160,6 +3342,21 @@ export default function pb(pi: ExtensionAPI) {
         if (!since.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
         previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since };
       }
+      // Fix laps report into their own sessions, not the brief: hand the follow-up review the
+      // reports (claims plus test results) so it judges evidence, capped like any test output.
+      const fixReports = (() => {
+        if (!name || !previous) return undefined;
+        const since = prevReview?.at ?? "";
+        const reports = readEvents(path.join(store.specDir(name), "events.jsonl"))
+          .filter((e) => e.type === "fix" && typeof e.at === "string" && (e.at as string) >= since && Array.isArray(e.fixed))
+          .slice(-3)
+          .map((e) => ({
+            fixed: (e.fixed as unknown[]).filter((x): x is string => typeof x === "string"),
+            skipped: Array.isArray(e.skipped) ? (e.skipped as unknown[]).filter((x): x is string => typeof x === "string") : [],
+            tests: typeof e.tests === "string" ? cap(e.tests, cfg.testOutputCap) : "",
+          }));
+        return reports.length ? reports : undefined;
+      })();
 
       // The abuse pass: on sensitive ground by default (reviewer.security "auto"), or on every review ("always").
       const mode = cfg.reviewer.security ?? "auto";
@@ -3177,7 +3374,10 @@ export default function pb(pi: ExtensionAPI) {
         previous,
         testChanges: p?.testChanges,
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
+        mappingNotes: loaded ? mappingNotes(loaded.spec, ctx.cwd) : undefined,
+        fixReports,
         designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
+        acceptanceDrift: loaded && name ? acceptanceDrift(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
         humanOverride: p?.edited ? "This spec was edited by hand after writing, so write-time gates were bypassed visibly rather than silently: judge its shape (Threats, measurements, Contracts, evidence, reasons) as well as its truth." : undefined,
         staleRefs: staleProseRefs(ctx.cwd, base),
       });
@@ -3386,6 +3586,9 @@ export default function pb(pi: ExtensionAPI) {
     const render = (phase: string, activity?: string) =>
       safely(() => ctx.ui.setWidget("pb-map", [`pb map — ${phase}${canEsc ? "   (Esc to stop)" : ""}`, ...(activity ? [`  ↳ ${activity}`] : [])]));
     let mapSession: string | undefined;
+    // The cartographer gets bash for inspection but must leave the project untouched, like the
+    // explorer: anything it writes is put back, so the map update never carries stray files with it.
+    const mapGuardBefore = snapshot(ctx.cwd, "pb: before map");
     const cartographer = (brief: string, phase: string) =>
       runFresh({
         cwd: ctx.cwd,
@@ -3441,6 +3644,7 @@ export default function pb(pi: ExtensionAPI) {
     } finally {
       unsubEsc?.();
       ctx.ui.setWidget("pb-map", undefined);
+      revertFreshRun(ctx, "the cartographer", mapGuardBefore, snapshot(ctx.cwd, "pb: after map"));
     }
 
     const diff = mapDiff(current, body);

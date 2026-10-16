@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.31.0
+
+- **The final gate runs lint and your own checks.** New `lint` config (`"auto"` uses package.json's `lint` script; other stacks set it explicitly) and `extraChecks` (project commands, e.g. standards scripts) run after the suite at the final gate, failing the build like any check. Each task is also compiled when done under `taskChecks: "end"` when a compile command exists, so type drift fails fast at the task. A red lint/project baseline warns before building but never blocks alone.
+- **Proof markers must name real tests.** `(tests: …)` entries resolve mechanically at write time: a `T1`-style entry means the task's own `Test:` run, a path-like entry must exist in the repo, anything else must occur in the test files. Unresolvable names are rejected; stragglers past the gate (hand edits) reach the reviewer as faked-mapping P1 candidates.
+- **The red proof is bound to the test files.** `pb_tests_red` fingerprints the test files' content; editing, swapping or weakening them afterwards re-requires proof at `pb_task_done`, like a rewritten `Test:` command does.
+- **Reviews judge evidence, not claims.** Follow-up reviews get the fix laps' own reports (fixed/skipped plus test results), an acceptance-drift advisory when acceptance lines moved during the build, and the proof-mapping check above.
+- **Final surfaces show what changed where.** The completion summary and the final-failure brief list changed files per task, harness-computed from checkpoints.
+- **Fresh-run guards everywhere.** The spec reviewer and the cartographer snapshot and put back like the explorer, so a stray write can't leak into the build; the dry-run's artifacts are put back too, and the baseline worktree borrows local untracked files (including dot-env) so suites needing them don't fail environmentally.
+- **Smaller integrity fixes.** `* Acceptance` bullets pass every gate `-` does; staleness parses UTC like the store writes it; `suspiciousCommand` catches `&&` and background `&`; the fresh-run spawner kills the process group and no longer reuses a foreign host script; advisories print as "Advised", not "Decided without you".
+
 ## 1.30.0
 
 - **The spec review keeps stopping.** Any finding stops the build before T1, so the review is read before anything builds: P0/P1 to amend (or rebut in Decisions), P2/P3 to decide on. Running `/pb:build` again judges each earlier finding against the new text first, then reviews the rest — stop, amend, rebuild, until the text passes. Unchanged text re-posts the standings instead of paying for the same review twice, and `/pb:build --force` builds the spec as it stands, recording the skip (standing findings included) as accepted.

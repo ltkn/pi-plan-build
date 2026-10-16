@@ -41,7 +41,14 @@ export function tryBrief(goal: string, context?: string): string {
  * pushback is identical wherever the discussion happens.
  */
 const CHALLENGE =
-  "Push back like a senior engineer would: disagree when the idea is second-best and say what you would do instead, with concrete reasons grounded in this code. No objection without evidence: cite a path (file:line), a constraint found, or a test that would fail — never taste. Label each pushback blocker, suggestion, or nit, so it's clear what needs an answer. For each objection, say what would change your mind — a measurement, a probe via pb_try, a fact about the code. State an uncertainty once as an Assumption with its claim, what would settle it, and what settling costs; a second reversal must be a pb_try call, not more prose. When you know better, teach: explain the trade-off and the principle behind your alternative, and point to where this codebase already applies it — guide like a mentor, so the engineer grows, not just the plan. Name rabbit holes early — what isn't worth exploring, and why — and don't follow them. Challenge weak spots (missing cases, the wrong layer, reinventing what exists, generality it doesn't need). Small change, small pushback: never debate for its own sake. Present the decision like a senior engineer: one recommendation with its rationale (trade-offs, cost, risk, why it beats the rest). Define every option fully before rejecting it — what it is, pros/cons, then why not — never a bare verdict or a letter the reader hasn't seen defined. Write plainly, conclusion first; no jargon without a one-line definition.";
+  "Talk plainly: conclusion first, the consequence in everyday words, any term of art defined in a line. Paths, commands and error quotes stay verbatim. The register, for scale: “the sync races on first boot: two workers both see no lock row, so both write” — not “there exists an initialization-window concurrency hazard in the write path”. Push back like a senior engineer would: disagree when the idea is second-best and say what you would do instead, with concrete reasons grounded in this code. No objection without evidence: cite a path (file:line), a constraint found, or a test that would fail — never taste. Label each pushback blocker, suggestion, or nit, so it's clear what needs an answer. For each objection, say what would change your mind — a measurement, a probe via pb_try, a fact about the code. State an uncertainty once as an Assumption with its claim, what would settle it, and what settling costs; a second reversal must be a pb_try call, not more prose. When you know better, teach: explain the trade-off and the principle behind your alternative, and point to where this codebase already applies it — guide like a mentor, so the engineer grows, not just the plan. Name rabbit holes early — what isn't worth exploring, and why — and don't follow them. Challenge weak spots (missing cases, the wrong layer, reinventing what exists, generality it doesn't need). Small change, small pushback: never debate for its own sake. Present the decision like a senior engineer: one recommendation with its rationale (trade-offs, cost, risk, why it beats the rest). Define every option fully before rejecting it — what it is, pros/cons, then why not — never a bare verdict or a letter the reader hasn't seen defined.";
+
+/**
+ * How the agent's reports to the human read — shared by the task and fix-lap report tools,
+ * so the sentence exists once. Discussion register lives in CHALLENGE; agent-facing reports
+ * (findings, verifier verdicts) stay technical.
+ */
+export const reportRegister = `Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.`;
 
  /** baseline: "running" while the harness runs the suite in the background, "none" when it doesn't. */
 export function planPrompt(feature: string, testCmd: string | null, standards: string, baseline: "running" | "none", extra = ""): string {
@@ -231,7 +238,7 @@ ${SPEC_FORMAT}${extraBlock(extra)}`;
 function gateLine(spec: ParsedSpec, buildCmd: string | null, each: boolean): string {
   if (spec.gate === "none") return `no checks run (${spec.gateReason})`;
   const end = spec.gate === "tests" ? "the full suite" : `a compile${buildCmd ? ` (\`${buildCmd}\`)` : ""}, no tests (${spec.gateReason})`;
-  if (!each) return `after the last task the harness runs ${end}; check each task yourself`;
+  if (!each) return `after the last task the harness runs ${end}${buildCmd ? `; each task is also compiled (\`${buildCmd}\`) when done` : ""}; check each task yourself`;
   return spec.gate === "tests" ? "it runs the task's Test: command (a compile when there is none), and the full suite after the last task" : `it runs ${end}`;
 }
 
@@ -432,8 +439,14 @@ export interface ReviewBrief {
   testChanges?: string[];
   /** tasks whose new tests were never seen failing (with why), and whose proof is shared with another task */
   redNotes?: string[];
+  /** `(tests: ...)` entries resolving to nothing: named tests that prove nothing are faked mappings (P1 candidates) */
+  mappingNotes?: string[];
+  /** what the fix laps reported (fixed/skipped titles plus their test results): judge the evidence, not the claim */
+  fixReports?: Array<{ fixed: string[]; skipped: string[]; tests: string }>;
   /** where the spec's Design comes from: how hard to look for drift between Design, Decisions and code */
   designNote?: string;
+  /** acceptance lines added, dropped or reworded since the build started (advisory): clarification or goalpost-moving */
+  acceptanceDrift?: string;
   /** identifiers the diff removed that prose still cites (file:line each): P2 candidates, history excepted */
   staleRefs?: Array<{ symbol: string; referrers: string[] }>;
   /** the spec was edited by hand after writing: gates were bypassed visibly, judge its shape too */
@@ -460,6 +473,33 @@ export function designProvenance(markdown: string, events: Array<Record<string, 
   const postHoc = proof.length > 0 && last > proof[proof.length - 1];
   const times = buildWrites.length === 1 ? "recorded once" : `rewritten ${buildWrites.length} times`;
   return `Design provenance: ${times}, first ${where}${postHoc ? ", last after the last check — every change should be in Decisions" : ""}.`;
+}
+
+/**
+ * Acceptance lines added, dropped or reworded since the build started (advisory only): the
+ * build-start event carries the Tasks text as the build saw it. A quiet tightening of the goal
+ * mid-build looks exactly like drift here, so the reviewer judges whether each change is a
+ * legitimate clarification. Rewordings that keep identical proof markers collapse to one line.
+ */
+export function acceptanceDrift(markdown: string, events: Array<Record<string, unknown>>): string | undefined {
+  const start = events.find((e) => e.type === "build-start" && Array.isArray(e.taskTexts));
+  if (!start) return undefined;
+  const line = /^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/;
+  const acc = (text: string) => text.split("\n").map((l) => l.trimEnd()).filter((l) => line.test(l)).map((l) => l.trim());
+  const before = acc((start.taskTexts as unknown[]).filter((x): x is string => typeof x === "string").join("\n"));
+  const after = acc(markdown);
+  const missing = before.filter((l) => !after.includes(l));
+  const added = after.filter((l) => !before.includes(l));
+  if (!missing.length && !added.length) return undefined;
+  const markers = (l: string) => [...l.matchAll(/\((?:tests|non-testable):[^)]*\)/g)].map((m) => m[0]).sort().join(" ");
+  if (missing.length === added.length && missing.map(markers).sort().join("\n") === added.map(markers).sort().join("\n"))
+    return `Acceptance drift during build: ${missing.length} line${missing.length === 1 ? "" : "s"} reworded since the build started, proofs unchanged — check the rewording didn't narrow the goal.`;
+  const take = (ls: string[]) => [...ls.slice(0, 8), ...(ls.length > 8 ? [`… +${ls.length - 8} more`] : [])];
+  return [
+    "Acceptance drift during build (judge whether each is a legitimate clarification or a quiet change of the goal):",
+    ...take(missing).map((l) => `- dropped/reworded since build start: ${l}`),
+    ...take(added).map((l) => `- added/reworded during build: ${l}`),
+  ].join("\n");
 }
 
 /** Static parts first (the spec), the parts that change between reviews last: a repeat review reuses the cached prefix. */
@@ -497,7 +537,24 @@ export function reviewerBrief(o: ReviewBrief): string {
     ...(o.redNotes?.length
       ? ["", "## New tests never seen failing", "", "Judge each: does its acceptance still have a test that checks it?", ...o.redNotes.map((n) => `- ${n}`)]
       : []),
+    ...(o.mappingNotes?.length
+      ? ["", "## Acceptance proof mapping", "", "Each named proof below resolves to no file or test: a named test that proves nothing is a faked mapping (P1 candidate). Exemptions dressed as docs to dodge tests are P1 too.", ...o.mappingNotes.map((n) => `- ${n}`)]
+      : []),
+    ...(o.fixReports?.length
+      ? [
+          "",
+          "## What the fix laps reported",
+          "",
+          "Each lap's own fixed/skipped claims with the tests it ran: verify each fix against the change and the check below, not against the claim.",
+          ...o.fixReports.flatMap((r, i) => [
+            `Lap ${i + 1} fixed: ${r.fixed.length ? r.fixed.join("; ") : "(none)"}`,
+            `Lap ${i + 1} skipped (needs a spec revision, not an edit): ${r.skipped.length ? r.skipped.join("; ") : "(none)"}`,
+            `Lap ${i + 1} tests: ${r.tests || "(not reported)"}`,
+          ]),
+        ]
+      : []),
     ...(o.designNote ? ["", "## Design provenance", "", o.designNote] : []),
+    ...(o.acceptanceDrift ? ["", "## Acceptance drift during build", "", o.acceptanceDrift] : []),
     ...(o.humanOverride ? ["", "## Human override", "", o.humanOverride] : []),
     ...(o.staleRefs?.length
       ? ["", "## Possibly stale prose references", "", "These identifiers vanished from the code but are still cited in prose; judge each as a P2 candidate (intentional history is fine):", ...o.staleRefs.map((s) => `- ${s.symbol}: ${s.referrers.join(", ")}`)]
