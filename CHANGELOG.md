@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.32.0
+
+- **Concurrent fresh runs queue until told otherwise.** New `maxConcurrent` config caps the runs pb spawns as sub-agents (explorer, try, spec-review, cartographer, verifier — one engine, and every admitted run holds KV memory for its whole life): extra runs wait FIFO and start as a running sibling exits, and a run stopped while queued never starts a process. pb ships uncapped (`0`); a value in `~/.pi/agent/pb/config.json` caps every project until the project sets its own (both merge like `extra` instructions), and the `PI_PB_MAX_CONCURRENT` env var outranks both — `0` disables the cap in every source. Non-integers floor toward 1; invalid values fall back to the default.
+
 ## 1.31.0
 
 - **The final gate runs lint and your own checks.** New `lint` config (`"auto"` uses package.json's `lint` script; other stacks set it explicitly) and `extraChecks` (project commands, e.g. standards scripts) run after the suite at the final gate, failing the build like any check. Each task is also compiled when done under `taskChecks: "end"` when a compile command exists, so type drift fails fast at the task. A red lint/project baseline warns before building but never blocks alone.

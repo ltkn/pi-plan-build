@@ -872,6 +872,7 @@ export default function pb(pi: ExtensionAPI) {
         tools: ["read", "grep", "find", "ls", "bash"],
         model: cfg.explorer.model ?? sessionModel(ctx),
         thinking: cfg.explorer.thinking ?? "max",
+        maxConcurrent: cfg.maxConcurrent,
         signal,
         onActivity: (line, call) => {
           steps.push(line);
@@ -956,6 +957,7 @@ export default function pb(pi: ExtensionAPI) {
         tools: ["read", "grep", "find", "ls", "bash"],
         model: cfg.explorer.model ?? sessionModel(ctx),
         thinking: cfg.explorer.thinking ?? "max",
+        maxConcurrent: cfg.maxConcurrent,
         signal,
         onActivity: (line, call) => {
           steps.push(line);
@@ -2436,6 +2438,7 @@ export default function pb(pi: ExtensionAPI) {
    */
   const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string, prior: Finding[] = []): Promise<{ findings: Finding[]; block: boolean }> => {
     const hash = specHash(md);
+    const cfg = store.config();
     // The reviewer gets bash for inspection but must leave the project untouched, like the
     // explorer: snapshot before and put back afterwards, so a stray write can't leak into the build.
     const reviewBefore = snapshot(ctx.cwd, "pb: before spec-review");
@@ -2449,6 +2452,7 @@ export default function pb(pi: ExtensionAPI) {
         prompt: prior.length ? "Review the spec again in the attached file, judging the earlier findings first." : "Review the spec in the attached file.",
         tools: ["read", "grep", "find", "ls", "bash"],
         model: sessionModel(ctx),
+        maxConcurrent: cfg.maxConcurrent,
         sessionDir: store.sessionsDir("spec-review"),
       });
     } finally {
@@ -3139,6 +3143,7 @@ export default function pb(pi: ExtensionAPI) {
             spec: run.name ? store.readSpec(run.name) : undefined,
             model: run.model,
             thinking: run.thinking,
+            maxConcurrent: cfg.maxConcurrent,
             sessionDir: run.name ? store.specSessionsDir(run.name, "verifier") : store.sessionsDir("verifier"),
             // Activity only, never the verifier's streaming prose: the verdict lands in the session,
             // and the saved run holds the whole transcript for audit.
@@ -3600,6 +3605,7 @@ export default function pb(pi: ExtensionAPI) {
         extensions: [REVIEW_TOOLS],
         model: cfg.explorer.model ?? sessionModel(ctx),
         thinking: cfg.explorer.thinking ?? "max",
+        maxConcurrent: cfg.maxConcurrent,
         signal: abort.signal,
         // Activity only, never the cartographer's streaming prose: the proposed map arrives
         // via the approve step, and the saved run holds the whole transcript for audit.

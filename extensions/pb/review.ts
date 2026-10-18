@@ -55,6 +55,8 @@ export async function verifyFindings(o: {
   spec?: string;
   model?: string;
   thinking?: string;
+  /** Cap on concurrent fresh runs (pb config's maxConcurrent; PI_PB_MAX_CONCURRENT outranks it). */
+  maxConcurrent?: number;
   signal?: AbortSignal;
   sessionDir?: string;
   onActivity?: (line: string) => void;
@@ -73,6 +75,7 @@ export async function verifyFindings(o: {
     extensions: [REVIEW_TOOLS],
     model: o.model,
     thinking: o.thinking,
+    maxConcurrent: o.maxConcurrent,
     signal: o.signal,
     sessionDir: o.sessionDir,
     onActivity: o.onActivity,

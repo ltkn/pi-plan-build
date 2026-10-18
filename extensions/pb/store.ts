@@ -28,6 +28,13 @@ export interface Config {
   verifyTimeoutSec: number;
   /** Fix attempts per task (or for the final check) before the build pauses for you. */
   maxAttempts: number;
+  /**
+   * Cap on concurrent fresh runs (explorer, try, spec-review, cartographer, verifier): they all
+   * land on the same engine, and every admitted run holds KV memory for its whole life. Extra
+   * runs queue FIFO. Unset or 0 = uncapped. A value in ~/.pi/agent/pb/config.json caps every
+   * project until the project sets its own; the PI_PB_MAX_CONCURRENT env var outranks all.
+   */
+  maxConcurrent?: number;
   /** "end": one check after the last task; "each": every task's own check (its Test: line, else a compile), then the final one. */
   taskChecks: "end" | "each";
   /** How long a pb_ask dialog in a build waits before the build goes on with the recommendation (seconds; 0 = forever). */
@@ -111,6 +118,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
       : [],
     verifyTimeoutSec: num((raw as { verifyTimeoutSec?: unknown }).verifyTimeoutSec, DEFAULT_CONFIG.verifyTimeoutSec),
     maxAttempts: Math.max(1, Math.floor(num((raw as { maxAttempts?: unknown }).maxAttempts, DEFAULT_CONFIG.maxAttempts))),
+    maxConcurrent: num((raw as { maxConcurrent?: unknown }).maxConcurrent, 0), // unset or 0 = uncapped; the runner still floors non-integers
     taskChecks: (raw as { taskChecks?: unknown }).taskChecks === "each" ? "each" : "end",
     askTimeoutSec: num((raw as { askTimeoutSec?: unknown }).askTimeoutSec, DEFAULT_CONFIG.askTimeoutSec),
     specWaitSec: num((raw as { specWaitSec?: unknown }).specWaitSec, DEFAULT_CONFIG.specWaitSec),
@@ -354,7 +362,11 @@ export class Store {
   config(): Config {
     const file = path.join(this.root, "config.json");
     if (!fs.existsSync(file)) writeFile(file, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
-    return sanitizeConfig(readJson<Partial<Config>>(file) ?? {});
+    const raw = readJson<Partial<Config>>(file) ?? {};
+    // maxConcurrent merges from the global pb config too (~/.pi/agent/pb/config.json), like extra:
+    // a machine-wide cap that every project runs under until the project sets its own.
+    if (raw.maxConcurrent === undefined) raw.maxConcurrent = readJson<Partial<Config>>(path.join(agentDir(), "pb", "config.json"))?.maxConcurrent;
+    return sanitizeConfig(raw);
   }
   /** Your extra instructions for a role: the global ones, then this project's. Read-only: never creates files. */
   extra(role: Role): string {

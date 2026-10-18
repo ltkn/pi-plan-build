@@ -21,6 +21,8 @@ export interface RunOptions {
   extensions?: string[];
   model?: string;
   thinking?: string;
+  /** Cap on concurrent fresh runs, from the config's `maxConcurrent` (0 = uncapped); the PI_PB_MAX_CONCURRENT env var outranks it; unset = uncapped. */
+  maxConcurrent?: number;
   signal?: AbortSignal;
   /** Each tool call the fresh model makes, as it happens: a one-line preview and the call itself. */
   onActivity?: (line: string, call: ToolCall) => void;
@@ -53,6 +55,62 @@ export interface RunResult {
   sessionFile?: string;
 }
 
+/**
+ * Concurrent fresh runs all land on the same engine, and every admitted
+ * prompt holds KV memory for its whole lifetime: cap how many spawned `pi`
+ * processes run at once. FIFO queue — queued tasks start as a running
+ * sibling exits. pb's built-in default is uncapped; the config's
+ * `maxConcurrent` sets a cap (project-level, or machine-wide in
+ * ~/.pi/agent/pb/config.json), and the PI_PB_MAX_CONCURRENT env var
+ * outranks both; 0 disables the cap.
+ */
+const DEFAULT_CONCURRENCY = 0;
+
+function concurrencyLimit(configured?: number): number | null {
+  const raw = process.env.PI_PB_MAX_CONCURRENT?.trim();
+  const envOk = raw !== undefined && raw !== "" && Number.isFinite(Number(raw)) && Number(raw) >= 0;
+  const n = envOk
+    ? Number(raw) // env wins, even against a config value
+    : typeof configured === "number" && Number.isFinite(configured) && configured >= 0
+      ? configured
+      : DEFAULT_CONCURRENCY; // pb's built-in default when neither the env nor the config spoke
+  return n === 0 ? null : Math.max(1, Math.floor(n)); // 0 = uncapped, in every source
+}
+
+let activeRuns = 0;
+const waitingSlots: Array<() => void> = [];
+
+async function acquireRunSlot(signal?: AbortSignal, configured?: number): Promise<(() => void) | null> {
+  const limit = concurrencyLimit(configured);
+  if (limit === null) return () => {};
+  while (activeRuns >= limit) {
+    if (signal?.aborted) return null;
+    let onAbort: (() => void) | undefined;
+    const queued = new Promise<void>((resolve) => waitingSlots.push(resolve));
+    const race = signal
+      ? new Promise<never>((_, reject) => {
+          onAbort = () => reject(new Error("stopped while queued"));
+          signal.addEventListener("abort", onAbort, { once: true });
+        })
+      : undefined;
+    try {
+      await (race ? Promise.race([queued, race]) : queued);
+    } catch {
+      return null; // the caller's signal aborted while queued
+    } finally {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+    }
+  }
+  activeRuns++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeRuns--;
+    waitingSlots.shift()?.();
+  };
+}
+
 function piInvocation(args: string[]): { command: string; args: string[] } {
   // Override for custom installs and for the test suite's mock.
   const override = process.env.PI_PB_PI_COMMAND;
@@ -81,7 +139,7 @@ export function previewCall(name: string, args: Record<string, unknown>): string
   return (pattern || at).replace(/\s+/g, " ");
 }
 
-export async function runFresh(o: RunOptions): Promise<RunResult> {
+async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
   const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), `pi-pb-${o.role}-`));
   const sysFile = path.join(tmp, "system.md");
   const briefFile = path.join(tmp, "brief.md");
@@ -240,4 +298,32 @@ export function usageOf(r: RunResult) {
     totalTokens: t.input + t.output + t.cacheRead + t.cacheWrite,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: r.cost },
   };
+}
+
+/**
+ * Fresh-context runner with the concurrency cap applied: at most
+ * PI_PB_MAX_CONCURRENT spawned `pi` processes (the config's `maxConcurrent`
+ * when it set a cap; built-in default uncapped) run at once, the rest queue
+ * FIFO and start as a running sibling exits. Aborting the caller's signal
+ * while queued stops before any process starts.
+ */
+export async function runFresh(o: RunOptions): Promise<RunResult> {
+  const release = await acquireRunSlot(o.signal, o.maxConcurrent);
+  if (release === null) {
+    return {
+      text: "",
+      toolCalls: [],
+      exitCode: 1,
+      cost: 0,
+      turns: 0,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, peakContext: 0 },
+      ms: 0,
+      aborted: true,
+    };
+  }
+  try {
+    return await runFreshUncapped(o);
+  } finally {
+    release();
+  }
 }

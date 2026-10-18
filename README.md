@@ -215,6 +215,7 @@ the existing ones still run.
 | `extraChecks` | `[]` | extra project commands (e.g. standards scripts), run at the final gate after lint |
 | `verifyTimeoutSec` | 900 | |
 | `maxAttempts` | 3 | failed checks (the final one, or a task's) before the build pauses |
+| `maxConcurrent` | 0 (uncapped) | cap on concurrent fresh runs (explorer, try, spec-review, map, verifier share one engine, and every admitted run holds KV memory with it); extra runs queue FIFO until a running one exits; a value in `~/.pi/agent/pb/config.json` caps every project until the project sets its own; the `PI_PB_MAX_CONCURRENT` env var outranks both |
 | `taskChecks` | `"end"` | `"end"`: the full check after the last task; `"each"`: also a check after every task |
 | `askTimeoutSec` | 300 | how long a dialog waits before going on without you: a `pb_ask` question in a build takes the recommendation, a dialog on the way into a build takes pb's choice; 0 = forever |
 | `specWaitSec` | 0 | how long `/pb:build` waits for the spec before yielding to the pending offer (which picks it up once written); 0 = wait as long as it takes (for slow local models) |
@@ -257,6 +258,8 @@ pi -e ./             # run Pi with this working copy loaded
 
 `PI_PB_PI_COMMAND` overrides the `pi` executable used for the fresh explorer,
 reviewer and verifier (the tests use it for `test/mock-pi.mjs`).
+`PI_PB_MAX_CONCURRENT` caps how many fresh runs run at once, outranking the
+config's `maxConcurrent` (0 = uncapped).
 
 ## Credits
 

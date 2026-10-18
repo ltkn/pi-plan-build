@@ -4669,6 +4669,138 @@ test("fresh calls are saved as sessions to open afterwards, and stream their tex
   assert.deepEqual(fs.existsSync(path.join(t.repo, ".pi/pb/sessions/explorer")), false);
 });
 
+test("concurrent fresh runs queue to PI_PB_MAX_CONCURRENT (default 2)", async () => {
+  const { runFresh } = await import("../extensions/pb/runner.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-conc-"));
+  const log = path.join(dir, "conc.log");
+  const prior = { MOCK_HOLD_MS: process.env.MOCK_HOLD_MS, PI_PB_MAX_CONCURRENT: process.env.PI_PB_MAX_CONCURRENT, MOCK_CONCURRENCY_LOG: process.env.MOCK_CONCURRENCY_LOG };
+  process.env.MOCK_HOLD_MS = "300";
+  process.env.PI_PB_MAX_CONCURRENT = "2";
+  process.env.MOCK_CONCURRENCY_LOG = log;
+  try {
+    const rs = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        runFresh({ cwd: dir, role: "explorer", systemPrompt: "You are an EXPLORER", brief: "# Question\n\nwhere?", prompt: "go", tools: ["read"] }),
+      ),
+    );
+    assert.ok(rs.every((r) => r.exitCode === 0 && r.text.includes("holds the model")));
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  const events = fs
+    .readFileSync(log, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => ({ kind: line.split(" ")[0], at: Number(line.split(" ")[1]) }))
+    .sort((a, b) => a.at - b.at || (a.kind === "e" ? -1 : 1)); // ends before starts at the same ms
+  let openCount = 0;
+  let peak = 0;
+  for (const event of events) {
+    openCount += event.kind === "s" ? 1 : -1;
+    peak = Math.max(peak, openCount);
+  }
+  assert.equal(peak, 2); // the cap is exercised, not merely absent
+});
+
+test("fresh runs honor the config's maxConcurrent, but PI_PB_MAX_CONCURRENT outranks it", async () => {
+  const { runFresh } = await import("../extensions/pb/runner.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-conc-cfg-"));
+  const prior = { MOCK_HOLD_MS: process.env.MOCK_HOLD_MS, PI_PB_MAX_CONCURRENT: process.env.PI_PB_MAX_CONCURRENT, MOCK_CONCURRENCY_LOG: process.env.MOCK_CONCURRENCY_LOG };
+  process.env.MOCK_HOLD_MS = "200";
+  const peakOf = (file: string) => {
+    const events = fs
+      .readFileSync(file, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => ({ kind: line.split(" ")[0], at: Number(line.split(" ")[1]) }))
+      .sort((a, b) => a.at - b.at || (a.kind === "e" ? -1 : 1)); // ends before starts at the same ms
+    let openCount = 0;
+    let peak = 0;
+    for (const event of events) {
+      openCount += event.kind === "s" ? 1 : -1;
+      peak = Math.max(peak, openCount);
+    }
+    return peak;
+  };
+  const run = () =>
+    runFresh({ cwd: dir, role: "explorer", systemPrompt: "You are an EXPLORER", brief: "# Question\n\nwhere?", prompt: "go", tools: ["read"], maxConcurrent: 3 });
+  try {
+    // No env: the config's 3 holds while a fourth run queues.
+    process.env.MOCK_CONCURRENCY_LOG = path.join(dir, "cfg.log");
+    const first = await Promise.all(Array.from({ length: 4 }, run));
+    assert.ok(first.every((r) => r.exitCode === 0 && r.text.includes("holds the model")));
+    assert.equal(peakOf(process.env.MOCK_CONCURRENCY_LOG as string), 3);
+
+    // The env outranks the config: capped to 1.
+    process.env.PI_PB_MAX_CONCURRENT = "1";
+    process.env.MOCK_CONCURRENCY_LOG = path.join(dir, "env.log");
+    const second = await Promise.all(Array.from({ length: 4 }, run));
+    assert.ok(second.every((r) => r.exitCode === 0 && r.text.includes("holds the model")));
+    assert.equal(peakOf(process.env.MOCK_CONCURRENCY_LOG as string), 1);
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("fresh runs are uncapped by default: 4 runs all run at once until the config or the env caps them", async () => {
+  const { runFresh } = await import("../extensions/pb/runner.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-conc-free-"));
+  const log = path.join(dir, "free.log");
+  const prior = { MOCK_HOLD_MS: process.env.MOCK_HOLD_MS, PI_PB_MAX_CONCURRENT: process.env.PI_PB_MAX_CONCURRENT, MOCK_CONCURRENCY_LOG: process.env.MOCK_CONCURRENCY_LOG };
+  process.env.MOCK_HOLD_MS = "200";
+  process.env.MOCK_CONCURRENCY_LOG = log;
+  try {
+    const rs = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        runFresh({ cwd: dir, role: "explorer", systemPrompt: "You are an EXPLORER", brief: "# Question\n\nwhere?", prompt: "go", tools: ["read"] }),
+      ),
+    );
+    assert.ok(rs.every((r) => r.exitCode === 0 && r.text.includes("holds the model")));
+    const events = fs
+      .readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => ({ kind: line.split(" ")[0], at: Number(line.split(" ")[1]) }))
+      .sort((a, b) => a.at - b.at || (a.kind === "e" ? -1 : 1)); // ends before starts at the same ms
+    let openCount = 0;
+    let peak = 0;
+    for (const event of events) {
+      openCount += event.kind === "s" ? 1 : -1;
+      peak = Math.max(peak, openCount);
+    }
+    assert.equal(peak, 4); // all four at once: no cap without a config or env value
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("maxConcurrent: uncapped by default; the global pb config caps every project until the project sets its own", async () => {
+  const { Store } = await import("../extensions/pb/store.ts");
+  const { agentDir } = await import("../extensions/pb/standards.ts");
+  const global = path.join(agentDir(), "pb", "config.json");
+  fs.mkdirSync(path.dirname(global), { recursive: true });
+  fs.writeFileSync(global, JSON.stringify({ maxConcurrent: 2 }));
+  try {
+    const t = setup({ verify: "true" }); // a fresh project config: no maxConcurrent of its own
+    assert.equal(new Store(t.repo).config().maxConcurrent, 2); // the machine's cap applies
+    new Store(t.repo).updateConfig((raw) => ({ ...raw, maxConcurrent: 4 }));
+    assert.equal(new Store(t.repo).config().maxConcurrent, 4); // the project outranks the machine
+  } finally {
+    fs.rmSync(global, { force: true });
+  }
+  const t2 = setup({ verify: "true" });
+  assert.equal(new Store(t2.repo).config().maxConcurrent, 0); // no machine cap: uncapped
+});
+
 test("/pb:compact in a build session compacts to the build's state (Pi's compaction, pb's summary)", async () => {
   const t = setup({ verify: "true" });
   await written(t);

@@ -11,6 +11,10 @@ const id = `mock-${process.pid}-${Date.now()}`;
 const dirAt = argv.indexOf("--session-dir");
 if (dirAt >= 0) fs.writeFileSync(`${argv[dirAt + 1]}/2026-01-01T00-00-00-000Z_${id}.jsonl`, "{}\n");
 console.log(JSON.stringify({ type: "session", version: 3, id }));
+// Concurrency probe: mark the live interval so a test can measure overlap.
+if (process.env.MOCK_CONCURRENCY_LOG) fs.appendFileSync(process.env.MOCK_CONCURRENCY_LOG, `s ${Date.now()}\n`);
+if (process.env.MOCK_HOLD_MS) await new Promise((r) => setTimeout(r, +process.env.MOCK_HOLD_MS));
+if (process.env.MOCK_CONCURRENCY_LOG) fs.appendFileSync(process.env.MOCK_CONCURRENCY_LOG, `e ${Date.now()}\n`);
 const say = (content) => {
   // The text is streamed in pieces before the message ends.
   for (const part of content.filter((c) => c.type === "text"))
