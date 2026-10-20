@@ -78,7 +78,22 @@ function concurrencyLimit(configured?: number): number | null {
 }
 
 let activeRuns = 0;
-const waitingSlots: Array<() => void> = [];
+/** Callers waiting for a slot; `gone` says a waiter left (aborted) before it could be woken. */
+interface Waiter {
+  wake: () => void;
+  gone: () => boolean;
+}
+const waitingSlots: Waiter[] = [];
+
+/** A freed slot goes to the first waiter still waiting: aborted ones are dropped, not woken. */
+function wakeNextWaiting(): void {
+  while (waitingSlots.length) {
+    const waiter = waitingSlots.shift()!;
+    if (waiter.gone()) continue;
+    waiter.wake();
+    return;
+  }
+}
 
 async function acquireRunSlot(signal?: AbortSignal, configured?: number): Promise<(() => void) | null> {
   const limit = concurrencyLimit(configured);
@@ -86,7 +101,14 @@ async function acquireRunSlot(signal?: AbortSignal, configured?: number): Promis
   while (activeRuns >= limit) {
     if (signal?.aborted) return null;
     let onAbort: (() => void) | undefined;
-    const queued = new Promise<void>((resolve) => waitingSlots.push(resolve));
+    let leaving = false;
+    // One release wakes exactly one waiter: an aborted one still in the queue would eat
+    // that wakeup and strand everyone behind it, so it leaves — and is skipped meanwhile.
+    const waiter: Waiter = { wake: () => {}, gone: () => leaving || !!signal?.aborted };
+    const queued = new Promise<void>((resolve) => {
+      waiter.wake = resolve;
+      waitingSlots.push(waiter);
+    });
     const race = signal
       ? new Promise<never>((_, reject) => {
           onAbort = () => reject(new Error("stopped while queued"));
@@ -96,7 +118,10 @@ async function acquireRunSlot(signal?: AbortSignal, configured?: number): Promis
     try {
       await (race ? Promise.race([queued, race]) : queued);
     } catch {
-      return null; // the caller's signal aborted while queued
+      leaving = true; // the caller's signal aborted while queued
+      const i = waitingSlots.indexOf(waiter);
+      if (i >= 0) waitingSlots.splice(i, 1);
+      return null;
     } finally {
       if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
@@ -107,7 +132,7 @@ async function acquireRunSlot(signal?: AbortSignal, configured?: number): Promis
     if (released) return;
     released = true;
     activeRuns--;
-    waitingSlots.shift()?.();
+    wakeNextWaiting();
   };
 }
 

@@ -68,7 +68,7 @@ import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewGate, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, now, readEvents, untrackedText } from "./store.ts";
+import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
 import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -261,6 +261,15 @@ const safely = (f: () => void) => {
   }
 };
 
+/** Whether a widget can be drawn here: hasUI, with a replaced session reading as none rather than a throw. */
+const watchable = (ctx: Pick<ExtensionContext, "hasUI">): boolean => {
+  try {
+    return !!ctx.hasUI;
+  } catch {
+    return false;
+  }
+};
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** The context Pi hands over after a session switch (newSession/switchSession's withSession). */
@@ -319,12 +328,26 @@ export default function pb(pi: ExtensionAPI) {
     return undefined;
   };
 
-  /** Put back what a fresh run (explorer, trier) changed; a guard that couldn't run is said out loud. */
-  const revertFreshRun = (ctx: ExtensionContext, what: string, before: Snapshot | undefined, after: Snapshot | undefined) => {
+  /** Put back what a fresh run changed, and say so: the same window can hold your own edit. */
+  const revertFreshRun = (cwd: string, warn: (message: string) => void, what: string, before: Snapshot | undefined, after: Snapshot | undefined) => {
     if (!before || !after || before.tree === after.tree) return;
-    const r = restore(ctx.cwd, after.commit, before.commit);
-    if (r.guardFailed) ctx.ui.notify(`Couldn't check what ${what} changed (the guard snapshot failed), so nothing was put back: check the working tree yourself.`, "warning");
+    const r = restore(cwd, after.commit, before.commit);
+    if (r.guardFailed) {
+      warn(`Couldn't check what ${what} changed (the guard snapshot failed), so nothing was put back: check the working tree yourself.`);
+      return;
+    }
+    if (!r.restored.length) return;
+    // The run is supposed to be read-only, but an edit of yours made meanwhile is in the same
+    // window and got put back too. Name the paths and keep the recovery command in the message.
+    const shown = r.restored.slice(0, 5);
+    const more = r.restored.length > shown.length ? ` (+${r.restored.length - shown.length} more)` : "";
+    warn(
+      `Files changed while ${what} ran were put back: ${shown.join(", ")}${more}. If one was your own edit, the post-run tree is in ${after.commit}: git show ${after.commit}:<path> for its content, git diff ${before.commit} ${after.commit} for the change.`,
+    );
   };
+
+  /** A warning from a flow whose session may have been replaced meanwhile: with no live UI there is nobody to tell. */
+  const warnLater = (ctx: Pick<ExtensionContext, "ui">, message: string) => safely(() => ctx.ui.notify(message, "warning"));
 
   /** Keep task statuses by id when a spec is (re)written; new tasks start as todo. */
   const syncTasks = (spec: ParsedSpec, old: TaskProgress[] = []): TaskProgress[] => {
@@ -829,10 +852,12 @@ export default function pb(pi: ExtensionAPI) {
     renderCall: (args, theme) => renderExploreCall(args, theme),
     renderResult: (result, opts, theme, context) => renderExploreResult(result as { content: { type: string; text?: string }[]; details?: ExploreDetails }, opts, theme, context?.isError),
     async execute(_id, params, signal, onUpdate, ctx) {
-      const store = new Store(ctx.cwd);
+      const cwd = ctx.cwd;
+      const sessionFile = ctx.sessionManager.getSessionFile();
+      const store = new Store(cwd);
       const cfg = store.config();
       const name = tree(ctx).getSessionName?.();
-      const before = snapshot(ctx.cwd, "pb: before explore");
+      const before = snapshot(cwd, "pb: before explore");
       const started = Date.now();
       const steps: string[] = [];
       const files = new Set<string>();
@@ -864,7 +889,7 @@ export default function pb(pi: ExtensionAPI) {
       // Heartbeat so the elapsed counter ticks even between tool calls on quiet stretches.
       const beat = setInterval(() => paint(text("")), 1000);
       const res = await runFresh({
-        cwd: ctx.cwd,
+        cwd,
         role: "explorer",
         systemPrompt: EXPLORER_SYSTEM,
         brief: explorerBrief(params.question, name?.startsWith("plan: ") ? name.slice(6) : undefined),
@@ -893,13 +918,13 @@ export default function pb(pi: ExtensionAPI) {
           paintTimer = undefined;
         }
       });
-      const after = snapshot(ctx.cwd, "pb: after explore");
-      revertFreshRun(ctx, "the explorer", before, after);
-      store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
+      const after = snapshot(cwd, "pb: after explore");
+      revertFreshRun(cwd, (m) => warnLater(ctx, m), "the explorer", before, after);
+      store.exploreEvent({ session: sessionFile, ...res.tokens, cost: res.cost, ms: res.ms });
       if (res.aborted) throw new Error("Exploration stopped. Narrow the question to one area or split it across two calls in one block; what was already read is listed above.");
       if (!res.text.trim()) throw new Error(`The explorer produced no answer${res.error ? `: ${res.error}` : ""}`);
       const t = res.tokens;
-      const session = res.sessionFile ? path.relative(ctx.cwd, res.sessionFile) : undefined;
+      const session = res.sessionFile ? path.relative(cwd, res.sessionFile) : undefined;
       return { content: text(res.text.trim()), details: { ...details(), writing: [], ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite, tokensIn: t.input + t.cacheRead + t.cacheWrite, tokensOut: t.output, session }, usage: usageOf(res) };
     },
   });
@@ -916,10 +941,12 @@ export default function pb(pi: ExtensionAPI) {
     renderCall: (args, theme) => renderTryCall(args, theme),
     renderResult: (result, opts, theme, context) => renderTryResult(result as { content: { type: string; text?: string }[]; details?: ExploreDetails }, opts, theme, context?.isError),
     async execute(_id, params, signal, onUpdate, ctx) {
-      const store = new Store(ctx.cwd);
+      const cwd = ctx.cwd;
+      const sessionFile = ctx.sessionManager.getSessionFile();
+      const store = new Store(cwd);
       const cfg = store.config();
       const name = tree(ctx).getSessionName?.();
-      const before = snapshot(ctx.cwd, "pb: before try");
+      const before = snapshot(cwd, "pb: before try");
       const started = Date.now();
       const steps: string[] = [];
       const files = new Set<string>();
@@ -949,7 +976,7 @@ export default function pb(pi: ExtensionAPI) {
       // Heartbeat so the elapsed counter ticks even between tool calls on quiet stretches.
       const beat = setInterval(() => paint(text("")), 1000);
       const res = await runFresh({
-        cwd: ctx.cwd,
+        cwd,
         role: "try",
         systemPrompt: TRY_SYSTEM,
         brief: tryBrief(params.goal, name?.startsWith("plan: ") ? name.slice(6) : undefined),
@@ -977,13 +1004,13 @@ export default function pb(pi: ExtensionAPI) {
           paintTimer = undefined;
         }
       });
-      const after = snapshot(ctx.cwd, "pb: after try");
-      revertFreshRun(ctx, "the trier", before, after);
-      store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...res.tokens, cost: res.cost, ms: res.ms });
+      const after = snapshot(cwd, "pb: after try");
+      revertFreshRun(cwd, (m) => warnLater(ctx, m), "the trier", before, after);
+      store.exploreEvent({ session: sessionFile, ...res.tokens, cost: res.cost, ms: res.ms });
       if (res.aborted) throw new Error("Probe stopped. Split the goal into smaller steps or bound it (fewer rows, less work); rerun the smaller probe.");
       if (!res.text.trim()) throw new Error(`The trier produced no answer${res.error ? `: ${res.error}` : ""}`);
       const t = res.tokens;
-      const session = res.sessionFile ? path.relative(ctx.cwd, res.sessionFile) : undefined;
+      const session = res.sessionFile ? path.relative(cwd, res.sessionFile) : undefined;
       return { content: text(res.text.trim()), details: { ...details(), writing: [], ms: res.ms, tokens: t.input + t.output + t.cacheRead + t.cacheWrite, tokensIn: t.input + t.cacheRead + t.cacheWrite, tokensOut: t.output, session }, usage: usageOf(res) };
     },
   });
@@ -1911,7 +1938,7 @@ export default function pb(pi: ExtensionAPI) {
     const active = pi.getActiveTools();
     if (store.reviewSession(session)) {
       pi.setActiveTools(REVIEW_SESSION_TOOLS);
-      if (store.reviewRun()?.interrupted?.session === session) ctx.ui.notify(`This review was interrupted: \`/${cmd("review")} continue\` picks it up where it was.`, "info");
+      if (store.reviewRunForSession(session)?.interrupted?.session === session) ctx.ui.notify(`This review was interrupted: \`/${cmd("review")} continue\` picks it up where it was.`, "info");
     }
     else if (active.includes("pb_report_findings")) pi.setActiveTools(active.filter((t) => t !== "pb_report_findings"));
     if (!carry) return;
@@ -2138,7 +2165,7 @@ export default function pb(pi: ExtensionAPI) {
     if (!name || !p || !unfinishedPhase(p.phase)) {
       const session = ctx.sessionManager.getSessionFile();
       const review = store.reviewSession(session);
-      const run = review ? store.reviewRun() : undefined;
+      const run = review ? store.reviewRunForSession(session) : undefined;
       if (review && run) {
         // A review session: reset to its role, the brief verbatim, the findings so far, and the
         // files read — plus a wrap-up directive when compactions repeat with nothing new read.
@@ -2436,16 +2463,29 @@ export default function pb(pi: ExtensionAPI) {
    * block instead of re-running, and --force skips it as recorded acceptance. Only the way into a
    * build gates; resumes after T1 started never do, however the spec has changed since.
    */
-  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string, prior: Finding[] = []): Promise<{ findings: Finding[]; block: boolean }> => {
+  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string, prior: Finding[] = []): Promise<{ findings: Finding[]; block: boolean; session?: string }> => {
     const hash = specHash(md);
     const cfg = store.config();
+    const cwd = ctx.cwd;
     // The reviewer gets bash for inspection but must leave the project untouched, like the
     // explorer: snapshot before and put back afterwards, so a stray write can't leak into the build.
-    const reviewBefore = snapshot(ctx.cwd, "pb: before spec-review");
+    const reviewBefore = snapshot(cwd, "pb: before spec-review");
+    // The review runs as a separate process and reaches the chat only as a verdict, so
+    // while it works the session announces it and the widget shows it live: the last tool
+    // call, and a heartbeat counting seconds between calls — a slow run must not read as a hang.
+    post(`▶ **Spec review** — a fresh reviewer attacks **${name}** before T1; the verdict lands here.`);
+    const started = Date.now();
+    let lastStep: string | undefined;
+    const paint = () =>
+      safely(() =>
+        ctx.ui.setWidget("pb-spec-review", [`pb spec-review ${name} · ${Math.round((Date.now() - started) / 1000)}s`, ...(lastStep ? [`  ↳ ${lastStep}`] : [])]),
+      );
+    paint();
+    const beat = watchable(ctx) ? setInterval(paint, 1000) : undefined;
     let res: Awaited<ReturnType<typeof runFresh>>;
     try {
       res = await runFresh({
-        cwd: ctx.cwd,
+        cwd,
         role: "spec-review",
         systemPrompt: SPEC_REVIEWER_SYSTEM,
         brief: specReviewBrief(name, md, prior),
@@ -2454,13 +2494,20 @@ export default function pb(pi: ExtensionAPI) {
         model: sessionModel(ctx),
         maxConcurrent: cfg.maxConcurrent,
         sessionDir: store.sessionsDir("spec-review"),
+        onActivity: (line) => {
+          lastStep = line;
+          paint();
+        },
       });
     } finally {
-      revertFreshRun(ctx, "the spec reviewer", reviewBefore, snapshot(ctx.cwd, "pb: after spec-review"));
+      if (beat !== undefined) clearInterval(beat);
+      safely(() => ctx.ui.setWidget("pb-spec-review", undefined));
+      revertFreshRun(cwd, (m) => warnLater(ctx, m), "the spec reviewer", reviewBefore, snapshot(cwd, "pb: after spec-review"));
     }
+    const session = res.sessionFile;
     const parsed = parseSpecReview(res.text);
-    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length, reported: parsed.findings, hash, followUp: prior.length > 0 });
-    return parsed;
+    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length, reported: parsed.findings, hash, followUp: prior.length > 0, session });
+    return { ...parsed, session };
   };
 
   const startBuild = async (
@@ -2504,8 +2551,22 @@ export default function pb(pi: ExtensionAPI) {
           ctx.ui.notify(`The spec changed while it was under review: run /${cmd("build")} again and the new text will be reviewed.`, "warning");
           return;
         }
+        // The run's transcript is kept with the spec's sessions: linked here, so the words
+        // behind the verdict stay reachable. The notification covers you being elsewhere.
+        const sessionNote = review.session ? `\n\nThe whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
+        if (cfg.notify)
+          notifyDesktop(
+            "pb: spec review",
+            review.block
+              ? "changes needed before T1"
+              : review.findings.length
+                ? `${review.findings.length} advisory finding${review.findings.length === 1 ? "" : "s"}`
+                : "pass, no findings",
+          );
         if (review.findings.length) {
-          post(`**Spec review** — ${review.block ? "changes needed before T1" : "advisory findings"}:\n${review.findings.map((f, i) => findingLine(f, i + 1)).join("\n")}`);
+          post(`**Spec review** — ${review.block ? "changes needed before T1" : "advisory findings"}:\n${review.findings.map((f, i) => findingLine(f, i + 1)).join("\n")}${sessionNote}`);
+        } else {
+          post(`**Spec review** — pass, no findings (the recorded pass covers this text).${sessionNote}`);
         }
         if (review.block) {
           ctx.ui.notify(
@@ -2573,23 +2634,38 @@ export default function pb(pi: ExtensionAPI) {
   const dryRunTests = async (ctx: ExtensionContext, store: Store, name: string): Promise<string[]> => {
     const loaded = loadSpec(store, name);
     if (!loaded) return [];
+    const cwd = ctx.cwd;
     const cfg = store.config();
     const commands = [...new Set(loaded.spec.tasks.filter((t) => needsRed(loaded.spec, t) && t.test).map((t) => t.test!))];
     if (!commands.length) return [];
     // The dry-run executes real Test: commands in the working copy: their artifacts (coverage,
     // caches) must not show up afterwards as planning changes, so put back whatever they wrote.
-    const dryBefore = snapshot(ctx.cwd, "pb: before dry-run");
+    const dryBefore = snapshot(cwd, "pb: before dry-run");
+    // The human waits at the approval for up to DRY_RUN_TIMEOUT_SEC per command, so the widget
+    // says which one is running and its elapsed seconds instead of leaving the session silent.
+    let current: { command: string; n: string; since: number } | undefined;
+    const paint = () => {
+      const run = current; // one frame's view of what is running; the next frame repaints
+      if (!run) return;
+      safely(() =>
+        ctx.ui.setWidget("pb-dry-run", [`pb dry-run ${name} (${run.n}/${commands.length}) — \`${run.command}\` · ${Math.round((Date.now() - run.since) / 1000)}s`]),
+      );
+    };
+    const beat = watchable(ctx) ? setInterval(paint, 1000) : undefined;
     try {
       const results: Array<{ command: string; result: string; line: string }> = [];
-      for (const command of commands) {
+      for (const [i, command] of commands.entries()) {
         if (suspiciousCommand(command)) {
           results.push({ command, result: "unknown", line: "not run here: chains shells or reaches the network — review before building" });
           continue;
         }
-        const r = await withChecking(() => runVerify(command, ctx.cwd, Math.min(cfg.verifyTimeoutSec, DRY_RUN_TIMEOUT_SEC), cfg.testOutputCap));
+        current = { command, n: `${i + 1}`, since: Date.now() };
+        paint();
+        const r = await withChecking(() => runVerify(command, cwd, Math.min(cfg.verifyTimeoutSec, DRY_RUN_TIMEOUT_SEC), cfg.testOutputCap));
         const line = r.summary.split("\n")[0];
         const result = r.ok ? "pass" : /TIMEOUT|ENOENT|not found|No such file/i.test(r.summary) ? "unknown" : "fail";
         results.push({ command, result, line });
+        current = undefined;
       }
       store.event(name, { type: "dryrun", results: results.map(({ command, result }) => ({ command, result })) });
       const describe: Record<string, (c: string, l: string) => string> = {
@@ -2599,7 +2675,9 @@ export default function pb(pi: ExtensionAPI) {
       };
       return ["", `Test commands, run once before you approve:`, ...results.map((r) => `- ${describe[r.result](r.command, r.line)}`)];
     } finally {
-      revertFreshRun(ctx, "the dry-run", dryBefore, snapshot(ctx.cwd, "pb: after dry-run"));
+      if (beat !== undefined) clearInterval(beat);
+      safely(() => ctx.ui.setWidget("pb-dry-run", undefined));
+      revertFreshRun(cwd, (m) => warnLater(ctx, m), "the dry-run", dryBefore, snapshot(cwd, "pb: after dry-run"));
     }
   };
 
@@ -2891,7 +2969,11 @@ export default function pb(pi: ExtensionAPI) {
           showProgress(ctx, p);
           return instruct("▶ coherence pass", `${coherePrompt(p.baseCommit, attempt, cfg.maxAttempts)}${from}`);
         }
-        const cur = p.current ?? nextTodo(p)?.id;
+        // p.current can name a task the list no longer has: a spec rewrite or human edit renamed
+        // it. Only a live, undone task keeps its claim; anything else resumes at the next todo,
+        // so a stale id reads as "continue", not as "nothing left to build".
+        const claimed = p.current !== undefined && p.tasks.some((t) => t.id === p.current && t.status !== "done");
+        const cur = claimed ? p.current : nextTodo(p)?.id;
         const tp = p.tasks.find((t) => t.id === cur);
         const loaded = loadSpec(store, p.spec);
         if (!loaded) return ctx.ui.notify(`${store.rel("specs", p.spec, "spec.md")} doesn't parse. Fix it (or /${cmd("spec")} ${p.spec}), then /${cmd("build")}.`, "error");
@@ -3064,7 +3146,7 @@ export default function pb(pi: ExtensionAPI) {
       withSession: async (c) => {
         // Fail closed: even if the carry was stolen or expired, this session is a review session.
         const reviewSession = (c as ExtensionContext).sessionManager.getSessionFile();
-        if (reviewSession) store.saveReviewSession(reviewSession, { role: todo, spec: run.name });
+        if (reviewSession) store.saveReviewSession(reviewSession, { role: todo, spec: run.name, run: run.id });
         const r = await drivePass(c, c.sendMessage, store, { role: todo, label: run.label, brief: run.brief });
         run.passes.push({ role: todo, ...r });
         await reviewNext(c, store, run, r.left);
@@ -3084,30 +3166,40 @@ export default function pb(pi: ExtensionAPI) {
     await reviewNext(c, store, run, r.left);
   };
 
-  /** The review's message: verdict, findings, what was dismissed or put back, and the sessions. */
+  /** The review's message: verdict, findings, what was dismissed or changed during the review, and the sessions. */
   const reviewMessage = (
     run: ReviewRun,
-    o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; restored: string[]; restoreGuardFailed?: boolean; partial: boolean; verificationFailed?: string; thrash?: boolean },
+    o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; changedDuring: string[]; partial: boolean; verificationFailed?: string; thrash?: boolean },
   ) => {
     const findings = [...o.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
     const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
     const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left);
-    const verdict = run.passes.length ? verdictOf(findings) : "none";
-    const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
     const unparsed = run.passes.filter((x) => x.unparsed && !x.left).map((x) => (x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"));
+    // A pass that answered in prose only lost whatever it reported: with nothing parseable
+    // there is no verdict to give — a clean one would wave through the very review this is for.
+    const lost = unparsed.length > 0 && !findings.length;
+    const verdict = !run.passes.length || lost ? "none" : verdictOf(findings);
+    const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
     const sessions = run.passes.map((x) => `${x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"} \`pi --session ${sessionIdOf(x.session)}\``);
     const text = [
-      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : run.abuseSkipped ? " · adversarial pass skipped" : ""}`,
+      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${lost ? "⚠ NO VERDICT — a pass reported in prose only" : verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : run.abuseSkipped ? " · adversarial pass skipped" : ""}`,
       ...(o.partial
         ? ["", `⚠ You left the review before it finished: the ${finished("review") ? "adversarial pass" : "review"} didn't finish; this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),
-      ...(unparsed.length ? ["", `⚠ The ${unparsed.join(" and ")} pass${unparsed.length === 1 ? "" : "es"} reported in prose only — nothing parseable, so findings may be missing above. Read the session${unparsed.length === 1 ? "" : "s"} before trusting this verdict.`] : []),
+      ...(unparsed.length
+        ? [
+            "",
+            lost
+              ? `⚠ The ${unparsed.join(" and ")} pass${unparsed.length === 1 ? "" : "es"} reported in prose only — nothing parseable, so there is no verdict. Read the session${unparsed.length === 1 ? "" : "s"} and judge the change yourself, or run /${cmd("review")} again.`
+              : `⚠ The ${unparsed.join(" and ")} pass${unparsed.length === 1 ? "" : "es"} reported in prose only — nothing parseable, so findings may be missing above. Read the session${unparsed.length === 1 ? "" : "s"} before trusting this verdict.`,
+          ]
+        : []),
       "",
       run.passes.find((x) => x.role === "review")?.prose ?? "",
       ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),
       ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
-      ...(o.restored.length ? ["", `⚠ Files changed during the review were put back: ${o.restored.join(", ")}`] : []),
-      ...(o.restoreGuardFailed ? ["", "⚠ Files changed during the review couldn't be told apart from work that moved on meanwhile (the guard snapshot failed), so nothing was put back: check the working tree."] : []),
+      ...(o.changedDuring.length ? ["", `⚠ Files changed while the review ran (left as they are — they may be yours, not the reviewer's): ${o.changedDuring.join(", ")}`] : []),
+      ...(run.largeFiles?.length ? ["", `⚠ Untracked files over 20 MB are in no snapshot or diff (read them yourself): ${run.largeFiles.join(", ")}`] : []),
       ...(o.thrash ? ["", "⚠ A review pass compacted repeatedly without new reads and wrapped up early: treat its findings as a partial pass."] : []),
       ...(o.verificationFailed ? ["", `⚠ The second look at the blocking findings couldn't run (${o.verificationFailed}): they are reported unconfirmed.`] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
@@ -3122,13 +3214,13 @@ export default function pb(pi: ExtensionAPI) {
 
   /** Never lost: the result (or what was reported so far) is kept with the spec. */
   const writeReview = (store: Store, run: ReviewRun, partial: boolean) => {
-    const m = reviewMessage(run, { findings: allFindings(run), dismissed: [], restored: [], partial, verificationFailed: undefined });
+    const m = reviewMessage(run, { findings: allFindings(run), dismissed: [], changedDuring: [], partial, verificationFailed: undefined });
     fs.mkdirSync(path.dirname(store.reviewFile(run.name)), { recursive: true });
     fs.writeFileSync(store.reviewFile(run.name), `${m.text}\n`);
     return m;
   };
 
-  /** Double-check, put back anything changed, record the result, and take you home with it. */
+  /** Double-check, report anything changed while the review ran, record the result, and take you home with it. */
   const reviewFinish = async (from: ExtensionCommandContext, store: Store, run: ReviewRun): Promise<void> => {
     const cfg = store.config();
     const widget = (t?: string[]) => safely(() => from.ui.setWidget("pb-review", t));
@@ -3151,10 +3243,16 @@ export default function pb(pi: ExtensionAPI) {
           });
     widget(undefined);
     const after = run.before ? snapshot(run.cwd, `pb: after review ${run.label}`) : undefined;
-    const reverted = run.before && after && run.before.tree !== after.tree ? restore(run.cwd, after.commit, run.before.commit) : { restored: [], guardFailed: false };
+    // Never revert what changed while the review ran: a file touched in that window is as likely
+    // to be your own edit (another session, an editor) as the reviewer's stray write, and pb can't
+    // tell them apart. Report the paths instead, so the change stays visible and nothing is lost.
+    const changedDuring = run.before && after ? changedPaths(run.cwd, run.before.commit, after.commit) : [];
+    // A large untracked file that appeared while the review ran is invisible to that diff too:
+    // add it to the ones the brief already named, so the result says what the review couldn't see.
+    if (run.before) run.largeFiles = [...new Set([...(run.largeFiles ?? []), ...skippedLargeFiles(run.cwd, commitTime(run.cwd, run.before.commit))])];
     // A stall from an earlier run of this spec must not mark this one: the events carry the run id.
     const thrash = run.name && run.id ? readEvents(path.join(store.specDir(run.name), "events.jsonl")).some((e) => e.type === "compact" && e.run === run.id && (e as { thrash?: unknown }).thrash === true) : false;
-    const m = reviewMessage(run, { findings: checked.findings, dismissed: checked.dismissed, restored: reverted.restored, restoreGuardFailed: reverted.guardFailed, partial: false, verificationFailed: checked.error?.split("\n")[0], thrash });
+    const m = reviewMessage(run, { findings: checked.findings, dismissed: checked.dismissed, changedDuring, partial: false, verificationFailed: checked.error?.split("\n")[0], thrash });
     const p = run.name ? store.progress(run.name) : undefined;
     if (run.name && p) {
       store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ...checked.tokens, cost: checked.cost });
@@ -3171,7 +3269,7 @@ export default function pb(pi: ExtensionAPI) {
     }
     fs.mkdirSync(path.dirname(store.reviewFile(run.name)), { recursive: true });
     fs.writeFileSync(store.reviewFile(run.name), `${m.text}\n`);
-    store.saveReviewRun(undefined);
+    store.clearReviewRun(run.id);
     if (!run.home) return;
     try {
       await from.switchSession(run.home, {
@@ -3198,7 +3296,7 @@ export default function pb(pi: ExtensionAPI) {
       // Inside a review session: /pb:review done ends it.
       const session = ctx.sessionManager.getSessionFile();
       const here = store.reviewSession(session);
-      const saved = store.reviewRun();
+      const saved = here ? store.reviewRunForSession(session) : store.interruptedReview(session);
       if (here) {
         // Inside a review session: done ends the pass; continue picks up an interrupted one.
         const cut = saved?.interrupted;
@@ -3220,7 +3318,7 @@ export default function pb(pi: ExtensionAPI) {
         if (!choice) return;
         if (choice === SHOW) {
           if (!fs.existsSync(store.reviewFile(saved.name))) {
-            store.saveReviewRun(undefined); // the spec went away (archived?): this run is dead
+            store.clearReviewRun(saved.id); // the spec went away (archived?): this run is dead
             return ctx.ui.notify("The review's file is gone (was the spec archived?). Start a new review.", "warning");
           }
           return post(fs.readFileSync(store.reviewFile(saved.name), "utf8"));
@@ -3233,13 +3331,16 @@ export default function pb(pi: ExtensionAPI) {
           try {
             await ctx.switchSession(cut.session, { withSession: (c) => reviewContinue(c, c.sendMessage, store, run, cut) });
           } catch {
-            store.saveReviewRun(undefined); // its session is gone too: nothing left to continue
+            store.clearReviewRun(run.id); // its session is gone too: nothing left to continue
             ctx.ui.notify("The interrupted review's session is gone. Start a new review.", "warning");
           }
           return;
         }
-        store.saveReviewRun(undefined);
+        store.clearReviewRun(saved.id);
       }
+      // Any older run from this session is superseded now (a crash leaves no interrupted marker,
+      // so /pb:review can't offer it): clear them before starting, or they linger unseen.
+      store.clearReviewRunsForHome(session);
       const full = /(^|\s)--full(\s|$)/.test(args);
       const rest = args.replace(/(^|\s)--full(?=\s|$)/g, " ").trim();
       const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
@@ -3295,9 +3396,25 @@ export default function pb(pi: ExtensionAPI) {
         store.saveProgress(p);
         return post(fs.readFileSync(store.reviewFile(name), "utf8"));
       }
-      const base = p?.baseCommit;
+      // A recorded base that no longer resolves (rewritten history, a shallow clone) would make
+      // the diff come back empty and the review pass blind: fall back to HEAD and say so.
+      const recordedBase = p?.baseCommit && /^[0-9a-f]{7,64}$/i.test(p.baseCommit) ? p.baseCommit : undefined;
+      const base = recordedBase && resolvesRevision(ctx.cwd, recordedBase) ? recordedBase : undefined;
+      const baseWarning = !name
+        ? undefined
+        : recordedBase && !base
+          ? `The build's base commit \`${recordedBase}\` no longer resolves here (history rewritten or garbage-collected?): the review compares against HEAD and may miss work committed since.`
+          : !recordedBase && gitRepo(ctx.cwd)
+            ? "The build didn't record a base commit: the review compares against HEAD and can't separate this change from work committed earlier."
+            : undefined;
+      if (baseWarning) ctx.ui.notify(baseWarning, "warning");
       const changed = changedSince(ctx.cwd, base);
-      if (!name && !changed.length) return ctx.ui.notify("Nothing to review: there are no uncommitted changes.", "info");
+      // Untracked files over the snapshot cap are in no diff: the reviewer is told to read them.
+      // A follow-up only counts those that moved since the last review; a first review uses the
+      // build's base. They also keep "nothing changed" from hiding a file no snapshot can see.
+      const reviewSince = !full && p?.review?.snapshot ? commitTime(ctx.cwd, p.review.snapshot) : undefined;
+      const largeFiles = skippedLargeFiles(ctx.cwd, reviewSince ?? (base ? commitTime(ctx.cwd, base) : undefined));
+      if (!name && !changed.length && !largeFiles.length) return ctx.ui.notify("Nothing to review: there are no uncommitted changes.", "info");
       const intent = name ? "" : rest || (ctx.hasUI ? ((await ctx.ui.input("What is the change meant to do? (optional)")) ?? "") : "");
 
       // Once per project: the model that built the change shares its blind spots; offer a different one.
@@ -3318,12 +3435,12 @@ export default function pb(pi: ExtensionAPI) {
       }
 
       const label = name ?? "the uncommitted change";
-      // Another session may be building this spec: confirm before the snapshot below arms
-      // the finish-time restore, which would put back that builder's in-flight files.
+      // Another session may be building this spec: confirm before reviewing, so its in-flight
+      // files aren't mistaken for the review's own and reported as changed during it.
       if (!(await confirmLiveBuild(ctx, store, name, ["building", "paused"], "Review it here anyway?"))) return;
-      // The tree as the reviewer sees it: snapshotted before the harness's own check, so the
-      // check's artifacts (coverage, caches) are put back with anything else the review changed.
-      // The next review's delta starts here too.
+      // The tree as the reviewer sees it, snapshotted before the harness's own check: anything
+      // the check or the review changes is reported (never silently reverted), and the next
+      // review's delta starts here too.
       const before = cfg.checkpoints ? snapshot(ctx.cwd, `pb: review ${label}`) : undefined;
       // Fresh ground truth first: the reviewer should judge what's on disk now.
       const command = loaded ? (loaded.spec.gate === "tests" ? testCmd : loaded.spec.gate === "build" ? buildCmd : null) : (testCmd ?? buildCmd);
@@ -3344,7 +3461,7 @@ export default function pb(pi: ExtensionAPI) {
       let previous: { snapshot: string; findings: Finding[]; changed: string[] } | undefined;
       if (!full && prevReview?.snapshot && before) {
         const since = changedPaths(ctx.cwd, prevReview.snapshot, before.commit);
-        if (!since.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
+        if (!since.length && !largeFiles.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict === "none" ? "no verdict" : prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
         previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since };
       }
       // Fix laps report into their own sessions, not the brief: hand the follow-up review the
@@ -3385,6 +3502,8 @@ export default function pb(pi: ExtensionAPI) {
         acceptanceDrift: loaded && name ? acceptanceDrift(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
         humanOverride: p?.edited ? "This spec was edited by hand after writing, so write-time gates were bypassed visibly rather than silently: judge its shape (Threats, measurements, Contracts, evidence, reasons) as well as its truth." : undefined,
         staleRefs: staleProseRefs(ctx.cwd, base),
+        baseWarning,
+        largeFiles,
       });
       // Only plain values from here on: `ctx` belongs to this session, which the first pass replaces.
       const run: ReviewRun = {
@@ -3398,6 +3517,7 @@ export default function pb(pi: ExtensionAPI) {
         followUp: !!previous,
         home: ctx.sessionManager.getSessionFile(),
         before: before ? { commit: before.commit, tree: before.tree } : undefined,
+        largeFiles,
         model: cfg.reviewer.model ?? sessionModel(ctx),
         thinking: cfg.reviewer.thinking ?? (pi.getThinkingLevel() as string | undefined),
         passes: [],
@@ -3582,8 +3702,10 @@ export default function pb(pi: ExtensionAPI) {
    * the existing map removed (unanswered: the current map stays). Returns the changes when it wrote the map.
    */
   const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string } = {}): Promise<string[] | undefined> => {
+    const cwd = ctx.cwd;
+    const sessionFile = ctx.sessionManager.getSessionFile();
     const cfg = store.config();
-    const current = readMap(ctx.cwd);
+    const current = readMap(cwd);
     const started = Date.now();
     const abort = new AbortController();
     const canEsc = ctx.hasUI && ctx.mode === "tui" && typeof ctx.ui.onTerminalInput === "function";
@@ -3593,10 +3715,10 @@ export default function pb(pi: ExtensionAPI) {
     let mapSession: string | undefined;
     // The cartographer gets bash for inspection but must leave the project untouched, like the
     // explorer: anything it writes is put back, so the map update never carries stray files with it.
-    const mapGuardBefore = snapshot(ctx.cwd, "pb: before map");
+    const mapGuardBefore = snapshot(cwd, "pb: before map");
     const cartographer = (brief: string, phase: string) =>
       runFresh({
-        cwd: ctx.cwd,
+        cwd,
         role: "cartographer",
         systemPrompt: CARTOGRAPHER_SYSTEM + extraBlock(store.extra("map")),
         brief,
@@ -3628,29 +3750,29 @@ export default function pb(pi: ExtensionAPI) {
     try {
       render("reading the project");
       const first = await cartographer(cartographerBrief({ current, ...o }), "reading the project");
-      store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...first.tokens, cost: first.cost, ms: first.ms });
+      store.exploreEvent({ session: sessionFile, ...first.tokens, cost: first.cost, ms: first.ms });
       if (first.aborted) return void ctx.ui.notify("Map update stopped.", "info");
       ({ map: body, changes } = mapOf(first));
       if (!body) return void ctx.ui.notify(`No map came back${first.error ? `: ${first.error}` : ""}.`, "warning");
-      unresolved = unresolvedPaths(ctx.cwd, body);
+      unresolved = unresolvedPaths(cwd, body);
       const overBy = mapTokens(body) - MAP_TOKENS;
       if (unresolved.length || overBy > 0) {
         // Once: the cartographer corrects or removes what doesn't resolve and trims to the budget, still able to
         // read the code; nothing is deleted behind its back.
         const phase = mapRepairPhase(unresolved.length, overBy > 0 ? overBy : 0);
         const second = await cartographer(cartographerBrief({ current, proposed: body, unresolved, overBy: overBy > 0 ? overBy : undefined }), phase);
-        store.exploreEvent({ session: ctx.sessionManager.getSessionFile(), ...second.tokens, cost: second.cost, ms: second.ms });
+        store.exploreEvent({ session: sessionFile, ...second.tokens, cost: second.cost, ms: second.ms });
         if (second.aborted) return void ctx.ui.notify("Map update stopped.", "info");
         const fixed = mapOf(second).map;
         if (fixed) {
           body = fixed;
-          unresolved = unresolvedPaths(ctx.cwd, body);
+          unresolved = unresolvedPaths(cwd, body);
         }
       }
     } finally {
       unsubEsc?.();
-      ctx.ui.setWidget("pb-map", undefined);
-      revertFreshRun(ctx, "the cartographer", mapGuardBefore, snapshot(ctx.cwd, "pb: after map"));
+      safely(() => ctx.ui.setWidget("pb-map", undefined));
+      revertFreshRun(cwd, (m) => warnLater(ctx, m), "the cartographer", mapGuardBefore, snapshot(cwd, "pb: after map"));
     }
 
     const diff = mapDiff(current, body);

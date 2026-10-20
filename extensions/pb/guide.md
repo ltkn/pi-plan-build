@@ -627,7 +627,9 @@ change you made with Pi without the rest of the flow.
 **Inside the review.** The spec pass, and the adversarial pass when one is due, each run
 in a real Pi session you're in: you watch everything natively, and you can
 interrupt it or ask it something ("why is 3 a P1?"). Its model is read-only: it
-can't edit or write files, and anything its commands change is put back. A pass
+can't edit or write files; anything a command it runs changes while the review
+runs is listed in the result, not reverted behind your back (it may be your own
+concurrent edit). A pass
 ends when it has reported its findings and stops, or at `/pb:review done`. When
 the spec pass is done and an adversarial pass is due, pb asks whether to run it now
 (unanswered, after `askTimeoutSec`, it runs; skipped, the result says so), and

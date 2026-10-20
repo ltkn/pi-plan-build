@@ -900,6 +900,51 @@ test("pb_explore answers from a separate context; its usage is reported and coun
   assert.match(t.posts.at(-1)!, /Explorer +3 calls · in 6\.0k · out 800( @ [\d.]+k? tok\/s)? · \$0\.04/);
 });
 
+test("explore: a session replaced mid-run still puts back what the run changed", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  process.env.MOCK_EXPLORE_WRITE = path.join(t.repo, "EXPLORE_WAS_HERE");
+  process.env.MOCK_HOLD_MS = "1000"; // the explorer writes only after the hold: switch sessions while it waits
+  try {
+    const homeCtx = t.runtime().ctx;
+    const pending = t.callTool("pb_explore", { question: "How are order transitions built?" });
+    const freshSessions = path.join(t.repo, ".pi/pb/sessions/explorer");
+    await until(() => fs.existsSync(freshSessions) && fs.readdirSync(freshSessions).length > 0);
+    // You start a new session while the explorer is still running: its ctx goes stale, but the
+    // teardown must not read through it or the guard restore is skipped.
+    await homeCtx.newSession({});
+    await pending;
+    assert.ok(!fs.existsSync(path.join(t.repo, "EXPLORE_WAS_HERE")));
+  } finally {
+    delete process.env.MOCK_EXPLORE_WRITE;
+    delete process.env.MOCK_HOLD_MS;
+  }
+});
+
+test("explore: a file you edited while it ran is named, and recoverable from the post-run snapshot", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  process.env.MOCK_HOLD_MS = "1000"; // the explorer is alive while you edit
+  try {
+    const pending = t.callTool("pb_explore", { question: "How are order transitions built?" });
+    const freshSessions = path.join(t.repo, ".pi/pb/sessions/explorer");
+    await until(() => fs.existsSync(freshSessions) && fs.readdirSync(freshSessions).length > 0);
+    fs.writeFileSync(path.join(t.repo, "README"), "my edit during the explorer\n");
+    await pending;
+  } finally {
+    delete process.env.MOCK_HOLD_MS;
+  }
+  assert.equal(t.read("README"), "hi\n"); // the read-only guarantee still wins...
+  const note = t.notes.find((n) => /Files changed while the explorer ran were put back/.test(n))!;
+  assert.match(note, /README/); // ...but the edit is named, not lost silently
+  const after = /\bthe post-run tree is in ([0-9a-f]{40})/.exec(note)![1];
+  const before = /git diff ([0-9a-f]{40})/.exec(note)![1];
+  assert.equal(execSync(`git show ${after}:README`, { cwd: t.repo }).toString(), "my edit during the explorer\n"); // the post-run tree kept it
+  assert.match(execSync(`git diff ${before} ${after} -- README`, { cwd: t.repo }).toString(), /\+my edit during the explorer/);
+});
+
 test("pb_explore keeps the answer when it arrives across messages", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -2136,7 +2181,7 @@ test("review: a long prose report with no parseable findings is flagged, not sil
   assert.equal(unparsedReport(undefined, lost), true); // substantial but tagless: warn, don't pass clean
 });
 
-test("review: the harness check's own artifacts are put back with the rest", async () => {
+test("review: the harness check's own artifacts are reported, not reverted behind your back", async () => {
   const t = setup({ verify: "touch review-artifact.txt" });
   await written(t);
   t.agent.script = diligent;
@@ -2145,7 +2190,9 @@ test("review: the harness check's own artifacts are put back with the rest", asy
   fs.rmSync(path.join(t.repo, "review-artifact.txt")); // ...so the review's own check is what recreates it
   await t.run("review");
   assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS/);
-  assert.ok(!fs.existsSync(path.join(t.repo, "review-artifact.txt"))); // the review put it back
+  // Left in place and named: reverting it would also revert any edit you made in the same window.
+  assert.ok(fs.existsSync(path.join(t.repo, "review-artifact.txt")));
+  assert.match(t.posts.at(-1)!, /⚠ Files changed while the review ran[^\n]*review-artifact\.txt/);
 });
 
 test("review: a mid-build review doesn't clobber the build's last result", async () => {
@@ -2484,14 +2531,33 @@ test("review: showing an archived spec's interrupted review says so instead of c
   t.agent.script = diligent;
   await t.run("build");
   await t.run("archive");
+  const home = t.runtime().ctx.sessionManager.getSessionFile();
   fs.writeFileSync(
     path.join(t.repo, ".pi/pb/review-run.json"),
-    JSON.stringify({ cwd: t.repo, name: "order-cancellation", label: "order-cancellation", brief: "", followUp: false, passes: [], interrupted: { role: "review", session: "gone.jsonl" } }),
+    JSON.stringify({ id: "dead-run", cwd: t.repo, name: "order-cancellation", label: "order-cancellation", brief: "", followUp: false, passes: [], home, interrupted: { role: "review", session: "gone.jsonl" } }),
   );
   t.selects.push("Show what it had reported");
   await t.run("review");
   assert.match(t.notes.at(-1)!, /The review's file is gone \(was the spec archived\?\)/);
-  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-run.json"))); // the dead run is cleared
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-run.json"))); // migrated, then cleared as dead
+  const runs = path.join(t.repo, ".pi/pb/review-runs");
+  assert.deepEqual(fs.existsSync(runs) ? fs.readdirSync(runs) : [], []);
+});
+
+test("review: starting a new review clears an abandoned run from this session", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  const home = t.runtime().ctx.sessionManager.getSessionFile();
+  // A crash mid-review leaves a run with no interrupted marker: /pb:review can't offer it.
+  store.saveReviewRun({ id: "crashed-run", cwd: t.repo, label: "crashed", brief: "", followUp: false, passes: [], home });
+  await t.run("review");
+  assert.equal(store.reviewRun("crashed-run"), undefined);
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS/);
 });
 
 test("review: when the second look can't run, the findings are reported unconfirmed", async () => {
@@ -2572,7 +2638,8 @@ test("review: the review session is read-only for its model; /pb:review done end
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // and back home at the end
   assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 2 · P3 0 · with an adversarial pass[\s\S]*Adversarial: cap the page size/);
   assert.equal(JSON.parse(t.read(".pi/pb/config.json")).maxAttempts, 2);
-  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-run.json"))); // finished: nothing left to continue
+  const runs = path.join(t.repo, ".pi/pb/review-runs");
+  assert.deepEqual(fs.existsSync(runs) ? fs.readdirSync(runs) : [], []); // finished: nothing left to continue
 });
 
 test("review: every pass session is gated (reporting tool present, editing blocked)", async () => {
@@ -2654,8 +2721,8 @@ test("review: compaction resets to role, brief, findings and files read; stalls 
   const { Store } = await import("../extensions/pb/store.ts");
   const store = new Store(t.repo);
   const session = t.runtime().ctx.sessionManager.getSessionFile();
-  store.saveReviewSession(session, { role: "review", spec: "order-cancellation", findings: [{ priority: "P2", title: "name it" }] });
-  store.saveReviewRun({ cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] } as any);
+  store.saveReviewSession(session, { role: "review", spec: "order-cancellation", run: "run-1", findings: [{ priority: "P2", title: "name it" }] });
+  store.saveReviewRun({ id: "run-1", cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] });
   const prep = (reads: string[], tokens: number) => ({ firstKeptEntryId: "e1", tokensBefore: tokens, fileOps: { read: new Set(reads), edited: new Set(), written: new Set() } });
   const [r1] = (await t.fire("session_before_compact", { preparation: prep(["a.ts", "b.ts"], 50000), reason: "threshold" })) as any[];
   assert.match(
@@ -2679,7 +2746,7 @@ test("review: findings reported between compactions count as progress, so writin
   const { Store } = await import("../extensions/pb/store.ts");
   const store = new Store(t.repo);
   const session = t.runtime().ctx.sessionManager.getSessionFile();
-  store.saveReviewRun({ cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] } as any);
+  store.saveReviewRun({ id: "run-1", cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] });
   // The files read and the size stay the same; the only thing moving is the findings list, which is
   // exactly what a review does once reading is done.
   const prep = { firstKeptEntryId: "e1", tokensBefore: 50000, fileOps: { read: new Set(["a.ts"]), edited: new Set(), written: new Set() } };
@@ -2688,6 +2755,7 @@ test("review: findings reported between compactions count as progress, so writin
     store.saveReviewSession(session, {
       role: "review",
       spec: "order-cancellation",
+      run: "run-1",
       findings: Array.from({ length: i + 1 }, (_, n) => ({ priority: "P2", title: `finding ${n}` })),
     });
     [r] = (await t.fire("session_before_compact", { preparation: prep, reason: "threshold" })) as any[];
@@ -2719,7 +2787,7 @@ test("review: a stall in this very run is still reported in its result", async (
   t.reviewer.script = true; // drive the review session by hand
   t.agent.script = async (text, tool) => {
     if (text.startsWith("[pb:review]")) {
-      const run = new Store(t.repo).reviewRun()!;
+      const run = new Store(t.repo).reviewRunForSession(t.runtime().ctx.sessionManager.getSessionFile())!;
       assert.ok(run.id); // every run carries the id its compact events are stamped with
       fs.appendFileSync(
         path.join(t.repo, ".pi/pb/specs/order-cancellation/events.jsonl"),
@@ -2766,6 +2834,24 @@ test("review: findings carry priorities; P0/P1 are double-checked; only line-lea
   assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 0/); // "No [P0] or [P1] issues" isn't a finding
 });
 
+test("review: a prose-only pass gives no verdict and leaves the phase short of reviewed", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.silent = true; // no pb_report_findings: a real report in a shape nothing can parse
+  t.reviewer.prose = `P1 — the updated_at bump on in-place edits is silently lost: the scheduler sets the field on a detached entity, so the save never persists it.\n\nP2 — a DB failure between the landed post and the standing-set save orphans the set with no coordinate rows.\n\n${"Fix: persist the bump through the repository, not the entity. ".repeat(20)}`;
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /⚠ NO VERDICT — a pass reported in prose only/);
+  assert.doesNotMatch(post, /✅ PASS/);
+  assert.match(post, /there is no verdict/);
+  assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /NO VERDICT/);
+  const p = t.progress("order-cancellation");
+  assert.equal(p.phase, "built"); // not promoted to reviewed on a lost pass
+  assert.equal(p.review.verdict, "none");
+});
+
 test("review: offers once to run the reviewer on another model than the one that built the change", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -2799,15 +2885,58 @@ test("review: works without a spec, on the uncommitted change and its intent", a
   assert.match(briefOf(t), /Intent: src\/README warm the greeting/); // the whole line went through as intent
 });
 
-test("review: files changed during the review are put back", async () => {
+test("review: files changed while the review ran are reported, not reverted", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
   t.reviewer.write = path.join(t.repo, "T1.txt");
   await t.run("review");
-  assert.equal(t.read("T1.txt"), "x");
-  assert.match(t.posts.at(-1)!, /⚠ Files changed during the review were put back: T1\.txt/);
+  // The same window holds the reviewer's stray write and any edit you made meanwhile (another
+  // session, an editor): pb can't tell them apart, so it never puts either back silently.
+  assert.equal(t.read("T1.txt"), "reviewer was here");
+  assert.match(t.posts.at(-1)!, /⚠ Files changed while the review ran \(left as they are — they may be yours, not the reviewer's\): T1\.txt/);
+});
+
+test("review: a base commit that no longer resolves is said, not diffed as nothing", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  const p = store.progress("order-cancellation")!;
+  p.baseCommit = "0".repeat(40); // history rewritten or GC'd since the build
+  store.saveProgress(p);
+  await t.run("review");
+  assert.match(t.notes.at(-1)!, /The build's base commit `0{40}` no longer resolves here/);
+  assert.match(briefOf(t), /⚠ The build's base commit `0{40}` no longer resolves here/);
+  assert.doesNotMatch(briefOf(t), /Base commit: 0{40}/); // never diff against a base that isn't there
+});
+
+test("review: untracked files over the snapshot cap are named, since no diff can show them", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  fs.writeFileSync(path.join(t.repo, "huge.bin"), Buffer.alloc(21 * 1024 * 1024));
+  await t.run("review");
+  assert.match(briefOf(t), /## Files too large to capture[\s\S]*- huge\.bin/);
+  assert.match(t.posts.at(-1)!, /⚠ Untracked files over 20 MB are in no snapshot or diff \(read them yourself\): huge\.bin/);
+});
+
+test("review: a follow-up isn't 'nothing changed' when only a huge untracked file moved", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  fs.writeFileSync(path.join(t.repo, "huge.bin"), Buffer.alloc(21 * 1024 * 1024));
+  await t.run("review");
+  assert.ok(!t.notes.some((n) => /Nothing changed since the last review/.test(n)));
+  assert.match(briefOf(t), /## Files too large to capture[\s\S]*- huge\.bin/);
+  assert.match(t.posts.at(-1)!, /⚠ Untracked files over 20 MB/);
 });
 
 test("stats: tasks, first try, checks, pauses, review, and the build session's tokens and cache", async () => {
@@ -3316,8 +3445,8 @@ test("compaction: a review session is reset to its role, the brief, and the find
   const { Store } = await import("../extensions/pb/store.ts");
   const store = new Store(t.repo);
   const session = path.join(t.repo, "review-session.jsonl");
-  store.saveReviewSession(session, { role: "review", spec: "order-cancellation", findings: [{ priority: "P1", title: "missing test", file: "x.ts", line: 1 }] });
-  store.saveReviewRun({ cwd: t.repo, label: "order-cancellation", brief: "# The brief", followUp: false, passes: [], home: t.repo });
+  store.saveReviewSession(session, { role: "review", spec: "order-cancellation", run: "run-2", findings: [{ priority: "P1", title: "missing test", file: "x.ts", line: 1 }] });
+  store.saveReviewRun({ id: "run-2", cwd: t.repo, label: "order-cancellation", brief: "# The brief", followUp: false, passes: [], home: t.repo });
   const ctx = { ...t.runtime().ctx, sessionManager: { getSessionFile: () => session } };
   const [r] = (await t.fire("session_before_compact", { preparation: { firstKeptEntryId: "e3", tokensBefore: 90000 }, reason: "threshold" }, ctx)) as any[];
   assert.equal(r.compaction.firstKeptEntryId, "e3"); // Pi's boundary kept; only the summary is pb's
@@ -3656,6 +3785,50 @@ test("legacy review-sessions.json migrates to per-session files on first write",
   assert.equal(s.reviewSession("/s/old.jsonl")?.spec, "a");
   assert.equal(s.reviewSession("/s/new.jsonl")?.role, "abuse");
   assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-sessions.json"))); // migrated away
+});
+
+test("review runs are per-run files: two reviews don't clobber, archive GCs by spec", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const s = new Store(t.repo);
+  const run = (id: string, home: string, name?: string) => ({ id, cwd: t.repo, ...(name ? { name } : {}), label: id, brief: "BRIEF", followUp: false, passes: [], home, interrupted: { role: "review" as const, session: `/${id}.jsonl` } });
+  s.saveReviewRun(run("run-a", "/home-a.jsonl", "a"));
+  s.saveReviewRun(run("run-b", "/home-b.jsonl", "b")); // must not overwrite run-a
+  assert.equal(s.reviewRun("run-a")?.label, "run-a");
+  assert.equal(s.reviewRun("run-b")?.label, "run-b");
+  assert.equal(s.interruptedReview("/home-a.jsonl")?.id, "run-a");
+  assert.equal(s.interruptedReview("/home-b.jsonl")?.id, "run-b");
+  assert.equal(s.reviewRunForSession("/run-b.jsonl")?.id, "run-b"); // its pass session finds its own run
+  s.clearReviewRun("run-a"); // finishing one...
+  assert.equal(s.reviewRun("run-a"), undefined);
+  assert.equal(s.interruptedReview("/home-b.jsonl")?.id, "run-b"); // ...leaves the other to continue
+  s.dropSessions("b"); // archiving the spec drops its dead runs
+  assert.equal(s.reviewRun("run-b"), undefined);
+});
+
+test("review runs: a new review from the same session clears what it supersedes, and only that", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const s = new Store(t.repo);
+  const run = (id: string, home: string) => ({ id, cwd: t.repo, label: id, brief: "", followUp: false, passes: [], home });
+  s.saveReviewRun(run("crashed", "/home-a.jsonl")); // no interrupted marker: never offered again
+  s.saveReviewRun(run("other", "/home-b.jsonl"));
+  s.clearReviewRunsForHome("/home-a.jsonl");
+  assert.equal(s.reviewRun("crashed"), undefined);
+  assert.equal(s.reviewRun("other")?.id, "other"); // another session's review is untouched
+});
+
+test("legacy review-run.json migrates to its per-run file", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/review-run.json"), JSON.stringify({ id: "old-run", cwd: t.repo, label: "old", brief: "", followUp: false, passes: [], home: "/h.jsonl" }));
+  const s = new Store(t.repo);
+  assert.equal(s.reviewRun("old-run")?.label, "old");
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/review-run.json"))); // migrated away
+  assert.equal(s.interruptedReview("/h.jsonl"), undefined); // no interrupted pass recorded: nothing to offer
 });
 
 test("pending builds are per-session files: two sessions don't clobber, expiry clears", async () => {
@@ -4705,6 +4878,36 @@ test("concurrent fresh runs queue to PI_PB_MAX_CONCURRENT (default 2)", async ()
   assert.equal(peak, 2); // the cap is exercised, not merely absent
 });
 
+test("a queued run aborted while waiting doesn't strand the next one behind it", { timeout: 10_000 }, async () => {
+  const { runFresh } = await import("../extensions/pb/runner.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-conc-abort-"));
+  const log = path.join(dir, "conc.log");
+  const prior = { MOCK_HOLD_MS: process.env.MOCK_HOLD_MS, PI_PB_MAX_CONCURRENT: process.env.PI_PB_MAX_CONCURRENT, MOCK_CONCURRENCY_LOG: process.env.MOCK_CONCURRENCY_LOG };
+  process.env.MOCK_HOLD_MS = "400";
+  process.env.PI_PB_MAX_CONCURRENT = "1";
+  process.env.MOCK_CONCURRENCY_LOG = log;
+  const run = (signal?: AbortSignal) =>
+    runFresh({ cwd: dir, role: "explorer", systemPrompt: "You are an EXPLORER", brief: "# Question\n\nwhere?", prompt: "go", tools: ["read"], signal });
+  try {
+    const a = run(); // holds the only slot
+    await until(() => fs.existsSync(log) && fs.readFileSync(log, "utf8").includes("s "));
+    const stopped = new AbortController();
+    const b = run(stopped.signal); // queues, then leaves before a slot frees
+    stopped.abort();
+    const c = run(); // queues behind the aborted waiter
+    const [ra, rb, rc] = await Promise.all([a, b, c]);
+    assert.equal(ra.exitCode, 0);
+    assert.equal(rb.aborted, true); // it never started
+    assert.equal(rc.exitCode, 0); // the freed slot woke c: an aborted waiter must not eat the wakeup
+    assert.ok(rc.text.includes("holds the model"));
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("fresh runs honor the config's maxConcurrent, but PI_PB_MAX_CONCURRENT outranks it", async () => {
   const { runFresh } = await import("../extensions/pb/runner.ts");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-conc-cfg-"));
@@ -5155,6 +5358,39 @@ test("spec review: restarting a started build never re-gates, however the spec c
   assert.ok(t.instructions.length > 1); // the restart went through
 });
 
+test("build: a spec rewrite that renumbers a task doesn't strand the resume at 'nothing left'", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  // T1 gets built; the build rests at T2 (the script does nothing more).
+  t.agent.script = async (text, tool) => {
+    if (!text.includes("Task T1")) return;
+    await tool("pb_tests_red", { task: "T1", tests: "T1.txt exists" });
+    fs.writeFileSync(path.join(t.repo, "T1.txt"), "x");
+    await tool("pb_task_done", { task: "T1", status: "done", changed: "T1", caveat: "none", rejected: "none", open: "none" });
+  };
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").current, "T2");
+  // The Tasks section is rewritten mid-build: the pending second task is renamed T3.
+  const edited = await t.callTool("pb_update_spec", {
+    name: "order-cancellation",
+    section: "Tasks",
+    content:
+      "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T3: second file\nCreate T3.txt.\n- Acceptance: T3.txt exists (tests: T3)\n- Test: `test -f T3.txt`",
+  });
+  assert.equal(edited.error, undefined, edited.error ?? "");
+  // Resume must build the renamed task, not read the stale current id as "build finished".
+  t.agent.script = async (text, tool) => {
+    if (!text.includes("Task T3")) return;
+    await tool("pb_tests_red", { task: "T3", tests: "T3.txt exists" });
+    fs.writeFileSync(path.join(t.repo, "T3.txt"), "x");
+    await tool("pb_task_done", { task: "T3", status: "done", changed: "T3", caveat: "none", rejected: "none", open: "none" });
+  };
+  await t.run("build");
+  assert.ok(!t.notes.some((n) => /Nothing left to build here/.test(n)));
+  assert.ok(t.instructions.some((x) => /Task T3/.test(x)));
+  assert.equal(t.progress("order-cancellation").phase, "built"); // T1 + T3 done, the suite checked
+});
+
 test("spec review: a spec edited while the review runs is not built on the stale pass", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -5167,6 +5403,84 @@ test("spec review: a spec edited while the review runs is not built on the stale
   }
   assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // nothing built
   assert.ok(t.notes.some((n) => /changed while it was under review/.test(n)));
+});
+
+test("spec review: the run is announced and watched while it works, and its transcript is linked", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "block";
+  process.env.MOCK_HOLD_MS = "500"; // the reviewer runs long enough to be watched
+  try {
+    const running = t.run("build", "order-cancellation");
+    await until(() => !!t.widgets.get("pb-spec-review"));
+    assert.match(t.widgets.get("pb-spec-review")!.join("\n"), /pb spec-review order-cancellation · \d+s/);
+    await running;
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_HOLD_MS;
+  }
+  assert.equal(t.widgets.get("pb-spec-review"), undefined); // cleared when the verdict lands
+  assert.ok(t.posts.some((p) => /▶ \*\*Spec review\*\* — a fresh reviewer attacks \*\*order-cancellation\*\* before T1/.test(p)));
+  assert.match(t.posts.at(-1)!, /changes needed before T1[\s\S]*The whole run: `pi --session \.pi\/pb\/sessions\/spec-review\/[^`]+\.jsonl`/);
+});
+
+test("spec review: a clean pass is announced with its transcript, and the run is recorded", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build", "order-cancellation");
+  assert.ok(t.posts.some((p) => /\*\*Spec review\*\* — pass, no findings \(the recorded pass covers this text\)\.[\s\S]*The whole run: `pi --session \.pi\/pb\/sessions\/spec-review\//.test(p)));
+  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
+  assert.equal(review.verdict, "pass");
+  assert.equal(review.findings, 0);
+  assert.match(review.session, /spec-review\/.+\.jsonl$/);
+});
+
+test("spec review: the verdict notifies the desktop, for a human elsewhere", async () => {
+  const { setNotifySink } = await import("../extensions/pb/notify.ts");
+  const sent: string[][] = [];
+  setNotifySink((title, body) => sent.push([title, body]));
+  try {
+    const t = setup({ verify: "true", notify: true });
+    process.chdir(t.repo);
+    await written(t);
+    process.env.MOCK_SPEC_REVIEW = "block";
+    try {
+      await t.run("build", "order-cancellation");
+    } finally {
+      delete process.env.MOCK_SPEC_REVIEW;
+    }
+    assert.deepEqual(sent.at(-1), ["pb: spec review", "changes needed before T1"]);
+    // Amend the spec so the gate runs again: the advisory pass pauses with its finding, notified.
+    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
+    process.env.MOCK_SPEC_REVIEW = "advisory";
+    try {
+      await t.run("build", "order-cancellation");
+    } finally {
+      delete process.env.MOCK_SPEC_REVIEW;
+    }
+    assert.deepEqual(sent.at(-1), ["pb: spec review", "1 advisory finding"]);
+  } finally {
+    setNotifySink(undefined);
+  }
+});
+
+test("spec: the pre-approval dry-run is watched like every other check", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await written(t, SPEC({
+    tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `sleep 0.5`\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)\n- Test: `sleep 0.7`",
+  }));
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).setPendingBuild(t.runtime().ctx.sessionManager.getSessionFile());
+  t.selects.push("Not now");
+  const pending = t.fire("agent_settled", {});
+  await until(() => !!t.widgets.get("pb-dry-run"));
+  assert.match(t.widgets.get("pb-dry-run")!.join("\n"), /pb dry-run order-cancellation \(\d\/2\) — `sleep 0\.\d`/);
+  await pending;
+  assert.equal(t.widgets.get("pb-dry-run"), undefined); // cleared with the results
 });
 
 test("spec review gate: a pass covers only the text it saw", () => {

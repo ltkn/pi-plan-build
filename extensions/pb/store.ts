@@ -273,6 +273,8 @@ export interface ReviewSessionState {
   role: "review" | "abuse";
   /** the spec under review, if any */
   spec?: string;
+  /** the review run this pass belongs to (its state file lives in review-runs/) */
+  run?: string;
   /** what the pass reported with pb_report_findings */
   findings?: Finding[];
   /** /pb:review done: finish now */
@@ -293,8 +295,10 @@ export interface ReviewRun {
   followUp: boolean;
   /** the session to come back to */
   home?: string;
-  /** the tree the review saw: anything changed during it is put back to this */
+  /** the tree the review saw: the delta base for the next review, and what changed during this one is reported against it */
   before?: { commit: string; tree: string };
+  /** untracked files over the snapshot cap, which no diff can show: the reviewer is told to read them */
+  largeFiles?: string[];
   model?: string;
   thinking?: string;
   passes: { role: "review" | "abuse"; findings: Finding[]; prose: string; session: string; left: boolean; unparsed: boolean }[];
@@ -593,13 +597,87 @@ export class Store {
     writeFile(this.reviewSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...state }, null, 2)}\n`);
   }
 
-  reviewRun(): ReviewRun | undefined {
-    return readJson<ReviewRun>(path.join(this.root, "review-run.json"));
+  /**
+   * Reviews in progress, one file per run (keyed by run id): two reviews in parallel must not
+   * overwrite each other's resume state, and finishing one must not delete the other's.
+   * The legacy single review-run.json is migrated on first access, then removed.
+   */
+  private reviewRunsDir(): string {
+    return path.join(this.root, "review-runs");
   }
-  saveReviewRun(run: ReviewRun | undefined): void {
-    const file = path.join(this.root, "review-run.json");
-    if (run) writeFile(file, `${JSON.stringify(run, null, 2)}\n`);
-    else fs.rmSync(file, { force: true });
+  private reviewRunFile(id: string): string {
+    return path.join(this.reviewRunsDir(), `${createHash("sha1").update(id).digest("hex")}.json`);
+  }
+  private migrateReviewRuns(): void {
+    const legacy = path.join(this.root, "review-run.json");
+    try {
+      if (!fs.statSync(legacy).isFile()) return;
+    } catch {
+      return;
+    }
+    const run = readJson<ReviewRun>(legacy);
+    // A legacy run without an id can't be keyed: leave it for an older pb rather than drop it.
+    if (!run?.id) return;
+    writeFile(this.reviewRunFile(run.id), `${JSON.stringify(run, null, 2)}\n`);
+    fs.rmSync(legacy, { force: true });
+  }
+  reviewRun(id: string | undefined): ReviewRun | undefined {
+    if (!id) return undefined;
+    this.migrateReviewRuns();
+    const run = readJson<ReviewRun>(this.reviewRunFile(id));
+    return run?.id === id ? run : undefined;
+  }
+  /** Every kept run, newest file first. */
+  private reviewRuns(): ReviewRun[] {
+    this.migrateReviewRuns();
+    let files: string[];
+    try {
+      files = fs.readdirSync(this.reviewRunsDir()).filter((f) => f.endsWith(".json"));
+    } catch {
+      return [];
+    }
+    const runs: Array<{ run: ReviewRun; at: number }> = [];
+    for (const f of files) {
+      const full = path.join(this.reviewRunsDir(), f);
+      const run = readJson<ReviewRun>(full);
+      if (!run?.id) continue;
+      try {
+        runs.push({ run, at: fs.statSync(full).mtimeMs });
+      } catch {
+        // removed between readdir and stat: gone, nothing to offer
+      }
+    }
+    return runs.sort((a, b) => b.at - a.at).map((x) => x.run);
+  }
+  /** The newest interrupted review started from this session (what /pb:review offers to continue). */
+  interruptedReview(home: string | undefined): ReviewRun | undefined {
+    if (!home) return undefined;
+    return this.reviewRuns().find((r) => r.home === home && r.interrupted);
+  }
+  /** The run whose review session is this one: a pass being driven, or the pass it was interrupted in. */
+  reviewRunForSession(session: string | undefined): ReviewRun | undefined {
+    if (!session) return undefined;
+    const own = this.reviewSession(session)?.run;
+    const run = this.reviewRun(own);
+    if (run) return run;
+    return this.reviewRuns().find((r) => r.interrupted?.session === session || r.passes.some((p) => p.session === session));
+  }
+  saveReviewRun(run: ReviewRun): void {
+    if (!run.id) throw new Error("a review run needs an id");
+    this.migrateReviewRuns();
+    writeFile(this.reviewRunFile(run.id), `${JSON.stringify(run, null, 2)}\n`);
+  }
+  clearReviewRun(id: string | undefined): void {
+    if (!id) return;
+    this.migrateReviewRuns();
+    fs.rmSync(this.reviewRunFile(id), { force: true });
+  }
+  /** Starting a review from `home` supersedes older runs from it, including crashes that left no interrupted marker. */
+  clearReviewRunsForHome(home: string | undefined): void {
+    if (!home) return;
+    for (const run of this.reviewRuns()) {
+      if (run.home === home) this.clearReviewRun(run.id);
+    }
   }
 
   /** The last review's result, kept with the spec (or in .pi/pb/ without one) so it's never lost. */
@@ -635,6 +713,16 @@ export class Store {
       }
     } catch {
       // no per-session review files yet
+    }
+    // GC review runs for this spec (a dead run must not be offered to continue later).
+    try {
+      for (const f of fs.readdirSync(this.reviewRunsDir())) {
+        if (!f.endsWith(".json")) continue;
+        const full = path.join(this.reviewRunsDir(), f);
+        if (readJson<ReviewRun>(full)?.name === name) fs.rmSync(full, { force: true });
+      }
+    } catch {
+      // no review runs yet
     }
     // GC review-sessions.json entries for this spec; the file otherwise grows without bound.
     const file = path.join(this.root, "review-sessions.json");
@@ -893,6 +981,12 @@ function git(cwd: string, args: string[]): string | undefined {
 }
 
 export const gitHead = (cwd: string) => git(cwd, ["rev-parse", "HEAD"])?.trim() || undefined;
+
+/** Whether cwd is inside a git working tree (a missing repo is worth saying, not silently diffing nothing). */
+export const gitRepo = (cwd: string) => git(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() === "true";
+
+/** Whether a revision resolves here: a recorded base that no longer does must be said, not diffed as nothing. */
+export const resolvesRevision = (cwd: string, rev: string) => git(cwd, ["rev-parse", "--verify", "-q", `${rev}^{commit}`]) !== undefined;
 
 /** Files changed since a commit (tracked + untracked), pb state excluded (all of .pi, including the archive). */
 export function changedSince(cwd: string, base?: string): string[] {

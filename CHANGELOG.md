@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.33.0
+
+- **The spec review is visible while it runs.** It announces its start, keeps a live widget with the elapsed time and the last tool call (a heartbeat keeps a slow run from reading as a hang), links the full transcript when the verdict lands, and posts a clean pass instead of leaving it silent; `notify` sends the verdict to your desktop too, for when you're elsewhere. The pre-approval dry-run gets the same live widget, naming the command (`n/total`) and its elapsed seconds.
+
+- **Stray writes are reported, never silently reverted.** A review no longer puts back files that changed while it ran — a file touched in that window is as likely to be your own edit as the reviewer's — and lists the paths in its result instead; the next review's delta still starts from the snapshot taken before it. The explorer, trier, spec reviewer, dry-run and cartographer still put back what they changed, but the notification now names the paths and the post-run snapshot, so an edit of yours made meanwhile is recoverable. Untracked files over 20 MB are named in the brief and the result: no snapshot or diff contains them.
+
+- **Reviews keep their own state.** Resume state is one file per run under `.pi/pb/review-runs/`, so two reviews no longer overwrite each other and finishing one doesn't delete another's; archive GCs a spec's runs, starting a review clears superseded runs from that session (including crashes that left no resume marker), and the legacy `review-run.json` migrates once.
+
+- **A prose-only pass gives no verdict, not a clean one.** When a finished pass reported only in prose and nothing parseable came back, the result says `⚠ NO VERDICT` and the phase stays short of reviewed, instead of waving the change through. A recorded diff base that no longer resolves falls back to HEAD with a warning rather than diffing as nothing, and a follow-up no longer says "nothing changed" when only a large untracked file moved.
+
+- **A stopped run no longer strands the queue.** A fresh run aborted while waiting for a concurrency slot leaves the queue and the next free slot skips it, so the runs behind it start; runs that outlive their session (a switch mid-run) put back and clean up without touching the replaced session.
+
+- **Resume follows the spec as it is now.** A spec rewrite that renumbers a task no longer leaves the build claiming a task that no longer exists; it resumes at the next todo instead of reporting nothing left to build.
+
 ## 1.32.0
 
 - **Concurrent fresh runs queue until told otherwise.** New `maxConcurrent` config caps the runs pb spawns as sub-agents (explorer, try, spec-review, cartographer, verifier — one engine, and every admitted run holds KV memory for its whole life): extra runs wait FIFO and start as a running sibling exits, and a run stopped while queued never starts a process. pb ships uncapped (`0`); a value in `~/.pi/agent/pb/config.json` caps every project until the project sets its own (both merge like `extra` instructions), and the `PI_PB_MAX_CONCURRENT` env var outranks both — `0` disables the cap in every source. Non-integers floor toward 1; invalid values fall back to the default.

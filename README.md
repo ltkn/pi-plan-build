@@ -127,7 +127,8 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   reports findings through a tool; a second fresh call double-checks the
   blocking ones, so a false P1 doesn't cost you a fix cycle. pb offers once to
   run it on another model family than the one that built the change. It can't
-  change your files: anything it touches is put back.
+  edit your files; anything a command it runs changes is listed in the result,
+  never silently reverted (it may be your own concurrent edit).
 - **A project map, so the next feature doesn't start from zero.** When you
   archive a feature, pb folds what it established about the project (layout,
   patterns to follow, constraints, test quirks) into a short map in AGENTS.md.
@@ -220,14 +221,14 @@ the existing ones still run.
 | `askTimeoutSec` | 300 | how long a dialog waits before going on without you: a `pb_ask` question in a build takes the recommendation, a dialog on the way into a build takes pb's choice; 0 = forever |
 | `specWaitSec` | 0 | how long `/pb:build` waits for the spec before yielding to the pending offer (which picks it up once written); 0 = wait as long as it takes (for slow local models) |
 | `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
-| `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, the planning and reviewer guards |
+| `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, and the planning and spec-review guards |
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
 | `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always`, asked for after the spec pass; `off`) |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |
-| `notify` | true | a desktop notification when pb asks you something (a question, or a dialog that goes on without you) |
+| `notify` | true | a desktop notification when pb asks you something (a question, or a dialog that goes on without you) or when a spec review finishes while you're elsewhere |
 | `extra` | unset | your instructions added to a role's prompt: `{"plan", "spec", "build", "review", "adversarial", "map"}`; also read from `~/.pi/agent/pb/config.json`, applied first |
 | `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build is reset to its state at the next task boundary; 0 = never |
 
@@ -240,6 +241,7 @@ the existing ones still run.
 | `.pi/pb/specs/<name>/checkpoints.json`, `events.jsonl` | undo points (files and conversation) and stats |
 | `.pi/pb/baseline.json`, `.pi/pb/planning/<session>.json` | the last test baseline; planning sessions and their snapshots (one file per session) |
 | `.pi/pb/reviews/<session>.json`, `.pi/pb/pending-build/<session>.json`, `.pi/pb/fixes/<session>.json` | review passes, pending builds and fixes sessions (one file per session, so parallel sessions never clobber each other) |
+| `.pi/pb/review-runs/<run>.json` | a review in progress (one file per run, so parallel reviews keep their own resume state; removed when it finishes) |
 | `.pi/pb/explore.jsonl` | `pb_explore` usage per session |
 | `.pi/pb/specs/<name>/review.md` | the last review's result (also posted in the session) |
 | `.pi/pb/specs/<name>/sessions/`, `.pi/pb/sessions/` | the saved runs of the verifier, the explorer and the cartographer, to open with `pi --session <file>`; removed by `/pb:archive` |

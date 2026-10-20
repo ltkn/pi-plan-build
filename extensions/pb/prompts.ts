@@ -451,6 +451,10 @@ export interface ReviewBrief {
   staleRefs?: Array<{ symbol: string; referrers: string[] }>;
   /** the spec was edited by hand after writing: gates were bypassed visibly, judge its shape too */
   humanOverride?: string;
+  /** why the recorded diff base is missing or unusable: what the reviewer can't see must be said */
+  baseWarning?: string;
+  /** untracked files over the snapshot cap: in no diff, so the reviewer reads them itself */
+  largeFiles?: string[];
 }
 
 /**
@@ -527,11 +531,15 @@ export function reviewerBrief(o: ReviewBrief): string {
     "## How to see the change",
     "",
     o.base ? `Base commit: ${o.base}\nRun: git diff ${o.base} -- . ':(exclude).pi'   and read the untracked files listed below.` : "Run: git diff HEAD and git status.",
+    ...(o.baseWarning ? ["", `⚠ ${o.baseWarning}`] : []),
     "",
     "## Changed files",
     "",
     o.changed.join("\n") || "(none)",
     o.stat ? `\n${o.stat}` : "",
+    ...(o.largeFiles?.length
+      ? ["", "## Files too large to capture", "", "These untracked files are over 20 MB: snapshots and diffs skip them, so read them yourself if they matter:", ...o.largeFiles.map((f) => `- ${f}`)]
+      : []),
     "",
     ...(o.testChanges?.length ? ["", "## Existing tests the build changed", "", "Deleted, cut down or skipped; judge whether each was justified:", ...o.testChanges.map((c) => `- ${c}`)] : []),
     ...(o.redNotes?.length
