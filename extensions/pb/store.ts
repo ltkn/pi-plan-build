@@ -51,6 +51,12 @@ export interface Config {
    * looks sensitive; "always"; "off").
    */
   reviewer: { model?: string; thinking?: string; verify?: boolean; security?: "auto" | "always" | "off"; idleSec?: number };
+  /**
+   * The fresh spec reviewer before T1: model and thinking level (unset model = your session's;
+   * unset thinking = Pi's default for that model). Point it at the build model when you want the
+   * plan checked by the model that will implement it.
+   */
+  specReviewer: { model?: string; thinking?: string };
   /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
   freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
@@ -93,6 +99,7 @@ export const DEFAULT_CONFIG: Config = {
   testOutputCap: 4000,
   checkpoints: true,
   reviewer: { verify: true, security: "auto" },
+  specReviewer: {},
   freshAbove: 50,
   baseline: true,
   explorer: {},
@@ -107,6 +114,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
   const bool = (v: unknown, d: boolean) => (typeof v === "boolean" ? v : d);
   const strOrNull = (v: unknown, d: string | null) => (v === null || v === undefined ? d : typeof v === "string" ? v : d);
   const reviewerRaw = typeof raw.reviewer === "object" && raw.reviewer !== null ? raw.reviewer : {};
+  const specReviewerRaw = typeof raw.specReviewer === "object" && raw.specReviewer !== null ? raw.specReviewer : {};
   const explorerRaw = typeof raw.explorer === "object" && raw.explorer !== null ? raw.explorer : {};
   const security = (reviewerRaw as { security?: unknown }).security;
   return {
@@ -130,6 +138,10 @@ function sanitizeConfig(raw: Partial<Config>): Config {
       verify: bool((reviewerRaw as { verify?: unknown }).verify, true),
       security: security === "auto" || security === "always" || security === "off" ? security : "auto",
       idleSec: typeof (reviewerRaw as { idleSec?: unknown }).idleSec === "number" ? (reviewerRaw as { idleSec: number }).idleSec : undefined,
+    },
+    specReviewer: {
+      model: typeof (specReviewerRaw as { model?: unknown }).model === "string" ? (specReviewerRaw as { model: string }).model : undefined,
+      thinking: typeof (specReviewerRaw as { thinking?: unknown }).thinking === "string" ? (specReviewerRaw as { thinking: string }).thinking : undefined,
     },
     freshAbove: num((raw as { freshAbove?: unknown }).freshAbove, DEFAULT_CONFIG.freshAbove),
     baseline: bool((raw as { baseline?: unknown }).baseline, true),

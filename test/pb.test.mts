@@ -450,6 +450,13 @@ const diligent: Script = async (text, tool) => {
   await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: "none" });
 };
 
+/** A real file for path:line citations: the write gate checks that cited lines exist. */
+const citedPage = (t: ReturnType<typeof setup>) => {
+  const file = path.join(t.repo, "src/page.ts");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, Array.from({ length: 30 }, (_, i) => `// line ${i + 1}`).join("\n") + "\n");
+};
+
 /** A spec written as if a /pb:plan came first: its one-time standards offer is already answered. */
 async function written(t: ReturnType<typeof setup>, spec = SPEC()) {
   process.chdir(t.repo);
@@ -1656,9 +1663,88 @@ Responds within 200ms.
   assert.equal((await t.callTool("pb_update_spec", { name: "planning-scoped", section: "Tasks", content: "### T1: a\n- Acceptance: a" })).error, undefined); // planning exempt
 });
 
+test("spec: external surfaces need Contracts; persisted data needs Migration and rollback", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const api = `# Order lookup
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Expose GET /api/orders to the client.
+## Decisions
+- Reuse the existing handler, because it already returns the list.
+## Tasks
+### T1: list orders
+- Acceptance: GET /api/orders returns the list (tests: T1)
+- Test: \`test -f T1.txt\`
+`;
+  assert.match((await t.callTool("pb_write_spec", { name: "api-missing", content: api })).error!, /external surface/);
+  const apiWith = api.replace("## Tasks", "## Contracts\n- GET /api/orders returns 200 with the orders array; errors use the existing problem type.\n## Tasks");
+  assert.equal((await t.callTool("pb_write_spec", { name: "api-ok", content: apiWith })).error, undefined);
+  const apiNegative = api.replace("## Tasks", "## Contracts\nnone — the URL string is only a log label; nothing outside the change observes it.\n## Tasks");
+  assert.equal((await t.callTool("pb_write_spec", { name: "api-negative", content: apiNegative })).error, undefined);
+  const apiPlaceholder = api.replace("## Tasks", "## Contracts\nnone.\n## Tasks");
+  assert.match((await t.callTool("pb_write_spec", { name: "api-placeholder", content: apiPlaceholder })).error!, /empty or a placeholder/);
+
+  const data = `# Stored orders
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Store orders in the database.
+## Decisions
+- Use the existing table, because it already has the columns.
+## Contracts
+- The orders table gains a status column; reads and writes use it.
+## Tasks
+### T1: save orders
+- Acceptance: the status is saved (tests: T1)
+- Test: \`test -f T1.txt\`
+`;
+  assert.match((await t.callTool("pb_write_spec", { name: "data-missing", content: data })).error!, /Migration and rollback/);
+  const withMigration = data.replace("## Tasks", "## Migration and rollback\nAdd the status column with a backfill; rollback drops it.\n## Tasks");
+  assert.equal((await t.callTool("pb_write_spec", { name: "data-ok", content: withMigration })).error, undefined);
+  const migrationNegative = data.replace("## Tasks", "## Migration and rollback\nnone — orders are only kept in memory; nothing outlives the process.\n## Tasks");
+  assert.equal((await t.callTool("pb_write_spec", { name: "data-negative", content: migrationNegative })).error, undefined);
+  const migrationPlaceholder = data.replace("## Tasks", "## Migration and rollback\nnone.\n## Tasks");
+  assert.match((await t.callTool("pb_write_spec", { name: "data-placeholder", content: migrationPlaceholder })).error!, /empty or a placeholder/);
+
+  await t.callTool("pb_write_spec", { name: "scope-data", content: SPEC() });
+  const scoped = await t.callTool("pb_update_spec", { name: "scope-data", section: "Tasks", content: "### T1: write\n- Acceptance: stored (tests: T1)\n- Test: `test -f db.txt`\nWrites to the database." });
+  assert.match(scoped.error!, /Migration and rollback/);
+});
+
+test("spec: a sensitive Decisions line needs Threats, not only a sensitive Goal", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const hidden = `# Session cleanup
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Speed up the orders page.
+## Decisions
+- Cache session tokens for a minute, because the lookup is hot.
+## Contracts
+- T1 owns the cache.
+## Tasks
+### T1: cache
+- Acceptance: cached (tests: T1)
+- Test: \`test -f cache.txt\`
+`;
+  assert.match((await t.callTool("pb_write_spec", { name: "decision-sensitive", content: hidden })).error!, /mentions "session"/);
+  const negated = hidden.replace("## Tasks", "## Threats and abuse\nnone — the cache only reads tokens; no entry point changes.\n## Tasks");
+  assert.equal((await t.callTool("pb_write_spec", { name: "decision-sensitive-ok", content: negated })).error, undefined);
+});
+
 test("spec: senior evidence requires Findings citations and Decisions reasons; planning stays exempt", async () => {
   const t = setup();
   process.chdir(t.repo);
+  citedPage(t);
   const noEvidence = `# Slow page
 Depends on: none
 Verification: tests
@@ -1682,6 +1768,14 @@ Speed up the page.
   assert.match((await t.callTool("pb_write_spec", { name: "noreason", content: noReason })).error!, /Decisions line without a reason/);
   const good = noEvidence.replace("- The code is slow.", "- `src/page.ts:12` holds the model; baseline `npm test` green.");
   assert.equal((await t.callTool("pb_write_spec", { name: "good", content: good })).error, undefined);
+  const badLine = good.replace("src/page.ts:12", "src/page.ts:999");
+  assert.match((await t.callTool("pb_write_spec", { name: "bad-line", content: badLine })).error!, /has 30 lines/);
+  const missingPath = good.replace("src/page.ts:12", "src/missing.ts:1");
+  assert.match((await t.callTool("pb_write_spec", { name: "bad-path", content: missingPath })).error!, /not in the project/);
+  const planningBad = missingPath.replace("# Slow page", "# Slow page\nStatus: planning");
+  assert.equal((await t.callTool("pb_write_spec", { name: "planning-bad-path", content: planningBad })).error, undefined);
+  const updated = await t.callTool("pb_update_spec", { name: "good", section: "Findings", content: "- `src/missing.ts:1` holds the model." });
+  assert.match(updated.error!, /not in the project/);
   const planning = noEvidence.replace("# Slow page", "# Slow page\nStatus: planning");
   assert.equal((await t.callTool("pb_write_spec", { name: "planning-ev", content: planning })).error, undefined);
   const root = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "TODO.md");
@@ -1691,6 +1785,7 @@ Speed up the page.
 test("spec: senior shape is strict about bare words, bare colons, and counts", async () => {
   const t = setup();
   process.chdir(t.repo);
+  citedPage(t);
   const bareWords = `# Slow page
 Depends on: none
 Verification: tests
@@ -5438,6 +5533,17 @@ test("spec review: a clean pass is announced with its transcript, and the run is
   assert.match(review.session, /spec-review\/.+\.jsonl$/);
 });
 
+test("spec review: specReviewer runs the same pass on the configured model and thinking", async () => {
+  const t = setup({ verify: "true", specReviewer: { model: "p/big", thinking: "high" } });
+  process.chdir(t.repo);
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build", "order-cancellation");
+  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
+  assert.equal(review.model, "p/big");
+  assert.equal(review.thinking, "high");
+});
+
 test("spec review: the verdict notifies the desktop, for a human elsewhere", async () => {
   const { setNotifySink } = await import("../extensions/pb/notify.ts");
   const sent: string[][] = [];
@@ -5528,6 +5634,9 @@ test("spec review: the brief attacks decisions and demands an exact verdict", as
   assert.match(b, /Not doing/);
   assert.match(b, /quantitative claim/);
   assert.match(b, /nothing to do/);
+  assert.match(b, /path:line that does not resolve/);
+  assert.match(b, /Migration and rollback/);
+  assert.match(b, /every Test: command is one this repo can run/);
   assert.match(b, /VERDICT: (block|pass)/);
 });
 
@@ -5653,6 +5762,9 @@ test("spec: the format checklist asks for prose inventory, real states and measu
     assert.match(p, /prose that describes the behavior/);
     assert.match(p, /enumerate its real states/);
     assert.match(p, /carries a measurement/);
+    assert.match(p, /## Migration and rollback/);
+    assert.match(p, /path:line must point at a real line/);
+    assert.match(p, /external surface/);
   }
 });
 

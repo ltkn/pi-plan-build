@@ -77,7 +77,7 @@ export function mapPaths(body: string): string[] {
 }
 
 /** The project's tracked (and untracked, not ignored) files, for resolving the map's paths. */
-function projectFiles(cwd: string): string[] {
+export function projectFiles(cwd: string): string[] {
   try {
     return execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] })
       .split("\n")
@@ -88,17 +88,30 @@ function projectFiles(cwd: string): string[] {
 }
 
 /**
- * Whether a path the map names exists: from the project root, under the path the section's heading names,
- * or as the end of a real path (with or without an extension: `auth/Login` finds `…/auth/Login.java`).
+ * The absolute path a project-relative path names: from the project root, or as the end of a
+ * tracked/untracked path (with or without an extension: `auth/Login` finds `…/auth/Login.java`).
+ * Undefined when nothing matches. Unlike `resolves`, this answers with the file so callers can
+ * inspect it (for example, count its lines).
  */
-function resolves(cwd: string, p: string, base: string | undefined, files: string[]): boolean {
-  if (fs.existsSync(path.resolve(cwd, p)) || (base && fs.existsSync(path.resolve(cwd, base, p)))) return true;
+export function resolveProjectPath(cwd: string, p: string, files = projectFiles(cwd)): string | undefined {
+  const direct = path.resolve(cwd, p);
+  if (fs.existsSync(direct)) return direct;
   const tail = `/${p.toLowerCase()}`;
   const esc = tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return files.some((f) => {
+  const match = files.find((f) => {
     const g = `/${f.toLowerCase()}`;
     return g.endsWith(tail) || g.includes(`${tail}/`) || new RegExp(`${esc}\\..+$`, "").test(g);
   });
+  return match ? path.resolve(cwd, match) : undefined;
+}
+
+/**
+ * Whether a path the map names exists: from the project root, under the path the section's heading names,
+ * or as the end of a real path.
+ */
+function resolves(cwd: string, p: string, base: string | undefined, files: string[]): boolean {
+  if (fs.existsSync(path.resolve(cwd, p)) || (base && fs.existsSync(path.resolve(cwd, base, p)))) return true;
+  return resolveProjectPath(cwd, p, files) !== undefined;
 }
 
 /** The paths in the map that don't resolve, with the line naming each. Code fences aren't paths. */

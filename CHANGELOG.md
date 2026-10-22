@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.34.0
+
+- **A spec is checked against the repo, not only against itself.** Ready specs reject a `path:line` that does not exist (new files need no line), require Contracts for any external surface even with one task, and require Migration and rollback when data or a stored format outlives the change. A section that does not apply is one line, `none — why`.
+- **The pre-T1 spec review knows what to check.** It now opens the paths the spec names, checks test commands against the repo, and flags missing Contracts, migrations and threat answers instead of only judging the prose. `specReviewer: {"model": "provider/id", "thinking": "high"}` runs the same pass on another model, such as the implementer's; unset keeps the session model.
+- **The implementer validates the plan before T1.** The build asks it to check the spec's paths, interfaces, test commands and assumptions against the repo, and stop rather than code around a wrong spec.
+
 ## 1.33.0
 
 - **The spec review is visible while it runs.** It announces its start, keeps a live widget with the elapsed time and the last tool call (a heartbeat keeps a slow run from reading as a hang), links the full transcript when the verdict lands, and posts a clean pass instead of leaving it silent; `notify` sends the verdict to your desktop too, for when you're elsewhere. The pre-approval dry-run gets the same live widget, naming the command (`n/total`) and its elapsed seconds.

@@ -141,13 +141,15 @@ New tests: yes | no — <why>
 
 ## Goal
 ## Findings
-What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Every bullet cites its evidence: a path (file:line), a probe (command plus conclusion), or a constraint. Probes kept as Commands with their Conclusion (tried X via \`command\`, got Y). Dead ends too: what was tried or ruled out, and why.
+What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Every bullet cites its evidence: a path (file:line), a probe (command plus conclusion), or a constraint. A path:line must point at a real line in the repo; a new file needs no line number. Probes kept as Commands with their Conclusion (tried X via \`command\`, got Y). Dead ends too: what was tried or ruled out, and why.
 ## Decisions
 Each decision with its reason, as it stands now: no dates, no history, not who decided. Every bullet carries its reason (because …); rejected ideas as "Not doing X, because …", so they aren't reconsidered. Settled guesses as "Assumption: <claim> — settles by <how>, because <reason>", so the reviewer can discharge them. Every quantitative claim (latencies, counts, windows) carries a measurement (command plus result) or is written as such an Assumption.
 ## Contracts
-No later step sees the whole change at once: tasks are built one by one. So pin here every seam the tasks share — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. Tasks sharing a seam (the same Test: command or a shared file) without this section are rejected; truly independent tasks need none, though a one-line "independent" section is always accepted. Pin exactly these, as they must end up; leave everything behind them to the build. When the change adds or alters nothing other code, clients or stored data depend on, leave this section out. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown.
+No later step sees the whole change at once: tasks are built one by one. So pin here every seam other code, clients or stored data depend on — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. A single task that changes an external surface needs this section too; tasks sharing a seam (the same Test: command or a shared file) without it are rejected. Truly independent internal tasks need none, though a one-line "independent" section is accepted, and a keyword false positive can be answered with "none — <why>". Pin exactly these, as they must end up; leave everything behind them to the build. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown.
+## Migration and rollback
+Only when the change persists or transforms data, a schema or a stored format: how existing data moves to the new shape, how the change is rolled back, and what old and new code do while both run. Say "none — <why>" when nothing outlives the change.
 ## Threats and abuse
-Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A ready spec that is sensitive in Goal or Tasks without this section is rejected: add it. The acceptance criteria then include the abuse cases.
+Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A ready spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks without this section is rejected: add it, or say "none — <why>" if the keyword points at nothing. The acceptance criteria then include the abuse cases.
 ## Open questions
 Only while Status is planning: what's undecided, the options still being weighed with what was found for and against each, and where the discussion stands.
 ## Tasks
@@ -160,7 +162,7 @@ The spec pins what the change must do and how we'll know: Goal, Decisions, Contr
 
 One task, unless a slice is worth reviewing on its own; then vertical slices, each leaving the code working and tested, never a split by layer or a closing "add tests" task. A task that adds no behaviour (wiring, configuration, a "(refactor) …") has no Test: line. Name the prose that describes the behavior being changed (map sections, javadoc, schema comments, guides); updating it is a Task, never an afterthought. A doc-only task carries no Test: line — its acceptance lines still say what to check, marked (non-testable: <why>).
 
-Add "## Out of scope" or "## Acceptance criteria" only when they help.
+Add "## Out of scope" or "## Acceptance criteria" only when they help. When you include a section that does not apply, say so in one line ("none — <why>"), never an empty heading or TBD.
 
 - Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.`;
 
@@ -259,6 +261,8 @@ export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each =
  */
 export function buildIntro(name: string, spec: ParsedSpec, buildCmd: string | null, each: boolean, standards: string, markdown?: string, extra = ""): string {
   return `[pb:build ${name}] ${markdown ? "Build this feature from the spec below." : `Build the spec you wrote (${P}/specs/${name}/spec.md).`} The planning is done: implement it as written.
+
+Before T1, validate the spec against the repo as it is now: the paths, interfaces, test commands and assumptions it names. If something cannot be built as written, stop and report it before changing code instead of coding around a wrong spec.
 
 ${buildMechanics(spec, buildCmd, each, extra)}${standardsBlock(standards)}${markdown ? `\n\n--- spec: ${P}/specs/${name}/spec.md ---\n\n${markdown}` : ""}`;
 }
@@ -575,7 +579,7 @@ export function reviewerBrief(o: ReviewBrief): string {
   return lines.join("\n");
 }
 
-export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review a feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. Read the spec and the code it points to (read/grep/find/ls only, no writes). Your findings must be checkable against the spec alone. Be concise: conclusion first. Your answer is all that goes back.`;
+export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review a feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. Read the spec and the code it points to (read/grep/find/ls only, no writes). Your findings must be checkable against the spec and the code it cites. Be concise: conclusion first. Your answer is all that goes back.`;
 
 /** What a spec review is asked, and the exact shape its answer must take. `prior`: the earlier findings a follow-up must judge first. */
 export function specReviewBrief(name: string, markdown: string, prior: Finding[] = []): string {
@@ -595,6 +599,8 @@ ${markdown}
 ${followUp}# Your job
 
 Attack its Decisions: for each decision, say how it could be wrong or abused in production. Re-test every "Not doing X" rejection: what breaks because X was rejected? Flag every quantitative claim (latencies, counts, windows) with no measurement: demand a number or an Assumption. Probe the empty paths: for every behavior the spec describes, ask what it does when there is nothing to do (empty input, all dependencies down, no reportable case) — if the spec is silent, flag it (P1 when a stale artifact would linger for the user, else P2), demanding defined behavior or an Assumption. Check the prose inventory: does every behavior name the docs that must change with it? Before blocking on an objection to a point the spec marks decided, check for new evidence (a measurement, a probe result, a code fact): without it, comment only — a re-litigation is not a finding.
+
+Ground it in the repo: open every path the spec names, and flag a path:line that does not resolve or a named test that no test file contains. Check that every external surface (API, event, schema, config, public signature, stored shape) has a Contract or an explicit "none — why"; every persisted-data change has a Migration and rollback answer or an explicit "none — why"; every Test: command is one this repo can run; and every Assumption has a settler. For each entry point or abusable rule, check Threats and abuse covers reach, proof, abuse and prevention, or says why none. Check the task order is buildable and each task leaves the code working.
 
 # Return exactly
 

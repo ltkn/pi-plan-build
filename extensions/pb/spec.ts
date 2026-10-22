@@ -10,7 +10,8 @@
  *   New tests: yes | no — <why, if no>
  *
  *   ## Goal · ## Findings · ## Decisions · ## Open questions · ## Tasks
- *   (optional: Out of scope, Acceptance criteria; Findings recommended; Open questions only while planning)
+ *   (optional: Out of scope, Acceptance criteria, Contracts, Migration and rollback, Threats and abuse;
+ *    Findings recommended; Open questions only while planning)
  *
  * A planning spec is the checkpoint of an unfinished discussion: it needs no Verification line and
  * no Tasks yet. A ready spec is what the build runs.
@@ -346,20 +347,73 @@ const sectionBullets = (md: string, name: string): string[] => {
  * High-signal product keywords for the write-time Threats gate. Deliberately
  * narrower than the reviewer's auto-mode heuristic: generic words (status,
  * limit, address, email, job, role) stay reviewer-level, not write-time blocks.
- * Scanned in Goal plus Tasks only, so meta-discussion in Findings/Decisions
- * about the gate itself never triggers it.
+ * Scanned across the spec's substantive sections, because a trust boundary is
+ * just as real when it is first named in Findings or Decisions.
  */
-const SENSITIVE_WRITE = /\b(auth\w*|login|logout|sign-?in|password|passwd|credential|secret|api[_-]?key|token|jwt|oauth|saml|sso|permission|privilege|admin|payment|billing|invoice|refund|webhook|upload|download|session|cookie|csrf|cors|endpoint|route)\b/i;
+const SENSITIVE_WRITE = /\b(auth\w*|login|logout|sign-?in|password|passwd|credential|secret|api[_-]?key|token|jwt|oauth|saml|sso|permission|privilege|admin|payment|billing|invoice|refund|webhook|upload|download|session|cookie|csrf|cors|endpoint|route|tenant|ownership|quota|replay|balance|credit|debit)\b/i;
 
-/** A ready spec whose Goal or Tasks look sensitive must carry Threats plus abuse-case acceptance. */
+/**
+ * Language-agnostic words for a surface other code, clients or stored data can
+ * observe: an API, event, schema, config, public signature, file format. A hit
+ * requires Contracts (or an explicit "none — why").
+ */
+const EXTERNAL_SURFACE =
+  /\b(?:api|endpoint|route|http|https|rest|graphql|grpc|rpc|webhook|event|message|queue|topic|schema|migration|database|table|column|constraint|json|dto|payload|config|configuration|environment|cli|file\s+format|serializ\w*|deserializ\w*|contract|client|consumer|producer)\b|\bpublic\s+(?:api|interface|signature|contract)\b/i;
+
+/**
+ * Words for data that outlives one run and needs a migration/rollback answer:
+ * a database, a schema, a stored format, a backfill. A hit requires Migration
+ * and rollback (or an explicit "none — why").
+ */
+const PERSISTED_DATA =
+  /\b(?:database|db|schema|migration|persist\w*|storage|stored?\s+(?:data|state|record|file)|file\s+format|serializ\w*|deserializ\w*|backfill|table|column)\b/i;
+
+/** The sections whose prose describes the change, never the headings themselves. */
+const SURFACE_SECTIONS = ["Goal", "Findings", "Context", "Decisions", "Contracts"] as const;
+
+const surfaceText = (md: string, spec: ParsedSpec): string =>
+  SURFACE_SECTIONS.map((name) => sectionOf(md, name))
+    .concat(spec.tasks.map((t) => t.text))
+    .filter(Boolean)
+    .join("\n");
+
+/** A section body that says why it does not apply: "none — no external surface". */
+const negativeWithReason = (body: string): boolean => {
+  const text = body.trim();
+  const first = text.split("\n")[0].trim();
+  if (!/^(?:none|n\/a|not applicable|nothing)\b/i.test(first)) return false;
+  return /(?:—|–|\bbecause\b|\bsince\b|:)\s*\S/i.test(text);
+};
+
+/** Whether a section has a real body, not an empty heading, TBD, or a bare "none". */
+const sectionUsable = (md: string, name: string): boolean => {
+  if (!hasSection(md, name)) return false;
+  const body = sectionOf(md, name);
+  if (!body) return false;
+  const first = body.trim().split("\n")[0].trim();
+  if (!/^(?:tbd|tba|todo|n\/a|none|nothing)\b/i.test(first)) return true;
+  return negativeWithReason(body);
+};
+
+const threatSection = (md: string): string | undefined =>
+  hasSection(md, "Threats and abuse") ? "Threats and abuse" : hasSection(md, "Threats") ? "Threats" : undefined;
+
+/**
+ * A ready spec whose substantive sections look sensitive must carry Threats plus
+ * abuse-case acceptance, or an explicit "none — why" that the reviewer can judge.
+ */
 export function threatsErrors(md: string, spec: ParsedSpec): string[] {
   if (spec.status !== "ready") return [];
-  if (hasSection(md, "Threats") || hasSection(md, "Threats and abuse")) return [];
-  const scope = [sectionOf(md, "Goal"), spec.tasks.map((t) => t.text).join("\n")].join("\n");
+  const section = threatSection(md);
+  if (section) {
+    if (sectionUsable(md, section)) return [];
+    return [`"## ${section}" is empty or a placeholder: name who can reach it, what they must prove, how it could be abused, and what prevents each abuse — or write "none — <why>"`];
+  }
+  const scope = surfaceText(md, spec);
   const hit = scope.split("\n").find((l) => SENSITIVE_WRITE.test(l.replace(/`[^`]*`/g, "")));
   if (!hit) return [];
   const word = hit.replace(/`[^`]*`/g, "").match(SENSITIVE_WRITE)![0];
-  return [`ready spec mentions "${word}" in Goal/Tasks but has no "## Threats and abuse": add who can reach it, what they must prove, how it could be abused, what prevents each abuse, and cover the abuse cases in Acceptance`];
+  return [`ready spec mentions "${word}" but has no "## Threats and abuse": add who can reach it, what they must prove, how it could be abused, what prevents each abuse, and cover the abuse cases in Acceptance (or write "none — <why>")`];
 }
 
 /**
@@ -426,19 +480,49 @@ export function sharesSeam(spec: ParsedSpec): boolean {
 }
 
 /**
- * A multi-task behavioural spec whose tasks share a seam must pin it in
- * Contracts. Disjoint tasks (no shared command, no shared file) need no
- * Contracts section: the existing advisory warning covers them.
+ * A ready spec needs Contracts when it changes an external surface, even with
+ * one task, or when a multi-task behavioural spec's tasks share a seam. Disjoint
+ * internal tasks need no Contracts section: the existing advisory warning covers
+ * them. `none — why` is accepted for the external-surface trigger alone, so a
+ * keyword false positive costs one line instead of a fake contract.
  */
 export function contractsErrors(md: string, spec: ParsedSpec): string[] {
   if (spec.status !== "ready") return [];
-  if (spec.tasks.length < 2) return [];
-  if (hasSection(md, "Contracts")) return [];
+  const external = EXTERNAL_SURFACE.test(surfaceText(md, spec));
   const behavioural = spec.tasks.some((t) => t.test || (/acceptance:/i.test(t.text) && !/^\(refactor\)/i.test(t.title)));
-  if (!behavioural) return [];
-  if (spec.gate === "none" && spec.tasks.every((t) => !t.test)) return [];
-  if (!sharesSeam(spec)) return [];
+  const shared = spec.tasks.length > 1 && sharesSeam(spec);
+  if (!external && !(shared && behavioural)) return [];
+  if (!external && spec.gate === "none" && spec.tasks.every((t) => !t.test)) return [];
+  if (hasSection(md, "Contracts")) {
+    if (!sectionUsable(md, "Contracts")) {
+      return [`"## Contracts" is empty or a placeholder: pin every seam (signatures, API and errors, data, events, and which task owns each side) or write "none — <why>"`];
+    }
+    if (shared && negativeWithReason(sectionOf(md, "Contracts"))) {
+      return [`${spec.tasks.length} tasks share a seam, but ## Contracts says none: pin every seam they share, or make the tasks truly independent`];
+    }
+    return [];
+  }
+  if (external) {
+    return [`ready spec changes an external surface (API, event, schema, config, public signature or stored shape) but has no ## Contracts: pin every seam other code, clients or stored data depend on, with its errors and which task owns each side (or write "none — <why>")`];
+  }
   return [`${spec.tasks.length} tasks share a seam but have no ## Contracts: pin every seam they share (signatures, API and errors, data, events, and which task owns each side)`];
+}
+
+/**
+ * A ready spec that changes persisted data or a stored format must say how the
+ * old data moves and how the change is rolled back, or state explicitly why no
+ * data outlives the change. The section is optional for every other spec.
+ */
+export function migrationErrors(md: string, spec: ParsedSpec): string[] {
+  if (spec.status !== "ready") return [];
+  if (!PERSISTED_DATA.test(surfaceText(md, spec))) return [];
+  if (!hasSection(md, "Migration and rollback")) {
+    return [`ready spec changes persisted data or a stored format but has no "## Migration and rollback": say how existing data moves to the new shape, how it is rolled back, and what old and new code do while both run (or write "none — <why>")`];
+  }
+  if (!sectionUsable(md, "Migration and rollback")) {
+    return [`"## Migration and rollback" is empty or a placeholder: say how existing data moves, how the change is rolled back, and what old and new code do while both run — or write "none — <why>"`];
+  }
+  return [];
 }
 
 /**
@@ -477,12 +561,12 @@ export function decisionsEvidenceErrors(md: string, spec: ParsedSpec): string[] 
 
 /** All senior-enforcement gates for a ready spec; empty when planning or clean. */
 export function semanticErrors(md: string, spec: ParsedSpec): string[] {
-  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...findingsEvidenceErrors(md, spec), ...decisionsEvidenceErrors(md, spec)];
+  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...migrationErrors(md, spec), ...findingsEvidenceErrors(md, spec), ...decisionsEvidenceErrors(md, spec)];
 }
 
-/** The Threats/numbers/Contracts subset: what a Tasks-section update re-checks. */
+/** The Threats/numbers/Contracts/migration subset: what a Tasks-section update re-checks. */
 export function taskScopeSemanticErrors(md: string, spec: ParsedSpec): string[] {
-  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec)];
+  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...migrationErrors(md, spec)];
 }
 
 /** A review answers for the exact markdown it saw: a pass stops covering the spec the moment the text changes. */

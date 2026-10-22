@@ -169,7 +169,8 @@ New tests: yes                      # or: no — why
 ## Goal
 ## Findings                          # what the analysis established: files, code to imitate, constraints, baseline
 ## Decisions                         # each with its reason, as it stands now; rejected ideas too
-## Contracts                         # only what others depend on: signatures, API and errors, data, events
+## Contracts                         # external surfaces and shared seams: signatures, API and errors, data, events
+## Migration and rollback            # only when data or a stored format outlives the change; else "none — why"
 ## Design                            # the shape the build settled on, recorded as it went — not by the plan
 ## Open questions                    # only while planning
 ## Tasks
@@ -182,13 +183,18 @@ New tests: yes                      # or: no — why
 
 The spec pins what and how you'll know, not how: Goal, Decisions, Contracts and
 Acceptance bind the build. Contracts pin every seam the tasks share, since no
-later step sees the whole change at once. Each task writes its tests first
-(seen failing), then the behaviour; the first task that settles a shape the
-later ones build on records it in `## Design`. Each Acceptance line is one
-behaviour, a test to write — with `(tests: …)` naming its proof (a `T1`-style
-entry means the task's own `Test:` run, anything else must resolve to a file
-or test in the repo), or `(non-testable: …)` saying why no test can (docs and
-config stay unblocked).
+later step sees the whole change at once, and are required even for a single
+task when it changes an external surface (an API, event, schema, config,
+public signature or stored shape). A persisted-data change also needs a
+`## Migration and rollback` answer, or an explicit `none — why`. A section that
+does not apply is one line, never an empty heading; `path:line` citations are
+checked against the repo when the spec is written, while a new file needs no
+line. Each task writes its tests first (seen failing), then the behaviour; the
+first task that settles a shape the later ones build on records it in
+`## Design`. Each Acceptance line is one behaviour, a test to write — with
+`(tests: …)` naming its proof (a `T1`-style entry means the task's own `Test:`
+run, anything else must resolve to a file or test in the repo), or
+`(non-testable: …)` saying why no test can (docs and config stay unblocked).
 
 `## Out of scope` and `## Acceptance criteria` are optional: a spec is as long
 as the change needs and no longer. Pi points to code instead of copying it;
@@ -225,6 +231,7 @@ the existing ones still run.
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
 | `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always`, asked for after the spec pass; `off`) |
+| `specReviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. Point it at `buildModel` to have the implementer model validate the plan |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |

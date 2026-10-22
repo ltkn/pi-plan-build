@@ -278,7 +278,8 @@ Then the sections:
 - **Goal.**
 - **Findings**: what the analysis established, so nobody redoes it: the files
   and classes involved and their roles, the code to imitate (by path and lines,
-  not pasted), constraints, the test command and baseline.
+  not pasted), constraints, the test command and baseline. A `path:line` must
+  cite a real line in the repo; a new file needs no line number.
 - **Decisions**: each with its reason as it stands now, no history; rejected
   ideas as "Not doing X, because …", so they aren't reconsidered.
 - **Contracts**: no later step sees the whole change at once — tasks are built
@@ -286,8 +287,13 @@ Then the sections:
   requests and responses with their error types, the data model and migrations,
   events, and which task owns each side. They're pinned as they must end up;
   everything behind them is left to the build, which asks before changing one,
-  and the reviewer checks each. Only when nothing else depends on the change is
-  there no Contracts section.
+  and the reviewer checks each. A single task that changes an external surface
+  needs Contracts too; only truly independent internal tasks can omit it. A
+  section that does not apply is one line, "none — why", never an empty heading
+  or TBD.
+- **Migration and rollback**: only when data, a schema or a stored format
+  outlives the change: how existing data moves, how it is rolled back, and what
+  old and new code do while both run. "none — why" when nothing persists.
 - **Open questions**: only while `Status: planning`.
 - **Tasks**: each as `### T1: <outcome>`, what must be true when it's done
   rather than how to build it, with `- Acceptance:` lines and, when it adds
@@ -352,9 +358,15 @@ still parses, and the build then gets your version), or not now.
 
 **Before the first task, the spec gets a review of its own.** A build runs one
 whenever the current text hasn't passed: a fresh, read-only pass that attacks
-every Decision, re-tests each "Not doing X" rejection and flags unmeasured
-numbers and undefined empty paths. Any finding stops the build before the
-first task so you can read it. A P0 or P1 means amend the spec (or record a
+every Decision, re-tests each "Not doing X" rejection, flags unmeasured
+numbers and undefined empty paths, and checks the spec against the repo: that
+its `path:line` citations and test commands resolve, that external surfaces have
+Contracts, and that persisted-data changes have a Migration and rollback answer.
+It runs on your session's model by default; set
+`"specReviewer": {"model": "provider/id"}` (or point it at `buildModel`) when
+you want another model, such as the implementer, to validate the plan. Any
+finding stops the build before the first task so you can read it. A P0 or P1
+means amend the spec (or record a
 rebuttal in Decisions) and run `/pb:build` again: the next pass judges each
 earlier finding against the new text before it looks at the rest, and it
 keeps stopping until it passes. P2/P3 are advisory: amend the spec if you
@@ -399,7 +411,10 @@ named "build: <spec>", seeded with the spec, on your model and thinking level.
 
 Before the first task, the spec gets its own fresh-eyes review (see
 `/pb:help spec`): any finding stops the build there for you to read, and
-`/pb:build --force` builds it as it stands instead.
+`/pb:build --force` builds it as it stands instead. The implementer then
+checks the spec's paths, interfaces and test commands against the repo before
+coding; a spec that cannot be built as written stops instead of being worked
+around.
 
 1. **The tasks.** Each task is built the same way: tests first, then the
    behaviour, then `pb_task_done` — reporting what changed plus the caveats,

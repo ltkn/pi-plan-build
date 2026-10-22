@@ -61,7 +61,7 @@ import {
   parseSpecReview,
   taskPrompt,
 } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapRepairPhase, mapTokens, missingPaths, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, fromProse, mergeFindings, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
@@ -201,6 +201,74 @@ const acceptanceMappingErrors = (spec: ParsedSpec, cwd: string): string[] =>
 /** Unresolved proof references for the reviewer: stragglers past the write-time gate (hand edits). */
 const mappingNotes = (spec: ParsedSpec, cwd: string): string[] =>
   unresolvedMappings(spec, cwd).map((m) => `${m.task} (tests: ${m.entry}) ${m.reason}`);
+
+/** Root files a spec may cite by name without an extension (README:12). */
+const ROOT_FILE_REF = /^(?:Makefile|Dockerfile|LICENSE|README|CHANGELOG|CONTRIBUTING|Gemfile|Rakefile|Procfile|go\.mod|go\.sum|package\.json|tsconfig\.json|pom\.xml|build\.gradle(?:\.kts)?)$/i;
+
+/**
+ * `path:line` references in a spec, outside fences. A path may be backticked or
+ * bare; a line range (`:40-80`) names its first line. New files without a line
+ * are allowed: only a line claim must point at a real file and line.
+ */
+const specPathRefs = (md: string): Array<{ path: string; line: number; text: string }> => {
+  const refs = new Map<string, { path: string; line: number; text: string }>();
+  const re = /`([^`\s]+):(\d+)(?:-\d+)?`|(?<![\w/`])([A-Za-z0-9_./-]+):(\d+)(?:-\d+)?/g;
+  let inFence = false;
+  for (const raw of md.split("\n")) {
+    if (/^(\s*)```/.test(raw)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    for (const m of raw.matchAll(re)) {
+      const p = (m[1] ?? m[3]).replace(/^\.\//, "").replace(/[/.,;:]+$/, "");
+      const line = Number(m[2] ?? m[4]);
+      if (!p || !Number.isFinite(line) || line < 1) continue;
+      const before = raw.slice(Math.max(0, (m.index ?? 0) - 12), m.index ?? 0);
+      if (before.includes("://") || p.startsWith("/") || p.startsWith("~") || p.includes("://") || p.includes("...")) continue;
+      if (/[<>{}*$@=,;()[\]\s]/.test(p)) continue;
+      if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(p) || /^v?\d+(?:\.\d+){1,3}$/i.test(p)) continue;
+      if (!p.includes("/") && !/\.[A-Za-z0-9]{1,12}$/.test(p) && !ROOT_FILE_REF.test(p)) continue;
+      const key = `${p}:${line}`;
+      if (!refs.has(key)) refs.set(key, { path: p, line, text: raw.trim() });
+    }
+  }
+  return [...refs.values()];
+};
+
+/** The number of lines in a text file, or undefined when it can't be counted (binary, huge). */
+const fileLines = (file: string): number | undefined => {
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > 2_000_000) return undefined;
+    const text = fs.readFileSync(file, "utf8");
+    if (text.includes("\0")) return undefined;
+    return text === "" ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+  } catch {
+    return undefined;
+  }
+};
+
+/** A ready spec's `path:line` citations must resolve to a real file and a real line. */
+const specPathErrors = (md: string, cwd: string): string[] => {
+  const files = projectFiles(cwd);
+  return specPathRefs(md).flatMap((ref) => {
+    const found = resolveProjectPath(cwd, ref.path, files);
+    if (!found) return [`the spec cites \`${ref.path}:${ref.line}\`, but that path is not in the project`];
+    let isFile = false;
+    try {
+      isFile = fs.statSync(found).isFile();
+    } catch {
+      // A path that vanished between resolution and inspection is as unusable as one that never existed.
+    }
+    if (!isFile) return [`the spec cites \`${ref.path}:${ref.line}\`, but that path does not name a file`];
+    const lines = fileLines(found);
+    if (lines !== undefined && ref.line > lines) {
+      return [`the spec cites \`${ref.path}:${ref.line}\`, but \`${ref.path}\` has ${lines} line${lines === 1 ? "" : "s"}`];
+    }
+    return [];
+  });
+};
 
 const specWarnings = (md: string, spec: ParsedSpec): string[] => {
   const redEligible = (t: SpecTask) => spec.gate === "tests" && spec.newTests && !/^\(refactor\)/i.test(t.title);
@@ -639,6 +707,8 @@ export default function pb(pi: ExtensionAPI) {
       if (markerErrs.length) throw new Error(`Acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
       const semErrs = semanticErrors(params.content, spec);
       if (semErrs.length) throw new Error(`The spec needs senior shape before it is ready:\n- ${semErrs.join("\n- ")}\nFix it and call pb_write_spec again.`);
+      const pathErrs = spec.status === "ready" ? specPathErrors(params.content, ctx.cwd) : [];
+      if (pathErrs.length) throw new Error(`The spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\nFix the path, line or citation; new files need no line number.`);
       const store = new Store(ctx.cwd);
       const mapErrs = acceptanceMappingErrors(spec, ctx.cwd);
       if (mapErrs.length) throw new Error(`Acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\nName a file in the repo or a test the test files contain (a T1-style entry means the task's own Test: run).`);
@@ -707,6 +777,12 @@ export default function pb(pi: ExtensionAPI) {
       } else if (spec.status === "ready" && sectionName === "tasks") {
         const taskErrs = taskScopeSemanticErrors(md, spec);
         if (taskErrs.length) throw new Error(`Not written: the spec needs senior shape before it is ready:\n- ${taskErrs.join("\n- ")}`);
+      }
+      // A path:line is a claim about the code the spec was written against. Check it on every
+      // ready write except Design, which the build writes and may legitimately describe new code.
+      if (spec.status === "ready" && sectionName !== "design") {
+        const pathErrs = specPathErrors(md, ctx.cwd);
+        if (pathErrs.length) throw new Error(`Not written: the spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\nFix the path, line or citation; new files need no line number.`);
       }
       store.writeSpec(name, md);
       const prev = store.progress(name);
@@ -2467,6 +2543,7 @@ export default function pb(pi: ExtensionAPI) {
     const hash = specHash(md);
     const cfg = store.config();
     const cwd = ctx.cwd;
+    const reviewModel = cfg.specReviewer.model ?? sessionModel(ctx);
     // The reviewer gets bash for inspection but must leave the project untouched, like the
     // explorer: snapshot before and put back afterwards, so a stray write can't leak into the build.
     const reviewBefore = snapshot(cwd, "pb: before spec-review");
@@ -2491,7 +2568,8 @@ export default function pb(pi: ExtensionAPI) {
         brief: specReviewBrief(name, md, prior),
         prompt: prior.length ? "Review the spec again in the attached file, judging the earlier findings first." : "Review the spec in the attached file.",
         tools: ["read", "grep", "find", "ls", "bash"],
-        model: sessionModel(ctx),
+        model: reviewModel,
+        thinking: cfg.specReviewer.thinking,
         maxConcurrent: cfg.maxConcurrent,
         sessionDir: store.sessionsDir("spec-review"),
         onActivity: (line) => {
@@ -2506,7 +2584,7 @@ export default function pb(pi: ExtensionAPI) {
     }
     const session = res.sessionFile;
     const parsed = parseSpecReview(res.text);
-    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length, reported: parsed.findings, hash, followUp: prior.length > 0, session });
+    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length, reported: parsed.findings, hash, followUp: prior.length > 0, model: reviewModel, thinking: cfg.specReviewer.thinking, session });
     return { ...parsed, session };
   };
 
