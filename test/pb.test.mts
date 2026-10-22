@@ -16,7 +16,7 @@ import { test } from "node:test";
 process.env.PI_PB_PI_COMMAND = path.join(path.dirname(new URL(import.meta.url).pathname), "mock-pi.mjs");
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const { default: pb } = await import("../extensions/pb/index.ts");
-const { parseSpec, addDecision, needsRed, redExemption, specReviewGate } = await import("../extensions/pb/spec.ts");
+const { parseSpec, acceptanceCriteria, addDecision, needsRed, redExemption, specReviewGate } = await import("../extensions/pb/spec.ts");
 
 type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
 type Tool = (name: string, params: object) => Promise<Result>;
@@ -48,7 +48,7 @@ function setup(config: object = {}) {
   const blocked: string[] = [];
   const agent: { script?: Script } = {};
   /** What the stand-in reviewer and abuse pass report (in their review sessions). */
-  const reviewer: { review: object[]; abuse: object[]; prose: string; silent?: boolean; write?: string; script?: boolean } = {
+  const reviewer: { review: object[]; abuse: object[]; prose: string; acceptance?: object[]; silent?: boolean; write?: string; script?: boolean } = {
     review: [
       { priority: "P3", file: "src/order.ts", line: 12, title: "consider a guard clause", fix: "return early" },
       { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
@@ -57,6 +57,8 @@ function setup(config: object = {}) {
     prose: "Acceptance: all met.",
   };
   const names = new Map<string, string>();
+  /** Acceptance ids from each review session's brief, for a pass resumed after an interruption. */
+  const reviewChecklists = new Map<string, string[]>();
   const stat = { runs: 0, editorText: "" };
   let sessions = 0;
 
@@ -304,6 +306,8 @@ function setup(config: object = {}) {
     queued++;
     running = running.then(async () => {
      try {
+      const asked = [...first.matchAll(/^- ((?:A\d+|T\d+\.\d+))(?: \(T\d+\))?: /gm)].map((m) => m[1]);
+      if (asked.length) reviewChecklists.set(rt.file(), asked);
       let input: string | undefined = first;
       while (input !== undefined) {
         continuation = undefined;
@@ -316,7 +320,9 @@ function setup(config: object = {}) {
           // The stand-in reviewer and abuse pass: report the configured findings, then a short reply.
           if (reviewer.write && pass === "review") fs.writeFileSync(reviewer.write, "reviewer was here");
           const findings = pass === "review" ? reviewer.review : reviewer.abuse;
-          if (!reviewer.silent) await callTool("pb_report_findings", { findings });
+          const checklist = pass === "review" ? (reviewChecklists.get(rt.file()) ?? []) : [];
+          const acceptance = pass === "review" ? (reviewer.acceptance ?? checklist.map((criterion) => ({ criterion, status: "met", evidence: "checked in src/order.ts:1" }))) : undefined;
+          if (!reviewer.silent) await callTool("pb_report_findings", { findings, ...(acceptance ? { acceptance } : {}) });
           append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: pass === "review" ? reviewer.prose : "Done." }] } });
         } else await agent.script?.(input, callTool);
         const usage = { input: 1000, output: 100, cacheRead: 9000, cacheWrite: 0, cost: { total: 0.001 } };
@@ -485,6 +491,43 @@ test("spec: parses the header, sections and tasks; says what's wrong otherwise",
   assert.ok(bad.errors.some((e) => e.includes('"Verification: none" needs a reason')));
   assert.ok(bad.errors.some((e) => e.includes('missing the "## Decisions" section')));
   assert.ok(bad.errors.some((e) => e.includes('T1 has no "- Acceptance:" line')));
+});
+
+test("spec: the review checklist derives stable ids without adding syntax to the spec", () => {
+  const markdown = SPEC().replace(
+    "- Acceptance: T1.txt exists (tests: T1)",
+    "- Acceptance: T1.txt exists (tests: T1)\n- Acceptance (abuse): T1.txt can't be swapped in",
+  );
+  const criteria = acceptanceCriteria(markdown, parseSpec(markdown).spec);
+  assert.deepEqual(
+    criteria.map((c) => [c.id, c.task, c.text]),
+    [
+      ["A1", undefined, "T1.txt and T2.txt exist."],
+      ["T1.1", "T1", "T1.txt exists (tests: T1)"],
+      ["T1.2", "T1", "T1.txt can't be swapped in"],
+      ["T2.1", "T2", "T2.txt exists (tests: T2)"],
+    ],
+  );
+  const none = acceptanceCriteria(SPEC().replace("- T1.txt and T2.txt exist.", "none — the task lines carry the checks."));
+  assert.deepEqual(
+    none.map((c) => c.id),
+    ["T1.1", "T2.1"],
+  );
+  const fenced = acceptanceCriteria(SPEC().replace("- T1.txt and T2.txt exist.", "```\n- not a criterion\n```"));
+  assert.deepEqual(
+    fenced.map((c) => c.id),
+    ["T1.1", "T2.1"],
+  );
+  const taskNone = acceptanceCriteria(SPEC().replace("- Acceptance: T1.txt exists (tests: T1)", "- Acceptance: none — covered by T2"));
+  assert.deepEqual(
+    taskNone.map((c) => c.id),
+    ["A1", "T2.1"],
+  );
+  const taskFenced = acceptanceCriteria(SPEC().replace("Create T1.txt.", "Create T1.txt.\n\n```\n- Acceptance: fenced example\n```"));
+  assert.deepEqual(
+    taskFenced.map((c) => c.id),
+    ["A1", "T1.1", "T2.1"],
+  );
 });
 
 test("spec: 'Depends on: none' allows a trailing note; real names still resolve", () => {
@@ -1286,6 +1329,31 @@ test("review brief: fix reports, mapping notes and acceptance drift render as se
   assert.match(brief, /## What the fix laps reported[\s\S]*Lap 1 fixed: guard clause[\s\S]*Lap 1 tests: npm test green/);
   assert.match(brief, /## Acceptance proof mapping[\s\S]*ghost/);
   assert.match(reviewerBrief({ changed: [], stat: "", check: "ok", focus: "", acceptanceDrift: drift }), /## Acceptance drift during build/);
+});
+
+test("review brief: every acceptance id is listed; a follow-up carries the previous statuses", async () => {
+  const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
+  const brief = reviewerBrief({
+    changed: [],
+    stat: "",
+    check: "ok",
+    focus: "",
+    acceptance: [
+      { id: "A1", text: "cancelling works" },
+      { id: "T1.1", text: "the test proves it (tests: T1)", task: "T1" },
+    ],
+    previous: {
+      snapshot: "abc",
+      findings: [],
+      changed: ["T1.txt"],
+      acceptance: [{ criterion: "A1", status: "met", evidence: "src/order.ts:12" }],
+    },
+  });
+  assert.match(
+    brief,
+    /## This is a follow-up review[\s\S]*Acceptance at the previous review[\s\S]*- A1: met — src\/order\.ts:12[\s\S]*## Acceptance checklist[\s\S]*Report every id below[\s\S]*- A1: cancelling works[\s\S]*- T1\.1 \(T1\): the test proves it \(tests: T1\)/,
+  );
+  assert.match(brief, /an id left out counts as not verified/i);
 });
 
 test("build: a task with no Test: command gets no red proof, and that is recorded and handed to the reviewer", async () => {
@@ -2262,6 +2330,9 @@ test("status lists every spec with its state and tasks", async () => {
 
 /** The review session's first message: the reviewer's brief. */
 const briefOf = (t: ReturnType<typeof setup>) => t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!;
+/** The acceptance checklist ids in a review prompt, reported met: for scripted review passes. */
+const acceptanceOf = (text: string, evidence = "checked in src/order.ts:1") =>
+  [...text.matchAll(/^- ((?:A\d+|T\d+\.\d+))(?: \(T\d+\))?: /gm)].map((m) => ({ criterion: m[1], status: "met", evidence }));
 const CHANGES = [
   { priority: "P1", file: "src/order.ts", line: 12, title: "consider a guard clause", fix: "return early" },
   { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
@@ -2274,6 +2345,42 @@ test("review: a long prose report with no parseable findings is flagged, not sil
   assert.equal(unparsedReport(undefined, "Done."), false); // short prose: nothing to lose
   const lost = `P1 — the updated_at bump on in-place edits is silently lost in production. GexStalenessScheduler.updateStoredSet calls row.setUpdatedAt(now) on detached entities, so the bump never persists.\n\nP2 — a DB failure between the landed post and saveAll orphans a stale standing set with no coordinate rows.\n\n${"Fix: persist the bump through the repository. ".repeat(20)}`;
   assert.equal(unparsedReport(undefined, lost), true); // substantial but tagless: warn, don't pass clean
+});
+
+test("review: acceptance coverage treats silence as unverified, never met", async () => {
+  const { acceptanceCoverage, normalizeAcceptance, verdictOf } = await import("../extensions/pb/review.ts");
+  const expected = [
+    { id: "A1", text: "the order can be cancelled" },
+    { id: "T1.1", text: "the test proves it", task: "T1" },
+    { id: "T2.1", text: "the audit entry exists", task: "T2" },
+  ];
+  const coverage = acceptanceCoverage(
+    expected,
+    normalizeAcceptance(
+      [
+        { criterion: "A1", status: "met", evidence: "src/order.ts:12" },
+        { criterion: "T1.1", status: "met", evidence: "  " }, // met without evidence is not met
+        { criterion: "T2.1", status: "not met", evidence: "the audit test does not run" },
+        { criterion: "X9", status: "met", evidence: "invented" }, // not in the spec: dropped
+      ],
+      expected,
+    ),
+  );
+  assert.deepEqual(
+    coverage.lines.map((l) => [l.criterion.id, l.status]),
+    [
+      ["A1", "met"],
+      ["T1.1", "not verified"],
+      ["T2.1", "not met"],
+    ],
+  );
+  assert.equal(coverage.met, 1);
+  assert.equal(verdictOf([], coverage), "changes_needed"); // not met blocks even without a P1 finding
+  assert.equal(verdictOf([{ priority: "P2", title: "advisory" }], coverage), "changes_needed");
+  assert.equal(verdictOf([], acceptanceCoverage(expected, [])), "unverified"); // all omitted
+  assert.equal(verdictOf([], acceptanceCoverage(expected.slice(0, 1), [])), "unverified"); // one omitted
+  assert.equal(verdictOf([], acceptanceCoverage([], [])), "pass"); // no spec checklist: unchanged
+  assert.equal(verdictOf([{ priority: "P0", title: "broken" }], acceptanceCoverage([], [])), "changes_needed");
 });
 
 test("review: the harness check's own artifacts are reported, not reverted behind your back", async () => {
@@ -2494,6 +2601,9 @@ test("review: a pass verdict mid-build keeps the phase and says tasks remain", a
   assert.equal(p.phase, "building"); // a pass must not strand the build as reviewed
   assert.equal(p.review?.verdict, "pass"); // the follow-up delta baseline is still kept
   assert.match(t.posts.at(-1)!, /still to build/);
+  // A manual review while building uses the same acceptance checklist as the final one.
+  assert.match(t.posts.at(-1)!, /\*\*Acceptance\*\* — 3\/3 met/);
+  assert.equal(p.review?.acceptance?.length, 3);
 });
 
 test("review: an explicit spec name wins over this session's spec", async () => {
@@ -2707,7 +2817,7 @@ test("review: the review session is read-only for its model; /pb:review done end
     if (text.startsWith("[pb:review]")) {
       assert.deepEqual(t.runtime().pi.getActiveTools(), ["read", "grep", "find", "ls", "bash", "pb_report_findings"]);
       blocked = (await tool("write", { path: "x.ts", content: "x" })).error;
-      await tool("pb_report_findings", { findings: CHANGES });
+      await tool("pb_report_findings", { findings: CHANGES, acceptance: acceptanceOf(text) });
       await t.runtime().cmds["pb:review"].handler("done", t.runtime().ctx);
     }
     if (text.startsWith("[pb:abuse]")) {
@@ -2749,7 +2859,7 @@ test("review: every pass session is gated (reporting tool present, editing block
     if (text.startsWith("[pb:review]") || text.startsWith("[pb:abuse]")) {
       gated.push(t.runtime().pi.getActiveTools());
       blocked.push((await tool("write", { path: "x.ts", content: "x" })).error);
-      await tool("pb_report_findings", { findings: [] });
+      await tool("pb_report_findings", { findings: [], ...(text.startsWith("[pb:review]") ? { acceptance: acceptanceOf(text) } : {}) });
       return;
     }
     return diligent(text, tool);
@@ -2816,13 +2926,19 @@ test("review: compaction resets to role, brief, findings and files read; stalls 
   const { Store } = await import("../extensions/pb/store.ts");
   const store = new Store(t.repo);
   const session = t.runtime().ctx.sessionManager.getSessionFile();
-  store.saveReviewSession(session, { role: "review", spec: "order-cancellation", run: "run-1", findings: [{ priority: "P2", title: "name it" }] });
+  store.saveReviewSession(session, {
+    role: "review",
+    spec: "order-cancellation",
+    run: "run-1",
+    findings: [{ priority: "P2", title: "name it" }],
+    acceptance: [{ criterion: "A1", status: "met", evidence: "src/order.ts:1" }],
+  });
   store.saveReviewRun({ id: "run-1", cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] });
   const prep = (reads: string[], tokens: number) => ({ firstKeptEntryId: "e1", tokensBefore: tokens, fileOps: { read: new Set(reads), edited: new Set(), written: new Set() } });
   const [r1] = (await t.fire("session_before_compact", { preparation: prep(["a.ts", "b.ts"], 50000), reason: "threshold" })) as any[];
   assert.match(
     r1.compaction.summary,
-    /\[pb review state: order-cancellation\] This review session was compacted[\s\S]*Files read before this point[\s\S]*- a\.ts[\s\S]*--- brief ---[\s\S]*BRIEF[\s\S]*--- findings so far ---[\s\S]*name it/,
+    /\[pb review state: order-cancellation\] This review session was compacted[\s\S]*Files read before this point[\s\S]*- a\.ts[\s\S]*--- acceptance so far ---[\s\S]*A1: met — src\/order\.ts:1[\s\S]*--- brief ---[\s\S]*BRIEF[\s\S]*--- findings so far ---[\s\S]*name it/,
   );
   assert.doesNotMatch(r1.compaction.summary, /report findings with what you have/);
   // Same reads at the same size three more times: the fourth wraps up instead of circling.
@@ -2852,6 +2968,29 @@ test("review: findings reported between compactions count as progress, so writin
       spec: "order-cancellation",
       run: "run-1",
       findings: Array.from({ length: i + 1 }, (_, n) => ({ priority: "P2", title: `finding ${n}` })),
+    });
+    [r] = (await t.fire("session_before_compact", { preparation: prep, reason: "threshold" })) as any[];
+  }
+  assert.doesNotMatch(r.compaction.summary, /report findings with what you have/);
+});
+
+test("review: acceptance results reported between compactions count as progress", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  store.saveReviewRun({ id: "run-1", cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] });
+  // Reads and size stay fixed; only the acceptance checklist advances, as it does once checking starts.
+  const prep = { firstKeptEntryId: "e1", tokensBefore: 50000, fileOps: { read: new Set(["a.ts"]), edited: new Set(), written: new Set() } };
+  let r: any;
+  for (let i = 0; i < 4; i++) {
+    store.saveReviewSession(session, {
+      role: "review",
+      spec: "order-cancellation",
+      run: "run-1",
+      findings: [],
+      acceptance: Array.from({ length: i + 1 }, (_, n) => ({ criterion: `T1.${n + 1}`, status: "met", evidence: "checked" })),
     });
     [r] = (await t.fire("session_before_compact", { preparation: prep, reason: "threshold" })) as any[];
   }
@@ -2888,7 +3027,7 @@ test("review: a stall in this very run is still reported in its result", async (
         path.join(t.repo, ".pi/pb/specs/order-cancellation/events.jsonl"),
         `${JSON.stringify({ at: "now", type: "compact", thrash: true, run: run.id })}\n`,
       );
-      await tool("pb_report_findings", { findings: [] });
+      await tool("pb_report_findings", { findings: [], acceptance: acceptanceOf(text) });
       return;
     }
     return diligent(text, tool);
@@ -2911,6 +3050,46 @@ test("review: a follow-up looks at the previous findings and what changed since"
   assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* \(follow-up\) — ✅ PASS/);
 });
 
+test("review: an omitted or unverified acceptance item never passes; the next review carries it", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.acceptance = [
+    { criterion: "A1", status: "met", evidence: "T1.txt and T2.txt exist in the worktree" },
+    { criterion: "T1.1", status: "not verified", evidence: "the named test was not run" },
+  ]; // T2.1 omitted on purpose
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /⚠ UNVERIFIED/);
+  assert.match(post, /\*\*Acceptance\*\* — 1\/3 met, 2 not verified/);
+  assert.match(post, /✓ met A1: T1\.txt and T2\.txt exist\./);
+  assert.match(post, /\? not verified T1\.1: T1\.txt exists \(tests: T1\) — the named test was not run/);
+  assert.match(post, /\? not verified \(not reported\) T2\.1: T2\.txt exists \(tests: T2\)/);
+  assert.match(post, /A missing or unchecked criterion is never a pass/);
+  const first = t.progress("order-cancellation");
+  assert.equal(first.phase, "built");
+  assert.equal(first.review.verdict, "unverified");
+  assert.deepEqual(
+    first.review.acceptance.map((a: { criterion: string; status: string }) => [a.criterion, a.status]),
+    [
+      ["A1", "met"],
+      ["T1.1", "not verified"],
+      ["T2.1", "not verified"],
+    ],
+  );
+
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
+  delete t.reviewer.acceptance; // the next pass reports every id automatically
+  await t.run("review");
+  assert.match(
+    briefOf(t),
+    /Acceptance at the previous review[\s\S]*A1: met — T1\.txt and T2\.txt exist in the worktree[\s\S]*T1\.1: not verified — the named test was not run[\s\S]*T2\.1: not verified — not reported/,
+  );
+  assert.match(t.posts.at(-1)!, /✅ PASS[\s\S]*\*\*Acceptance\*\* — 3\/3 met/);
+  assert.equal(t.progress("order-cancellation").phase, "reviewed");
+});
+
 test("review: findings carry priorities; P0/P1 are double-checked; only line-leading tags count in prose", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -2926,7 +3105,8 @@ test("review: findings carry priorities; P0/P1 are double-checked; only line-lea
   t.reviewer.silent = true; // no tool call: the prose's line-leading tags are the findings
   t.reviewer.prose = "No [P0] or [P1] issues found.\n\n1. [P2] src/order.ts:30 — name the constant.";
   await t.run("review", "--full");
-  assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 0/); // "No [P0] or [P1] issues" isn't a finding
+  // "No [P0] or [P1] issues" isn't a finding; with no acceptance tool report, silence is unverified, not pass.
+  assert.match(t.posts.at(-1)!, /⚠ UNVERIFIED · P0 0 · P1 0 · P2 1 · P3 0/);
 });
 
 test("review: a prose-only pass gives no verdict and leaves the phase short of reviewed", async () => {
@@ -3190,7 +3370,7 @@ test("help: every What-now block the code uses exists in the guide, and /pb:help
   const dir = path.join(path.dirname(new URL(import.meta.url).pathname), "../extensions/pb");
   const src = ["index.ts", "prompts.ts"].map((f) => fs.readFileSync(path.join(dir, f), "utf8")).join("\n");
   const keys = new Set([...src.matchAll(/tip\(\s*"([\w.-]+)"/g)].map((m) => m[1]));
-  for (const k of ["build.paused", "build.paused-attempts", "review.pass", "review.changes", "review.other"]) keys.add(k);
+  for (const k of ["build.paused", "build.paused-attempts", "review.pass", "review.changes", "review.unverified", "review.other"]) keys.add(k);
   for (const k of keys) assert.ok(tip(k).startsWith("**What now**"), `missing tip ${k}`);
   const t = setup();
   process.chdir(t.repo);
@@ -5258,6 +5438,9 @@ test("review: acceptance-proof mapping is checked, faked or dodged mappings are 
   const { parseSpec } = await import("../extensions/pb/spec.ts");
   assert.match(REVIEWER_SYSTEM, /faked mapping/);
   assert.match(REVIEWER_SYSTEM, /non-testable/);
+  assert.match(REVIEWER_SYSTEM, /met with evidence/);
+  assert.match(REVIEWER_SYSTEM, /an id you leave out is not verified/i);
+  assert.match(REVIEWER_SYSTEM, /not met.*P1 finding/);
   const spec = parseSpec(SPEC()).spec!;
   assert.match(taskPrompt(spec.tasks[0], 1, 3, null, true), /which acceptance lines each failing test proves/);
 });

@@ -21,7 +21,7 @@
  *   - Test: `<targeted test command>`        (optional)
  */
 import { createHash } from "node:crypto";
-import type { Finding, Gate } from "./store.ts";
+import type { AcceptanceCriterion, Finding, Gate } from "./store.ts";
 
 export interface SpecTask {
   id: string;
@@ -166,6 +166,45 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
   if (dup.length) errors.push(`duplicate task ids: ${[...new Set(dup)].join(", ")}`);
 
   return errors.length ? { errors } : { spec: { title: title!, status, dependsOn, gate, gateReason, newTests, newTestsReason, tasks }, errors };
+}
+
+/** Lines outside fenced code blocks, where example bullets are not real criteria. */
+const unfenced = (text: string): string[] => {
+  const lines = text.split("\n");
+  const structure = blankFenced(text);
+  return lines.filter((_, i) => structure[i].trim() !== "");
+};
+
+/** A section that does not apply: "none — why", "N/A", and nothing checkable. */
+const noCriteria = (text: string) => /^(?:none|n\/a|not applicable)\s*(?:[—–:.,;-]|$)/i.test(text);
+
+/**
+ * The review's acceptance checklist, derived from the spec's current text without changing its format:
+ * top-level "## Acceptance criteria" bullets become A1, A2, ...; each task's "- Acceptance:" line
+ * becomes T1.1, T1.2, ... in reading order. Proof markers stay in the text so the reviewer can judge them.
+ */
+export function acceptanceCriteria(md: string, parsed?: ParsedSpec): AcceptanceCriterion[] {
+  const spec = parsed ?? parseSpec(md).spec;
+  const out: AcceptanceCriterion[] = [];
+  let lineNo = 0;
+  for (const line of unfenced(sectionOf(md, "Acceptance criteria"))) {
+    const m = /^\s*[-*]\s+(.+)$/.exec(line);
+    if (!m) continue;
+    const text = m[1].trim();
+    if (!text || noCriteria(text)) continue;
+    out.push({ id: `A${++lineNo}`, text });
+  }
+  for (const task of spec?.tasks ?? []) {
+    let taskLine = 0;
+    for (const line of unfenced(task.text)) {
+      const m = /^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:\s*(.+)$/i.exec(line);
+      if (!m) continue;
+      const text = m[2].trim();
+      if (!text || noCriteria(text)) continue;
+      out.push({ id: `${task.id}.${++taskLine}`, text, task: task.id });
+    }
+  }
+  return out;
 }
 
 /**

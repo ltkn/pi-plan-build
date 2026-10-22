@@ -7,7 +7,7 @@
  */
 import { tip } from "./help.ts";
 import { type ParsedSpec, type SpecTask, sectionHeading } from "./spec.ts";
-import { type Finding, PB_DIR, type Progress, type TaskProgress } from "./store.ts";
+import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, type Progress, type TaskProgress } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
 
@@ -371,7 +371,7 @@ Do not modify any file. Use read/grep/find/ls and bash only for inspection (git 
 The harness already ran the check on the current tree; the result is in the brief. Don't re-run the full suite; run a specific test only when you need evidence. Read the diff file by file.
 
 Check:
-- With a spec: its acceptance criteria, one by one: met or not met, with evidence (file:line or test name). Each task's acceptance too, each with a test that checks it. Acceptance lines carry (tests: ...) proof markers or (non-testable: ...) exemptions: check each named test really proves its line (a named test that proves nothing is a faked mapping: P1), and each exemption is genuinely untestable behavior (behavior dressed as docs to dodge tests: P1). Its Contracts, if any: each exactly as written, or changed with a recorded decision. No Contracts with more than one task: flag any seam the tasks share but nothing pins (P2). Its Design (the shape the build settled on, recorded as it went): consistent with the Contracts and Decisions, and the code matches it, or the change is recorded in Decisions. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The assumptions (Decisions entries starting "Assumption", made while writing the spec or building): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged. Its Threats and abuse, if any: each abuse prevented and tested.
+- With a spec: every acceptance id in the brief's checklist, one by one: met with evidence (file:line or test name), not met (and a P1 finding), or not verified with the reason. An id you leave out is not verified, never met; a criterion you did not check is not verified. Acceptance lines carry (tests: ...) proof markers or (non-testable: ...) exemptions: check each named test really proves its line (a named test that proves nothing is a faked mapping: P1), and each exemption is genuinely untestable behavior (behavior dressed as docs to dodge tests: P1). Its Contracts, if any: each exactly as written, or changed with a recorded decision. No Contracts with more than one task: flag any seam the tasks share but nothing pins (P2). Its Design (the shape the build settled on, recorded as it went): consistent with the Contracts and Decisions, and the code matches it, or the change is recorded in Decisions. Its decisions respected, including the rejected alternatives ("Not doing X"): flag anything the build brought back. The assumptions (Decisions entries starting "Assumption", made while writing the spec or building): flag any that look wrong or second-best. Tasks titled "(refactor)": behaviour unchanged. Its Threats and abuse, if any: each abuse prevented and tested.
 - The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 - Without a spec: whether the change does what the intent in the brief says.
 - Missing cases, error handling, convention breaks, changes outside the scope, debug output, commented-out code or leftover TODOs.
@@ -388,7 +388,9 @@ Merge findings with the same concrete fix before reporting: same file and line p
 When the code is right and only the spec's framing is imprecise, report P3 with a proposed rewording, not P2: ask which reasonable reader would call the code wrong — if the code matches at least one reasonable reading of the spec, it's a note for the author, not a defect. A change that violates every reasonable reading keeps its priority.
 Pre-existing issues are at most P2. Report only what the author would want to fix, each with file, line and a concrete fix.
 
-Then reply briefly in markdown: the acceptance checklist when there is a spec, and anything worth knowing that isn't a finding. Don't repeat the findings.`;
+Report acceptance in the same call: one entry for every id in the brief's checklist, with status met, not met, or not verified and evidence. Met and not met need evidence; not met also needs a P1 finding. An id you leave out is not verified, not passed: never write "all met" in prose instead of reporting the list.
+
+Then reply briefly in markdown: anything worth knowing that isn't a finding. Don't repeat the findings or the acceptance checklist.`;
 
 /** The abuse pass: one fresh call whose only job is to break the change, on sensitive ground by default (reviewer.security "auto"). */
 export const ATTACKER_SYSTEM = `You are an ATTACKER in a fresh session, working for the defenders: find how this change can be abused or broken before someone else does. You did not build it and are not shown how it was built.
@@ -430,6 +432,8 @@ export const findingLine = (f: Finding, n?: number) =>
 export interface ReviewBrief {
   /** the spec, when the change was built from one */
   spec?: { name: string; markdown: string; parsed: ParsedSpec };
+  /** the spec's acceptance checklist: every id must be reported, omission counts as not verified */
+  acceptance?: AcceptanceCriterion[];
   /** what the change is meant to do, when there is no spec */
   intent?: string;
   base?: string;
@@ -437,8 +441,8 @@ export interface ReviewBrief {
   stat: string;
   check: string;
   focus: string;
-  /** the previous review: only its findings and what changed since are reviewed */
-  previous?: { snapshot: string; findings: Finding[]; changed: string[] };
+  /** the previous review: only its findings, acceptance and what changed since are reviewed */
+  previous?: { snapshot: string; findings: Finding[]; changed: string[]; acceptance?: AcceptanceCheck[] };
   /** existing tests the build deleted, cut down or skipped */
   testChanges?: string[];
   /** tasks whose new tests were never seen failing (with why), and whose proof is shared with another task */
@@ -528,6 +532,24 @@ export function reviewerBrief(o: ReviewBrief): string {
       `Changed since the previous review (its tree is commit ${o.previous.snapshot}): git diff ${o.previous.snapshot} -- . ':(exclude).pi'`,
       "",
       o.previous.changed.join("\n") || "(nothing)",
+      "",
+      ...(o.previous.acceptance?.length
+        ? [
+            "Acceptance at the previous review (carry a `met` forward only when nothing changed since can affect it; report every current id anyway):",
+            "",
+            ...o.previous.acceptance.map((c) => `- ${c.criterion}: ${c.status}${c.evidence ? ` — ${c.evidence}` : ""}`),
+            "",
+          ]
+        : []),
+    );
+  }
+  if (o.acceptance?.length) {
+    lines.push(
+      "## Acceptance checklist",
+      "",
+      "Report every id below in pb_report_findings's `acceptance` array, with status met, not met, or not verified and evidence. An id left out counts as not verified: a criterion not checked is never met.",
+      "",
+      ...o.acceptance.map((c) => `- ${c.id}${c.task ? ` (${c.task})` : ""}: ${c.text}`),
       "",
     );
   }
@@ -634,12 +656,15 @@ export function parseSpecReview(text: string): SpecReviewResult {
  * is re-derived and nothing read is re-read blind. A stalled session (repeated compactions with
  * nothing new read) is told to wrap up with what it has instead of starting another reading round.
  */
-export function reviewStateSummary(o: { label: string; role: "review" | "abuse"; brief: string; findings: Finding[]; read?: string[]; wrapUp?: boolean }): string {
+export function reviewStateSummary(o: { label: string; role: "review" | "abuse"; brief: string; findings: Finding[]; acceptance?: AcceptanceCheck[]; read?: string[]; wrapUp?: boolean }): string {
   return [
-    `[pb review state: ${o.label}] This ${o.role === "review" ? "review" : "abuse-pass"} session was compacted. The brief below is the complete baseline: re-read any files you need from it, and carry on where the findings leave off.`,
+    `[pb review state: ${o.label}] This ${o.role === "review" ? "review" : "abuse-pass"} session was compacted. The brief below is the complete baseline: re-read any files you need from it, and carry on where the findings and acceptance checks leave off.`,
     "",
     ...(o.wrapUp ? ["Compacted repeatedly without reading anything new: report findings with what you have and stop — do not start another reading round.", ""] : []),
     ...(o.read?.length ? ["Files read before this point (read again what you need):", ...o.read.slice(0, 40).map((f) => `- ${f}`), ""] : []),
+    ...(o.acceptance?.length
+      ? ["--- acceptance so far ---", "", ...o.acceptance.map((c) => `- ${c.criterion}: ${c.status}${c.evidence ? ` — ${c.evidence}` : ""}`), ""]
+      : []),
     "--- brief ---",
     "",
     o.brief,

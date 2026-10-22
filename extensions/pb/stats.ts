@@ -216,7 +216,7 @@ export function renderAll(list: SpecStats[]): string {
   const lp = (v: string, n: number) => v.padStart(n);
   const rows = list.map((s) => {
     const x = summarize(s);
-    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 9)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost + x.explorer.cost).toFixed(2)}`, 9)}${lp(x.ms ? dur(x.ms) : "–", 9)}`;
+    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 10)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost + x.explorer.cost).toFixed(2)}`, 9)}${lp(x.ms ? dur(x.ms) : "–", 9)}`;
   });
-  return ["```", `${pad("spec", 26)}${lp("tasks", 7)}${lp("1st try", 9)}${lp("failed", 8)}${lp("pauses", 8)}  ${pad("review", 9)}${lp("tokens", 9)}${lp("cache", 7)}${lp("cost", 9)}${lp("time", 9)}`, ...rows, "```"].join("\n");
+  return ["```", `${pad("spec", 26)}${lp("tasks", 7)}${lp("1st try", 9)}${lp("failed", 8)}${lp("pauses", 8)}  ${pad("review", 10)}${lp("tokens", 9)}${lp("cache", 7)}${lp("cost", 9)}${lp("time", 9)}`, ...rows, "```"].join("\n");
 }

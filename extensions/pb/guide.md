@@ -377,6 +377,27 @@ instead, recording the skip (with any standing findings) as accepted. Only
 the way into a build is gated: once the first task has started, spec edits
 are the code reviewer's to judge, not re-reviewed at plan level.
 
+**Read the plan yourself, in this order.** The spec reviewer is a second pair
+of eyes, not a substitute for yours:
+
+1. **Goal and Out of scope**: does this solve the right problem, and is the
+   boundary in the right place?
+2. **Acceptance criteria**: is each one checkable, and would it prove the goal
+   rather than merely describe the work?
+3. **Decisions**: is each reason still true, and is every rejected alternative
+   rejected deliberately ("Not doing X, because …")?
+4. **Contracts, Migration and rollback, Threats and abuse**: are the shared
+   seams pinned before the tasks split, and are rollback and abuse answered
+   rather than assumed away?
+5. **Tasks**: does each leave the code working, and does each named test prove
+   its acceptance line? Do the tasks build in an order that could actually run?
+6. **Findings (and Context)**: are the facts still true, and does every
+   `path:line` citation still point at the code it describes?
+
+A plan you cannot check this way is not ready: amend it with `/pb:spec` before
+building. The pre-T1 review can miss something; this read is where you catch a
+plan that is checkable but aimed at the wrong outcome.
+
 - **Threats and abuse.** When a change adds or alters an entry point, touches
   a trust boundary (authentication, authorization, credentials, sensitive data,
   external input) or has rules someone gains from breaking (money, quantities,
@@ -575,8 +596,9 @@ then:
 `/pb:review` runs the check once more, then opens a **fresh session**, "review:
 <spec> · spec", and takes you there: the reviewer sees the spec, the diff and the check
 result, but not the build conversation, so it isn't anchored by the builder's
-reasoning. It checks
-every acceptance criterion with evidence, the decisions (including rejected
+reasoning. It reports
+every acceptance criterion as met with evidence, not met, or not verified. It
+also checks the decisions (including rejected
 alternatives and the build's assumptions), `(refactor)` tasks for unchanged
 behaviour, the existing tests the build changed, the tasks whose new tests
 carry no proof (with why each), unresolvable `(tests: …)` proof names (a named
@@ -600,6 +622,17 @@ listed as dismissed, with its evidence, instead of costing you a fix cycle
 *changes needed*. Findings with the same concrete fix are reported once, at
 the highest priority. When the code is right and only the spec's framing is
 imprecise, that's a P3 note with a proposed rewording, not a defect.
+
+**Every acceptance criterion is a checklist item.** The spec's top-level
+criteria become `A1`, `A2`, … and each task's `- Acceptance:` lines become
+`T1.1`, `T1.2`, … The reviewer reports each one as **met** with evidence
+(file:line or test name), **not met**, or **not verified** with the reason.
+The spec format does not change, and every spec review uses the same list,
+including a manual `/pb:review` during a build. An omitted or unchecked item
+counts as not verified, never as met: a review with nothing blocking but any
+unverified item ends **UNVERIFIED**, not pass, and leaves the phase where it
+was. A not-met item is blocking and comes with a P1 finding. P2/P3 findings
+stay advisory.
 
 The findings land in the session you ran it from; run it **in the build
 session** and fix them right there: that session knows the code it just wrote.
@@ -806,6 +839,13 @@ model call).
 **What now** — the review found things to fix before merging
 - Fix them in a fresh fenced session: `/pb:fix 1 4 5` takes finding ids (P0–P2 only; P3 nits fix by hand or ignore), no ids fixes all open ones — or fix them here, this session knows the code. Example: *"fix findings 1 and 3"*
 - Then `/pb:review` again — it checks only those findings and what changed · more: `/pb:help review`
+<!-- /pb -->
+
+### Review could not verify everything
+<!-- pb:tip review.unverified -->
+**What now** — the review found nothing blocking, but some acceptance criteria were not verified
+- Read the acceptance list above: every `not verified` or missing id needs evidence, not silence.
+- Check that behaviour yourself or run the named test, then `/pb:review` again. If nothing else changed, `/pb:review --full` re-checks the whole change. If the criterion is not checkable as written, amend the spec with `/pb:spec`.
 <!-- /pb -->
 
 ### Review without a verdict

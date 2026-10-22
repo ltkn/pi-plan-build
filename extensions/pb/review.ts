@@ -6,17 +6,101 @@
 import { fileURLToPath } from "node:url";
 import { VERIFIER_SYSTEM, verifierBrief } from "./prompts.ts";
 import { runFresh } from "./runner.ts";
-import type { Finding, Priority } from "./store.ts";
+import type { AcceptanceCheck, AcceptanceCriterion, AcceptanceStatus, Finding, Priority } from "./store.ts";
 
 export const REVIEW_TOOLS = fileURLToPath(new URL("./review-tools.ts", import.meta.url));
 const INSPECT = ["read", "grep", "find", "ls", "bash"];
 
-export type Verdict = "pass" | "changes_needed" | "none";
+export type Verdict = "pass" | "changes_needed" | "unverified" | "none";
 
 export const blocking = (f: Finding) => f.priority === "P0" || f.priority === "P1";
 
-/** Any P0 or P1 means changes needed. */
-export const verdictOf = (findings: Finding[]): Verdict => (findings.some(blocking) ? "changes_needed" : "pass");
+/** A criterion the reviewer did not report: missing is not a pass. */
+export interface AcceptanceLine {
+  criterion: AcceptanceCriterion;
+  status: AcceptanceStatus | "not reported";
+  evidence?: string;
+}
+
+/** The checklist joined with what the pass reported, including what it left out. */
+export interface AcceptanceCoverage {
+  expected: AcceptanceCriterion[];
+  lines: AcceptanceLine[];
+  met: number;
+  notMet: AcceptanceLine[];
+  notVerified: AcceptanceLine[];
+  missing: AcceptanceLine[];
+  enforced: boolean;
+}
+
+/**
+ * Join a spec's checklist with the pass's report. Unknown ids are ignored (a model miscounting can't
+ * invent criteria), the last report per id wins, and `met` without evidence degrades to `not verified`.
+ */
+export function acceptanceCoverage(expected: AcceptanceCriterion[] | undefined, checks: AcceptanceCheck[] | undefined): AcceptanceCoverage {
+  const list = expected ?? [];
+  const known = new Set(list.map((c) => c.id));
+  const byId = new Map<string, AcceptanceCheck>();
+  for (const check of checks ?? []) {
+    if (!known.has(check.criterion)) continue;
+    byId.set(check.criterion, check);
+  }
+  const lines: AcceptanceLine[] = list.map((criterion) => {
+    const check = byId.get(criterion.id);
+    if (!check) return { criterion, status: "not reported" };
+    const evidence = check.evidence.trim();
+    if (check.status === "met" && !evidence) return { criterion, status: "not verified", evidence: "no evidence supplied" };
+    return { criterion, status: check.status, ...(evidence ? { evidence } : {}) };
+  });
+  const withStatus = (status: AcceptanceLine["status"]) => lines.filter((l) => l.status === status);
+  return {
+    expected: list,
+    lines,
+    met: withStatus("met").length,
+    notMet: withStatus("not met"),
+    notVerified: withStatus("not verified"),
+    missing: withStatus("not reported"),
+    enforced: list.length > 0,
+  };
+}
+
+/**
+ * The verdict ladder. Any confirmed P0/P1, or any reported `not met`, means changes needed. A review
+ * that leaves any checklist item unverified (reported as such or omitted) gets its own verdict, so
+ * silence never reads as a pass. Without a checklist, the old findings-only rule applies.
+ */
+export const verdictOf = (findings: Finding[], coverage?: AcceptanceCoverage): Verdict => {
+  if (findings.some(blocking)) return "changes_needed";
+  if (coverage?.enforced) {
+    if (coverage.notMet.length) return "changes_needed";
+    if (coverage.notVerified.length || coverage.missing.length) return "unverified";
+  }
+  return "pass";
+};
+
+/**
+ * Normalize what pb_report_findings received: known statuses and criteria only, last entry per id,
+ * and no `met` without evidence. With an expected checklist, ids outside it are dropped.
+ */
+export function normalizeAcceptance(raw: unknown, expected: AcceptanceCriterion[] = []): AcceptanceCheck[] {
+  const known = expected.length ? new Set(expected.map((c) => c.id)) : undefined;
+  const byId = new Map<string, AcceptanceCheck>();
+  for (const item of Array.isArray(raw) ? raw : []) {
+    const x = item as { criterion?: unknown; status?: unknown; evidence?: unknown };
+    const criterion = typeof x.criterion === "string" ? x.criterion.trim() : "";
+    const status = x.status;
+    if (!criterion || (status !== "met" && status !== "not met" && status !== "not verified")) continue;
+    if (known && !known.has(criterion)) continue;
+    let evidence = typeof x.evidence === "string" ? x.evidence.trim() : "";
+    let normalized: AcceptanceStatus = status;
+    if (normalized === "met" && !evidence) {
+      normalized = "not verified";
+      evidence = "no evidence supplied";
+    }
+    byId.set(criterion, { criterion, status: normalized, evidence });
+  }
+  return [...byId.values()];
+}
 
 /** A pass that answered in prose only: findings are the lines that start with a priority tag (outside fences). */
 export function fromProse(text: string): Finding[] {

@@ -63,12 +63,12 @@ import {
 } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
-import { REVIEW_TOOLS, fromProse, mergeFindings, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
+import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SPEC_NAME, type SpecTask, addDecision, buildTask, commitMessage, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewGate, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewGate, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
 import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -664,15 +664,16 @@ export default function pb(pi: ExtensionAPI) {
   /**
    * Mid-task compactions with no forward progress in a row, by session: the thrash guard's memory.
    * In-memory (a crash just delays it); a task boundary is progress by construction, so only the
-   * Pi-compaction path reads it. `findings` counts what a review pass has reported, so findings
-   * written between two compactions count as progress even when nothing new was read.
+   * Pi-compaction path reads it. `findings` and `checks` count what a review pass has reported, so
+   * findings and acceptance results written between two compactions count as progress even when
+   * nothing new was read.
    */
-  const compactStalls = new Map<string, { task?: string; changed: string[]; read: string[]; tokens: number; strikes: number; findings?: number }>();
+  const compactStalls = new Map<string, { task?: string; changed: string[]; read: string[]; tokens: number; strikes: number; findings?: number; checks?: number }>();
   /** How many sessions' stall state is kept; older ones are dropped so a long-lived process doesn't grow. */
   const STALL_MEMORY = 64;
   /** Compacting this often with nothing changed, read, shrunk or reported means stuck, not long: pause instead of looping. */
   const COMPACT_STALL_LIMIT = 3;
-  const rememberStall = (session: string, stall: { task?: string; changed: string[]; read: string[]; tokens: number; strikes: number; findings?: number }) => {
+  const rememberStall = (session: string, stall: { task?: string; changed: string[]; read: string[]; tokens: number; strikes: number; findings?: number; checks?: number }) => {
     compactStalls.set(session, stall);
     for (const k of compactStalls.keys()) {
       if (compactStalls.size <= STALL_MEMORY) break;
@@ -1095,7 +1096,7 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_report_findings",
     label: "Report findings",
     description:
-      "In a pb review session: report the review's findings, one call with all of them (an empty list when there are none). Call it again if they change.",
+      "In a pb review session: report the review's findings and acceptance checklist, one call with all of them (empty lists when there are none). Call it again if they change.",
     parameters: Type.Object({
       findings: Type.Array(
         Type.Object({
@@ -1106,6 +1107,15 @@ export default function pb(pi: ExtensionAPI) {
           fix: Type.Optional(Type.String({ description: "a concrete fix" })),
         }),
       ),
+      acceptance: Type.Optional(
+        Type.Array(
+          Type.Object({
+            criterion: Type.String({ description: 'the checklist id, e.g. "A1" or "T1.1"' }),
+            status: StringEnum(["met", "not met", "not verified"]),
+            evidence: Type.String({ description: "file:line, test name, or why it is not verified; required for met and not met" }),
+          }),
+        ),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const store = new Store(ctx.cwd);
@@ -1113,8 +1123,18 @@ export default function pb(pi: ExtensionAPI) {
       const state = store.reviewSession(session);
       if (!session || !state) throw new Error("This is not a pb review session.");
       const findings = (params.findings as Finding[]).filter((f) => /^P[0-3]$/.test(f.priority) && f.title);
-      store.saveReviewSession(session, { ...state, findings });
-      return reply(`Recorded ${findings.length} finding(s). Now reply briefly${state.role === "review" ? " (the acceptance checklist, and anything worth knowing that isn't a finding)" : ""}, then stop.`);
+      if (state.role === "abuse") {
+        store.saveReviewSession(session, { ...state, findings });
+        return reply(`Recorded ${findings.length} finding(s). Now reply briefly, then stop.`);
+      }
+      const expected = state.run ? (store.reviewRun(state.run)?.acceptance ?? []) : [];
+      const acceptance = normalizeAcceptance(Array.isArray(params.acceptance) ? params.acceptance : state.acceptance, expected);
+      store.saveReviewSession(session, { ...state, findings, acceptance });
+      const missing = expected.filter((c) => !acceptance.some((a) => a.criterion === c.id)).map((c) => c.id);
+      const closing = missing.length
+        ? `Not reported (counts as not verified): ${missing.join(", ")}. Check them if you can, report again, then stop.`
+        : "Now reply briefly, then stop.";
+      return reply(`Recorded ${findings.length} finding(s) and ${acceptance.length} acceptance result(s). ${closing}`);
     },
   });
 
@@ -2248,13 +2268,16 @@ export default function pb(pi: ExtensionAPI) {
         const ops = (ev.preparation as { fileOps?: { read?: Iterable<string>; edited?: Iterable<string>; written?: Iterable<string> } }).fileOps;
         const read = ops?.read ? [...ops.read] : undefined;
         const tokens = ev.preparation.tokensBefore;
-        // Findings reported between two compactions are progress too: the end of a review is
-        // reading done, writing findings and running checks, which reads nothing new.
+        // Findings and acceptance results reported between two compactions are progress too: the end
+        // of a review is reading done, writing results and running checks, which reads nothing new.
         const findings = [...run.passes.flatMap((x) => x.findings), ...(review.findings ?? [])].length;
+        const acceptance = [...run.passes.flatMap((x) => x.acceptance ?? []), ...(review.acceptance ?? [])];
+        const checks = acceptance.length;
         const prev = session ? compactStalls.get(session) : undefined;
-        const progressed = !prev || (read?.some((f) => !prev.read.includes(f)) ?? false) || findings > (prev.findings ?? 0) || tokens < prev.tokens;
+        const progressed =
+          !prev || (read?.some((f) => !prev.read.includes(f)) ?? false) || findings > (prev.findings ?? 0) || checks > (prev.checks ?? 0) || tokens < prev.tokens;
         const strikes = progressed ? 0 : (prev?.strikes ?? 0) + 1;
-        if (session) rememberStall(session, { task: `review:${review.role}`, changed: [], read: read ?? [], tokens, strikes, findings });
+        if (session) rememberStall(session, { task: `review:${review.role}`, changed: [], read: read ?? [], tokens, strikes, findings, checks });
         const wrapUp = strikes >= COMPACT_STALL_LIMIT;
         if (run.name) store.event(run.name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, review: review.role, ...(run.id ? { run: run.id } : {}), ...(wrapUp ? { thrash: true } : {}) });
         return {
@@ -2264,6 +2287,7 @@ export default function pb(pi: ExtensionAPI) {
               role: review.role,
               brief: run.brief,
               findings: [...run.passes.flatMap((x) => x.findings), ...(review.findings ?? [])],
+              acceptance,
               read,
               wrapUp,
             }),
@@ -3171,7 +3195,15 @@ export default function pb(pi: ExtensionAPI) {
           if (nudged) break;
           nudged = true;
           idle = 0;
-          void send({ customType: "pb-instruction", content: "[pb] Report your findings with pb_report_findings (an empty list if there are none), then stop.", display: false }, { triggerTurn: true });
+          void send(
+            {
+              customType: "pb-instruction",
+              content:
+                "[pb] Report your findings with pb_report_findings (an empty list if there are none) and every acceptance checklist id, then stop.",
+              display: false,
+            },
+            { triggerTurn: true },
+          );
         }
       }
       const branch = tree(c as ExtensionContext).getBranch?.() ?? [];
@@ -3180,10 +3212,11 @@ export default function pb(pi: ExtensionAPI) {
       const state = store.reviewSession(session);
       if (state?.done) store.saveReviewSession(session, { ...state, done: undefined });
       const findings = state?.findings ?? fromProse(text);
-      return { findings, prose: text, unparsed: unparsedReport(state?.findings, text), left: false, session };
+      return { findings, acceptance: state?.acceptance ?? [], prose: text, unparsed: unparsedReport(state?.findings, text), left: false, session };
     } catch {
       // You switched to another session: this one can't be driven any more.
-      return { findings: store.reviewSession(session)?.findings ?? [], prose: "", left: true, session, unparsed: false };
+      const state = store.reviewSession(session);
+      return { findings: state?.findings ?? [], acceptance: state?.acceptance ?? [], prose: "", left: true, session, unparsed: false };
     }
   };
 
@@ -3256,11 +3289,27 @@ export default function pb(pi: ExtensionAPI) {
     // A pass that answered in prose only lost whatever it reported: with nothing parseable
     // there is no verdict to give — a clean one would wave through the very review this is for.
     const lost = unparsed.length > 0 && !findings.length;
-    const verdict = !run.passes.length || lost ? "none" : verdictOf(findings);
+    const coverage = acceptanceCoverage(
+      run.acceptance,
+      run.passes.filter((x) => x.role === "review").flatMap((x) => x.acceptance ?? []),
+    );
+    const verdict = !run.passes.length || lost ? "none" : verdictOf(findings, coverage);
     const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
     const sessions = run.passes.map((x) => `${x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"} \`pi --session ${sessionIdOf(x.session)}\``);
+    const notVerified = coverage.notVerified.length + coverage.missing.length;
+    const acceptanceLine = (l: (typeof coverage.lines)[number]) => {
+      const mark = l.status === "met" ? "✓ met" : l.status === "not met" ? "✗ not met" : l.status === "not reported" ? "? not verified (not reported)" : "? not verified";
+      return `- ${mark} ${l.criterion.id}: ${l.criterion.text}${l.evidence ? ` — ${l.evidence}` : ""}`;
+    };
+    // What the next review carries: the whole checklist, with an omission stored as not verified.
+    const acceptance: AcceptanceCheck[] = coverage.lines.map((l) => ({
+      criterion: l.criterion.id,
+      status: l.status === "not reported" ? "not verified" : l.status,
+      evidence: l.status === "not reported" ? "not reported" : (l.evidence ?? ""),
+    }));
+    const tipKey = verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
     const text = [
-      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${lost ? "⚠ NO VERDICT — a pass reported in prose only" : verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : run.abuseSkipped ? " · adversarial pass skipped" : ""}`,
+      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${lost ? "⚠ NO VERDICT — a pass reported in prose only" : verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : verdict === "unverified" ? "⚠ UNVERIFIED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : run.abuseSkipped ? " · adversarial pass skipped" : ""}`,
       ...(o.partial
         ? ["", `⚠ You left the review before it finished: the ${finished("review") ? "adversarial pass" : "review"} didn't finish; this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),
@@ -3274,6 +3323,20 @@ export default function pb(pi: ExtensionAPI) {
         : []),
       "",
       run.passes.find((x) => x.role === "review")?.prose ?? "",
+      ...(coverage.enforced
+        ? [
+            "",
+            `**Acceptance** — ${coverage.met}/${coverage.lines.length} met${coverage.notMet.length ? `, ${coverage.notMet.length} not met` : ""}${notVerified ? `, ${notVerified} not verified` : ""}`,
+            "",
+            ...coverage.lines.map(acceptanceLine),
+            ...(notVerified
+              ? [
+                  "",
+                  `A missing or unchecked criterion is never a pass: verify it (or amend the spec if it is not checkable), then run /${cmd("review")} again. If nothing else changed, \`/${cmd("review")} --full\` re-checks the whole change.`,
+                ]
+              : []),
+          ]
+        : []),
       ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),
       ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
       ...(o.changedDuring.length ? ["", `⚠ Files changed while the review ran (left as they are — they may be yours, not the reviewer's): ${o.changedDuring.join(", ")}`] : []),
@@ -3283,9 +3346,9 @@ export default function pb(pi: ExtensionAPI) {
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
       ...(run.name && !o.partial ? ["", commitBlock(commitMessage(new Store(run.cwd).readSpec(run.name) ?? ""))] : []),
       "",
-      tip(verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : "review.other", { spec: run.label }),
+      tip(tipKey, { spec: run.label }),
     ].join("\n");
-    return { text, verdict, counts, findings, complete: finished("review") && (!run.security || finished("abuse")), abuse: finished("abuse") };
+    return { text, verdict, counts, findings, acceptance, complete: finished("review") && (!run.security || finished("abuse")), abuse: finished("abuse") };
   };
 
   const allFindings = (run: ReviewRun) => run.passes.flatMap((x) => (x.role === "abuse" ? x.findings.map((f) => ({ ...f, title: `Adversarial: ${f.title}` })) : x.findings));
@@ -3336,7 +3399,7 @@ export default function pb(pi: ExtensionAPI) {
       store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ...checked.tokens, cost: checked.cost });
       const remaining = p.tasks.filter((t) => t.status !== "done").map((t) => t.id);
       if (m.complete) {
-        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings.filter((f) => f.priority !== "P3") };
+        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings.filter((f) => f.priority !== "P3"), acceptance: m.acceptance };
         // A pass only finishes a finished build: with tasks still open the phase stays,
         // or the next /pb:build strands and /pb:archive offers a half-built spec.
         if (m.verdict === "pass" && !remaining.length) p.phase = "reviewed";
@@ -3536,11 +3599,11 @@ export default function pb(pi: ExtensionAPI) {
       }
 
       const prevReview = p?.review;
-      let previous: { snapshot: string; findings: Finding[]; changed: string[] } | undefined;
+      let previous: { snapshot: string; findings: Finding[]; changed: string[]; acceptance?: AcceptanceCheck[] } | undefined;
       if (!full && prevReview?.snapshot && before) {
         const since = changedPaths(ctx.cwd, prevReview.snapshot, before.commit);
         if (!since.length && !largeFiles.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict === "none" ? "no verdict" : prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
-        previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since };
+        previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since, acceptance: prevReview.acceptance };
       }
       // Fix laps report into their own sessions, not the brief: hand the follow-up review the
       // reports (claims plus test results) so it judges evidence, capped like any test output.
@@ -3563,8 +3626,10 @@ export default function pb(pi: ExtensionAPI) {
       const diffText = mode === "auto" ? gitDiff(ctx.cwd, base) : "";
       const security =
         mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changed, diff: diffText + untrackedText(ctx.cwd, changed) });
+      const acceptance = loaded && name ? acceptanceCriteria(loaded.md, loaded.spec) : undefined;
       const brief = reviewerBrief({
         spec: loaded && name ? { name, markdown: loaded.md, parsed: loaded.spec } : undefined,
+        acceptance,
         intent,
         base,
         changed,
@@ -3592,6 +3657,7 @@ export default function pb(pi: ExtensionAPI) {
         brief,
         base,
         security,
+        acceptance,
         followUp: !!previous,
         home: ctx.sessionManager.getSessionFile(),
         before: before ? { commit: before.commit, tree: before.tree } : undefined,

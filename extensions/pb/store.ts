@@ -209,6 +209,25 @@ export interface Finding {
   fix?: string;
 }
 
+/** One acceptance criterion's review result. A criterion left out is never `met`. */
+export type AcceptanceStatus = "met" | "not met" | "not verified";
+
+/** A checklist item derived from the spec for the reviewer; the spec format itself stays unchanged. */
+export interface AcceptanceCriterion {
+  /** review-only id: A1 for a top-level line, T1.1 for a task's acceptance line */
+  id: string;
+  text: string;
+  /** the task id, when the criterion comes from a task's acceptance line */
+  task?: string;
+}
+
+/** What a pass reported for one criterion. `met` always carries evidence; otherwise it degrades to not verified. */
+export interface AcceptanceCheck {
+  criterion: string;
+  status: AcceptanceStatus;
+  evidence: string;
+}
+
 export interface ReviewState {
   at: string;
   /** snapshot of the tree the review saw: the next review looks only at what changed since */
@@ -216,6 +235,8 @@ export interface ReviewState {
   verdict: string;
   /** confirmed findings, to check again next time */
   findings: Finding[];
+  /** acceptance statuses to carry into a follow-up */
+  acceptance?: AcceptanceCheck[];
 }
 
 export interface Progress {
@@ -289,6 +310,8 @@ export interface ReviewSessionState {
   run?: string;
   /** what the pass reported with pb_report_findings */
   findings?: Finding[];
+  /** the acceptance checklist this spec pass reported, if any */
+  acceptance?: AcceptanceCheck[];
   /** /pb:review done: finish now */
   done?: boolean;
 }
@@ -313,7 +336,9 @@ export interface ReviewRun {
   largeFiles?: string[];
   model?: string;
   thinking?: string;
-  passes: { role: "review" | "abuse"; findings: Finding[]; prose: string; session: string; left: boolean; unparsed: boolean }[];
+  /** the spec's acceptance checklist for this review: A1, A2, T1.1, T2.1, ... */
+  acceptance?: AcceptanceCriterion[];
+  passes: { role: "review" | "abuse"; findings: Finding[]; acceptance?: AcceptanceCheck[]; prose: string; session: string; left: boolean; unparsed: boolean }[];
   /** you chose to skip the abuse pass when the review was done */
   abuseSkipped?: boolean;
   /** the pass you left before it finished */

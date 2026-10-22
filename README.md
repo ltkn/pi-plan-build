@@ -55,9 +55,10 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
     → one run: T1 → T2 → … (each: its tests seen failing, then passing) → coherence (3+ tasks) → full suite ✗ → fix → full suite ✓
    ✅ BUILD COMPLETE
 /pb:review
-   → a spec pass in a fresh session: every acceptance criterion with evidence,
-     decisions, tests, comments, your standards; then an adversarial pass that
-     tries to break the change; P0/P1 findings double-checked
+   → a spec pass in a fresh session: every acceptance criterion met with
+     evidence, not met, or not verified (silence is not a pass), decisions,
+     tests, comments, your standards; then an adversarial pass that tries to
+     break the change; P0/P1 findings double-checked
    → fix them right there (`/pb:fix` opens a fenced session for them), /pb:review again (only the findings and what changed)
 ```
 
@@ -125,7 +126,10 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 - **Fresh eyes where they pay.** The reviewer never saw the build's reasoning,
   and judges the spec too: a faithful build of a wrong plan is still wrong. It
   reports findings through a tool; a second fresh call double-checks the
-  blocking ones, so a false P1 doesn't cost you a fix cycle. pb offers once to
+  blocking ones, so a false P1 doesn't cost you a fix cycle. The spec's
+  acceptance criteria and each task's acceptance lines are a checklist the
+  reviewer must answer one by one: a missing or unchecked item is unverified,
+  never a pass. pb offers once to
   run it on another model family than the one that built the change. It can't
   edit your files; anything a command it runs changes is listed in the result,
   never silently reverted (it may be your own concurrent edit).
