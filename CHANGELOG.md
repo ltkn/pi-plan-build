@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.35.0
+
+- **Every review checks the spec's acceptance list.** Top-level criteria become `A1`, `A2`, … and each task's acceptance lines become `T1.1`, `T1.2`, … The reviewer reports each one through `pb_report_findings` as `met` with evidence, `not met`, or `not verified`; an omitted item is never a pass. A `not met` item blocks like a P0/P1, while any unverified item ends the review `unverified` and leaves the phase where it was. Follow-up reviews carry the previous statuses and require every current id. The spec format and configuration do not change, and a manual `/pb:review` during a build uses the same list.
+- **Read the plan yourself, in a deliberate order.** The guide now walks Goal and Out of scope, acceptance criteria, Decisions, Contracts/Migration/Threats, Tasks and Findings, so a plan that is checkable but aimed at the wrong outcome is caught before T1.
+- **A spec-review block can no longer read as a pass.** Findings written as Markdown list or heading lines (`- [P1] …`) were stored as a block with zero findings, so the summary said "pass, no findings" while the next line said T1 was blocked. The parser now accepts list, heading and bold forms; a block always posts "changes needed before T1" (with the transcript as fallback when nothing parses), and an unchanged block with no recorded findings is re-reviewed instead of re-posted empty.
+
 ## 1.34.0
 
 - **A spec is checked against the repo, not only against itself.** Ready specs reject a `path:line` that does not exist (new files need no line), require Contracts for any external surface even with one task, and require Migration and rollback when data or a stored format outlives the change. A section that does not apply is one line, `none — why`.

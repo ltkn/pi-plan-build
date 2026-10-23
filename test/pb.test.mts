@@ -5529,6 +5529,45 @@ test("spec review: P0 findings stop the build before T1 with the findings shown"
   assert.equal(t.progress("order-cancellation").phase, "written"); // untouched
 });
 
+test("spec review: Markdown bullet findings block and are not mistaken for a pass", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "block-bullets";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.match(t.posts.at(-1)!, /changes needed before T1/);
+  assert.match(t.posts.at(-1)!, /unguarded transition/);
+  assert.doesNotMatch(t.posts.at(-1)!, /pass, no findings/);
+  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
+  assert.equal(review.verdict, "block");
+  assert.equal(review.findings, 1);
+  assert.equal(review.reported[0].priority, "P1");
+  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // never launched
+});
+
+test("spec review: a block verdict with no parseable finding never reads as a pass", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  process.env.MOCK_SPEC_REVIEW = "block-untagged";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.match(t.posts.at(-1)!, /changes needed before T1/);
+  assert.match(t.posts.at(-1)!, /blocked without a parseable finding/);
+  assert.doesNotMatch(t.posts.at(-1)!, /pass, no findings/);
+  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
+  assert.equal(review.verdict, "block");
+  assert.equal(review.findings, 0);
+  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // never launched
+});
+
 test("spec review: after amendment the build re-reviews and proceeds on the pass", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -5772,6 +5811,32 @@ test("spec: the pre-approval dry-run is watched like every other check", async (
   assert.equal(t.widgets.get("pb-dry-run"), undefined); // cleared with the results
 });
 
+test("spec review parser: accepts Markdown bullets, headings and bold tags", async () => {
+  const { parseSpecReview } = await import("../extensions/pb/prompts.ts");
+  const parsed = parseSpecReview(
+    [
+      "## Findings",
+      "",
+      "- [P1] Decisions — first",
+      "  Fix: fix one",
+      "* **[P2]** Contracts — second",
+      "### [P3] Tasks — third",
+      "1. [P2] Answers — fourth",
+      "",
+      "## Verdict — VERDICT: block",
+    ].join("\n"),
+  );
+  assert.deepEqual(parsed.findings, [
+    { priority: "P1", title: "Decisions — first", fix: "fix one" },
+    { priority: "P2", title: "Contracts — second" },
+    { priority: "P3", title: "Tasks — third" },
+    { priority: "P2", title: "Answers — fourth" },
+  ]);
+  assert.equal(parsed.block, true);
+  // The verdict is load-bearing even when the model writes no parseable finding line.
+  assert.deepEqual(parseSpecReview("VERDICT: block"), { findings: [], block: true });
+});
+
 test("spec review gate: a pass covers only the text it saw", () => {
   const pass = { type: "spec-review", verdict: "pass", hash: "h" };
   assert.deepEqual(specReviewGate([pass], "h"), { action: "skip" });
@@ -5787,6 +5852,7 @@ test("spec review gate: a standing block is re-posted, not re-run", () => {
   assert.deepEqual(specReviewGate([block], "h2"), { action: "review", prior: [f] });
   assert.deepEqual(specReviewGate([pass, block], "h"), { action: "repost", findings: [f] }); // the last verdict rules
   assert.deepEqual(specReviewGate([block, pass], "h"), { action: "skip" });
+  assert.deepEqual(specReviewGate([{ ...block, reported: [] }], "h"), { action: "review", prior: [] }); // nothing to re-post
 });
 
 test("spec review gate: a forced event settles nothing and no hash means no coverage", () => {

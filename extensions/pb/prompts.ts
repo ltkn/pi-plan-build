@@ -641,7 +641,10 @@ export function parseSpecReview(text: string): SpecReviewResult {
   const findings: Finding[] = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
-    const m = /^#?\s*\[(P[0-3])\]\s*([^\n]+)$/.exec(lines[i].trim());
+    // Models routinely render the required `[P#]` line as a Markdown list/heading, and
+    // sometimes bold the tag. Accept all of those forms: a finding written as `- [P1] …`
+    // is the same finding, not silence.
+    const m = /^(?:#{1,6}\s*)?(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*)?\[(P[0-3])\](?:\*\*)?\s+([^\n]+)$/.exec(lines[i].trim());
     if (!m) continue;
     const fix = /^Fix:\s*([^\n]+)$/.exec((lines[i + 1] ?? "").trim());
     findings.push({ priority: m[1] as Finding["priority"], title: m[2].trim(), ...(fix ? { fix: fix[1].trim() } : {}) });

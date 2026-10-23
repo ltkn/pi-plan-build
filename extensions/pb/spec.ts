@@ -618,13 +618,16 @@ export type SpecReviewGate =
 
 /**
  * What a build start owes the spec review, from its {type:"spec-review"} events and the current
- * text's hash: a pass on this text skips it, a block on this text is re-posted (a re-run would
- * re-find the same), and anything else runs — with the last verdict's findings first, to judge.
+ * text's hash: a pass on this text skips it, a block on this text with findings is re-posted (a
+ * re-run would re-find the same), and anything else runs — with the last verdict's findings
+ * first, to judge. A block with no recorded findings is re-run: there is nothing to re-post,
+ * and a blank block would tell the human nothing.
  */
 export function specReviewGate(events: Array<Record<string, unknown>>, hash: string): SpecReviewGate {
   const last = events.filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block")).at(-1);
   if (!last) return { action: "review", prior: [] };
   const findings = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
   if (last.hash !== hash) return { action: "review", prior: findings };
-  return last.verdict === "pass" ? { action: "skip" } : { action: "repost", findings };
+  if (last.verdict === "pass") return { action: "skip" };
+  return findings.length ? { action: "repost", findings } : { action: "review", prior: [] };
 }

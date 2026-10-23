@@ -2665,8 +2665,11 @@ export default function pb(pi: ExtensionAPI) {
                 ? `${review.findings.length} advisory finding${review.findings.length === 1 ? "" : "s"}`
                 : "pass, no findings",
           );
-        if (review.findings.length) {
-          post(`**Spec review** — ${review.block ? "changes needed before T1" : "advisory findings"}:\n${review.findings.map((f, i) => findingLine(f, i + 1)).join("\n")}${sessionNote}`);
+        if (review.block || review.findings.length) {
+          const body = review.findings.length
+            ? review.findings.map((f, i) => findingLine(f, i + 1)).join("\n")
+            : "The reviewer blocked without a parseable finding — read the run below.";
+          post(`**Spec review** — ${review.block ? "changes needed before T1" : "advisory findings"}:\n${body}${sessionNote}`);
         } else {
           post(`**Spec review** — pass, no findings (the recorded pass covers this text).${sessionNote}`);
         }
