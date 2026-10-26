@@ -12,8 +12,8 @@ build. Your engineering standards live in AGENTS.md, written once.
 /pb:compact [undo]    pb's compaction: planning, write the spec and reset to it (automatic at checkpointAt);
                       build, compact to the build's state
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
-                      (--fresh: in a new session from the spec)
-                      before the first task, fresh eyes attack the spec itself: P0/P1 findings stop the build until amended
+                      (--fresh: in a new session from the spec; --review: run the spec review even where auto would skip)
+                      before the first task, risky specs get fresh eyes: P0/P1 findings stop the build until amended
 /pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default); /pb:review checks the delta after
 /pb:review [focus]    independent review, in fresh sessions you watch (spec pass, then adversarial pass), P0–P3, blocking findings
                       double-checked; follow-ups look only at what changed (--full: everything)
@@ -116,13 +116,17 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   fresh, read-only Pi session that pb takes you into: watch it, interrupt it,
   ask it something; pb brings you back with the result, which is also kept in
   the spec's `review.md`.
-- **Fresh eyes on the plan, too.** Before the first task, a spec-sized review
-  attacks the spec's Decisions, re-tests every "Not doing X", and flags
-  unmeasured numbers — any finding stops the build for you to read: P0/P1 to
-  amend (every amendment is re-reviewed, earlier findings judged first) or
-  `/pb:build --force` to build it as it stands. And every acceptance line names
-  its proof, so uncovered lines can't slip to review unnoticed (prose that
-  can't be tested says so, and never blocks).
+- **Fresh eyes on the plan, when they pay.** Before the first task, a risky spec
+  (security, persisted data, a migration, an external contract, threats, or
+  a large change)
+  gets a review that attacks its Decisions, re-tests every "Not doing X", and
+  flags unmeasured numbers. A P0/P1 stops the build for you to amend (only the
+  changed sections are re-reviewed; earlier findings are judged first); P2/P3
+  are shown and the build goes on. After two blocking rounds a human decides —
+  `/pb:build --review` for one more round or `--force` to build it as it
+  stands. And every acceptance line names its proof, so uncovered lines can't
+  slip to review unnoticed (prose that can't be tested says so, and never
+  blocks).
 - **Fresh eyes where they pay.** The reviewer never saw the build's reasoning,
   and judges the spec too: a faithful build of a wrong plan is still wrong. It
   reports findings through a tool; a second fresh call double-checks the
@@ -235,7 +239,7 @@ the existing ones still run.
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
 | `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always`, asked for after the spec pass; `off`) |
-| `specReviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. Point it at `buildModel` to have the implementer model validate the plan |
+| `specReviewer` | `{"mode": "auto", "maxRounds": 2}` | `{"model": "provider/id", "thinking": "high", "mode": "auto", "maxRounds": 2}` for the fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. `mode`: `auto` reviews risky specs (security, persisted data or a migration, external surfaces, threats, 4+ tasks), `always` every spec, `off` none (an earlier blocking review still waits for `--review` or `--force`); `maxRounds` caps automatic blocking rounds before a human decides. Point it at `buildModel` to have the implementer model validate the plan |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |

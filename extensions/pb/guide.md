@@ -17,10 +17,11 @@ step Pi shows a short **What now** block; `/pb:help <topic>` posts any section b
 2. **`/pb:build`**: first it asks, while you're here, how to go on once the
    spec is written: build here, build in a fresh session, or show you the spec
    first. Then Pi writes a short **spec** from the discussion (goal, findings,
-   decisions, tasks); the build reviews the spec itself before the first task —
-   fresh eyes, read-only — and any finding stops it for you to read: P0/P1 to
-   amend or rebut, P2/P3 to decide on (see `/pb:help spec`). Run `/pb:build`
-   again to go on. A clean review starts by itself, so you can walk away. The
+   decisions, tasks); a risky spec gets a review of its own before the first
+   task — fresh eyes, read-only — and a P0/P1 stops it for you to amend or
+   rebut; P2/P3 are shown and the build goes on (see `/pb:help spec`). Run
+   `/pb:build` again to go on after a block. A clean or advisory-only review
+   starts by itself, so you can walk away. The
    tasks then run one by one, and the harness runs the full test suite after the
    last one; a failure goes back to Pi to fix.
 3. **`/pb:review`**: a fresh reviewer compares the change with the spec and
@@ -275,7 +276,8 @@ New tests: yes                 (or: no — why)
 
 Then the sections:
 
-- **Goal.**
+- **Goal**: the outcome in a few sentences — what is true after the change,
+  for whom, and how you'll know it worked; no implementation.
 - **Findings**: what the analysis established, so nobody redoes it: the files
   and classes involved and their roles, the code to imitate (by path and lines,
   not pasted), constraints, the test command and baseline. A `path:line` must
@@ -356,26 +358,37 @@ shown in the session for later. Shown first, you choose: build here, build in a
 fresh session, **edit the spec first** (in an editor; it's saved only when it
 still parses, and the build then gets your version), or not now.
 
-**Before the first task, the spec gets a review of its own.** A build runs one
-whenever the current text hasn't passed: a fresh, read-only pass that attacks
-every Decision, re-tests each "Not doing X" rejection, flags unmeasured
-numbers and undefined empty paths, and checks the spec against the repo: that
-its `path:line` citations and test commands resolve, that external surfaces have
-Contracts, and that persisted-data changes have a Migration and rollback answer.
-It runs on your session's model by default; set
+**Before the first task, a risky spec gets a review of its own.** A build runs
+one when the spec touches a security-sensitive surface, carries Threats,
+persists data or carries a migration, changes an external contract, or has four or more tasks. Small,
+reversible specs skip it and rely on the write-time checks and your read:
+`/pb:build --review` asks for the pass anyway, and
+`"specReviewer": {"mode": "always"}` reviews every spec (`"off"` never
+starts one, though a spec an earlier review blocked still waits for `--review`
+or `--force`).
+The pass is fresh and read-only: it attacks every Decision, re-tests each "Not
+doing X" rejection, flags unmeasured numbers and undefined empty paths, and
+checks the spec against the repo: that its `path:line` citations and test
+commands resolve, that external surfaces have Contracts, and that
+persisted-data changes have a Migration and rollback answer. It runs on your
+session's model by default; set
 `"specReviewer": {"model": "provider/id"}` (or point it at `buildModel`) when
-you want another model, such as the implementer, to validate the plan. Any
-finding stops the build before the first task so you can read it. A P0 or P1
-means amend the spec (or record a
-rebuttal in Decisions) and run `/pb:build` again: the next pass judges each
-earlier finding against the new text before it looks at the rest, and it
-keeps stopping until it passes. P2/P3 are advisory: amend the spec if you
-agree and the next pass judges the change, or run `/pb:build` again
-unchanged — the recorded pass covers that text, so the build starts at T1
-without re-reviewing. `/pb:build --force` builds the spec as it stands
-instead, recording the skip (with any standing findings) as accepted. Only
-the way into a build is gated: once the first task has started, spec edits
-are the code reviewer's to judge, not re-reviewed at plan level.
+you want another model, such as the implementer, to validate the plan.
+
+Only a P0 or P1 stops the build before the first task; P2/P3 are shown and the
+build carries on, with the findings recorded beside the spec. A block means
+amend the spec (or record a rebuttal in Decisions) and run `/pb:build` again:
+the next pass reviews only the changed sections and tasks, against the full
+spec and the earlier findings, and judges each earlier P0/P1 against the new
+text first. An unchanged blocked spec is re-posted, not re-reviewed. After
+`maxRounds` blocking rounds (2 by default) the loop stops and the next changed
+spec waits for you: `/pb:build --review` spends one more round, or
+`/pb:build --force` builds it as it stands and records the standing findings as
+accepted. A block whose answer cannot be parsed is reformatted once; if that
+fails too, the reviewer's own prose is shown and nothing re-runs until you
+amend or ask with `--review`. Only the way into a build is gated: once the
+first task has started, spec edits are the code reviewer's to judge, not
+re-reviewed at plan level.
 
 **Read the plan yourself, in this order.** The spec reviewer is a second pair
 of eyes, not a substitute for yours:
@@ -430,12 +443,13 @@ more than half full (`freshAbove`) or when `buildModel` names another model
 model, uncached); `/pb:build --fresh` asks for one directly: a new session
 named "build: <spec>", seeded with the spec, on your model and thinking level.
 
-Before the first task, the spec gets its own fresh-eyes review (see
-`/pb:help spec`): any finding stops the build there for you to read, and
-`/pb:build --force` builds it as it stands instead. The implementer then
-checks the spec's paths, interfaces and test commands against the repo before
-coding; a spec that cannot be built as written stops instead of being worked
-around.
+Before the first task, a risky spec gets its own fresh-eyes review (see
+`/pb:help spec`): P0/P1 findings stop the build there for you to read, P2/P3
+are shown and carried, and `/pb:build --review` asks for a pass that would be
+skipped. `/pb:build --force` builds it as it stands instead. The implementer
+then checks the spec's paths, interfaces and test commands against the repo
+before coding; a spec that cannot be built as written stops instead of being
+worked around.
 
 1. **The tasks.** Each task is built the same way: tests first, then the
    behaviour, then `pb_task_done` — reporting what changed plus the caveats,
@@ -462,8 +476,8 @@ its own, which slices work unnaturally and costs a run per task. With `"end"`
 each task is still compiled when done (when a compile command exists), and the
 final gate additionally runs `lint` and `extraChecks` when configured.
 
-The spec's Goal, Decisions, Contracts and Acceptance bind the build: changing
-one takes a `pb_ask`. How to build it is the build's: a better way found while
+The spec's Goal, Decisions, Contracts, Threats and Acceptance bind the build:
+changing one takes a `pb_ask`. How to build it is the build's: a better way found while
 coding is taken, and a change to the Design goes in Decisions. Where
 the spec is ambiguous, contradicts itself or doesn't match the code, Pi takes
 the sensible reading, records it in the spec's Decisions as an **assumption**,
@@ -802,7 +816,7 @@ model call).
 **What now** — the spec is written, nothing is built yet
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
-- Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — the build reviews the spec first: a finding stops it before the first task · more: `/pb:help spec`
+- Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — risky specs are reviewed first: a P0/P1 stops it before the first task · more: `/pb:help spec`
 <!-- /pb -->
 
 ### Build paused

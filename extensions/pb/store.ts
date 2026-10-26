@@ -54,9 +54,12 @@ export interface Config {
   /**
    * The fresh spec reviewer before T1: model and thinking level (unset model = your session's;
    * unset thinking = Pi's default for that model). Point it at the build model when you want the
-   * plan checked by the model that will implement it.
+   * plan checked by the model that will implement it. `mode` decides when it runs: "auto" reviews
+   * security-sensitive, persisted-data, external-surface, threat-laden and large specs (the default),
+   * "always" reviews every spec, and "off" skips the automatic pass. `maxRounds` caps automatic
+   * blocking rounds: after that, a human decides instead of the loop reviewing forever.
    */
-  specReviewer: { model?: string; thinking?: string };
+  specReviewer: { model?: string; thinking?: string; mode: "auto" | "always" | "off"; maxRounds: number };
   /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
   freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
@@ -99,7 +102,7 @@ export const DEFAULT_CONFIG: Config = {
   testOutputCap: 4000,
   checkpoints: true,
   reviewer: { verify: true, security: "auto" },
-  specReviewer: {},
+  specReviewer: { mode: "auto", maxRounds: 2 },
   freshAbove: 50,
   baseline: true,
   explorer: {},
@@ -117,6 +120,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
   const specReviewerRaw = typeof raw.specReviewer === "object" && raw.specReviewer !== null ? raw.specReviewer : {};
   const explorerRaw = typeof raw.explorer === "object" && raw.explorer !== null ? raw.explorer : {};
   const security = (reviewerRaw as { security?: unknown }).security;
+  const reviewMode = (specReviewerRaw as { mode?: unknown }).mode;
   return {
     verify: strOrNull((raw as { verify?: unknown }).verify, DEFAULT_CONFIG.verify),
     build: strOrNull((raw as { build?: unknown }).build, DEFAULT_CONFIG.build),
@@ -142,6 +146,8 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     specReviewer: {
       model: typeof (specReviewerRaw as { model?: unknown }).model === "string" ? (specReviewerRaw as { model: string }).model : undefined,
       thinking: typeof (specReviewerRaw as { thinking?: unknown }).thinking === "string" ? (specReviewerRaw as { thinking: string }).thinking : undefined,
+      mode: reviewMode === "auto" || reviewMode === "always" || reviewMode === "off" ? reviewMode : "auto",
+      maxRounds: Math.max(1, Math.floor(num((specReviewerRaw as { maxRounds?: unknown }).maxRounds, DEFAULT_CONFIG.specReviewer.maxRounds))),
     },
     freshAbove: num((raw as { freshAbove?: unknown }).freshAbove, DEFAULT_CONFIG.freshAbove),
     baseline: bool((raw as { baseline?: unknown }).baseline, true),
@@ -202,11 +208,25 @@ export type Phase = "written" | "building" | "paused" | "built" | "reviewed";
 export type Priority = "P0" | "P1" | "P2" | "P3";
 
 export interface Finding {
+  /** stable spec-review id assigned by the harness (F1, F2, …); absent elsewhere */
+  id?: string;
   priority: Priority;
   file?: string;
   line?: number;
   title: string;
   fix?: string;
+  /** a delta review's pre-existing problem, outside the change under review; only an outside P0 blocks */
+  outside?: boolean;
+}
+
+/** A follow-up spec review's verdict on one earlier P0/P1 finding. */
+export interface SpecResolution {
+  id: string;
+  status: "resolved" | "open";
+  evidence: string;
+  /** the earlier finding, carried here so a resolved row still reads on its own */
+  title?: string;
+  priority?: Priority;
 }
 
 /** One acceptance criterion's review result. A criterion left out is never `met`. */
@@ -967,13 +987,18 @@ export class Store {
     fs.rmSync(legacy, { force: true });
   }
   private pendingBuildTTL = 60 * 60_000;
-  setPendingBuild(sessionFile: string | undefined): void {
+  setPendingBuild(sessionFile: string | undefined, o: { review?: boolean } = {}): void {
     this.migratePendingBuilds();
     if (!sessionFile) {
       fs.rmSync(this.pendingBuildsDir(), { recursive: true, force: true });
       return;
     }
-    writeFile(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: Date.now() }, null, 2)}\n`);
+    writeFile(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: Date.now(), ...(o.review ? { review: true } : {}) }, null, 2)}\n`);
+  }
+  /** Whether the pending build was asked for with --review. */
+  pendingBuildReview(sessionFile: string | undefined): boolean {
+    if (!sessionFile) return false;
+    return readJson<{ review?: unknown }>(this.pendingBuildFile(sessionFile))?.review === true;
   }
   pendingBuild(sessionFile: string | undefined): boolean {
     if (!sessionFile) return false;

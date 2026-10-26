@@ -56,7 +56,9 @@ import {
   reviewerBrief,
   reportRegister,
   specPrompt,
+  specRepairBrief,
   specReviewBrief,
+  SPEC_REPAIR_SYSTEM,
   SPEC_REVIEWER_SYSTEM,
   parseSpecReview,
   taskPrompt,
@@ -65,10 +67,10 @@ import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SPEC_NAME, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewGate, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
+import { type ParsedSpec, SPEC_NAME, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, ensureSpecIds, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type SpecResolution, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
 import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -543,6 +545,24 @@ export default function pb(pi: ExtensionAPI) {
     const store = new Store(ctx.cwd);
     const name = store.specForSession(ctx.sessionManager.getSessionFile());
     return { store, name, progress: name ? store.progress(name) : undefined };
+  };
+
+  /**
+   * The build these tools can record into, or why there is none: no build in this session,
+   * or one that is paused, finished or not started. Both tools refuse before touching state.
+   */
+  const buildOfSession = (ctx: ExtensionContext) => {
+    const { store, progress } = specOfSession(ctx);
+    if (!progress) throw new Error("No pb build is running in this session.");
+    if (progress.phase === "building") return { store, progress };
+    const name = progress.spec;
+    if (progress.phase === "paused")
+      throw new Error(
+        `The build of ${name} is paused${progress.current ? ` at ${progress.current}` : ""}: the human decides how to go on. To resume it, run /${cmd("build")} ${name}.`,
+      );
+    if (progress.phase === "built") throw new Error(`The build of ${name} is finished, so there is nothing to record. To review it, run /${cmd("review")} ${name}.`);
+    if (progress.phase === "reviewed") throw new Error(`The build of ${name} is finished and reviewed, so there is nothing left to record.`);
+    throw new Error(`The build of ${name} has not started. Run /${cmd("build")} ${name} to start it.`);
   };
 
   const unfinishedPhase = (phase?: string) => ["building", "paused"].includes(phase ?? "");
@@ -1154,8 +1174,7 @@ export default function pb(pi: ExtensionAPI) {
     }),
     executionMode: "sequential",
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const { store, progress: p } = specOfSession(ctx);
-      if (!p || p.phase !== "building") throw new Error("No pb build is running in this session.");
+      const { store, progress: p } = buildOfSession(ctx);
       if (params.task !== p.current) throw new Error(`The current task is ${p.current ?? "none"}, not ${params.task}.`);
       const tp = p.tasks.find((t) => t.id === p.current);
       const blank = (v: unknown) => typeof v !== "string" || !v.trim();
@@ -1219,8 +1238,7 @@ export default function pb(pi: ExtensionAPI) {
     }),
     executionMode: "sequential",
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const { store, progress: p } = specOfSession(ctx);
-      if (!p || p.phase !== "building") throw new Error("No pb build is running in this session.");
+      const { store, progress: p } = buildOfSession(ctx);
       if (params.task !== p.current) throw new Error(`The current task is ${p.current ?? "none"}, not ${params.task}.`);
       const spec = loadSpec(store, p.spec)?.spec;
       const task = spec?.tasks.find((t) => t.id === p.current);
@@ -2559,22 +2577,36 @@ export default function pb(pi: ExtensionAPI) {
    * Fresh eyes on the plan before the first task: a spec-sized review that attacks Decisions,
    * re-tests "Not doing X" rejections and flags unmeasured quantitative claims. A pass covers
    * exactly the text it saw, hash and all, on its {type:"spec-review"} event: a later start
-   * re-runs it when the text changed (the earlier findings first, to judge), re-posts a standing
-   * block instead of re-running, and --force skips it as recorded acceptance. Only the way into a
-   * build gates; resumes after T1 started never do, however the spec has changed since.
+   * reviews only the changed sections and tasks, re-posts a standing block instead of re-running,
+   * repairs one unparseable block rather than re-reviewing, and --force skips it as recorded
+   * acceptance. Only the way into a build gates; resumes after T1 started never do, however the
+   * spec has changed since.
    */
-  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string, prior: Finding[] = []): Promise<{ findings: Finding[]; block: boolean; session?: string }> => {
+  const runSpecReview = async (
+    ctx: ExtensionContext,
+    store: Store,
+    name: string,
+    md: string,
+    o: { prior?: Finding[]; advisory?: Finding[]; priorMarkdown?: string; nextId?: number; round?: number; because?: string } = {},
+  ): Promise<{ findings: Finding[]; advisory: Finding[]; outside: Finding[]; resolutions: SpecResolution[]; block: boolean; unparsed: boolean; prose?: string; session?: string }> => {
     const hash = specHash(md);
     const cfg = store.config();
     const cwd = ctx.cwd;
     const reviewModel = cfg.specReviewer.model ?? sessionModel(ctx);
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    const carried = ensureSpecIds([...(o.prior ?? []), ...(o.advisory ?? [])]);
+    const prior = carried.findings.filter(specReviewBlocks);
+    const priorAdvisory = carried.findings.filter((f) => !specReviewBlocks(f));
+    let next = Math.max(carried.next, o.nextId ?? 1);
+    const followUp = o.priorMarkdown !== undefined || prior.length > 0 || priorAdvisory.length > 0;
+    const round = o.round ?? (followUp ? 2 : 1);
     // The reviewer gets bash for inspection but must leave the project untouched, like the
     // explorer: snapshot before and put back afterwards, so a stray write can't leak into the build.
     const reviewBefore = snapshot(cwd, "pb: before spec-review");
     // The review runs as a separate process and reaches the chat only as a verdict, so
     // while it works the session announces it and the widget shows it live: the last tool
     // call, and a heartbeat counting seconds between calls — a slow run must not read as a hang.
-    post(`▶ **Spec review** — a fresh reviewer attacks **${name}** before T1; the verdict lands here.`);
+    post(`▶ **Spec review** — a fresh reviewer attacks **${name}** before T1${o.because ? ` (${o.because})` : ""}; the verdict lands here.`);
     const started = Date.now();
     let lastStep: string | undefined;
     const paint = () =>
@@ -2584,13 +2616,15 @@ export default function pb(pi: ExtensionAPI) {
     paint();
     const beat = watchable(ctx) ? setInterval(paint, 1000) : undefined;
     let res: Awaited<ReturnType<typeof runFresh>>;
+    let parsed: ReturnType<typeof parseSpecReview>;
+    let repaired = false;
     try {
       res = await runFresh({
         cwd,
         role: "spec-review",
         systemPrompt: SPEC_REVIEWER_SYSTEM,
-        brief: specReviewBrief(name, md, prior),
-        prompt: prior.length ? "Review the spec again in the attached file, judging the earlier findings first." : "Review the spec in the attached file.",
+        brief: specReviewBrief(name, md, { prior, priorMarkdown: o.priorMarkdown, advisory: priorAdvisory, round }),
+        prompt: followUp ? "Review the spec again in the attached file. Resolve every earlier P0/P1 by id first, then report only new or changed findings." : "Review the spec in the attached file.",
         tools: ["read", "grep", "find", "ls", "bash"],
         model: reviewModel,
         thinking: cfg.specReviewer.thinking,
@@ -2601,15 +2635,112 @@ export default function pb(pi: ExtensionAPI) {
           paint();
         },
       });
+      parsed = res.text.trim()
+        ? parseSpecReview(res.text)
+        : // A run that returns no answer is not a pass: fail closed with its error as the prose.
+          { findings: [], outside: [], resolutions: [], block: true };
+      // A block with nothing parseable is a format failure, not a reason to spend a full review
+      // again: one cheap reformat of the same words, then the human sees the prose if that fails.
+      const known = parsed.findings.length || parsed.outside.length || parsed.resolutions.length;
+      if (parsed.block && !known && !!res.text.trim()) {
+        lastStep = "reformatting the verdict";
+        paint();
+        try {
+          const fix = await runFresh({
+            cwd,
+            role: "spec-repair",
+            systemPrompt: SPEC_REPAIR_SYSTEM,
+            brief: specRepairBrief({ name, answer: cap(res.text, 12000), prior }),
+            prompt: "Reformat the reviewer's answer in the attached file; do not review the spec again.",
+            tools: [],
+            model: reviewModel,
+            thinking: "off",
+            maxConcurrent: cfg.maxConcurrent,
+            sessionDir: store.sessionsDir("spec-review"),
+          });
+          const formatted = parseSpecReview(fix.text);
+          // Only a reformat that still blocks can stand in for a block: a repair that turns the
+          // reviewer's words into a pass has lost the verdict, not read it.
+          if (formatted.block && (formatted.findings.length || formatted.outside.length || formatted.resolutions.length)) {
+            parsed = formatted;
+            repaired = true;
+          }
+        } catch {
+          // The repair is a convenience; its failure leaves the original prose to show.
+        }
+      }
     } finally {
       if (beat !== undefined) clearInterval(beat);
       safely(() => ctx.ui.setWidget("pb-spec-review", undefined));
       revertFreshRun(cwd, (m) => warnLater(ctx, m), "the spec reviewer", reviewBefore, snapshot(cwd, "pb: after spec-review"));
     }
     const session = res.sessionFile;
-    const parsed = parseSpecReview(res.text);
-    store.event(name, { type: "spec-review", verdict: parsed.block ? "block" : "pass", findings: parsed.findings.length, reported: parsed.findings, hash, followUp: prior.length > 0, model: reviewModel, thinking: cfg.specReviewer.thinking, session });
-    return { ...parsed, session };
+    const answer = res.text.trim() || res.error || "";
+    const unparsed = parsed.block && !parsed.findings.length && !parsed.outside.length && !parsed.resolutions.length;
+    const byId = new Map(parsed.resolutions.map((r) => [r.id, r]));
+    const reReported = new Set([...parsed.findings, ...parsed.outside].map((f) => norm(f.title)));
+    const resolutions: SpecResolution[] = [];
+    const reported: Finding[] = [];
+    for (const f of prior) {
+      const id = f.id!;
+      const reply = byId.get(id);
+      const evidence = reply?.evidence.trim() ?? "";
+      // A resolution that is missing, empty, or contradicted by the same finding under
+      // Findings is still open. Silence never clears an earlier blocker.
+      const repeated = reReported.has(norm(f.title));
+      const resolved = reply?.status === "resolved" && evidence.length > 0 && !repeated;
+      resolutions.push({
+        id,
+        status: resolved ? "resolved" : "open",
+        evidence: repeated ? "Re-reported as a new finding; the earlier problem is not gone." : evidence || "No resolution reported.",
+        title: f.title,
+        priority: f.priority,
+      });
+      if (!resolved) reported.push(f);
+    }
+    const blockerTitles = new Map(prior.map((f) => [norm(f.title), f]));
+    const advisoryTitles = new Map(priorAdvisory.map((f) => [norm(f.title), f]));
+    const escalated = new Set<string>();
+    const accepted: Finding[] = [];
+    const add = (f: Finding, outside: boolean) => {
+      const key = norm(f.title);
+      if (blockerTitles.has(key)) return; // already represented by its resolution or open entry
+      const oldAdvisory = advisoryTitles.get(key);
+      if (oldAdvisory) {
+        if (f.priority !== "P0" && f.priority !== "P1") return; // carried, not new
+        escalated.add(oldAdvisory.id!); // the change made it blocking: report it under its new id
+      }
+      accepted.push({ ...f, id: `F${next++}`, ...(outside ? { outside: true } : {}) });
+    };
+    for (const f of parsed.findings) add(f, false);
+    for (const f of parsed.outside) add(f, true);
+    reported.push(...accepted);
+    const outside = accepted.filter((f) => f.outside);
+    const advisory = [...priorAdvisory.filter((f) => !escalated.has(f.id!)), ...outside.filter((f) => f.priority !== "P0")];
+    const block =
+      resolutions.some((r) => r.status === "open") ||
+      reported.some(specReviewBlocks) ||
+      unparsed;
+    store.event(name, {
+      type: "spec-review",
+      verdict: block ? "block" : "pass",
+      findings: reported.length,
+      reported,
+      advisory,
+      resolutions,
+      markdown: md,
+      hash,
+      followUp,
+      round,
+      nextId: next,
+      repaired: repaired || undefined,
+      unparsed: unparsed || undefined,
+      prose: unparsed ? cap(answer, 12000) : undefined,
+      model: reviewModel,
+      thinking: cfg.specReviewer.thinking,
+      session,
+    });
+    return { findings: reported, advisory, outside, resolutions, block, unparsed, prose: unparsed ? cap(answer, 12000) : undefined, session };
   };
 
   const startBuild = async (
@@ -2617,7 +2748,7 @@ export default function pb(pi: ExtensionAPI) {
     store: Store,
     name: string,
     fresh: boolean,
-    o: { decided?: boolean; checked?: boolean; notes?: string[]; force?: boolean } = {},
+    o: { decided?: boolean; checked?: boolean; notes?: string[]; force?: boolean; review?: boolean } = {},
   ): Promise<void> => {
     const notes = o.notes ?? [];
     const checked = await preBuildChecks(ctx, store, name, o);
@@ -2626,28 +2757,78 @@ export default function pb(pi: ExtensionAPI) {
 
     // The review gates only the way into a build: once T1 has started, the spec changes as the
     // build runs (Design, Decisions) and a resume or restart must not re-litigate those.
-    // Findings of any priority stop the build here, so the review is read before anything builds.
+    // Only an in-scope P0/P1 or an outside P0 blocks; every other finding is advisory and never
+    // pauses the build. "auto" skips the first review of a low-risk spec but never the resolution
+    // of an earlier block; the round cap stops the automatic loop so a human decides. --review asks
+    // for a round the gate would skip; --force accepts the standing findings instead.
     const phase = store.progress(name)?.phase ?? "written";
     if (phase === "written") {
       const hash = specHash(md);
-      const gate = specReviewGate(readEvents(path.join(store.specDir(name), "events.jsonl")), hash);
+      const gate = specReviewGate(readEvents(path.join(store.specDir(name), "events.jsonl")), hash, cfg.specReviewer.maxRounds);
+      const carried = gate.action === "review" || gate.action === "manual" ? gate : undefined;
+      const risk = specReviewRisk(md, spec);
+      const mode = cfg.specReviewer.mode;
+      const continuing = !!carried && (carried.prior.length > 0 || carried.blockingRounds > 0);
+      const automatic = mode === "always" || (mode === "auto" && risk.review) || continuing;
+      const line = (f: Finding, i: number) => `${findingLine(f, i + 1)}${f.outside ? "\n   Outside the change: a pre-existing problem, not caused by this revision." : ""}`;
       if (o.force && gate.action !== "skip") {
-        const accepted = gate.action === "repost" ? gate.findings : [];
-        store.event(name, { type: "spec-review", verdict: "forced", hash, findings: accepted.length, reported: accepted });
+        // Accepting the standing findings is part of what --force records: the next reader can
+        // see what was overridden, not just that a review was skipped.
+        const accepted = gate.action === "repost" ? gate.findings : gate.prior;
+        const acceptedAdvisory = gate.advisory;
+        store.event(name, { type: "spec-review", verdict: "forced", hash, findings: accepted.length, reported: accepted, advisory: acceptedAdvisory });
         post(
           accepted.length
             ? `**Spec review forced** — building the spec as it stands; ${accepted.length} standing finding${accepted.length === 1 ? "" : "s"} recorded as accepted.`
             : "**Spec review forced** — building the spec without a review of this text.",
         );
       } else if (gate.action === "repost") {
-        post(`**Spec review** — changes needed before T1 (the spec is unchanged since that review):\n${gate.findings.map((f, i) => findingLine(f, i + 1)).join("\n")}`);
+        const carriedNote = gate.advisory.length ? `\n\n${gate.advisory.length} earlier advisory finding${gate.advisory.length === 1 ? "" : "s"} carried (not re-listed).` : "";
+        post(`**Spec review** — changes needed before T1 (the spec is unchanged since that review):\n${gate.findings.map(line).join("\n")}${carriedNote}`);
         ctx.ui.notify(
           `Spec review still blocks T1: the spec hasn't changed since it was reviewed. Amend it (or record a rebuttal in Decisions) and rebuild — the next pass judges your change; /${cmd("build")} --force builds it as it stands.`,
           "warning",
         );
         return;
-      } else if (gate.action === "review") {
-        const review = await runSpecReview(ctx, store, name, md, gate.prior);
+      } else if (gate.action === "manual" && !o.review) {
+        // The automatic loop has reached its end: a cap needs a human decision, and an unreadable
+        // block shows the reviewer's own words instead of spending a full review again.
+        const standing = gate.prior.length ? gate.prior.map(line).join("\n") : "The reviewer's answer could not be read as findings.";
+        const prose = gate.prose?.trim() ? `\n\n${gate.prose.trim()}` : "";
+        post(gate.reason === "cap" ? `**Spec review** — ${gate.blockingRounds} blocking rounds; it is your call now:\n${standing}${prose}` : `**Spec review** — blocked without a parseable finding:\n${standing}${prose}`);
+        ctx.ui.notify(
+          gate.reason === "cap"
+            ? `Spec review stopped after ${gate.blockingRounds} blocking rounds: amend the spec and /${cmd("build")} --review for one more round, or /${cmd("build")} --force to build it as it stands.`
+            : `Spec review blocked without a parseable finding: amend the spec and /${cmd("build")} --review for a fresh review, or /${cmd("build")} --force to build it as it stands.`,
+          "warning",
+        );
+        return;
+      } else if (mode === "off" && gate.action === "review" && continuing && !o.review) {
+        // Review is off, but an earlier review already blocked this spec: silence must not clear it.
+        post(`**Spec review is off** — an earlier review left standing findings, so this is your call:\n${gate.prior.map(line).join("\n") || "The earlier review left blocking findings."}`);
+        ctx.ui.notify(
+          `Spec review is off, but ${name} has standing blocking findings: /${cmd("build")} --review runs one review, or /${cmd("build")} --force builds it as it stands.`,
+          "warning",
+        );
+        return;
+      } else if (o.review || (gate.action === "review" && automatic)) {
+        const review = await runSpecReview(ctx, store, name, md, {
+          ...(carried
+            ? {
+                prior: carried.prior,
+                advisory: carried.advisory,
+                priorMarkdown: carried.markdown,
+                nextId: carried.nextId,
+                round: carried.round,
+                because:
+                  gate.action === "manual"
+                    ? gate.reason === "cap"
+                      ? `requested with --review, past the ${cfg.specReviewer.maxRounds}-round cap`
+                      : "requested with --review"
+                    : undefined,
+              }
+            : { because: "requested with --review" }),
+        });
         if (sessionGone(ctx)) return; // replaced while it ran: the verdict is recorded, rerunning resumes from it
         if (store.readSpec(name) !== md) {
           ctx.ui.notify(`The spec changed while it was under review: run /${cmd("build")} again and the new text will be reviewed.`, "warning");
@@ -2656,6 +2837,14 @@ export default function pb(pi: ExtensionAPI) {
         // The run's transcript is kept with the spec's sessions: linked here, so the words
         // behind the verdict stay reachable. The notification covers you being elsewhere.
         const sessionNote = review.session ? `\n\nThe whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
+        const resolutionNote = review.resolutions.length
+          ? `Earlier findings:\n${review.resolutions
+              .map(
+                (r) =>
+                  `- ${r.id}${r.priority ? ` [${r.priority}]` : ""}${r.title ? ` ${r.title}` : ""} — ${r.status === "resolved" ? "RESOLVED" : "STILL OPEN"}: ${r.evidence}`,
+              )
+              .join("\n")}\n\n`
+          : "";
         if (cfg.notify)
           notifyDesktop(
             "pb: spec review",
@@ -2663,15 +2852,30 @@ export default function pb(pi: ExtensionAPI) {
               ? "changes needed before T1"
               : review.findings.length
                 ? `${review.findings.length} advisory finding${review.findings.length === 1 ? "" : "s"}`
-                : "pass, no findings",
+                : review.advisory.length
+                  ? "pass, no new findings"
+                  : "pass, no findings",
           );
-        if (review.block || review.findings.length) {
-          const body = review.findings.length
-            ? review.findings.map((f, i) => findingLine(f, i + 1)).join("\n")
-            : "The reviewer blocked without a parseable finding — read the run below.";
-          post(`**Spec review** — ${review.block ? "changes needed before T1" : "advisory findings"}:\n${body}${sessionNote}`);
+        if (review.block) {
+          const blocking = review.findings.filter(specReviewBlocks);
+          const newAdvisory = review.findings.filter((f) => !specReviewBlocks(f));
+          const body = blocking.length
+            ? blocking.map(line).join("\n")
+            : `The reviewer blocked without a parseable finding.${review.prose?.trim() ? `\n\n${review.prose.trim()}` : ""}`;
+          const advisoryNote = newAdvisory.length
+            ? `\n\nNew advisory findings (not blocking):\n${newAdvisory.map(line).join("\n")}`
+            : "";
+          post(`**Spec review** — changes needed before T1:\n${resolutionNote}${body}${advisoryNote}${sessionNote}`);
+        } else if (review.findings.length) {
+          const body = review.findings.map(line).join("\n");
+          post(`**Spec review** — advisory findings:\n${resolutionNote}${body}${sessionNote}`);
+        } else if (review.advisory.length) {
+          // Carried P2/P3 are context, not fresh findings: do not re-list them.
+          post(
+            `**Spec review** — pass, no new findings. ${review.advisory.length} earlier advisory finding${review.advisory.length === 1 ? "" : "s"} carried (not re-listed); the recorded pass covers this text.${resolutionNote ? `\n\n${resolutionNote.trimEnd()}` : ""}${sessionNote}`.trimEnd(),
+          );
         } else {
-          post(`**Spec review** — pass, no findings (the recorded pass covers this text).${sessionNote}`);
+          post(`**Spec review** — pass, no findings (the recorded pass covers this text).${resolutionNote ? `\n\n${resolutionNote.trimEnd()}` : ""}${sessionNote}`.trimEnd());
         }
         if (review.block) {
           ctx.ui.notify(
@@ -2680,14 +2884,12 @@ export default function pb(pi: ExtensionAPI) {
           );
           return;
         }
-        // Advisory findings pause here too: the point is to read the review before anything builds.
-        if (review.findings.length) {
+        // Advisory findings are recorded with the spec and shown here; they never hold up the build.
+        if (review.findings.length)
           ctx.ui.notify(
-            `Spec review passed with ${review.findings.length} advisory finding${review.findings.length === 1 ? "" : "s"}: read them, then /${cmd("build")} again to build as it stands (the recorded pass covers this text, so nothing is re-reviewed), or amend the spec and let the next pass judge the change.`,
-            "warning",
+            `Spec review passed with ${review.findings.length} advisory finding${review.findings.length === 1 ? "" : "s"} (shown above): building now; they stay recorded with the spec.`,
+            "info",
           );
-          return;
-        }
       }
     }
 
@@ -2849,7 +3051,7 @@ export default function pb(pi: ExtensionAPI) {
    * except pb_ask questions, which go on with the recommendation after askTimeoutSec.
    */
   const specWriting = new Set<string>();
-  const specThenBuild = async (ctx: ExtensionCommandContext, store: Store, marker: string, prompt: string, force = false) => {
+  const specThenBuild = async (ctx: ExtensionCommandContext, store: Store, marker: string, prompt: string, force = false, review = false) => {
     const session = ctx.sessionManager.getSessionFile();
     const { cfg, testCmd } = commands(ctx.cwd, store);
     const notes: string[] = [];
@@ -2867,7 +3069,7 @@ export default function pb(pi: ExtensionAPI) {
     const choice = await choose(ctx, store, "Pi writes the spec first. Then?", options, options[0], notes);
     if (!choice) return;
     if (choice === SHOW) {
-      store.setPendingBuild(session);
+      store.setPendingBuild(session, { review });
       return instruct(marker, `${prompt}\n\nAfter writing it, stop: the harness shows it to me and asks whether to build.`);
     }
 
@@ -2891,7 +3093,7 @@ export default function pb(pi: ExtensionAPI) {
     const ready = readySpecs(store, session, since);
     if (!ready.length) {
       // A question in chat, or the spec isn't ready yet: pb offers the build once it is.
-      store.setPendingBuild(session);
+      store.setPendingBuild(session, { review });
       const finished = store.specNames().filter((n) => {
         const p = store.progress(n);
         return !!p && p.writtenIn === session && ["built", "reviewed"].includes(p.phase ?? "");
@@ -2904,7 +3106,7 @@ export default function pb(pi: ExtensionAPI) {
     const dry = await dryRunTests(ctx, store, ready[0]);
     if (sessionGone(ctx)) return; // replaced during the dry run: a later /pb:build still offers the spec
     showSpec(store, ready[0], ready, dry);
-    await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes, force });
+    await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes, force, review });
   };
 
   /** After /pb:build asked for the spec: once it's written, show it and ask how to go on. */
@@ -2912,6 +3114,7 @@ export default function pb(pi: ExtensionAPI) {
     const store = new Store(ctx.cwd);
     const session = ctx.sessionManager.getSessionFile();
     if (!store.pendingBuild(session)) return false;
+    const review = store.pendingBuildReview(session);
     const names = readySpecs(store, session);
     if (!names.length) return true; // still talking (e.g. a question before writing): keep waiting
     if (session) store.clearPendingBuild(session);
@@ -2922,7 +3125,7 @@ export default function pb(pi: ExtensionAPI) {
     const dry = await dryRunTests(ctx, store, name);
     if (sessionGone(ctx)) {
       // Replaced during the dry run: offer again on a later turn instead of dying mid-offer.
-      if (session) store.setPendingBuild(session);
+      if (session) store.setPendingBuild(session, { review });
       return true;
     }
     showSpec(store, name, names, dry);
@@ -2944,15 +3147,15 @@ export default function pb(pi: ExtensionAPI) {
       const choice = await choose(ctx, store, `Build ${name} now? ${spec.tasks.length} tasks`, preferFresh ? [FRESH, HERE, EDIT, LATER] : [HERE, FRESH, EDIT, LATER], HERE, notes);
       if (sessionGone(ctx)) {
         // Replaced while deciding: offer again on a later turn instead of dying mid-offer.
-        if (session) store.setPendingBuild(session);
+        if (session) store.setPendingBuild(session, { review });
         return true;
       }
       if (choice === EDIT) {
         await editSpec(ctx, store, name);
         continue;
       }
-      if (choice === HERE) await startBuild(ctx, store, name, false, { decided: true, notes });
-      else if (choice === FRESH) await startBuild(ctx, store, name, true, { decided: true, notes });
+      if (choice === HERE) await startBuild(ctx, store, name, false, { decided: true, notes, review });
+      else if (choice === FRESH) await startBuild(ctx, store, name, true, { decided: true, notes, review });
       else post(tip("spec.next"));
       return true;
     }
@@ -3004,14 +3207,15 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   pi.registerCommand(cmd("build"), {
-    description: "Build the planned feature here, task by task, each checked (writes the spec first if there isn't one). --fresh builds in a new session, --force builds an unreviewed spec as it stands. In a paused build: continue, optionally with guidance",
-    getArgumentCompletions: (prefix: string) => [{ value: "--fresh", label: "--fresh" }, { value: "--force", label: "--force" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
+    description: "Build the planned feature here, task by task, each checked (writes the spec first if there isn't one). --fresh builds in a new session, --review runs a review the gate would skip or stopped, --force builds an unreviewed spec as it stands. In a paused build: continue, optionally with guidance",
+    getArgumentCompletions: (prefix: string) => [{ value: "--fresh", label: "--fresh" }, { value: "--review", label: "--review" }, { value: "--force", label: "--force" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
       const fresh = /(^|\s)--fresh(\s|$)/.test(args);
       const force = /(^|\s)--force(\s|$)/.test(args);
-      const words = args.replace(/(^|\s)--(fresh|force)(?=\s|$)/g, " ").trim().split(/\s+/).filter(Boolean);
+      const review = /(^|\s)--review(\s|$)/.test(args);
+      const words = args.replace(/(^|\s)--(fresh|force|review)(?=\s|$)/g, " ").trim().split(/\s+/).filter(Boolean);
       const session = ctx.sessionManager.getSessionFile();
       const { cfg, buildCmd } = commands(ctx.cwd, store);
 
@@ -3039,6 +3243,7 @@ export default function pb(pi: ExtensionAPI) {
         const p = here.progress;
         if (fresh) ctx.ui.notify("`--fresh` only applies when starting a build: continuing here instead.", "warning");
         if (force) ctx.ui.notify("`--force` only applies when starting a build: continuing here instead.", "warning");
+        if (review) ctx.ui.notify("`--review` only applies when starting a build: continuing here instead.", "warning");
         // Resuming lifts planning protection: a /pb:plan or /pb:deps after the pause turned it back on.
         if (!(await liftPlanning(ctx, store))) return;
         // The spec name itself isn't guidance: only what follows it is.
@@ -3116,7 +3321,7 @@ export default function pb(pi: ExtensionAPI) {
         const planning = !!session && store.planningSessions().includes(session);
         if (!mine.length && (planning || !offered.length)) {
           // No spec from this discussion yet: write it first, then build it.
-          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec")), force);
+          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec")), force, review);
         }
         const pool = mine.length ? mine : offered;
         const labelOf = (n: string) => {
@@ -3137,7 +3342,7 @@ export default function pb(pi: ExtensionAPI) {
       if (!(await confirmLiveBuild(ctx, store, name, ["building"], "Restart it here — finished tasks stay done?"))) return;
       if (loadSpec(store, name)?.spec.status === "planning") {
         // A checkpoint of an unfinished discussion: finish it (tasks, verification), then build it.
-        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec")).replace(/\s*After writing it, stop:[^\n]*/, ""), force);
+        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec")).replace(/\s*After writing it, stop:[^\n]*/, ""), force, review);
       }
       if (words[0] === name && words.length > 1) {
         // Trailing words with a named spec are guidance (as on resume); without a name
@@ -3146,7 +3351,7 @@ export default function pb(pi: ExtensionAPI) {
           ctx.ui.notify("Guidance not recorded: it would leave the spec unparseable.", "warning");
         }
       }
-      await startBuild(ctx, store, name, fresh, { force });
+      await startBuild(ctx, store, name, fresh, { force, review });
     },
   });
 

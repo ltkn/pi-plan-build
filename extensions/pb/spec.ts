@@ -608,26 +608,201 @@ export function taskScopeSemanticErrors(md: string, spec: ParsedSpec): string[] 
   return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...migrationErrors(md, spec)];
 }
 
+/** A spec at or above this many tasks has too wide a blast radius to build unreviewed in auto mode. */
+export const LARGE_SPEC_TASKS = 4;
+
+export interface SpecReviewRisk {
+  review: boolean;
+  reason?: string;
+}
+
+/**
+ * Whether a spec carries enough risk to deserve an independent reviewer under "auto": a
+ * security-sensitive surface, threats, a migration, persisted data, an external contract, or a
+ * large blast radius. Small reversible specs rely on the write-time checks and the human's read.
+ */
+export function specReviewRisk(md: string, spec: ParsedSpec): SpecReviewRisk {
+  const scope = surfaceText(md, spec);
+  const sensitive = scope.split("\n").find((line) => SENSITIVE_WRITE.test(line.replace(/`[^`]*`/g, "")));
+  if (sensitive) return { review: true, reason: `security-sensitive (${sensitive.replace(/`[^`]*`/g, "").match(SENSITIVE_WRITE)?.[0] ?? "surface"})` };
+  if (threatSection(md)) return { review: true, reason: "threats and abuse" };
+  const migration = sectionOf(md, "Migration and rollback");
+  if (migration && !negativeWithReason(migration)) return { review: true, reason: "a migration" };
+  if (PERSISTED_DATA.test(scope)) return { review: true, reason: "persisted data" };
+  if (EXTERNAL_SURFACE.test(scope)) return { review: true, reason: "an external surface" };
+  if (spec.tasks.length >= LARGE_SPEC_TASKS) return { review: true, reason: `${spec.tasks.length} tasks` };
+  return { review: false };
+}
+
 /** A review answers for the exact markdown it saw: a pass stops covering the spec the moment the text changes. */
 export const specHash = (markdown: string) => createHash("sha256").update(markdown).digest("hex");
 
+/** The prior state a changed spec's review needs: open blockers, carried advisories, and the text they came from. */
+export interface SpecReviewCarry {
+  /** earlier blocking findings, with stable ids: in-scope P0/P1 and outside P0 */
+  prior: Finding[];
+  /** earlier P2/P3 findings, carried as context and never re-listed as new */
+  advisory: Finding[];
+  /** the exact text the earlier review saw, when the event has it */
+  markdown?: string;
+  nextId: number;
+  round: number;
+  /** blocking rounds since the last pass or forced acceptance; an unreadable block counts too */
+  blockingRounds: number;
+}
+
 export type SpecReviewGate =
   | { action: "skip" }
-  | { action: "repost"; findings: Finding[] }
-  | { action: "review"; prior: Finding[] };
+  | { action: "repost"; findings: Finding[]; advisory: Finding[] }
+  | ({ action: "manual"; reason: "cap" | "unparsed"; prose?: string } & SpecReviewCarry)
+  | ({ action: "review" } & SpecReviewCarry);
+
+const SPEC_FINDING_ID = /^F(\d+)$/;
+
+/** Whether a finding holds the build: an in-scope P0/P1, or an outside P0 (pre-existing, but unsafe to build on). */
+export const specReviewBlocks = (f: Finding) => f.priority === "P0" || (f.priority === "P1" && !f.outside);
+
+/** Give every legacy or newly parsed finding a stable F id, continuing after the highest one already issued. */
+export function ensureSpecIds(findings: Finding[]): { findings: Finding[]; next: number } {
+  let next = findings.reduce((highest, f) => Math.max(highest, Number(SPEC_FINDING_ID.exec(f.id ?? "")?.[1] ?? 0)), 0) + 1;
+  return { findings: findings.map((f) => (f.id ? f : { ...f, id: `F${next++}` })), next };
+}
+
+const findingKey = (f: Finding) => f.id ?? f.title.trim().toLowerCase().replace(/\s+/g, " ");
+
+/** The distinct text blocks a spec is reviewed in: its header, its ## sections and each task. */
+interface SpecTextBlock {
+  key: string;
+  label: string;
+  text: string;
+}
+
+const blockName = (heading: string) => heading.trim().toLowerCase().replace(/\s+/g, " ").replace(/:$/, "");
+
+const specTextBlocks = (md: string): SpecTextBlock[] => {
+  const lines = md.split("\n");
+  const blanked = blankFenced(md);
+  const blocks: SpecTextBlock[] = [];
+  const firstHeading = blanked.findIndex((l) => /^##\s+(?!#)/.test(l));
+  const header = lines.slice(0, firstHeading < 0 ? lines.length : firstHeading).join("\n").trim();
+  if (header) blocks.push({ key: "header", label: "Header", text: header });
+  const headings: number[] = [];
+  blanked.forEach((line, i) => {
+    if (/^##\s+(?!#)/.test(line)) headings.push(i);
+  });
+  for (const [k, at] of headings.entries()) {
+    const end = headings[k + 1] ?? lines.length;
+    const heading = blanked[at].replace(/^##\s+/, "").replace(/\s*:?\s*$/, "").trim();
+    blocks.push({ key: `section:${blockName(heading)}`, label: `## ${heading}`, text: lines.slice(at, end).join("\n").trim() });
+  }
+  return blocks;
+};
+
+/** Each task under ## Tasks is its own block: changing one does not resend the whole task list. */
+const withTaskBlocks = (md: string, blocks: SpecTextBlock[]): SpecTextBlock[] => {
+  const spec = parseSpec(md).spec;
+  if (!spec) return blocks;
+  return blocks.flatMap((b) => (b.key === "section:tasks" ? spec.tasks.map((t) => ({ key: `task:${t.id}`, label: `### ${t.id}: ${t.title}`, text: t.text })) : [b]));
+};
+
+export interface SpecReviewDelta {
+  /** current text of the sections and tasks that changed */
+  changed: string;
+  /** their earlier text, plus sections removed since */
+  earlier: string;
+  /** labels of sections/tasks that disappeared */
+  removed: string[];
+  /** unchanged sections and header that bind the delta: goal, decisions, contracts, migration, threats, acceptance */
+  context: string;
+}
+
+/** Sections whose text frames every delta review, whether or not they changed themselves. */
+const BINDING_BLOCKS = new Set([
+  "header",
+  "section:goal",
+  "section:out of scope",
+  "section:decisions",
+  "section:contracts",
+  "section:migration and rollback",
+  "section:threats and abuse",
+  "section:threats",
+  "section:acceptance criteria",
+]);
+
+/**
+ * What changed between two reviewed spec texts, compared by section and task so a delta round
+ * sends only the parts that moved. A text whose blocks all match returns an empty delta: the
+ * caller then falls back to a full review, because a hash change alone is not worth re-reading.
+ */
+export function specReviewDelta(previous: string, current: string): SpecReviewDelta {
+  const before = withTaskBlocks(previous, specTextBlocks(previous));
+  const after = withTaskBlocks(current, specTextBlocks(current));
+  const beforeBy = new Map(before.map((b) => [b.key, b]));
+  const changed = after.filter((b) => beforeBy.get(b.key)?.text.trim() !== b.text.trim());
+  const afterKeys = new Set(after.map((b) => b.key));
+  const removed = before.filter((b) => !afterKeys.has(b.key) && b.key !== "header");
+  const changedKeys = new Set(changed.map((b) => b.key));
+  const earlierParts = [
+    ...changed.map((b) => beforeBy.get(b.key)?.text).filter((text): text is string => !!text),
+    ...removed.map((b) => b.text),
+  ];
+  return {
+    changed: changed.map((b) => b.text).join("\n\n").trim(),
+    earlier: earlierParts.join("\n\n").trim(),
+    removed: removed.map((b) => b.label),
+    context: after
+      .filter((b) => BINDING_BLOCKS.has(b.key) && !changedKeys.has(b.key))
+      .map((b) => b.text)
+      .join("\n\n")
+      .trim(),
+  };
+}
 
 /**
  * What a build start owes the spec review, from its {type:"spec-review"} events and the current
- * text's hash: a pass on this text skips it, a block on this text with findings is re-posted (a
- * re-run would re-find the same), and anything else runs — with the last verdict's findings
- * first, to judge. A block with no recorded findings is re-run: there is nothing to re-post,
- * and a blank block would tell the human nothing.
+ * text's hash: a pass on this text skips it, a block on this text with open P0/P1 findings is
+ * re-posted (a re-run would re-find the same), and anything else runs with the earlier blockers
+ * and advisory findings first. Only an in-scope P0/P1 or an outside P0 blocks; anything else is
+ * carried as advisory. A block with no open blocker is re-run because there is nothing to re-post.
+ * After `maxRounds` blocking rounds since the last pass, a human decides instead: the automatic
+ * loop stops and the standing findings stay visible. An unreadable block counts too, since it
+ * cannot be shown harmless. Legacy events without ids get them here, once.
  */
-export function specReviewGate(events: Array<Record<string, unknown>>, hash: string): SpecReviewGate {
+export function specReviewGate(events: Array<Record<string, unknown>>, hash: string, maxRounds = 2): SpecReviewGate {
   const last = events.filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block")).at(-1);
-  if (!last) return { action: "review", prior: [] };
-  const findings = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
-  if (last.hash !== hash) return { action: "review", prior: findings };
+  if (!last) return { action: "review", prior: [], advisory: [], nextId: 1, round: 1, blockingRounds: 0 };
+  const reported = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
+  const carried = Array.isArray(last.advisory) ? (last.advisory as Finding[]) : [];
+  const seen = new Set<string>();
+  const combined = [...reported, ...carried].filter((f) => {
+    const key = findingKey(f);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const ids = ensureSpecIds(combined);
+  const prior = ids.findings.filter(specReviewBlocks);
+  const advisory = ids.findings.filter((f) => !specReviewBlocks(f));
+  const nextId = Math.max(ids.next, typeof last.nextId === "number" ? last.nextId : 1);
+  const round = (typeof last.round === "number" ? last.round : 1) + 1;
+  const markdown = typeof last.markdown === "string" ? last.markdown : undefined;
+  // A pass or a forced acceptance closes the cycle: only blocks after it can reach the cap.
+  const reset = events.reduce((at, e, i) => (e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "forced") ? i : at), -1);
+  const blockingRounds = events.slice(reset + 1).filter((e) => {
+    if (e.type !== "spec-review" || e.verdict !== "block") return false;
+    const findings = Array.isArray(e.reported) ? (e.reported as Finding[]) : [];
+    const open = Array.isArray(e.resolutions) ? (e.resolutions as Array<{ status?: string }>).some((r) => r.status === "open") : false;
+    return findings.some(specReviewBlocks) || open || e.unparsed === true || (!Array.isArray(e.reported) && typeof e.findings === "number" && e.findings > 0);
+  }).length;
+  const carry = { prior, advisory, ...(markdown !== undefined ? { markdown } : {}), nextId, round, blockingRounds };
+  const prose = typeof last.prose === "string" ? last.prose : undefined;
+  const cap = Math.max(1, Math.floor(maxRounds));
+  if (last.hash !== hash) {
+    if (blockingRounds >= cap) return { action: "manual", reason: "cap", ...(prose !== undefined ? { prose } : {}), ...carry };
+    return { action: "review", ...carry };
+  }
   if (last.verdict === "pass") return { action: "skip" };
-  return findings.length ? { action: "repost", findings } : { action: "review", prior: [] };
+  if (prior.length) return { action: "repost", findings: prior, advisory };
+  if (last.unparsed) return { action: "manual", reason: "unparsed", ...(prose !== undefined ? { prose } : {}), ...carry, prior: [] };
+  return { action: "review", ...carry, prior: [] };
 }

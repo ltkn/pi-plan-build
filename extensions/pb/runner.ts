@@ -176,6 +176,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
   if (o.model) args.push("--model", o.model);
   if (o.thinking) args.push("--thinking", o.thinking);
   if (o.tools.length) args.push("--tools", o.tools.join(","));
+  else args.push("--no-tools"); // an empty allowlist means none: omitting the flag would leave Pi's defaults on
   args.push("--append-system-prompt", sysFile, `@${briefFile}`, o.prompt);
 
   const started = Date.now();

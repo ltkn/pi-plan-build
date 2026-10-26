@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.36.0
+
+- **The spec review follows the risk, not the calendar.** `specReviewer.mode` defaults to `auto`: a spec that touches a security-sensitive surface, carries Threats, persists data or a migration, changes an external contract or has four or more tasks gets the fresh pre-T1 review; a small, reversible one relies on the write-time checks and your read. `always` reviews every spec, `off` none, and `/pb:build --review` asks for the pass on a spec the mode would skip. P2/P3 findings no longer pause the build: they are shown and recorded beside the spec, while only P0/P1 stop it.
+- **Review rounds converge instead of repeating.** A follow-up sends only the changed sections and tasks, with the full spec available for context; an earlier finding is judged against the new text by id, and a problem outside the change goes to its own "Outside the change" lane (only an outside P0 blocks; outside P1-P3 are advisory and carried). An unchanged blocked spec is still re-posted rather than re-read.
+- **The loop has an end.** `specReviewer.maxRounds` (2 by default) caps automatic blocking rounds; after that, a changed spec waits for you. `/pb:build --review` spends one more round, `/pb:build --force` builds it as it stands and records the standing findings as accepted. A pass or a forced acceptance starts the count again.
+- **A broken answer is repaired once, then shown, not re-reviewed.** A block verdict with nothing parseable gets one cheap reformat by the same model with thinking off and no tools, limited to the reviewer's own words. If that still fails, the reviewer's prose is posted and a repeat start shows it again without spending another review.
+
 ## 1.35.0
 
 - **Every review checks the spec's acceptance list.** Top-level criteria become `A1`, `A2`, … and each task's acceptance lines become `T1.1`, `T1.2`, … The reviewer reports each one through `pb_report_findings` as `met` with evidence, `not met`, or `not verified`; an omitted item is never a pass. A `not met` item blocks like a P0/P1, while any unverified item ends the review `unverified` and leaves the phase where it was. Follow-up reviews carry the previous statuses and require every current id. The spec format and configuration do not change, and a manual `/pb:review` during a build uses the same list.
