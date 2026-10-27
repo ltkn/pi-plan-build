@@ -17,6 +17,7 @@ process.env.PI_PB_PI_COMMAND = path.join(path.dirname(new URL(import.meta.url).p
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const { default: pb } = await import("../extensions/pb/index.ts");
 const { parseSpec, acceptanceCriteria, addDecision, needsRed, redExemption, specHash, specReviewDelta, specReviewGate, specReviewRisk } = await import("../extensions/pb/spec.ts");
+const { parseRequirementDeltas, planRequirementDeltas, requirementCriteria } = await import("../extensions/pb/requirements.ts");
 
 type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
 type Tool = (name: string, params: object) => Promise<Result>;
@@ -318,7 +319,7 @@ function setup(config: object = {}) {
     queued++;
     running = running.then(async () => {
      try {
-      const asked = [...first.matchAll(/^- ((?:A\d+|T\d+\.\d+))(?: \(T\d+\))?: /gm)].map((m) => m[1]);
+      const asked = [...first.matchAll(/^- ((?:A\d+|R\d+\.\d+|T\d+\.\d+))(?: \([^)]+\))?: /gm)].map((m) => m[1]);
       if (asked.length) reviewChecklists.set(rt.file(), asked);
       let input: string | undefined = first;
       while (input !== undefined) {
@@ -451,6 +452,18 @@ Create T2.txt.
 }
 `;
 
+/** A requirement delta for the SPEC above: one added requirement with one checkable scenario. */
+const REQUIREMENTS = `
+## Requirements: order-cancellation
+### ADDED
+### Requirement: Cancel a pending order
+A pending order can be cancelled by its owner.
+#### Scenario: Owner cancels a pending order
+- **GIVEN** a pending order owned by the caller
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+`;
+
 /** The task an instruction or tool result is about. */
 const taskOf = (text: string) => text.match(/Task (T\d+)/)?.[1] ?? text.match(/task "(\w+)"/)?.[1];
 
@@ -540,6 +553,82 @@ test("spec: the review checklist derives stable ids without adding syntax to the
     taskFenced.map((c) => c.id),
     ["A1", "T1.1", "T2.1"],
   );
+});
+
+test("requirements: scenarios join the review checklist as R ids", () => {
+  const markdown = `${SPEC()}${REQUIREMENTS}`;
+  const criteria = acceptanceCriteria(markdown, parseSpec(markdown).spec);
+  const scenario = criteria.find((c) => c.id === "R1.1");
+  assert.deepEqual(scenario, {
+    id: "R1.1",
+    text: "Cancel a pending order: Owner cancels a pending order — GIVEN a pending order owned by the caller; WHEN the owner cancels it; THEN it becomes CANCELLED",
+    capability: "order-cancellation",
+    requirement: "Cancel a pending order",
+  });
+  assert.deepEqual(requirementCriteria(markdown).map((c) => c.id), ["R1.1"]);
+  // REMOVED requirements have no scenario left to check.
+  const removed = `${SPEC().split("## Tasks")[0]}## Requirements: order-cancellation\n### REMOVED\n### Requirement: Cancel a pending order\n\n## Tasks${SPEC().split("## Tasks")[1]}`;
+  assert.deepEqual(requirementCriteria(removed), []);
+});
+
+test("requirements: a delta applies exactly, and conflicts are refused", () => {
+  const added = parseRequirementDeltas(REQUIREMENTS);
+  assert.deepEqual(added.errors, []);
+  assert.deepEqual(
+    added.deltas.map((d) => [d.capability, d.groups.map((g) => [g.kind, g.requirements.map((r) => r.name)])]),
+    [["order-cancellation", [["ADDED", ["Cancel a pending order"]]]]],
+  );
+  const first = planRequirementDeltas(added.deltas, () => undefined);
+  assert.deepEqual(first.errors, []);
+  assert.match(first.plans[0].markdown, /^# order-cancellation requirements$/m);
+  assert.match(first.plans[0].markdown, /### Requirement: Cancel a pending order/);
+  assert.match(first.plans[0].markdown, /- \*\*WHEN\*\* the owner cancels it/);
+  assert.deepEqual([first.plans[0].added, first.plans[0].modified, first.plans[0].removed], [["Cancel a pending order"], [], []]);
+
+  const modify = `## Requirements: order-cancellation
+### MODIFIED
+### Requirement: Cancel a pending order
+Only the owner can cancel a pending order.
+#### Scenario: Someone else cannot cancel it
+- **GIVEN** a pending order owned by another user
+- **WHEN** the caller tries to cancel it
+- **THEN** it stays PENDING
+`;
+  const second = planRequirementDeltas(parseRequirementDeltas(modify).deltas, () => first.plans[0].markdown);
+  assert.deepEqual(second.errors, []);
+  assert.deepEqual([second.plans[0].modified, second.plans[0].added], [["Cancel a pending order"], []]);
+  assert.match(second.plans[0].markdown, /Only the owner can cancel a pending order\./);
+  assert.doesNotMatch(second.plans[0].markdown, /A pending order can be cancelled by its owner\./);
+
+  const removed = `## Requirements: order-cancellation
+### REMOVED
+### Requirement: Cancel a pending order
+`;
+  const third = planRequirementDeltas(parseRequirementDeltas(removed).deltas, () => second.plans[0].markdown);
+  assert.deepEqual(third.errors, []);
+  assert.deepEqual(third.plans[0].removed, ["Cancel a pending order"]);
+  assert.doesNotMatch(third.plans[0].markdown, /Requirement: Cancel a pending order/);
+
+  const conflict = planRequirementDeltas(parseRequirementDeltas(REQUIREMENTS).deltas, () => first.plans[0].markdown);
+  assert.match(conflict.errors[0]!, /ADDED "Cancel a pending order" already exists; use MODIFIED/);
+  const missing = planRequirementDeltas(parseRequirementDeltas(modify).deltas, () => undefined);
+  assert.match(missing.errors[0]!, /MODIFIED "Cancel a pending order" does not exist; use ADDED/);
+
+  const bad = parseRequirementDeltas(`## Requirements: order-cancellation
+### ADDED
+### Requirement: No scenario
+A statement with no check.
+`);
+  assert.ok(bad.errors.some((e) => e.includes("needs at least one")));
+  const noThen = parseRequirementDeltas(`## Requirements: order-cancellation
+### ADDED
+### Requirement: Half a scenario
+A statement.
+#### Scenario: Half
+- **GIVEN** something
+- **WHEN** it happens
+`);
+  assert.ok(noThen.errors.some((e) => e.includes("needs at least one **THEN** line")));
 });
 
 test("spec: 'Depends on: none' allows a trailing note; real names still resolve", () => {
@@ -2390,7 +2479,7 @@ test("status lists every spec with its state and tasks", async () => {
 const briefOf = (t: ReturnType<typeof setup>) => t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!;
 /** The acceptance checklist ids in a review prompt, reported met: for scripted review passes. */
 const acceptanceOf = (text: string, evidence = "checked in src/order.ts:1") =>
-  [...text.matchAll(/^- ((?:A\d+|T\d+\.\d+))(?: \(T\d+\))?: /gm)].map((m) => ({ criterion: m[1], status: "met", evidence }));
+  [...text.matchAll(/^- ((?:A\d+|R\d+\.\d+|T\d+\.\d+))(?: \([^)]+\))?: /gm)].map((m) => ({ criterion: m[1], status: "met", evidence }));
 const CHANGES = [
   { priority: "P1", file: "src/order.ts", line: 12, title: "consider a guard clause", fix: "return early" },
   { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
@@ -3398,6 +3487,148 @@ test("archive moves a finished spec out of .pi/pb/, and stats still see it", asy
   assert.doesNotMatch(execSync("git status --porcelain", { cwd: t.repo, encoding: "utf8" }), /pb-archive/);
   await t.run("stats", "all");
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2/);
+});
+
+test("archive merges a spec's requirement delta into the living base", async () => {
+  const t = setup({ verify: "true", mapOnArchive: false });
+  await written(t, `${SPEC()}${REQUIREMENTS}`);
+  await t.run("archive", "order-cancellation");
+  const base = t.read("specs/order-cancellation.md");
+  assert.match(base, /^# order-cancellation requirements$/m);
+  assert.match(base, /### Requirement: Cancel a pending order/);
+  assert.match(base, /- \*\*WHEN\*\* the owner cancels it/);
+  assert.match(base, /- \*\*THEN\*\* it becomes CANCELLED/);
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")));
+  assert.match(t.notes.at(-1)!, /Archived order-cancellation .*Requirement deltas merged: order-cancellation \+1 ~0 -0/);
+});
+
+test("archive keeps the living base outside the git-ignored pb state", async () => {
+  const t = setup({ verify: "true", mapOnArchive: false });
+  fs.writeFileSync(path.join(t.repo, ".gitignore"), ".pi/\n");
+  await written(t, `${SPEC()}${REQUIREMENTS}`);
+  await t.run("archive", "order-cancellation");
+  assert.ok(fs.existsSync(path.join(t.repo, "specs/order-cancellation.md")));
+  // The pb run state stays ignored; the living base is visible to git and ready to commit.
+  assert.doesNotThrow(() => execSync("git check-ignore -q -- .pi/pb", { cwd: t.repo, stdio: "ignore" }));
+  assert.throws(() => execSync("git check-ignore -q -- specs/order-cancellation.md", { cwd: t.repo, stdio: "ignore" }));
+  assert.match(execSync("git status --porcelain", { cwd: t.repo, encoding: "utf8" }), /^\?\? specs\//m);
+});
+
+test("archive warns when the living base is gitignored", async () => {
+  const t = setup({ verify: "true", mapOnArchive: false });
+  fs.writeFileSync(path.join(t.repo, ".gitignore"), "specs/\n");
+  await written(t, `${SPEC()}${REQUIREMENTS}`);
+  await t.run("archive", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /living requirement base is gitignored \(specs\/order-cancellation\.md\)/);
+});
+
+test("archive: a requirement delta that no longer applies stops before anything moves", async () => {
+  const t = setup({ mapOnArchive: false });
+  await written(t, `${SPEC()}${REQUIREMENTS}`);
+  const file = path.join(t.repo, "specs/order-cancellation.md");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const base = `# order-cancellation requirements
+
+## Requirements
+
+### Requirement: Cancel a pending order
+A pending order can be cancelled.
+#### Scenario: Owner cancels
+- **GIVEN** a pending order
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+`;
+  fs.writeFileSync(file, base);
+  await t.run("archive", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /Not archived: order-cancellation's requirement delta doesn't apply:[\s\S]*already exists; use MODIFIED/);
+  assert.ok(fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")));
+  assert.equal(fs.readFileSync(file, "utf8"), base);
+  const rejected = await t.callTool("pb_write_spec", { name: "order-cancellation", content: `${SPEC()}${REQUIREMENTS}` });
+  assert.match(rejected.error!, /already exists; use MODIFIED/);
+  const updated = await t.callTool("pb_update_spec", {
+    name: "order-cancellation",
+    section: "Requirements: order-cancellation",
+    content: `### ADDED
+### Requirement: Cancel a pending order
+A pending order can be cancelled.
+#### Scenario: Owner cancels
+- **GIVEN** a pending order
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED`,
+  });
+  assert.match(updated.error!, /already exists; use MODIFIED/);
+});
+
+test("archive: a failed move puts the living requirement base back", async () => {
+  const t = setup({ mapOnArchive: false });
+  const file = path.join(t.repo, "specs/order-cancellation.md");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const base = `# order-cancellation requirements
+
+## Requirements
+
+### Requirement: Cancel a pending order
+A pending order can be cancelled.
+#### Scenario: Owner cancels
+- **GIVEN** a pending order
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+`;
+  fs.writeFileSync(file, base);
+  const modify = `${SPEC()}
+## Requirements: order-cancellation
+### MODIFIED
+### Requirement: Cancel a pending order
+Only the owner can cancel a pending order.
+#### Scenario: Someone else cannot cancel it
+- **GIVEN** a pending order owned by another user
+- **WHEN** the caller tries to cancel it
+- **THEN** it stays PENDING
+`;
+  await written(t, modify);
+  fs.writeFileSync(path.join(t.repo, ".pi/pb-archive"), "not a directory");
+  await t.run("archive", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /Could not archive order-cancellation:[\s\S]*the living requirement base was restored/);
+  assert.equal(fs.readFileSync(file, "utf8"), base);
+  assert.ok(fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")));
+});
+
+test("report: status and stats --json return pb.report/1, and pb-report does too", async () => {
+  const t = setup({ mapOnArchive: false });
+  await written(t, `${SPEC()}${REQUIREMENTS}`);
+  await t.run("status", "--json");
+  const status = JSON.parse(t.posts.at(-1)!);
+  assert.equal(status.schema, "pb.report/1");
+  assert.equal(status.specs[0].name, "order-cancellation");
+  assert.equal(status.specs[0].phase, "written");
+  assert.deepEqual(status.specs[0].requirements, [{ capability: "order-cancellation", added: ["Cancel a pending order"], modified: [], removed: [] }]);
+  const scenario = status.specs[0].acceptance.find((a: { id: string }) => a.id === "R1.1");
+  assert.deepEqual([scenario.capability, scenario.requirement, scenario.status], ["order-cancellation", "Cancel a pending order", "not reported"]);
+  assert.equal(status.summary.requirements, 0);
+
+  await t.run("stats", "--json");
+  const stats = JSON.parse(t.posts.at(-1)!);
+  assert.equal(stats.schema, "pb.report/1");
+  assert.equal(stats.specs[0].stats.tasks, 2);
+
+  const cli = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "extensions/pb/report-cli.mjs");
+  const out = JSON.parse(execSync(`${JSON.stringify(process.execPath)} ${JSON.stringify(cli)} --cwd ${JSON.stringify(t.repo)} --stats --review`, { encoding: "utf8" }));
+  assert.equal(out.schema, "pb.report/1");
+  assert.equal(out.specs[0].stats.tasks, 2);
+  assert.deepEqual(out.specs[0].review.findings, []);
+});
+
+test("review: a requirement scenario is checked as R1.1 and reported", async () => {
+  const t = setup({ verify: "true", mapOnArchive: false });
+  await written(t, `${SPEC()}${REQUIREMENTS}`);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  const progress = t.progress("order-cancellation");
+  assert.equal(progress.review.verdict, "pass");
+  const scenario = progress.review.acceptance.find((a: { criterion: string }) => a.criterion === "R1.1");
+  assert.equal(scenario.status, "met");
+  assert.match(scenario.evidence, /^checked/);
 });
 
 test("archive: a name collision never moves the spec into a folder that already exists", async () => {

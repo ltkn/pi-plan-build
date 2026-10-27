@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type Progress, type Store, readEvents as readJsonl, COHERE_TASK_ID } from "./store.ts";
-import { outRate } from "./render.ts";
+import { human, outRate } from "./format.ts";
 
 type Ev = { type: string; at: string; [k: string]: unknown };
 
@@ -73,7 +73,6 @@ export function loadStats(store: Store): SpecStats[] {
     .filter((s) => s.events.length || s.progress);
 }
 
-const human = (n: number) => (n < 1000 ? `${n}` : n < 1e6 ? `${(n / 1e3).toFixed(1)}k` : `${(n / 1e6).toFixed(2)}M`);
 const pct = (a: number, b: number) => (b ? `${Math.round((100 * a) / b)}%` : "–");
 const dur = (ms: number) => {
   const s = Math.round(ms / 1000);

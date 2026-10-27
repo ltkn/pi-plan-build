@@ -296,6 +296,15 @@ Then the sections:
 - **Migration and rollback**: only when data, a schema or a stored format
   outlives the change: how existing data moves, how it is rolled back, and what
   old and new code do while both run. "none — why" when nothing persists.
+- **Requirements: <capability>**: only when the change alters what a capability
+  guarantees. One section per capability, with `### ADDED`, `### MODIFIED` and
+  `### REMOVED` groups of `### Requirement:` / `#### Scenario:` blocks; a
+  scenario's `GIVEN` / `WHEN` / `THEN` lines become review criteria (`R1.1`,
+  `R2.1`, …). ADDED must be new; MODIFIED and REMOVED must exist; MODIFIED
+  replaces the requirement whole, and a rename is REMOVED plus ADDED. The delta
+  is checked when the spec is written, and `/pb:archive` merges it into
+  `specs/<capability>.md` or refuses before moving anything. `specs/` is kept
+  with the project, so the requirement base is committed and reviewed with it.
 - **Open questions**: only while `Status: planning`.
 - **Tasks**: each as `### T1: <outcome>`, what must be true when it's done
   rather than how to build it, with `- Acceptance:` lines and, when it adds
@@ -360,7 +369,8 @@ still parses, and the build then gets your version), or not now.
 
 **Before the first task, a risky spec gets a review of its own.** A build runs
 one when the spec touches a security-sensitive surface, carries Threats,
-persists data or carries a migration, changes an external contract, or has four or more tasks. Small,
+persists data or carries a migration, changes an external contract, changes the
+requirement base, or has four or more tasks. Small,
 reversible specs skip it and rely on the write-time checks and your read:
 `/pb:build --review` asks for the pass anyway, and
 `"specReviewer": {"mode": "always"}` reviews every spec (`"off"` never
@@ -395,7 +405,7 @@ of eyes, not a substitute for yours:
 
 1. **Goal and Out of scope**: does this solve the right problem, and is the
    boundary in the right place?
-2. **Acceptance criteria**: is each one checkable, and would it prove the goal
+2. **Acceptance criteria and requirement scenarios**: is each one checkable, and would it prove the goal
    rather than merely describe the work?
 3. **Decisions**: is each reason still true, and is every rejected alternative
    rejected deliberately ("Not doing X, because …")?
@@ -638,14 +648,15 @@ the highest priority. When the code is right and only the spec's framing is
 imprecise, that's a P3 note with a proposed rewording, not a defect.
 
 **Every acceptance criterion is a checklist item.** The spec's top-level
-criteria become `A1`, `A2`, … and each task's `- Acceptance:` lines become
-`T1.1`, `T1.2`, … The reviewer reports each one as **met** with evidence
-(file:line or test name), **not met**, or **not verified** with the reason.
-The spec format does not change, and every spec review uses the same list,
-including a manual `/pb:review` during a build. An omitted or unchecked item
-counts as not verified, never as met: a review with nothing blocking but any
-unverified item ends **UNVERIFIED**, not pass, and leaves the phase where it
-was. A not-met item is blocking and comes with a P1 finding. P2/P3 findings
+criteria become `A1`, `A2`, …, each requirement scenario becomes `R1.1`,
+`R2.1`, …, and each task's `- Acceptance:` lines become `T1.1`, `T1.2`, …
+The reviewer reports each one as **met** with evidence (file:line or test
+name), **not met**, or **not verified** with the reason.
+The checklist follows the spec as written, and every spec review uses the same
+list, including a manual `/pb:review` during a build. An omitted or unchecked
+item counts as not verified, never as met: a review with nothing blocking but
+any unverified item ends **UNVERIFIED**, not pass, and leaves the phase where
+it was. A not-met item is blocking and comes with a P1 finding. P2/P3 findings
 stay advisory.
 
 The findings land in the session you ran it from; run it **in the build
@@ -774,6 +785,8 @@ model call).
 ## Status, stats and archive
 
 - **`/pb:status`**: every spec, its state, verification, dependencies and tasks.
+  `/pb:status --json` prints the same information as the `pb.report/1`
+  document for scripts.
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and
   failed, pauses, the review verdicts with the latest review's confirmed P0/P1,
   red proofs (proven, sent back, pre-green), tokens in and out per role (with
@@ -781,9 +794,17 @@ model call).
   and time, and how often the session was compacted, reset, reminded or asked
   you something. Build and review show no rate: their wall time includes your
   pauses. `/pb:stats all` compares every spec, archived ones included.
+  `/pb:stats --json` prints the same report with each spec's stats.
+- **`pb-report`**: the report without Pi, for scripts and dashboards:
+  `pb-report [--cwd dir] [--stats] [--review]`. The `schema` field is
+  `pb.report/1`; a breaking change gets a new one.
 - **`/pb:archive`**: moves a finished spec to `.pi/pb-archive/` (which git
   ignores), so `/pb:build` and `/pb:status` only show live work, and offers to
-  update the project map (`/pb:help map`).
+  update the project map (`/pb:help map`). A spec's requirement delta is merged
+  into `specs/` in the same step: a delta that no longer applies stops the
+  archive before anything moves, and if the spec can't be moved the living
+  files are put back. `specs/` is tracked with the project; the archive stays
+  local.
 <!-- /pb -->
 
 <!-- pb:topic rules -->

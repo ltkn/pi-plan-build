@@ -4,6 +4,7 @@
  */
 import { type ExtensionAPI, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
+import { human, outRate } from "./format.ts";
 import { MAP_TOKENS } from "./map.ts";
 
 export function registerRenderers(pi: ExtensionAPI) {
@@ -88,13 +89,7 @@ export const LIVE_STEPS = 8;
 export const LIVE_WRITING_LINES = 4;
 /** Minimum ms between live repaints: calmer screen, same data. Terminal states always flush immediately. */
 export const LIVE_FLUSH_MS = 250;
-const human = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
 const secs = (ms: number) => `${Math.round(ms / 1000)}s`;
-/** Blended throughput over the run's wall time (which includes the tools the explorer ran), not pure generation speed. */
-export const outRate = (out: number, ms: number) => {
-  const r = (out / ms) * 1000;
-  return r < 1000 ? r.toFixed(1) : human(r);
-};
 const MAX_ANSWER_LINES = 200;
 const MAX_FILES = 50;
 

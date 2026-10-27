@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.37.0
+
+- **Requirements outlive the spec that changed them.** A spec can carry a `## Requirements: <capability>` delta: `### ADDED`, `### MODIFIED` or `### REMOVED` groups of `### Requirement:` / `#### Scenario:` blocks. `/pb:archive` merges it into the living base at `specs/<capability>.md`; a delta that no longer applies (ADDED that exists, MODIFIED/REMOVED that doesn't) stops the archive before anything moves, and if the spec can't be archived the living files are restored. The base lives with the project, outside the git-ignored `.pi/`, so it can be committed and reviewed; `.pi/pb/` remains run state. `pb_write_spec` and `pb_update_spec` run the same check when the delta is written. A rename is REMOVED plus ADDED; MODIFIED replaces the requirement whole.
+- **Scenarios are acceptance criteria.** Each scenario of a touched requirement becomes `R1.1`, `R2.1`, … in the review checklist, reported like `A` and `T` ids; the reviewer checks it against the built code. A spec that changes the requirement base also gets the fresh pre-T1 review.
+- **One machine-readable report.** `/pb:status --json` and `/pb:stats --json` print the same `pb.report/1` document (specs, phases, review verdicts and findings, acceptance statuses, requirement deltas, the living base, and optional stats), and the new `pb-report [--cwd dir] [--stats] [--review]` command prints it without Pi. The `schema` field is the contract: a breaking change gets a new version.
+
 ## 1.36.0
 
 - **The spec review follows the risk, not the calendar.** `specReviewer.mode` defaults to `auto`: a spec that touches a security-sensitive surface, carries Threats, persists data or a migration, changes an external contract or has four or more tasks gets the fresh pre-T1 review; a small, reversible one relies on the write-time checks and your read. `always` reviews every spec, `off` none, and `/pb:build --review` asks for the pass on a spec the mode would skip. P2/P3 findings no longer pause the build: they are shown and recorded beside the spec, while only P0/P1 stop it.

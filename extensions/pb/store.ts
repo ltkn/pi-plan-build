@@ -1,18 +1,21 @@
 /**
  * On-disk state: .pi/pb/config.json, one folder per spec under .pi/pb/specs/<name>/
- * (spec.md, progress.json, checkpoints.json, events.jsonl), and finished specs
- * under .pi/pb-archive/, which ignores itself in git.
+ * (spec.md, progress.json, checkpoints.json, events.jsonl), finished specs
+ * under .pi/pb-archive/, which ignores itself in git, and the living requirement
+ * base under specs/ in the project, which is meant to be committed.
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { SPEC_NAME } from "./spec.ts";
+import { KEBAB_NAME } from "./names.ts";
 import { agentDir } from "./standards.ts";
 
 export const PREFIX = "pb";
 export const PB_DIR = path.join(".pi", "pb");
 export const ARCHIVE_DIR = path.join(".pi", "pb-archive");
+/** The living requirement base: project knowledge, not pb run state, so it is meant to be committed. */
+export const REQUIREMENTS_DIR = "specs";
 
 export type Gate = "tests" | "build" | "none";
 
@@ -234,11 +237,15 @@ export type AcceptanceStatus = "met" | "not met" | "not verified";
 
 /** A checklist item derived from the spec for the reviewer; the spec format itself stays unchanged. */
 export interface AcceptanceCriterion {
-  /** review-only id: A1 for a top-level line, T1.1 for a task's acceptance line */
+  /** review-only id: A1 for a top-level line, R1.1 for a requirement scenario, T1.1 for a task's acceptance line */
   id: string;
   text: string;
   /** the task id, when the criterion comes from a task's acceptance line */
   task?: string;
+  /** the capability, when the criterion comes from a requirement delta */
+  capability?: string;
+  /** the requirement name, when the criterion comes from a requirement delta */
+  requirement?: string;
 }
 
 /** What a pass reported for one criterion. `met` always carries evidence; otherwise it degrades to not verified. */
@@ -381,7 +388,7 @@ function readJson<T>(file: string): T | undefined {
   }
 }
 
-function writeFile(file: string, content: string): void {
+export function writeFileAtomic(file: string, content: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, content, "utf8");
@@ -422,7 +429,7 @@ export class Store {
 
   config(): Config {
     const file = path.join(this.root, "config.json");
-    if (!fs.existsSync(file)) writeFile(file, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
+    if (!fs.existsSync(file)) writeFileAtomic(file, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
     const raw = readJson<Partial<Config>>(file) ?? {};
     // maxConcurrent merges from the global pb config too (~/.pi/agent/pb/config.json), like extra:
     // a machine-wide cap that every project runs under until the project sets its own.
@@ -440,7 +447,7 @@ export class Store {
   updateConfig(patch: (raw: Partial<Config>) => Partial<Config>): void {
     const file = path.join(this.root, "config.json");
     this.config(); // created with the defaults if missing
-    writeFile(file, `${JSON.stringify(patch(readJson<Partial<Config>>(file) ?? {}), null, 2)}\n`);
+    writeFileAtomic(file, `${JSON.stringify(patch(readJson<Partial<Config>>(file) ?? {}), null, 2)}\n`);
   }
 
   /* --------------------------------- specs --------------------------------- */
@@ -452,7 +459,7 @@ export class Store {
    * separator — throws instead of reaching path.join.
    */
   specDir(name: string): string {
-    if (!SPEC_NAME.test(name) && !this.specNames().includes(name)) throw new Error(`"${name}" is not a valid spec name: use short kebab-case, e.g. order-cancellation`);
+    if (!KEBAB_NAME.test(name) && !this.specNames().includes(name)) throw new Error(`"${name}" is not a valid spec name: use short kebab-case, e.g. order-cancellation`);
     return path.join(this.root, "specs", name);
   }
   specNames(): string[] {
@@ -467,7 +474,62 @@ export class Store {
     }
   }
   writeSpec(name: string, markdown: string): void {
-    writeFile(path.join(this.specDir(name), "spec.md"), markdown.endsWith("\n") ? markdown : `${markdown}\n`);
+    writeFileAtomic(path.join(this.specDir(name), "spec.md"), markdown.endsWith("\n") ? markdown : `${markdown}\n`);
+  }
+
+  /* ----------------------------- requirements ----------------------------- */
+
+  /**
+   * The living requirement base: one markdown file per capability in the project's `specs/`,
+   * outside `.pi/`, because it is durable project knowledge rather than run state.
+   */
+  requirementsDir(): string {
+    return path.join(this.cwd, REQUIREMENTS_DIR);
+  }
+
+  /** A capability's living file. The capability must be a valid name, like a spec folder. */
+  requirementPath(capability: string): string {
+    if (!KEBAB_NAME.test(capability)) throw new Error(`"${capability}" is not a valid capability name: use short kebab-case, e.g. order-cancellation`);
+    return path.join(this.requirementsDir(), `${capability}.md`);
+  }
+
+  /** A capability's living file relative to the project root, for reports and messages. */
+  requirementsRel(capability: string): string {
+    return path.relative(this.cwd, this.requirementPath(capability)).split(path.sep).join("/");
+  }
+
+  /** Whether git ignores a project-relative path: living requirements must not be silently local. */
+  isGitIgnored(relPath: string): boolean {
+    try {
+      execFileSync("git", ["check-ignore", "-q", "--", relPath], { cwd: this.cwd, stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  requirementNames(): string[] {
+    const dir = this.requirementsDir();
+    return fs.existsSync(dir)
+      ? fs
+          .readdirSync(dir, { withFileTypes: true })
+          .filter((d) => d.isFile() && d.name.endsWith(".md"))
+          .map((d) => d.name.slice(0, -3))
+          .filter((name) => KEBAB_NAME.test(name))
+          .sort()
+      : [];
+  }
+
+  readRequirementFile(capability: string): string | undefined {
+    try {
+      return fs.readFileSync(this.requirementPath(capability), "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+
+  writeRequirementFile(capability: string, markdown: string): void {
+    writeFileAtomic(this.requirementPath(capability), markdown.endsWith("\n") ? markdown : `${markdown}\n`);
   }
 
   progress(name: string): Progress | undefined {
@@ -482,14 +544,14 @@ export class Store {
   }
   saveProgress(p: Progress): void {
     p.updatedAt = now();
-    writeFile(path.join(this.specDir(p.spec), "progress.json"), `${JSON.stringify(p, null, 2)}\n`);
+    writeFileAtomic(path.join(this.specDir(p.spec), "progress.json"), `${JSON.stringify(p, null, 2)}\n`);
   }
 
   checkpoints(name: string): Checkpoint[] {
     return readJson<Checkpoint[]>(path.join(this.specDir(name), "checkpoints.json")) ?? [];
   }
   saveCheckpoints(name: string, list: Checkpoint[]): void {
-    writeFile(path.join(this.specDir(name), "checkpoints.json"), `${JSON.stringify(list, null, 2)}\n`);
+    writeFileAtomic(path.join(this.specDir(name), "checkpoints.json"), `${JSON.stringify(list, null, 2)}\n`);
   }
 
   /** Append a stats event for a spec. */
@@ -553,7 +615,7 @@ export class Store {
     }
     if (!exists) return;
     for (const [sessionFile, rec] of Object.entries(this.legacyPlanningMap())) {
-      writeFile(this.planningFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...rec }, null, 2)}\n`);
+      writeFileAtomic(this.planningFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...rec }, null, 2)}\n`);
     }
     fs.rmSync(legacy, { force: true });
   }
@@ -597,14 +659,14 @@ export class Store {
     if (typeof prev.checkpointFrom === "string") rec.checkpointFrom = prev.checkpointFrom;
     const req = request ?? (typeof prev.request === "string" ? prev.request : undefined);
     if (req !== undefined) rec.request = req;
-    writeFile(file, `${JSON.stringify(rec, null, 2)}\n`);
+    writeFileAtomic(file, `${JSON.stringify(rec, null, 2)}\n`);
   }
   setCheckpointFrom(sessionFile: string, entry: string | undefined): void {
     this.migratePlanning();
     const file = this.planningFile(sessionFile);
     const prev = readJson<{ snapshot?: unknown; checkpointFrom?: unknown; request?: unknown }>(file);
     if (!prev) return;
-    writeFile(file, `${JSON.stringify({ session: sessionFile, ...prev, checkpointFrom: entry }, null, 2)}\n`);
+    writeFileAtomic(file, `${JSON.stringify({ session: sessionFile, ...prev, checkpointFrom: entry }, null, 2)}\n`);
   }
 
   /**
@@ -635,7 +697,7 @@ export class Store {
     }
     for (const [sessionFile, state] of Object.entries(this.legacyReviewSessions())) {
       if (!state || (state.role !== "review" && state.role !== "abuse")) continue;
-      writeFile(this.reviewSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...state }, null, 2)}\n`);
+      writeFileAtomic(this.reviewSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...state }, null, 2)}\n`);
     }
     fs.rmSync(legacy, { force: true });
   }
@@ -651,7 +713,7 @@ export class Store {
   }
   saveReviewSession(sessionFile: string, state: ReviewSessionState): void {
     this.migrateReviewSessions();
-    writeFile(this.reviewSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...state }, null, 2)}\n`);
+    writeFileAtomic(this.reviewSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...state }, null, 2)}\n`);
   }
 
   /**
@@ -675,7 +737,7 @@ export class Store {
     const run = readJson<ReviewRun>(legacy);
     // A legacy run without an id can't be keyed: leave it for an older pb rather than drop it.
     if (!run?.id) return;
-    writeFile(this.reviewRunFile(run.id), `${JSON.stringify(run, null, 2)}\n`);
+    writeFileAtomic(this.reviewRunFile(run.id), `${JSON.stringify(run, null, 2)}\n`);
     fs.rmSync(legacy, { force: true });
   }
   reviewRun(id: string | undefined): ReviewRun | undefined {
@@ -722,7 +784,7 @@ export class Store {
   saveReviewRun(run: ReviewRun): void {
     if (!run.id) throw new Error("a review run needs an id");
     this.migrateReviewRuns();
-    writeFile(this.reviewRunFile(run.id), `${JSON.stringify(run, null, 2)}\n`);
+    writeFileAtomic(this.reviewRunFile(run.id), `${JSON.stringify(run, null, 2)}\n`);
   }
   clearReviewRun(id: string | undefined): void {
     if (!id) return;
@@ -792,7 +854,7 @@ export class Store {
           changed = true;
         }
       }
-      if (changed) writeFile(file, `${JSON.stringify(all, null, 2)}\n`);
+      if (changed) writeFileAtomic(file, `${JSON.stringify(all, null, 2)}\n`);
     }
   }
 
@@ -805,7 +867,7 @@ export class Store {
     }
   }
   saveMapPrevious(body: string): void {
-    writeFile(path.join(this.root, "map-previous.md"), body);
+    writeFileAtomic(path.join(this.root, "map-previous.md"), body);
   }
 
   /** The test suite's result when planning began. Per session when known, global last otherwise. */
@@ -817,8 +879,8 @@ export class Store {
     return readJson<Baseline>(path.join(this.root, "baseline.json"));
   }
   saveBaseline(b: Baseline, sessionFile?: string): void {
-    writeFile(path.join(this.root, "baseline.json"), `${JSON.stringify(b, null, 2)}\n`);
-    if (sessionFile) writeFile(this.sessionBaselineFile(sessionFile), `${JSON.stringify(b, null, 2)}\n`);
+    writeFileAtomic(path.join(this.root, "baseline.json"), `${JSON.stringify(b, null, 2)}\n`);
+    if (sessionFile) writeFileAtomic(this.sessionBaselineFile(sessionFile), `${JSON.stringify(b, null, 2)}\n`);
   }
   private sessionBaselineFile(sessionFile: string): string {
     const safe = Buffer.from(sessionFile).toString("base64url");
@@ -831,7 +893,7 @@ export class Store {
    * Scoped by parent session so an unrelated new session can't steal it; 60min TTL for slow approvals.
    */
   setCarry(c: { model?: string; thinking?: string; spec: string; review?: ReviewSessionState; parent?: string }): void {
-    writeFile(path.join(this.root, "carry.json"), `${JSON.stringify({ ...c, at: Date.now() })}\n`);
+    writeFileAtomic(path.join(this.root, "carry.json"), `${JSON.stringify({ ...c, at: Date.now() })}\n`);
   }
   takeCarry(previousSessionFile?: string): { model?: string; thinking?: string; spec: string; review?: ReviewSessionState; parent?: string } | undefined {
     const file = path.join(this.root, "carry.json");
@@ -896,7 +958,7 @@ export class Store {
     return path.join(this.root, "fixes", `${createHash("sha1").update(sessionFile).digest("hex")}.json`);
   }
   saveFixSession(sessionFile: string, rec: { spec: string; findings: Finding[] }): void {
-    writeFile(this.fixSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...rec }, null, 2)}\n`);
+    writeFileAtomic(this.fixSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...rec }, null, 2)}\n`);
   }
   fixSession(sessionFile: string | undefined): { spec: string; findings: Finding[] } | undefined {
     if (!sessionFile) return undefined;
@@ -982,7 +1044,7 @@ export class Store {
       return;
     }
     for (const [sessionFile, rec] of Object.entries(this.legacyPendingBuilds())) {
-      writeFile(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: rec.at }, null, 2)}\n`);
+      writeFileAtomic(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: rec.at }, null, 2)}\n`);
     }
     fs.rmSync(legacy, { force: true });
   }
@@ -993,7 +1055,7 @@ export class Store {
       fs.rmSync(this.pendingBuildsDir(), { recursive: true, force: true });
       return;
     }
-    writeFile(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: Date.now(), ...(o.review ? { review: true } : {}) }, null, 2)}\n`);
+    writeFileAtomic(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: Date.now(), ...(o.review ? { review: true } : {}) }, null, 2)}\n`);
   }
   /** Whether the pending build was asked for with --review. */
   pendingBuildReview(sessionFile: string | undefined): boolean {

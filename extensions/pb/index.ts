@@ -67,7 +67,10 @@ import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, SPEC_NAME, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, ensureSpecIds, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, ensureSpecIds, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
+import { KEBAB_NAME } from "./names.ts";
+import { planArchiveRequirements, requirementDeltaSummary, requirementWriteErrors, writeRequirementPlans } from "./requirements.ts";
+import { buildReport } from "./report.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewRun, type ReviewSessionState, type SpecResolution, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
@@ -720,7 +723,7 @@ export default function pb(pi: ExtensionAPI) {
       content: Type.String({ description: "the complete spec in markdown" }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      if (!SPEC_NAME.test(params.name)) throw new Error(`"${params.name}" is not a valid name: use short kebab-case, e.g. order-cancellation`);
+      if (!KEBAB_NAME.test(params.name)) throw new Error(`"${params.name}" is not a valid name: use short kebab-case, e.g. order-cancellation`);
       if (params.name === "off") throw new Error(`"off" is reserved (/${cmd("plan")} off ends planning): pick another spec name.`);
       const { spec, errors } = parseSpec(params.content);
       if (!spec) throw new Error(`The spec doesn't parse:\n- ${errors.join("\n- ")}\nFix it and call pb_write_spec again.`);
@@ -733,6 +736,8 @@ export default function pb(pi: ExtensionAPI) {
       const store = new Store(ctx.cwd);
       const mapErrs = acceptanceMappingErrors(spec, ctx.cwd);
       if (mapErrs.length) throw new Error(`Acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\nName a file in the repo or a test the test files contain (a T1-style entry means the task's own Test: run).`);
+      const reqErrs = requirementWriteErrors(store, params.content);
+      if (reqErrs.length) throw new Error(`The requirement delta can't be merged into the living requirement base:\n- ${reqErrs.join("\n- ")}\nFix it and call pb_write_spec again.`);
       const prev = store.progress(params.name);
       store.writeSpec(params.name, params.content);
       store.saveProgress({
@@ -746,11 +751,12 @@ export default function pb(pi: ExtensionAPI) {
       });
       store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, status: spec.status, tokens: tokensOf(params.content) });
       const what = spec.status === "planning" ? "status planning" : `${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}`;
+      const delta = requirementDeltaSummary(params.content);
       const warnings = [...specWarnings(params.content, spec)];
       const rw = rewriteWarning(params.name, prev, spec);
       if (rw) warnings.push(rw);
       const notes = warnings.map((w) => `\nNote: ${w}.`);
-      return reply(`Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${what}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}; ${sizeNote(tokensOf(params.content))}.${notes.join("")}`);
+      return reply(`Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${what}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}${delta ? `; requirement delta ${delta}` : ""}; ${sizeNote(tokensOf(params.content))}.${notes.join("")}`);
     },
   });
 
@@ -799,6 +805,11 @@ export default function pb(pi: ExtensionAPI) {
         const taskErrs = taskScopeSemanticErrors(md, spec);
         if (taskErrs.length) throw new Error(`Not written: the spec needs senior shape before it is ready:\n- ${taskErrs.join("\n- ")}`);
       }
+      const touchesRequirements = sectionName === "requirements" || sectionName.startsWith("requirements:");
+      if (touchesRequirements || becameReady) {
+        const reqErrs = requirementWriteErrors(store, md);
+        if (reqErrs.length) throw new Error(`Not written: the requirement delta can't be merged into the living requirement base:\n- ${reqErrs.join("\n- ")}`);
+      }
       // A path:line is a claim about the code the spec was written against. Check it on every
       // ready write except Design, which the build writes and may legitimately describe new code.
       if (spec.status === "ready" && sectionName !== "design") {
@@ -809,10 +820,11 @@ export default function pb(pi: ExtensionAPI) {
       const prev = store.progress(name);
       store.saveProgress({ ...(prev ?? { spec: name, phase: "written" }), spec: name, tasks: syncTasks(spec, prev?.tasks), writtenIn: ctx.sessionManager.getSessionFile(), updatedAt: now() });
       store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md) });
-      const isTasks = params.section?.replace(/^#+\s*/, "").trim().toLowerCase() === "tasks";
+      const isTasks = sectionName === "tasks";
       const rw = isTasks ? rewriteWarning(name, prev, spec) : undefined;
       const notes = isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])].map((w) => `\nNote: ${w}.`) : [];
-      return reply(`Updated ${store.rel("specs", name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}; ${sizeNote(tokensOf(md))}.${notes.join("")}`);
+      const delta = touchesRequirements ? requirementDeltaSummary(md) : undefined;
+      return reply(`Updated ${store.rel("specs", name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}${delta ? `; requirement delta ${delta}` : ""}; ${sizeNote(tokensOf(md))}.${notes.join("")}`);
     },
   });
 
@@ -1130,7 +1142,7 @@ export default function pb(pi: ExtensionAPI) {
       acceptance: Type.Optional(
         Type.Array(
           Type.Object({
-            criterion: Type.String({ description: 'the checklist id, e.g. "A1" or "T1.1"' }),
+            criterion: Type.String({ description: 'the checklist id, e.g. "A1", "R1.1" or "T1.1"' }),
             status: StringEnum(["met", "not met", "not verified"]),
             evidence: Type.String({ description: "file:line, test name, or why it is not verified; required for met and not met" }),
           }),
@@ -1578,7 +1590,7 @@ export default function pb(pi: ExtensionAPI) {
       }
       if (!arg)
         return ctx.ui.notify(`Describe what you want, in your own words, e.g.\n/${cmd("plan")} let admins cancel an order while it is still pending, and notify the customer`, "warning");
-      if (SPEC_NAME.test(arg) && store.readSpec(arg)) {
+      if (KEBAB_NAME.test(arg) && store.readSpec(arg)) {
         const phase = store.progress(arg)?.phase ?? "written";
         if (phase === "written") {
           if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
@@ -1595,7 +1607,7 @@ export default function pb(pi: ExtensionAPI) {
       // A near-miss spec name silently starting a new plan costs a duplicate spec downstream:
       // redirect in the same style as the phase-mismatch message above.
       const near = normSpecArg(arg);
-      if (near !== arg && near !== "off" && SPEC_NAME.test(near)) {
+      if (near !== arg && near !== "off" && KEBAB_NAME.test(near)) {
         const hit = store.specNames().filter((n) => n === near);
         if (hit.length === 1 && store.readSpec(hit[0])) {
           return ctx.ui.notify(
@@ -1683,7 +1695,7 @@ export default function pb(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
       const which = args.trim();
-      const md = which && SPEC_NAME.test(which) ? store.readSpec(which) : undefined;
+      const md = which && KEBAB_NAME.test(which) ? store.readSpec(which) : undefined;
       instruct(`▶ /${cmd("spec")}${which ? ` — ${which}` : ""}`, specPrompt(which, store.specNames(), md ? { name: which, markdown: md } : undefined, store.extra("spec")));
     },
   });
@@ -3222,9 +3234,9 @@ export default function pb(pi: ExtensionAPI) {
       // The name is the only user string that reaches path.join, and store.specDir refuses anything
       // that isn't a valid spec name (or a folder already under specs/). Here the arg counts as a
       // name only when valid; a path-like or legacy-named arg is refused, not read or reinterpreted.
-      if (words[0] && !SPEC_NAME.test(words[0])) {
+      if (words[0] && !KEBAB_NAME.test(words[0])) {
         const near = normSpecArg(words[0]);
-        const hit = near !== "off" && SPEC_NAME.test(near) ? store.specNames().filter((n) => n === near) : [];
+        const hit = near !== "off" && KEBAB_NAME.test(near) ? store.specNames().filter((n) => n === near) : [];
         if (hit.length === 1 && store.readSpec(hit[0])) {
           return ctx.ui.notify(
             `\`${words[0]}\` isn't a spec name (spec names are lowercase with hyphens). Did you mean \`${hit[0]}\`? \`/${cmd("build")} ${hit[0]}\` continues it; to start something else, describe it without a leading name.`,
@@ -3238,7 +3250,7 @@ export default function pb(pi: ExtensionAPI) {
 
       // This session has an unfinished build: continue it — unless a different spec was named.
       const here = specOfSession(ctx);
-      const named = words[0] && SPEC_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
+      const named = words[0] && KEBAB_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
       if (here.name && here.progress && unfinishedPhase(here.progress.phase) && (!named || named === here.name)) {
         const p = here.progress;
         if (fresh) ctx.ui.notify("`--fresh` only applies when starting a build: continuing here instead.", "warning");
@@ -3315,7 +3327,7 @@ export default function pb(pi: ExtensionAPI) {
       // Which spec: a named one; else the ones this session wrote; else any ready one.
       const phaseOf = (n: string) => store.progress(n)?.phase ?? "written";
       const offered = store.specNames().filter((n) => phaseOf(n) === "written" || unfinishedPhase(phaseOf(n)));
-      let name = words[0] && SPEC_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
+      let name = words[0] && KEBAB_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
       if (!name) {
         const mine = offered.filter((n) => store.progress(n)?.writtenIn === session);
         const planning = !!session && store.planningSessions().includes(session);
@@ -3709,12 +3721,12 @@ export default function pb(pi: ExtensionAPI) {
         // refused. Anything else — path-like words included, which specDir's guard keeps out of
         // paths anyway — falls through as intent text below, unlike /pb:build where it would
         // become a new spec's topic.
-        if (SPEC_NAME.test(w) && store.readSpec(w)) {
+        if (KEBAB_NAME.test(w) && store.readSpec(w)) {
           name = w;
           focusRest = words.slice(1).join(" ");
-        } else if (!SPEC_NAME.test(w)) {
+        } else if (!KEBAB_NAME.test(w)) {
           const near = normSpecArg(w);
-          const hit = near !== "off" && SPEC_NAME.test(near) ? store.specNames().filter((n) => n === near) : [];
+          const hit = near !== "off" && KEBAB_NAME.test(near) ? store.specNames().filter((n) => n === near) : [];
           if (hit.length === 1 && store.readSpec(hit[0])) {
             name = hit[0];
             focusRest = words.slice(1).join(" ");
@@ -3986,7 +3998,7 @@ export default function pb(pi: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionFile();
       const words = args.trim().split(/\s+/).filter(Boolean);
       // Spec: named, else this session's. Findings: all open, else the named ones.
-      let name = words[0] && SPEC_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
+      let name = words[0] && KEBAB_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
       const ids = name ? words.slice(1) : words;
       if (!name) name = specOfSession(ctx).name;
       if (!name && session) {
@@ -4031,11 +4043,12 @@ export default function pb(pi: ExtensionAPI) {
   /* -------------------------------- stats -------------------------------- */
 
   pi.registerCommand(cmd("stats"), {
-    description: "How a build went: tasks, first-try rate, checks, pauses, tokens and cache. A spec name, or all",
+    description: "How a build went: tasks, first-try rate, checks, pauses, tokens and cache. A spec name, or all; --json for pb.report/1",
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
       const arg = args.trim();
+      if (arg.split(/\s+/).includes("--json")) return post(JSON.stringify(buildReport(store, { stats: true, review: true }), null, 2));
       const all = loadStats(store);
       if (arg === "all") return post(renderAll(all));
       const name = arg || specOfSession(ctx).name || (all.length === 1 ? all[0].name : undefined);
@@ -4212,14 +4225,27 @@ export default function pb(pi: ExtensionAPI) {
       if (!store.readSpec(name)) return ctx.ui.notify(`No spec "${name}".`, "warning");
       if (!candidates.includes(name) && ctx.hasUI && !(await ctx.ui.confirm(`${name} isn't finished`, "Archive it anyway?"))) return;
       const markdown = store.readSpec(name) ?? "";
+      const preflight = planArchiveRequirements(store, markdown);
+      if (preflight.errors.length) {
+        return ctx.ui.notify(`Not archived: ${name}'s requirement delta doesn't apply:\n- ${preflight.errors.join("\n- ")}\nFix the spec's "## Requirements:" section, then run /${cmd("archive")} again.`, "error");
+      }
       const changed = changedSince(ctx.cwd, store.progress(name)?.baseCommit);
       // The feature is finished: its review runs and the explorer and map runs so far aren't needed any more.
       store.dropSessions(name);
+      let merge: { rollback: () => string[] } | undefined;
+      if (preflight.plans.length) {
+        try {
+          merge = writeRequirementPlans(store, preflight.plans);
+        } catch (e) {
+          return ctx.ui.notify(`Not archived: ${(e as Error).message}`, "error");
+        }
+      }
       let dest: string;
       try {
         dest = store.archive(name);
       } catch (e) {
-        return ctx.ui.notify(`Could not archive ${name}: ${(e as Error).message}`, "error");
+        const restored = merge?.rollback() ?? [];
+        return ctx.ui.notify(`Could not archive ${name}: ${(e as Error).message}${merge ? (restored.length ? `; restoring the requirement base also failed: ${restored.join("; ")}` : "; the living requirement base was restored") : ""}`, "error");
       }
       if (!store.specNames().length) dropCheckpoints(ctx.cwd); // no live spec left to undo: let git reclaim the snapshots
       // The feature is done: what it established about the project goes into the map every session reads.
@@ -4231,7 +4257,10 @@ export default function pb(pi: ExtensionAPI) {
       // changed files alone rarely justify a full re-read, and the next feature's run covers placement.
       const mapNews = !!findings.trim() || !readMap(ctx.cwd);
       const willMap = store.config().mapOnArchive && mapNews;
-      ctx.ui.notify(`Archived ${name} to ${path.relative(ctx.cwd, dest)}.${willMap ? ` Updating the project map from ${name}…` : ""}`, "info");
+      const merged = preflight.plans.map((p) => `${p.capability} +${p.added.length} ~${p.modified.length} -${p.removed.length}`).join(", ");
+      const ignored = preflight.plans.map((p) => store.requirementsRel(p.capability)).filter((rel) => store.isGitIgnored(rel));
+      const ignoredNote = ignored.length ? ` The living requirement base is gitignored (${ignored.join(", ")}): remove that rule so it can be committed.` : "";
+      ctx.ui.notify(`Archived ${name} to ${path.relative(ctx.cwd, dest)}.${merged ? ` Requirement deltas merged: ${merged}.` : ""}${ignoredNote}${willMap ? ` Updating the project map from ${name}…` : ""}`, "info");
       if (store.config().mapOnArchive && !mapNews) {
         ctx.ui.notify(`No new findings in ${name} for the project map; skipping.`, "info");
       } else if (willMap) {
@@ -4348,9 +4377,10 @@ export default function pb(pi: ExtensionAPI) {
   /* -------------------------------- status ------------------------------- */
 
   pi.registerCommand(cmd("status"), {
-    description: "Every spec and where it stands",
-    handler: async (_args, ctx) => {
+    description: "Every spec and where it stands; --json for pb.report/1",
+    handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
+      if (args.trim().split(/\s+/).includes("--json")) return post(JSON.stringify(buildReport(store, { review: true }), null, 2));
       const names = store.specNames();
       if (!names.length) return ctx.ui.notify(`No specs yet. Start with /${cmd("plan")} <feature>.`, "info");
       const here = store.specForSession(ctx.sessionManager.getSessionFile());

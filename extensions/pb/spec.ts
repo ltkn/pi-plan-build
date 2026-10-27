@@ -21,7 +21,11 @@
  *   - Test: `<targeted test command>`        (optional)
  */
 import { createHash } from "node:crypto";
+import { blankFenced, escapeRegExp, headerBlock, sectionHeading, sectionOf, setSection, unfenced } from "./markdown.ts";
+import { parseRequirementDeltas, requirementCriteria, requirementSurfaceText } from "./requirements.ts";
 import type { AcceptanceCriterion, Finding, Gate } from "./store.ts";
+
+export { sectionHeading, sectionOf, setSection };
 
 export interface SpecTask {
   id: string;
@@ -45,40 +49,7 @@ export interface ParsedSpec {
 /** The rest is optional: specs stay as short as the change allows. Tasks are required once the spec is ready. */
 export const REQUIRED_SECTIONS = ["Goal", "Decisions"];
 
-/** Lines of markdown with fenced code blocks blanked for structure detection (headings inside fences aren't structure). */
-const FENCE = /^(\s*)```/;
-const blankFenced = (md: string): string[] => {
-  const out: string[] = [];
-  let inFence = false;
-  for (const line of md.split("\n")) {
-    if (FENCE.test(line)) {
-      inFence = !inFence;
-      out.push("");
-      continue;
-    }
-    out.push(inFence ? "" : line);
-  }
-  return out;
-};
-
-/** Text before the first ## heading outside fences: title + Status/Verification/New tests/Depends on live here. */
-const headerBlock = (md: string): string => {
-  const lines = md.split("\n");
-  const blanked = blankFenced(md);
-  const idx = blanked.findIndex((l) => /^##\s/.test(l));
-  return (idx < 0 ? lines : lines.slice(0, idx)).join("\n");
-};
-
-const escapeReg = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-/**
- * The one section-heading matcher: "## <name>", case-insensitive, with an optional trailing
- * colon (planners write both). Writers and readers share it; when they drift, a heading the
- * reader accepts becomes a second section to the writer.
- */
-export const sectionHeading = (name: string) => new RegExp(`^##\\s+${escapeReg(name)}\\s*:?\\s*$`, "im");
-
-const header = (md: string, label: string) => headerBlock(md).match(new RegExp(`^\\s{0,3}${escapeReg(label)}:\\s*(.+)$`, "im"))?.[1].trim();
+const header = (md: string, label: string) => headerBlock(md).match(new RegExp(`^\\s{0,3}${escapeRegExp(label)}:\\s*(.+)$`, "im"))?.[1].trim();
 const splitReason = (v: string) => {
   const m = v.match(/^(.*?)\s*[—–]\s*(.+)$/) ?? v.match(/^(.*?)\s+-\s+(.+)$/);
   if (!m) return { value: v.trim().toLowerCase(), reason: undefined as string | undefined };
@@ -168,20 +139,14 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
   return errors.length ? { errors } : { spec: { title: title!, status, dependsOn, gate, gateReason, newTests, newTestsReason, tasks }, errors };
 }
 
-/** Lines outside fenced code blocks, where example bullets are not real criteria. */
-const unfenced = (text: string): string[] => {
-  const lines = text.split("\n");
-  const structure = blankFenced(text);
-  return lines.filter((_, i) => structure[i].trim() !== "");
-};
-
 /** A section that does not apply: "none — why", "N/A", and nothing checkable. */
 const noCriteria = (text: string) => /^(?:none|n\/a|not applicable)\s*(?:[—–:.,;-]|$)/i.test(text);
 
 /**
  * The review's acceptance checklist, derived from the spec's current text without changing its format:
- * top-level "## Acceptance criteria" bullets become A1, A2, ...; each task's "- Acceptance:" line
- * becomes T1.1, T1.2, ... in reading order. Proof markers stay in the text so the reviewer can judge them.
+ * top-level "## Acceptance criteria" bullets become A1, A2, ...; requirement deltas contribute each
+ * touched scenario as R1.1, R1.2, ...; each task's "- Acceptance:" line becomes T1.1, T1.2, ... in
+ * reading order. Proof markers stay in the text so the reviewer can judge them.
  */
 export function acceptanceCriteria(md: string, parsed?: ParsedSpec): AcceptanceCriterion[] {
   const spec = parsed ?? parseSpec(md).spec;
@@ -194,6 +159,9 @@ export function acceptanceCriteria(md: string, parsed?: ParsedSpec): AcceptanceC
     if (!text || noCriteria(text)) continue;
     out.push({ id: `A${++lineNo}`, text });
   }
+  for (const criterion of requirementCriteria(md)) {
+    out.push({ id: criterion.id, text: criterion.text, capability: criterion.capability, requirement: criterion.requirement });
+  }
   for (const task of spec?.tasks ?? []) {
     let taskLine = 0;
     for (const line of unfenced(task.text)) {
@@ -205,35 +173,6 @@ export function acceptanceCriteria(md: string, parsed?: ParsedSpec): AcceptanceC
     }
   }
   return out;
-}
-
-/**
- * Replace (or append to) one "## <section>" of a spec; a missing section is added before Tasks, or
- * at the end. Lets a checkpoint change only what moved instead of rewriting the whole spec.
- * Fence-aware: headings inside code fences aren't sections.
- */
-export function setSection(md: string, section: string, body: string, mode: "replace" | "append" = "replace"): string {
-  const name = section.replace(/^#+\s*/, "").trim();
-  const lines = md.split("\n");
-  const blanked = blankFenced(md);
-  const idx = blanked.findIndex((l) => sectionHeading(name).test(l));
-  const text = body.trim();
-  if (idx < 0) {
-    const tasksIdx = blanked.findIndex((l) => sectionHeading("Tasks").test(l));
-    const block = `## ${name}\n${text}\n\n`;
-    if (tasksIdx < 0 || name.toLowerCase() === "tasks") return `${md.trimEnd()}\n\n${block.trimEnd()}\n`;
-    const at = lines.slice(0, tasksIdx).join("\n").length + (tasksIdx > 0 ? 1 : 0);
-    const head = md.slice(0, at).replace(/\s*$/, "\n\n");
-    return `${head}${block}${md.slice(at).replace(/^\s*/, "")}`;
-  }
-  const startLine = idx + 1;
-  const rel = blanked.slice(startLine).findIndex((l) => /^##\s+(?!#)/.test(l));
-  const endLine = rel < 0 ? lines.length : startLine + rel;
-  const start = lines.slice(0, startLine).join("\n").length + (startLine > 0 ? 1 : 0);
-  const end = lines.slice(0, endLine).join("\n").length + (endLine < lines.length ? 1 : 0);
-  const current = md.slice(start, end).trim();
-  const merged = mode === "append" && current ? `${current}\n${text}` : text;
-  return `${md.slice(0, start).replace(/\s*$/, "")}\n${merged}\n${end < md.length ? `\n${md.slice(end).replace(/^\s*/, "")}` : ""}`;
 }
 
 /** Set the "Status:" header line (header block only, so examples in Findings are untouched). */
@@ -266,8 +205,6 @@ export function addDecision(md: string, decision: string): string {
   const end = next < 0 ? md.length : start + next;
   return `${md.slice(0, end).trimEnd()}\n${line}\n\n${md.slice(end).trimStart()}`;
 }
-
-export const SPEC_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 /** A commit message for the feature, from its spec: the title as subject, the goal, and what the tasks did. */
 export function commitMessage(md: string): string | undefined {
@@ -340,17 +277,6 @@ export const ownTestRef = (entry: string) => /^T\d+$/i.test(entry.trim());
 /** A path-like entry: must exist in the repo. */
 export const pathTestRef = (entry: string) => /[/\\]/.test(entry) || /\.[A-Za-z0-9]+$/.test(entry.trim());
 
-/** A section's body, trimmed ("" when missing). Fence-aware; name is literal. */
-export const sectionOf = (md: string, name: string): string => {
-  const lines = md.split("\n");
-  const blanked = blankFenced(md);
-  const idx = blanked.findIndex((l) => sectionHeading(name).test(l));
-  if (idx < 0) return "";
-  const rel = blanked.slice(idx + 1).findIndex((l) => /^##\s+(?!#)/.test(l));
-  const end = rel < 0 ? lines.length : idx + 1 + rel;
-  return lines.slice(idx + 1, end).join("\n").trim();
-};
-
 /* ------------------------- senior-enforcement gates ------------------------- */
 
 /**
@@ -411,10 +337,7 @@ const PERSISTED_DATA =
 const SURFACE_SECTIONS = ["Goal", "Findings", "Context", "Decisions", "Contracts"] as const;
 
 const surfaceText = (md: string, spec: ParsedSpec): string =>
-  SURFACE_SECTIONS.map((name) => sectionOf(md, name))
-    .concat(spec.tasks.map((t) => t.text))
-    .filter(Boolean)
-    .join("\n");
+  [...SURFACE_SECTIONS.map((name) => sectionOf(md, name)), ...spec.tasks.map((t) => t.text), requirementSurfaceText(md)].filter(Boolean).join("\n");
 
 /** A section body that says why it does not apply: "none — no external surface". */
 const negativeWithReason = (body: string): boolean => {
@@ -484,6 +407,21 @@ export function quantitativeErrors(md: string, spec: ParsedSpec): string[] {
       if (/assumption:/i.test(trimmed) && /settles?\s+by/i.test(trimmed)) continue;
       if (/`[^`]+`/.test(trimmed)) continue;
       out.push(`${t.id} quantitative claim without measurement or Assumption: "${trimmed}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
+    }
+  }
+  for (const delta of parseRequirementDeltas(md).deltas) {
+    for (const group of delta.groups) {
+      if (group.kind === "REMOVED") continue;
+      for (const requirement of group.requirements) {
+        const lines = [requirement.statement, ...requirement.scenarios.flatMap((s) => s.criteria.map((c) => `${c.keyword} ${c.text}`))];
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || (!QUANTITY.test(trimmed) && !SUBSECOND.test(trimmed))) continue;
+          if (/assumption:/i.test(trimmed) && /settles?\s+by/i.test(trimmed)) continue;
+          if (/`[^`]+`/.test(trimmed)) continue;
+          out.push(`${delta.capability} requirement "${requirement.name}" has a quantitative claim without measurement or Assumption: "${trimmed}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
+        }
+      }
     }
   }
   return out;
@@ -625,6 +563,7 @@ export function specReviewRisk(md: string, spec: ParsedSpec): SpecReviewRisk {
   const scope = surfaceText(md, spec);
   const sensitive = scope.split("\n").find((line) => SENSITIVE_WRITE.test(line.replace(/`[^`]*`/g, "")));
   if (sensitive) return { review: true, reason: `security-sensitive (${sensitive.replace(/`[^`]*`/g, "").match(SENSITIVE_WRITE)?.[0] ?? "surface"})` };
+  if (parseRequirementDeltas(md).deltas.length) return { review: true, reason: "changes the requirement base" };
   if (threatSection(md)) return { review: true, reason: "threats and abuse" };
   const migration = sectionOf(md, "Migration and rollback");
   if (migration && !negativeWithReason(migration)) return { review: true, reason: "a migration" };
@@ -729,6 +668,9 @@ const BINDING_BLOCKS = new Set([
   "section:acceptance criteria",
 ]);
 
+/** Requirement deltas bind every review: a task change must still fit the requirement it serves. */
+const bindingBlock = (key: string) => BINDING_BLOCKS.has(key) || key.startsWith("section:requirements");
+
 /**
  * What changed between two reviewed spec texts, compared by section and task so a delta round
  * sends only the parts that moved. A text whose blocks all match returns an empty delta: the
@@ -751,7 +693,7 @@ export function specReviewDelta(previous: string, current: string): SpecReviewDe
     earlier: earlierParts.join("\n\n").trim(),
     removed: removed.map((b) => b.label),
     context: after
-      .filter((b) => BINDING_BLOCKS.has(b.key) && !changedKeys.has(b.key))
+      .filter((b) => bindingBlock(b.key) && !changedKeys.has(b.key))
       .map((b) => b.text)
       .join("\n\n")
       .trim(),

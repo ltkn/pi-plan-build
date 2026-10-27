@@ -7,7 +7,7 @@
  */
 import { tip } from "./help.ts";
 import { type ParsedSpec, type SpecTask, sectionHeading, specReviewDelta } from "./spec.ts";
-import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, type Progress, type SpecResolution, type TaskProgress } from "./store.ts";
+import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, REQUIREMENTS_DIR, type Progress, type SpecResolution, type TaskProgress } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
 
@@ -147,6 +147,20 @@ Each decision with its reason, as it stands now: no dates, no history, not who d
 No later step sees the whole change at once: tasks are built one by one. So pin here every seam other code, clients or stored data depend on — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. A single task that changes an external surface needs this section too; tasks sharing a seam (the same Test: command or a shared file) without it are rejected. Truly independent internal tasks need none, though a one-line "independent" section is accepted, and a keyword false positive can be answered with "none — <why>". Pin exactly these, as they must end up; leave everything behind them to the build. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown.
 ## Migration and rollback
 Only when the change persists or transforms data, a schema or a stored format: how existing data moves to the new shape, how the change is rolled back, and what old and new code do while both run. Say "none — <why>" when nothing outlives the change.
+## Requirements: <capability>
+Only when the change alters what a capability guarantees. Each capability touched gets one section: the delta that /pb:archive merges into ${REQUIREMENTS_DIR}/<capability>.md.
+### ADDED
+### Requirement: <name>
+<what the requirement states, in one or two sentences>
+#### Scenario: <name>
+- **GIVEN** <starting state>
+- **WHEN** <action or event>
+- **THEN** <observable outcome>
+### MODIFIED
+(same Requirement and Scenario blocks; replaces the existing requirement whole)
+### REMOVED
+### Requirement: <the existing requirement's name>
+ADDED must not already exist; MODIFIED and REMOVED must exist, or the write is refused. A rename is REMOVED plus ADDED. Every requirement carries at least one scenario with a WHEN and a THEN; each scenario becomes a review criterion (R1.1, R2.1, …) checked against the built code.
 ## Threats and abuse
 Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A ready spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks without this section is rejected: add it, or say "none — <why>" if the keyword points at nothing. The acceptance criteria then include the abuse cases.
 ## Open questions
@@ -173,6 +187,7 @@ Write the spec${which ? ` for: ${which}` : ""} from our discussion with the pb_w
 ${SPEC_FORMAT}
 
 - One spec per change you would merge on its own; if the discussion covers several, say so and write one each.
+- When the change alters what a capability guarantees, read the capability's living file (\`${REQUIREMENTS_DIR}/<capability>.md\`) if it exists, then add one "## Requirements: <capability>" delta: ADDED, MODIFIED or REMOVED must match that base exactly, because /pb:archive merges it and refuses a delta that doesn't apply.
 - Refactoring that the standards call for (outdated code in the way) comes first, as tasks titled "(refactor) …" that keep behaviour; a large one is a spec of its own that this one depends on.
 - Before writing, check the spec for contradictions and against the code; fix them in the spec and tell me briefly what you changed.
 - The approach follows the engineering standards (AGENTS.md).
@@ -563,7 +578,7 @@ export function reviewerBrief(o: ReviewBrief): string {
       "",
       "Report every id below in pb_report_findings's `acceptance` array, with status met, not met, or not verified and evidence. An id left out counts as not verified: a criterion not checked is never met.",
       "",
-      ...o.acceptance.map((c) => `- ${c.id}${c.task ? ` (${c.task})` : ""}: ${c.text}`),
+      ...o.acceptance.map((c) => `- ${c.id}${c.task ? ` (${c.task})` : c.capability ? ` (${c.capability})` : ""}: ${c.text}`),
       "",
     );
   }
