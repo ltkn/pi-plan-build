@@ -297,14 +297,25 @@ Then the sections:
   outlives the change: how existing data moves, how it is rolled back, and what
   old and new code do while both run. "none — why" when nothing persists.
 - **Requirements: <capability>**: only when the change alters what a capability
-  guarantees. One section per capability, with `### ADDED`, `### MODIFIED` and
-  `### REMOVED` groups of `### Requirement:` / `#### Scenario:` blocks; a
-  scenario's `GIVEN` / `WHEN` / `THEN` lines become review criteria (`R1.1`,
-  `R2.1`, …). ADDED must be new; MODIFIED and REMOVED must exist; MODIFIED
-  replaces the requirement whole, and a rename is REMOVED plus ADDED. The delta
-  is checked when the spec is written, and `/pb:archive` merges it into
-  `specs/<capability>.md` or refuses before moving anything. `specs/` is kept
-  with the project, so the requirement base is committed and reviewed with it.
+  guarantees. One section per capability, opened by `Overview:` — what the
+  capability is and what it refuses to do, in a sentence or two — then
+  `### ADDED`, `### MODIFIED` and `### REMOVED` groups of `### Requirement:` /
+  `#### Scenario:` blocks. `/pb:archive` writes the overview into the living
+  file's `## Overview`; a capability that has none must supply one, and a new
+  overview replaces the old. It is plain text and never a review criterion. Each
+  requirement opens with an `Invariant:` line — the rule that must hold for
+  every input — and its scenarios are examples. The invariant becomes the first
+  review criterion (`R1.1`), each scenario follows (`R1.2`, …); a requirement
+  written before invariants falls back to its statement. Each `THEN` is one
+  observable claim, so several claims are several `THEN` lines. Add a scenario
+  only where it carries information the invariant doesn't — a boundary, a state
+  transition, an abuse, precedence between overlapping rules — not a happy path
+  that restates the rule or near-duplicate cases. ADDED must be new; MODIFIED
+  and REMOVED must exist; MODIFIED replaces the requirement whole, and a rename
+  is REMOVED plus ADDED. The delta is checked when the spec is written, and
+  `/pb:archive` merges it into `specs/<capability>.md` or refuses before moving
+  anything. `specs/` is kept with the project, so the requirement base is
+  committed and reviewed with it.
 - **Open questions**: only while `Status: planning`.
 - **Tasks**: each as `### T1: <outcome>`, what must be true when it's done
   rather than how to build it, with `- Acceptance:` lines and, when it adds
@@ -312,6 +323,10 @@ Then the sections:
   test would check it, abuse cases included: they are the tests to write. One
   task, unless a slice is worth reviewing on its own; then vertical slices, each
   working and tested, never a split by layer or a closing "add tests" task.
+  Keep each task narrow: one coherent change with its own targeted `Test:`,
+  never several independent changes bundled with a full-suite run. The harness
+  runs the full suite once, after the last task; work that would bundle them is
+  split instead.
 - **Design**: written by the build, not the plan: the shape it settles on as it
   goes, recorded once by the first task whose design the later ones build on;
   every change to it after that goes in Decisions, never by rewriting Design.
@@ -340,7 +355,9 @@ against rules, "unchanged" against "extended", every path and name), resolves
 what it finds, and tells you. Writing warns, never rejects: several tasks and
 no Contracts (pin the shared seams, or ignore it if they're independent),
 tasks sharing a `Test:` command (the later auto-proceeds once the earlier
-proves it), a behaviour task with no `Test:` (add one, or stay disclosed),
+proves it), a task that names a full-suite run (the harness does that once,
+after the last task; keep the task's `Test:` targeted and split it if it
+bundles several changes), a behaviour task with no `Test:` (add one, or stay disclosed),
 a `Test:` that always passes like `true` (the build would wedge demanding
 red — omit it instead), and a `Test:` that chains shells or reaches the
 network (`;`, `|`, `$`, backticks, `curl`/`wget` — it runs with your
@@ -380,7 +397,10 @@ The pass is fresh and read-only: it attacks every Decision, re-tests each "Not
 doing X" rejection, flags unmeasured numbers and undefined empty paths, and
 checks the spec against the repo: that its `path:line` citations and test
 commands resolve, that external surfaces have Contracts, and that
-persisted-data changes have a Migration and rollback answer. It runs on your
+persisted-data changes have a Migration and rollback answer. Every observable
+value in a Contract — a status, error, header, ordering, event or stored value
+— is checked against the code path or test the spec cites for it; a value with
+no citation, or one its citation contradicts, is a finding. It runs on your
 session's model by default; set
 `"specReviewer": {"model": "provider/id"}` (or point it at `buildModel`) when
 you want another model, such as the implementer, to validate the plan.
@@ -469,8 +489,15 @@ worked around.
    is arrived at is the build's: the compiler and the tests give the feedback,
    task by task, where each step is checked by something real. The first task
    that settles a shape the later ones build on records it in the spec's
-   `## Design`.
-2. **The end.** After the last task, on a build of three or more tasks the
+   `## Design`. A task that has grown into several changes finishes the smallest
+   coherent part and reports the rest as open, so it can become its own task
+   instead of one long run.
+2. **Structured files are edited literally.** `pom.xml`, JSON, YAML and other
+   structured files are changed by exact literal replacement or line-based
+   edits, never by a regex that can backtrack — a nested-quantifier pattern such
+   as `(?:(?!-->).*?)*` can run for minutes on a real file. The full suite stays
+   with the harness after the last task; a task's `Test:` stays targeted.
+3. **The end.** After the last task, on a build of three or more tasks the
    harness hands out one coherence pass first: re-read the whole diff and
    consolidate the duplication, dead code or inconsistent naming the slicing
    left behind, strictly within the spec (no behaviour, API or data change;
@@ -647,9 +674,26 @@ listed as dismissed, with its evidence, instead of costing you a fix cycle
 the highest priority. When the code is right and only the spec's framing is
 imprecise, that's a P3 note with a proposed rewording, not a defect.
 
+Every finding also carries a **class**: in this change, or **outside the
+change** (a problem that pre-dates it). An outside finding is still a finding:
+reported with its file, line, priority and fix, capped at P2 and advisory, so
+it stays visible and pickable by `/pb:fix` instead of living in a prose note.
+The cap is a rule, not a bypass: an outside P0/P1 (a misclassification, or a
+serious pre-existing problem the reviewer insists on) still blocks. A closing
+prose note is only for what is not a problem; a real problem left there has no
+class and no verdict. The verifier judges an outside finding on whether the
+problem is real, not on whether this change caused it.
+
+When behaviour is chosen by a derived classification, the reviewer also tries
+an input that matches more than one class (a kind, role, mode, type, state,
+host, tenant) and checks which class wins at each decision — routing, lookup,
+authorization, default — since a guard can trust a different classifier than
+the router and be skipped.
+
 **Every acceptance criterion is a checklist item.** The spec's top-level
-criteria become `A1`, `A2`, …, each requirement scenario becomes `R1.1`,
-`R2.1`, …, and each task's `- Acceptance:` lines become `T1.1`, `T1.2`, …
+criteria become `A1`, `A2`, …, each requirement's invariant becomes `R1.1`,
+its scenarios follow (`R1.2`, …), and each task's `- Acceptance:` lines become
+`T1.1`, `T1.2`, …
 The reviewer reports each one as **met** with evidence (file:line or test
 name), **not met**, or **not verified** with the reason.
 The checklist follows the spec as written, and every spec review uses the same
@@ -673,6 +717,9 @@ every rule it enforces, it looks for:
 
 - **access**: another user's data, a stolen session, what each state change
   requires the caller to prove, reused logic that lost its preconditions
+- **classifications**: an input that matches more than one class (a kind,
+  role, mode, type, state, host, tenant) at once, and which class a guard
+  trusts when routing and authorization disagree
 - **business rules** bypassed by negative, zero or huge quantities, repeated,
   skipped or reordered steps, acting on yourself or twice
 - **concurrency**: races on shared state, check-then-act gaps, double submits,
@@ -815,6 +862,10 @@ model call).
 - **Write rejected ideas into the spec.** "Not doing X, because …" stops them
   from coming back.
 - **Give tasks a `Test:` line**: how Pi checks each task; the harness runs the full suite once.
+- **Keep tasks narrow and edits literal**: one coherent change per task, with a
+  targeted `Test:`, and the full suite left to the harness. Edit `pom.xml`, JSON,
+  YAML and other structured files by literal replacement or line-based edits,
+  never a nested-quantifier regex that can backtrack for minutes.
 - **Read what the spec step resolved, and the build's assumptions**: that's
   where a wrong guess shows up cheapest.
 - **Nudge with `/pb:build <hint>`; undo when the code is wrong; rewrite the

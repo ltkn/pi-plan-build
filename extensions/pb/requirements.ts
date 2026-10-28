@@ -4,9 +4,10 @@
  * It changes only when a spec is archived. The spec carries a delta, one section per capability:
  *
  *   ## Requirements: order-cancellation
+ *   Overview: Orders can be cancelled by their owner while pending.
  *   ### ADDED
  *   ### Requirement: Cancel a pending order
- *   A pending order can be cancelled by its owner.
+ *   Invariant: Only the order's owner can cancel it, and only while it is pending.
  *   #### Scenario: Owner cancels
  *   - **GIVEN** an order in PENDING owned by the caller
  *   - **WHEN** the owner cancels it
@@ -14,7 +15,8 @@
  *
  * ADDED must not exist, MODIFIED and REMOVED must exist; MODIFIED replaces the requirement whole
  * (a rename is REMOVED + ADDED). A delta that does not apply exactly is refused, so the base never
- * half-merges. Each scenario is an acceptance criterion (R1.1, R2.1, …) for the review.
+ * half-merges. The invariant is the first review criterion (R1.1) and each scenario follows (R1.2,
+ * R2.1, …), so the reviewer checks the rule, not only its examples.
  */
 import * as fs from "node:fs";
 import { blankFenced, sectionHeading } from "./markdown.ts";
@@ -35,7 +37,9 @@ export interface RequirementScenario {
 
 export interface Requirement {
   name: string;
-  /** what the requirement states, before its scenarios */
+  /** the checkable rule from an "Invariant:" line; empty when the requirement only states its rule as prose */
+  invariant: string;
+  /** what the requirement states beyond its invariant, before its scenarios */
   statement: string;
   scenarios: RequirementScenario[];
 }
@@ -43,6 +47,8 @@ export interface Requirement {
 export interface RequirementDocument {
   capability: string;
   title: string;
+  /** the human entry point: what the capability is and what it refuses to do; never a criterion */
+  overview: string;
   /** text kept between "## Requirements" and the first requirement */
   intro: string;
   requirements: Requirement[];
@@ -54,6 +60,8 @@ export type RequirementGroup = "ADDED" | "MODIFIED" | "REMOVED";
 
 export interface RequirementDelta {
   capability: string;
+  /** the capability's human entry point; required when the living file has none, replaces the old one when given */
+  overview?: string;
   groups: Array<{ kind: RequirementGroup; requirements: Requirement[] }>;
 }
 
@@ -69,6 +77,7 @@ export interface RequirementPlan {
 }
 
 const KEYWORD = /^\s*[-*]\s+\*\*(GIVEN|WHEN|THEN|AND)\*\*\s+(.+?)\s*$/i;
+const INVARIANT = /^Invariant\s*:\s*(.*)$/i;
 const GROUP = /^###\s+(ADDED|MODIFIED|REMOVED)\s*:?\s*$/i;
 const ANY_H2 = /^##\s+(?!#)/;
 
@@ -77,6 +86,7 @@ const key = (name: string) => name.trim().toLowerCase();
 const emptyDocument = (capability: string): RequirementDocument => ({
   capability,
   title: `${capability} requirements`,
+  overview: "",
   intro: "",
   requirements: [],
   source: `# ${capability} requirements\n\n## Requirements\n`,
@@ -93,6 +103,7 @@ const displayNameError = (kind: string, name: string): string | undefined => {
 interface RequirementDraft {
   name: string;
   line: number;
+  invariant: string[];
   statement: string[];
   scenarios: ScenarioDraft[];
 }
@@ -186,7 +197,19 @@ function parseBlocks(lines: string[], blanked: string[], from: number, to: numbe
       const name = parsed[1].trim();
       const bad = displayNameError("Requirement", name);
       if (bad) errors.push(`line ${i + 1}: ${bad}`);
-      current = { name, line: i + 1, statement: [], scenarios: [] };
+      current = { name, line: i + 1, invariant: [], statement: [], scenarios: [] };
+      continue;
+    }
+    const invariant = !scenario ? text.match(INVARIANT) : undefined;
+    if (invariant) {
+      if (!current) {
+        errors.push(`line ${i + 1}: an "Invariant:" line must be inside a Requirement`);
+        continue;
+      }
+      const rule = invariant[1].trim();
+      if (!rule) errors.push(`line ${i + 1}: "Invariant:" needs the rule it states`);
+      else if (current.invariant.length) errors.push(`line ${i + 1}: requirement "${current.name}" already has an Invariant line; keep one`);
+      else current.invariant.push(rule);
       continue;
     }
     if (scenario) scenario.body.push({ line: i + 1, text: raw.trim() });
@@ -204,8 +227,9 @@ function parseBlocks(lines: string[], blanked: string[], from: number, to: numbe
     if (duplicate !== undefined) errors.push(`line ${draft.line}: requirement "${draft.name}" also appears at line ${duplicate}; requirement names must be unique`);
     else seen.set(key(draft.name), draft.line);
 
+    const invariant = trimBlank(draft.invariant);
     const statement = trimBlank(draft.statement);
-    if (mode !== "REMOVED" && !statement) errors.push(`line ${draft.line}: requirement "${draft.name}" needs a statement before its first Scenario`);
+    if (mode !== "REMOVED" && !invariant && !statement) errors.push(`line ${draft.line}: requirement "${draft.name}" needs an "Invariant:" line (the rule to check) or a statement before its first Scenario`);
 
     const scenarioNames = new Map<string, number>();
     const scenarios: RequirementScenario[] = [];
@@ -235,10 +259,10 @@ function parseBlocks(lines: string[], blanked: string[], from: number, to: numbe
 
     if (mode === "REMOVED") {
       if (draft.scenarios.length) errors.push(`line ${draft.line}: REMOVED names the requirement only; remove its scenarios from the delta (they leave with the requirement)`);
-      requirements.push({ name: draft.name, statement, scenarios: [] });
+      requirements.push({ name: draft.name, invariant, statement, scenarios: [] });
     } else {
       if (!draft.scenarios.length) errors.push(`line ${draft.line}: requirement "${draft.name}" needs at least one "#### Scenario:" so it can be checked`);
-      requirements.push({ name: draft.name, statement, scenarios });
+      requirements.push({ name: draft.name, invariant, statement, scenarios });
     }
   }
   return { requirements, intro: trimBlank(intro) };
@@ -254,17 +278,26 @@ export function parseRequirementDocument(markdown: string, capability: string): 
   if (capError) errors.push(capError);
 
   const title = lines.find((_, i) => /^#\s+/.test(blanked[i]))?.replace(/^#\s+/, "").trim() || `${capability} requirements`;
+  const overviewStarts = blanked.flatMap((l, i) => (sectionHeading("Overview").test(l) ? [i] : []));
+  if (overviewStarts.length > 1) errors.push(`duplicate "## Overview" section: keep one`);
+  const overviewAt = overviewStarts[0] ?? -1;
+  let overview = "";
+  if (overviewAt >= 0) {
+    const rel = blanked.slice(overviewAt + 1).findIndex((l) => ANY_H2.test(l));
+    const end = rel < 0 ? lines.length : overviewAt + 1 + rel;
+    overview = trimBlank(lines.slice(overviewAt + 1, end));
+  }
   const starts = blanked.flatMap((l, i) => (sectionHeading("Requirements").test(l) ? [i] : []));
   if (!starts.length) {
     errors.push(`missing the "## Requirements" section`);
-    return { document: { capability, title, intro: "", requirements: [], source: md }, errors };
+    return { document: { capability, title, overview, intro: "", requirements: [], source: md }, errors };
   }
   if (starts.length > 1) errors.push(`duplicate "## Requirements" section: keep one`);
   const start = starts[0];
   const rel = blanked.slice(start + 1).findIndex((l) => ANY_H2.test(l));
   const end = rel < 0 ? lines.length : start + 1 + rel;
   const parsed = parseBlocks(lines, blanked, start + 1, end, "document", errors);
-  return { document: { capability, title, intro: parsed.intro, requirements: parsed.requirements, source: md }, errors };
+  return { document: { capability, title, overview, intro: parsed.intro, requirements: parsed.requirements, source: md }, errors };
 }
 
 /** Parse every "## Requirements: <capability>" delta section in a spec. */
@@ -307,24 +340,38 @@ export function parseRequirementDeltas(markdown: string): { deltas: RequirementD
     }
     seen.add(capability);
 
-    const groups = parseGroups(lines, blanked, i + 1, end, capability, errors);
-    deltas.push({ capability, groups });
+    const parsed = parseGroups(lines, blanked, i + 1, end, capability, errors);
+    deltas.push({ capability, overview: parsed.overview, groups: parsed.groups });
   }
   return { deltas, errors };
 }
 
-function parseGroups(lines: string[], blanked: string[], from: number, to: number, capability: string, errors: string[]): Array<{ kind: RequirementGroup; requirements: Requirement[] }> {
+function parseGroups(lines: string[], blanked: string[], from: number, to: number, capability: string, errors: string[]): { groups: Array<{ kind: RequirementGroup; requirements: Requirement[] }>; overview?: string } {
   const markers: Array<{ at: number; kind: RequirementGroup }> = [];
   for (let i = from; i < to; i++) {
     const m = (blanked[i] ?? "").match(GROUP);
     if (m) markers.push({ at: i, kind: m[1].toUpperCase() as RequirementGroup });
   }
+
+  let overview: string | undefined;
+  for (let i = from; i < (markers[0]?.at ?? to); i++) {
+    const text = (blanked[i] ?? "").trim();
+    if (!text) continue;
+    const m = text.match(/^Overview\s*:\s*(.*)$/i);
+    if (m) {
+      if (overview !== undefined) errors.push(`"## Requirements: ${capability}" has more than one Overview line; keep one`);
+      else if (!m[1].trim()) errors.push(`"## Requirements: ${capability}" has an empty Overview; say what the capability is and what it refuses to do`);
+      else if (/^\s*(#|```)/.test(m[1])) errors.push(`"## Requirements: ${capability}" Overview must be plain text, not a heading or a fence`);
+      else overview = m[1].trim();
+      continue;
+    }
+    errors.push(`"## Requirements: ${capability}" has text before its first group ("${text}"); write "Overview: <what the capability is>" or move it into a requirement`);
+  }
+
   if (!markers.length) {
     errors.push(`"## Requirements: ${capability}" has no "### ADDED", "### MODIFIED" or "### REMOVED" group`);
-    return [];
+    return { groups: [], overview };
   }
-  const before = lines.slice(from, markers[0].at).filter((l) => l.trim());
-  if (before.length) errors.push(`"## Requirements: ${capability}" has text before its first group ("${before[0].trim()}"); move it into a requirement`);
 
   const byKind = new Map<RequirementGroup, Requirement[]>();
   for (const [n, marker] of markers.entries()) {
@@ -334,7 +381,7 @@ function parseGroups(lines: string[], blanked: string[], from: number, to: numbe
     if (!parsed.requirements.length) errors.push(`"${capability}" ${marker.kind} has no requirements`);
     byKind.set(marker.kind, [...(byKind.get(marker.kind) ?? []), ...parsed.requirements]);
   }
-  return [...byKind].map(([kind, requirements]) => ({ kind, requirements }));
+  return { groups: [...byKind].map(([kind, requirements]) => ({ kind, requirements })), overview };
 }
 
 /**
@@ -391,9 +438,10 @@ export function planRequirementDeltas(deltas: RequirementDelta[], read: (capabil
       if (duplicate !== undefined) errors.push(`${delta.capability}: the merged base would hold "${duplicate}" and "${requirement.name}" at once; requirement names must be unique`);
       else names.set(key(requirement.name), requirement.name);
     }
+    if (!before.overview && !delta.overview) errors.push(`${delta.capability}: the living file has no Overview; write "Overview: <what the capability is and what it refuses to do>" in the delta`);
     if (errors.length) continue;
 
-    const after: RequirementDocument = { ...before, requirements };
+    const after: RequirementDocument = { ...before, overview: delta.overview ?? before.overview, requirements };
     plans.push({
       capability: delta.capability,
       before,
@@ -420,7 +468,7 @@ export function requirementWriteErrors(store: Store, markdown: string): string[]
   return planArchiveRequirements(store, markdown).errors;
 }
 
-/** The spec review checklist's scenario criteria, one per touched scenario: R1.1, R1.2, R2.1, … */
+/** The spec review checklist: the invariant first (R1.1), then one criterion per scenario (R1.2, R2.1, …). */
 export interface RequirementCriterion {
   id: string;
   text: string;
@@ -437,12 +485,24 @@ export function requirementCriteria(markdown: string): RequirementCriterion[] {
       if (group.kind === "REMOVED") continue;
       for (const requirement of group.requirements) {
         requirementIndex++;
-        let scenarioIndex = 0;
+        let criterionIndex = 0;
+        // The rule is checked before its examples: an explicit Invariant line, or the statement it
+        // was written as before invariants existed. Scenarios are evidence for the rule, not the rule.
+        const invariant = (requirement.invariant || requirement.statement).replace(/\s+/g, " ").trim();
+        if (invariant) {
+          criterionIndex++;
+          out.push({
+            id: `R${requirementIndex}.${criterionIndex}`,
+            text: `${requirement.name}: invariant — ${invariant}`,
+            capability: delta.capability,
+            requirement: requirement.name,
+          });
+        }
         for (const scenario of requirement.scenarios) {
-          scenarioIndex++;
+          criterionIndex++;
           const criteria = scenario.criteria.map((c) => `${c.keyword} ${c.text}`).join("; ");
           out.push({
-            id: `R${requirementIndex}.${scenarioIndex}`,
+            id: `R${requirementIndex}.${criterionIndex}`,
             text: `${requirement.name}: ${scenario.name}${criteria ? ` — ${criteria}` : ""}`,
             capability: delta.capability,
             requirement: requirement.name,
@@ -464,6 +524,7 @@ export function requirementSurfaceText(markdown: string): string {
         .flatMap((group) =>
           group.requirements.flatMap((requirement) => [
             requirement.name,
+            requirement.invariant,
             requirement.statement,
             ...requirement.scenarios.flatMap((scenario) => [scenario.name, ...scenario.criteria.map((c) => `${c.keyword} ${c.text}`)]),
           ]),
@@ -486,12 +547,13 @@ export function requirementDeltaSummary(markdown: string): string | undefined {
 
 /** Render a requirement block in the canonical form the parser reads. */
 function renderRequirement(requirement: Requirement): string {
-  return [
-    `### Requirement: ${requirement.name}`,
-    "",
-    requirement.statement.trim(),
-    ...requirement.scenarios.map((scenario) => ["", `#### Scenario: ${scenario.name}`, ...scenario.criteria.map((c) => `- **${c.keyword}** ${c.text}`)].join("\n")),
-  ].join("\n");
+  const parts = [`### Requirement: ${requirement.name}`];
+  if (requirement.invariant.trim()) parts.push(`Invariant: ${requirement.invariant.trim()}`);
+  if (requirement.statement.trim()) parts.push(requirement.statement.trim());
+  for (const scenario of requirement.scenarios) {
+    parts.push([`#### Scenario: ${scenario.name}`, ...scenario.criteria.map((c) => `- **${c.keyword}** ${c.text}`)].join("\n"));
+  }
+  return parts.join("\n\n");
 }
 
 /** Replace just the managed "## Requirements" section, preserving the title, intro and trailing sections. */
@@ -516,11 +578,36 @@ function replaceRequirementsSection(markdown: string, body: string): string {
   return `${head}${trimmed ? `\n\n${trimmed}` : ""}${tail ? `\n\n${tail}` : ""}\n`;
 }
 
+/** Replace (or add) the human entry point: a living file opens with its "## Overview". */
+function replaceOverviewSection(markdown: string, overview: string): string {
+  const md = normalize(markdown);
+  const body = `## Overview\n\n${overview.trim()}`;
+  const withoutOverview = (() => {
+    const lines = md.split("\n");
+    const blanked = blankFenced(md);
+    const idx = blanked.findIndex((l) => sectionHeading("Overview").test(l));
+    if (idx < 0) return md;
+    const rel = blanked.slice(idx + 1).findIndex((l) => ANY_H2.test(l));
+    const end = rel < 0 ? lines.length : idx + 1 + rel;
+    return [...lines.slice(0, idx), ...lines.slice(end)].join("\n");
+  })();
+  const cleaned = normalize(withoutOverview);
+  const lines = cleaned.split("\n");
+  const blanked = blankFenced(cleaned);
+  const requirementsAt = blanked.findIndex((l) => sectionHeading("Requirements").test(l));
+  if (requirementsAt < 0) return `${cleaned.trimEnd()}${cleaned.trim() ? "\n\n" : ""}${body}\n`;
+  const head = lines.slice(0, requirementsAt).join("\n").trimEnd();
+  const tail = lines.slice(requirementsAt).join("\n").trimStart();
+  return `${head ? `${head}\n\n` : ""}${body}\n\n${tail}\n`;
+}
+
 /** The whole living document after a merge, with its non-managed text untouched. */
 export function renderRequirementDocument(document: RequirementDocument): string {
   const body = [document.intro.trim(), ...document.requirements.map(renderRequirement)].filter(Boolean).join("\n\n");
   const source = document.source.trim() ? document.source : emptyDocument(document.capability).source;
-  return replaceRequirementsSection(source, body);
+  const withRequirements = replaceRequirementsSection(source, body);
+  const rendered = document.overview.trim() ? replaceOverviewSection(withRequirements, document.overview) : withRequirements;
+  return `${rendered.trimEnd()}\n`;
 }
 
 /** A capability's living file, for reports: counts plus parse errors, never a throw. */

@@ -17,7 +17,7 @@ process.env.PI_PB_PI_COMMAND = path.join(path.dirname(new URL(import.meta.url).p
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const { default: pb } = await import("../extensions/pb/index.ts");
 const { parseSpec, acceptanceCriteria, addDecision, needsRed, redExemption, specHash, specReviewDelta, specReviewGate, specReviewRisk } = await import("../extensions/pb/spec.ts");
-const { parseRequirementDeltas, planRequirementDeltas, requirementCriteria } = await import("../extensions/pb/requirements.ts");
+const { parseRequirementDocument, parseRequirementDeltas, planRequirementDeltas, requirementCriteria } = await import("../extensions/pb/requirements.ts");
 
 type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
 type Tool = (name: string, params: object) => Promise<Result>;
@@ -455,9 +455,10 @@ Create T2.txt.
 /** A requirement delta for the SPEC above: one added requirement with one checkable scenario. */
 const REQUIREMENTS = `
 ## Requirements: order-cancellation
+Overview: Orders are cancelled by their owner while pending; nothing else changes.
 ### ADDED
 ### Requirement: Cancel a pending order
-A pending order can be cancelled by its owner.
+Invariant: Only the order's owner can cancel it, and only while it is PENDING.
 #### Scenario: Owner cancels a pending order
 - **GIVEN** a pending order owned by the caller
 - **WHEN** the owner cancels it
@@ -555,20 +556,151 @@ test("spec: the review checklist derives stable ids without adding syntax to the
   );
 });
 
-test("requirements: scenarios join the review checklist as R ids", () => {
+test("requirements: the invariant joins the checklist first, then its scenarios", () => {
   const markdown = `${SPEC()}${REQUIREMENTS}`;
   const criteria = acceptanceCriteria(markdown, parseSpec(markdown).spec);
-  const scenario = criteria.find((c) => c.id === "R1.1");
-  assert.deepEqual(scenario, {
+  const invariant = criteria.find((c) => c.id === "R1.1");
+  assert.deepEqual(invariant, {
     id: "R1.1",
+    text: "Cancel a pending order: invariant — Only the order's owner can cancel it, and only while it is PENDING.",
+    capability: "order-cancellation",
+    requirement: "Cancel a pending order",
+  });
+  const scenario = criteria.find((c) => c.id === "R1.2");
+  assert.deepEqual(scenario, {
+    id: "R1.2",
     text: "Cancel a pending order: Owner cancels a pending order — GIVEN a pending order owned by the caller; WHEN the owner cancels it; THEN it becomes CANCELLED",
     capability: "order-cancellation",
     requirement: "Cancel a pending order",
   });
-  assert.deepEqual(requirementCriteria(markdown).map((c) => c.id), ["R1.1"]);
+  assert.deepEqual(requirementCriteria(markdown).map((c) => c.id), ["R1.1", "R1.2"]);
   // REMOVED requirements have no scenario left to check.
   const removed = `${SPEC().split("## Tasks")[0]}## Requirements: order-cancellation\n### REMOVED\n### Requirement: Cancel a pending order\n\n## Tasks${SPEC().split("## Tasks")[1]}`;
   assert.deepEqual(requirementCriteria(removed), []);
+});
+
+test("requirements: a requirement without an Invariant line is checked by its statement", () => {
+  const stated = REQUIREMENTS.replace(/^Invariant:.*\n/m, "A pending order can be cancelled by its owner.\n");
+  const criteria = requirementCriteria(`${SPEC()}${stated}`);
+  assert.deepEqual(criteria.map((c) => c.id), ["R1.1", "R1.2"]);
+  assert.equal(criteria[0]!.text, "Cancel a pending order: invariant — A pending order can be cancelled by its owner.");
+});
+
+test("requirements: every THEN line is its own observable claim", () => {
+  const twoClaims = REQUIREMENTS.replace("- **THEN** it becomes CANCELLED", "- **THEN** it becomes CANCELLED\n- **THEN** a second cancel is refused");
+  const scenario = requirementCriteria(`${SPEC()}${twoClaims}`).find((c) => c.id === "R1.2");
+  assert.match(scenario!.text, /THEN it becomes CANCELLED; THEN a second cancel is refused/);
+});
+
+test("requirements: an Invariant must state a rule, appear once, and be enough on its own", () => {
+  const base = (body: string) => `## Requirements: order-cancellation
+### ADDED
+### Requirement: Cancel a pending order
+${body}
+#### Scenario: Owner cancels a pending order
+- **GIVEN** a pending order owned by the caller
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+`;
+  assert.deepEqual(parseRequirementDeltas(base("Invariant: Only the owner can cancel it.")).errors, []);
+  assert.ok(parseRequirementDeltas(base("Invariant:")).errors.some((e) => e.includes('"Invariant:" needs the rule it states')));
+  assert.ok(
+    parseRequirementDeltas(base("Invariant: One.\nInvariant: Two.")).errors.some((e) => e.includes("already has an Invariant line")),
+  );
+});
+
+test("requirements: the delta owns the capability's Overview, and an omitted one keeps the old", () => {
+  const first = planRequirementDeltas(parseRequirementDeltas(REQUIREMENTS).deltas, () => undefined);
+  assert.deepEqual(first.errors, []);
+  const markdown = first.plans[0]!.markdown;
+  // A new capability opens with its overview, before the requirements it summarises.
+  assert.match(
+    markdown,
+    /^# order-cancellation requirements\n\n## Overview\n\nOrders are cancelled by their owner while pending; nothing else changes\.\n\n## Requirements\n/,
+  );
+  assert.match(markdown, /### Requirement: Cancel a pending order/);
+  // The overview is documentation, not a checklist item: the invariant is still R1.1.
+  assert.deepEqual(requirementCriteria(`${SPEC()}${REQUIREMENTS}`).map((c) => c.id), ["R1.1", "R1.2"]);
+
+  const modify = (overview?: string) => `## Requirements: order-cancellation
+${overview ? `${overview}\n` : ""}### MODIFIED
+### Requirement: Cancel a pending order
+Invariant: Only the owner can cancel it.
+#### Scenario: Owner cancels
+- **GIVEN** a pending order
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+`;
+  const kept = planRequirementDeltas(parseRequirementDeltas(modify()).deltas, () => markdown);
+  assert.deepEqual(kept.errors, []);
+  assert.match(kept.plans[0]!.markdown, /Orders are cancelled by their owner while pending/);
+
+  const refreshed = planRequirementDeltas(
+    parseRequirementDeltas(modify("Overview: Cancellation and refunds for pending orders.")).deltas,
+    () => markdown,
+  );
+  assert.deepEqual(refreshed.errors, []);
+  assert.match(refreshed.plans[0]!.markdown, /## Overview\n\nCancellation and refunds for pending orders\./);
+  assert.doesNotMatch(refreshed.plans[0]!.markdown, /Orders are cancelled by their owner while pending/);
+  // The refreshed overview stays before Requirements, even if it was written after them.
+  const misplaced = `${markdown.replace(/## Overview\n\n.*?\n\n/, "").trimEnd()}\n\n## Overview\n\nMisplaced.\n`;
+  const moved = planRequirementDeltas(parseRequirementDeltas(modify("Overview: Cancellation and refunds.")).deltas, () => misplaced);
+  assert.deepEqual(moved.errors, []);
+  assert.match(moved.plans[0]!.markdown, /## Overview\n\nCancellation and refunds\.\n\n## Requirements/);
+});
+
+test("requirements: a capability without an Overview is refused until the delta writes one", () => {
+  const noOverview = REQUIREMENTS.replace(/^Overview:.*\n/m, "");
+  const fresh = planRequirementDeltas(parseRequirementDeltas(noOverview).deltas, () => undefined);
+  assert.match(fresh.errors[0]!, /has no Overview; write "Overview: <what the capability is and what it refuses to do>"/);
+
+  const first = planRequirementDeltas(parseRequirementDeltas(REQUIREMENTS).deltas, () => undefined);
+  const stripped = first.plans[0]!.markdown.replace(/## Overview\n\n.*?\n\n/, "");
+  const modify = (overview?: string) => `## Requirements: order-cancellation
+${overview ? `${overview}\n` : ""}### MODIFIED
+### Requirement: Cancel a pending order
+Invariant: Only the owner can cancel it.
+#### Scenario: Owner cancels
+- **GIVEN** a pending order
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+`;
+  const existing = planRequirementDeltas(parseRequirementDeltas(modify()).deltas, () => stripped);
+  assert.match(existing.errors[0]!, /has no Overview; write "Overview:/);
+  const supplied = planRequirementDeltas(parseRequirementDeltas(modify("Overview: Orders can be cancelled.")).deltas, () => stripped);
+  assert.deepEqual(supplied.errors, []);
+  assert.match(supplied.plans[0]!.markdown, /## Overview\n\nOrders can be cancelled\.\n\n## Requirements/);
+});
+
+test("requirements: the Overview is one plain line before the first group", () => {
+  const delta = (line: string) => `## Requirements: order-cancellation
+${line}
+### ADDED
+### Requirement: Cancel a pending order
+Invariant: Only the owner can cancel it.
+#### Scenario: Owner cancels
+- **GIVEN** a pending order
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+`;
+  assert.deepEqual(parseRequirementDeltas(delta("Overview: Orders can be cancelled.")).errors, []);
+  assert.ok(parseRequirementDeltas(delta("Overview:")).errors.some((e) => e.includes("has an empty Overview")));
+  assert.ok(parseRequirementDeltas(delta("Overview: # Heading")).errors.some((e) => e.includes("must be plain text")));
+  assert.ok(parseRequirementDeltas(delta("Overview: One.\nOverview: Two.")).errors.some((e) => e.includes("more than one Overview line")));
+  assert.ok(parseRequirementDeltas(delta("Orders can be cancelled.")).errors.some((e) => e.includes("has text before its first group")));
+  const duplicateSections = "# order-cancellation requirements\n\n## Overview\nOne.\n\n## Overview\nTwo.\n\n## Requirements\n";
+  assert.ok(parseRequirementDocument(duplicateSections, "order-cancellation").errors.some((e) => e.includes('duplicate "## Overview" section')));
+});
+
+test("spec: the requirements format states the invariant first and one claim per THEN", async () => {
+  const { specPrompt } = await import("../extensions/pb/prompts.ts");
+  const prompt = specPrompt("", []);
+  assert.match(prompt, /Overview: <what the capability is and what it refuses to do/);
+  assert.match(prompt, /Overview is required when the capability has no living file yet/);
+  assert.match(prompt, /Invariant: <the rule that must hold for every input/);
+  assert.match(prompt, /one observable claim/);
+  assert.match(prompt, /R1\.2/);
+  assert.match(prompt, /Add a scenario only where it carries information the invariant doesn't/);
 });
 
 test("requirements: a delta applies exactly, and conflicts are refused", () => {
@@ -582,6 +714,7 @@ test("requirements: a delta applies exactly, and conflicts are refused", () => {
   assert.deepEqual(first.errors, []);
   assert.match(first.plans[0].markdown, /^# order-cancellation requirements$/m);
   assert.match(first.plans[0].markdown, /### Requirement: Cancel a pending order/);
+  assert.match(first.plans[0].markdown, /Invariant: Only the order's owner can cancel it, and only while it is PENDING\./);
   assert.match(first.plans[0].markdown, /- \*\*WHEN\*\* the owner cancels it/);
   assert.deepEqual([first.plans[0].added, first.plans[0].modified, first.plans[0].removed], [["Cancel a pending order"], [], []]);
 
@@ -2686,6 +2819,7 @@ test("fix: a lap opens a fenced session seeded with the findings", async () => {
   assert.match(seed, /Fix exactly the review findings below/);
   assert.match(seed, /name the constant/);
   assert.match(seed, /Do not commit, archive, or write under \.pi\//);
+  assert.match(seed, /Edit structured files .*exact literal replacement or line-based edits, never a backtracking regex/);
   assert.match(seed, /call pb_fix_done/);
 });
 
@@ -3256,6 +3390,41 @@ test("review: findings carry priorities; P0/P1 are double-checked; only line-lea
   assert.match(t.posts.at(-1)!, /⚠ UNVERIFIED · P0 0 · P1 0 · P2 1 · P3 0/);
 });
 
+test("review: a pre-existing problem gets its own outside class instead of a prose note", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [{ priority: "P2", file: "src/order.ts", line: 30, title: "the legacy path still trusts the raw header", fix: "classify once and pass the result", outside: true }];
+  t.reviewer.prose = "Worth knowing: the legacy path predates this change.";
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /✅ PASS/); // an outside finding is advisory, even when it is the only one
+  assert.match(post, /\*\*Outside the change\*\* — pre-existing, not caused by this revision[\s\S]*\[P2 · Outside the change\].*legacy path/);
+  assert.doesNotMatch(post, /\*\*Findings\*\*/); // its own section, not mixed into the change's findings
+  const saved = t.progress("order-cancellation").review.findings;
+  assert.deepEqual(
+    saved.map((f: { title: string; outside?: boolean; priority: string }) => [f.title, f.outside, f.priority]),
+    [["the legacy path still trusts the raw header", true, "P2"]],
+  );
+});
+
+test("review: a finding's class reaches every later rendering, not only its first report", async () => {
+  const { findingLine, verifierBrief, VERIFIER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  const finding = { priority: "P2" as const, file: "src/order.ts", line: 30, title: "the legacy path still trusts the raw header", fix: "classify once", outside: true };
+  assert.match(findingLine(finding, 1), /^1\. \[P2 · Outside the change\] src\/order\.ts:30 — the legacy path still trusts the raw header/);
+  assert.match(verifierBrief([finding], "abc"), /\[P2 · Outside the change\] src\/order\.ts:30/);
+  assert.match(VERIFIER_SYSTEM, /Never reject a finding for being outside/);
+});
+
+test("review: an outside P2 is advisory, but a mislabeled P0/P1 still blocks", async () => {
+  const { verdictOf } = await import("../extensions/pb/review.ts");
+  assert.equal(verdictOf([{ priority: "P2", title: "pre-existing", outside: true }]), "pass");
+  // The class is the reviewer's claim, never a way to wave a blocker through.
+  assert.equal(verdictOf([{ priority: "P1", title: "pre-existing", outside: true }]), "changes_needed");
+  assert.equal(verdictOf([{ priority: "P0", title: "pre-existing", outside: true }]), "changes_needed");
+});
+
 test("review: a prose-only pass gives no verdict and leaves the phase short of reviewed", async () => {
   const t = setup({ verify: "true", reviewer: { security: "off" } });
   await written(t);
@@ -3495,11 +3664,33 @@ test("archive merges a spec's requirement delta into the living base", async () 
   await t.run("archive", "order-cancellation");
   const base = t.read("specs/order-cancellation.md");
   assert.match(base, /^# order-cancellation requirements$/m);
+  assert.match(base, /## Overview\n\nOrders are cancelled by their owner while pending; nothing else changes\.\n\n## Requirements/);
   assert.match(base, /### Requirement: Cancel a pending order/);
+  assert.match(base, /Invariant: Only the order's owner can cancel it, and only while it is PENDING\./);
   assert.match(base, /- \*\*WHEN\*\* the owner cancels it/);
   assert.match(base, /- \*\*THEN\*\* it becomes CANCELLED/);
   assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")));
   assert.match(t.notes.at(-1)!, /Archived order-cancellation .*Requirement deltas merged: order-cancellation \+1 ~0 -0/);
+});
+
+test("archive refreshes the living Overview when the delta supplies a new one", async () => {
+  const t = setup({ verify: "true", mapOnArchive: false });
+  await written(t, `${SPEC()}${REQUIREMENTS}`);
+  await t.run("archive", "order-cancellation");
+  await written(t, `${SPEC()}## Requirements: order-cancellation
+Overview: Pending orders can be cancelled by their owner; refunds follow automatically.
+### MODIFIED
+### Requirement: Cancel a pending order
+Invariant: Only the order's owner can cancel it, and only while it is PENDING.
+#### Scenario: Owner cancels a pending order
+- **GIVEN** a pending order owned by the caller
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+`);
+  await t.run("archive", "order-cancellation");
+  const base = t.read("specs/order-cancellation.md");
+  assert.match(base, /## Overview\n\nPending orders can be cancelled by their owner; refunds follow automatically\.\n\n## Requirements/);
+  assert.doesNotMatch(base, /nothing else changes/);
 });
 
 test("archive keeps the living base outside the git-ignored pb state", async () => {
@@ -3528,6 +3719,10 @@ test("archive: a requirement delta that no longer applies stops before anything 
   const file = path.join(t.repo, "specs/order-cancellation.md");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const base = `# order-cancellation requirements
+
+## Overview
+
+A pending order can be cancelled; nothing else changes.
 
 ## Requirements
 
@@ -3564,6 +3759,10 @@ test("archive: a failed move puts the living requirement base back", async () =>
   const file = path.join(t.repo, "specs/order-cancellation.md");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const base = `# order-cancellation requirements
+
+## Overview
+
+A pending order can be cancelled; nothing else changes.
 
 ## Requirements
 
@@ -3602,8 +3801,9 @@ test("report: status and stats --json return pb.report/1, and pb-report does too
   assert.equal(status.specs[0].name, "order-cancellation");
   assert.equal(status.specs[0].phase, "written");
   assert.deepEqual(status.specs[0].requirements, [{ capability: "order-cancellation", added: ["Cancel a pending order"], modified: [], removed: [] }]);
-  const scenario = status.specs[0].acceptance.find((a: { id: string }) => a.id === "R1.1");
+  const scenario = status.specs[0].acceptance.find((a: { id: string }) => a.id === "R1.2");
   assert.deepEqual([scenario.capability, scenario.requirement, scenario.status], ["order-cancellation", "Cancel a pending order", "not reported"]);
+  assert.equal(status.specs[0].acceptance.find((a: { id: string }) => a.id === "R1.1").text, "Cancel a pending order: invariant — Only the order's owner can cancel it, and only while it is PENDING.");
   assert.equal(status.summary.requirements, 0);
 
   await t.run("stats", "--json");
@@ -3618,7 +3818,7 @@ test("report: status and stats --json return pb.report/1, and pb-report does too
   assert.deepEqual(out.specs[0].review.findings, []);
 });
 
-test("review: a requirement scenario is checked as R1.1 and reported", async () => {
+test("review: a requirement invariant and its scenario are checked and reported", async () => {
   const t = setup({ verify: "true", mapOnArchive: false });
   await written(t, `${SPEC()}${REQUIREMENTS}`);
   t.agent.script = diligent;
@@ -3626,7 +3826,9 @@ test("review: a requirement scenario is checked as R1.1 and reported", async () 
   await t.run("review");
   const progress = t.progress("order-cancellation");
   assert.equal(progress.review.verdict, "pass");
-  const scenario = progress.review.acceptance.find((a: { criterion: string }) => a.criterion === "R1.1");
+  const invariant = progress.review.acceptance.find((a: { criterion: string }) => a.criterion === "R1.1");
+  assert.equal(invariant.status, "met");
+  const scenario = progress.review.acceptance.find((a: { criterion: string }) => a.criterion === "R1.2");
   assert.equal(scenario.status, "met");
   assert.match(scenario.evidence, /^checked/);
 });
@@ -6043,6 +6245,7 @@ test("spec review: carried P2/P3 are not re-listed and do not block or pause", a
   }
   const first = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
   assert.deepEqual(first.reported.map((f: any) => [f.id, f.priority]), [["F1", "P0"], ["F2", "P2"]]);
+  assert.match(t.posts.find((p) => /changes needed before T1/.test(p))!, /changes needed before T1 \(1 blocking finding, 1 advisory\)/);
   await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
   await t.run("build", "order-cancellation"); // the changed spec is reviewed again; the advisory is only carried
   assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // no new advisory: the build proceeds
@@ -6380,7 +6583,7 @@ test("spec review: an outside P1 is advisory and does not hold the build", async
   assert.equal(review.verdict, "pass");
   assert.equal(review.reported[0].outside, true);
   const post = t.posts.find((p) => /advisory findings/.test(p))!;
-  assert.match(post, /Outside the change: a pre-existing problem/);
+  assert.match(post, /Outside the change/);
   assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
 });
 
@@ -6397,7 +6600,7 @@ test("spec review: an outside P0 blocks even when the verdict says pass", async 
   const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
   assert.equal(review.verdict, "block");
   assert.equal(review.reported[0].outside, true);
-  assert.match(t.posts.at(-1)!, /changes needed before T1[\s\S]*corrupts the ledger[\s\S]*Outside the change/);
+  assert.match(t.posts.at(-1)!, /changes needed before T1[\s\S]*Outside the change[\s\S]*corrupts the ledger/);
   assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
 });
 
@@ -6855,13 +7058,22 @@ test("spec review: an empty-path P1 blocks the build before T1", async () => {
 });
 
 test("review: the prompts merge same-fix findings and calibrate framing", async () => {
-  const { REVIEWER_SYSTEM, ATTACKER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  const { REVIEWER_SYSTEM, ATTACKER_SYSTEM, SPEC_REVIEWER_SYSTEM, VERIFIER_SYSTEM } = await import("../extensions/pb/prompts.ts");
   assert.match(REVIEWER_SYSTEM, /same concrete fix/);
   assert.match(REVIEWER_SYSTEM, /reasonable reader/);
   assert.match(REVIEWER_SYSTEM, /## Ground rules[\s\S]*## What to check[\s\S]*## How to judge[\s\S]*## Report/);
   assert.match(REVIEWER_SYSTEM, /Severity is the consequence and likelihood/);
   assert.match(ATTACKER_SYSTEM, /same concrete fix/);
-  assert.match(ATTACKER_SYSTEM, /Pre-existing issues are at most P2/);
+  // Pre-existing problems are reported, not suppressed: the cap is a priority, not a filter.
+  assert.match(ATTACKER_SYSTEM, /Pre-existing problems are still reported/);
+  assert.match(ATTACKER_SYSTEM, /marked `outside`/);
+  assert.match(REVIEWER_SYSTEM, /Pre-existing issues are still findings/);
+  // A real problem belongs in the tool report, never only in the closing prose.
+  assert.match(REVIEWER_SYSTEM, /never leave a real problem here/);
+  assert.match(ATTACKER_SYSTEM, /never only in that line/);
+  // Every pass that judges behaviour tests a classification that matches more than one class.
+  for (const prompt of [REVIEWER_SYSTEM, ATTACKER_SYSTEM, SPEC_REVIEWER_SYSTEM]) assert.match(prompt, /more than one class/);
+  assert.match(VERIFIER_SYSTEM, /Never reject a finding for being outside/);
 });
 
 test("review: findings with the same concrete fix merge; distinct ones stay split", async () => {
@@ -6893,6 +7105,13 @@ test("review: findings with the same concrete fix merge; distinct ones stay spli
     ] as any).length,
     2,
   ); // no file: never merge
+  const classed = mergeFindings([
+    { priority: "P2", file: "b.ts", line: 4, title: "pre-existing copy", fix: "guard the transition", outside: true },
+    { priority: "P1", file: "b.ts", line: 4, title: "the change reaches it", fix: "guard the transition" },
+  ] as any);
+  assert.equal(classed.length, 1);
+  assert.equal(classed[0].priority, "P1");
+  assert.equal(classed[0].outside, undefined); // a defect the change reaches is not outside it
 });
 
 test("review: the brief carries stale prose references for judgment, absent when clean", async () => {
@@ -6970,6 +7189,49 @@ test("spec: the format checklist asks for prose inventory, real states and measu
     assert.match(p, /## Goal\nThe outcome in a few sentences/);
     assert.match(p, /Goal, Decisions, Contracts, Threats and Acceptance bind the build/);
   }
+});
+
+test("spec: every observable contract value cites the code or test that pins it", async () => {
+  const { specPrompt, finishSpecPrompt, specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
+    assert.match(p, /Every observable value a Contract states/);
+    assert.match(p, /cites the code path or test that pins it today \(file:line\), or is written as an Assumption/);
+  }
+  assert.match(specPrompt("", []), /never infer a status or an order from what the design should do/);
+  const review = specReviewBrief("s", "# S\n\n## Contracts\n- 200\n");
+  assert.match(review, /open the cited code path or test and check it produces exactly that value/);
+  assert.match(review, /P1 when the build would implement a wrong contract or a test that fails against correct code/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /value inferred from the design, or contradicted by its citation, is a finding/);
+});
+
+test("build: a task stays narrow, edits structured files literally, and leaves the full suite to the harness", async () => {
+  const { taskPrompt, specPrompt, finishSpecPrompt, specReviewBrief } = await import("../extensions/pb/prompts.ts");
+  const spec = parseSpec(SPEC()).spec!;
+  const prompt = taskPrompt(spec.tasks[0], 1, 3, null);
+  assert.match(prompt, /Keep the change to this task/);
+  assert.match(prompt, /finish the smallest coherent part and report the rest as open/);
+  assert.match(prompt, /Don't run the full suite/);
+  assert.match(prompt, /structured files \(`pom\.xml`, JSON, YAML\) by exact literal replacement or line-based edits/);
+  assert.match(prompt, /\(\?:\(\?!-->\)\.\*\?\)\*/);
+  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
+    assert.match(p, /Keep each task narrow/);
+    assert.match(p, /full-suite run/);
+  }
+  assert.match(specPrompt("", []), /Split work that bundles several independent changes/);
+  assert.match(specReviewBrief("s", "# S\n"), /Task size: each task is one coherent change/);
+});
+
+test("spec: a task naming a full-suite run gets an advisory, not a rejection", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const broad = SPEC({ tasks: "### T1: everything\nEdit the model and then run the full suite.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`" });
+  const warned = await t.callTool("pb_write_spec", { name: "broad", content: broad });
+  assert.equal(warned.error, undefined);
+  assert.match(warned.content![0].text, /T1 names a full-suite run .*the harness runs the full suite after the last task/);
+  const narrow = SPEC({ tasks: "### T1: the model\nEdit the model.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`" });
+  const quiet = await t.callTool("pb_write_spec", { name: "narrow", content: narrow });
+  assert.equal(quiet.error, undefined);
+  assert.doesNotMatch(quiet.content![0].text, /full-suite run/);
 });
 
 test("spec: the format teaches the acceptance proof markers and doc-only acceptance lines", async () => {

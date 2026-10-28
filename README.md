@@ -75,6 +75,12 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   uninterrupted run; after the last one the harness runs the full suite, sends
   a failure back to fix, and pauses after `maxAttempts`. The agent's word never
   ends a build.
+- **Narrow tasks, literal edits.** A task carries one coherent change with a
+  targeted `Test:`; work that would bundle several changes with a full
+  verification is split, because the harness runs the suite once after the last
+  task. Structured files such as `pom.xml`, JSON and YAML are edited by exact
+  literal replacement or line-based edits, never by a regex that can backtrack
+  for minutes (a nested-quantifier pattern such as `(?:(?!-->).*?)*`).
 - **Tests proven to test.** Each task writes its tests first, where the
   compiler gives feedback, and the harness requires them to fail before the
   behaviour exists. Contracts pin every shared seam; the first task that
@@ -101,10 +107,12 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   findings as accepted). Every acceptance line names its proof.
 - **Fresh eyes on the build.** A spec pass, then an adversarial pass, each in a
   fresh read-only session you watch. The spec's acceptance criteria, requirement
-  scenarios (`R1.1`, …) and task acceptance lines are answered one by one; a
-  missing item is unverified, never a pass. Blocking findings get a second look,
-  and pb offers another model family. A command the reviewer runs may change
-  files: they're listed, never silently reverted.
+  invariants and scenarios (`R1.1`, …) and task acceptance lines are answered
+  one by one; a missing item is unverified, never a pass. Blocking findings get a second look,
+  and pb offers another model family. A pre-existing problem is reported as an
+  outside finding (advisory, capped at P2), never left as a prose note. A
+  command the reviewer runs may change files: they're listed, never silently
+  reverted.
 - **Memory across features.** Archiving folds what the feature taught about the
   project into a short map in AGENTS.md, and pb checks every path it names
   against the repo, so the map doesn't drift. Requirement deltas accumulate in
@@ -140,13 +148,15 @@ New tests: yes                      # or: no — why
 ## Contracts                         # external surfaces and shared seams: signatures, API and errors, data, events
 ## Migration and rollback            # only when data or a stored format outlives the change; else "none — why"
 ## Requirements: order-cancellation # only when what a capability guarantees changes; merged on archive
+Overview: Pending orders can be cancelled by their owner; nothing else changes state.
 ### ADDED
 ### Requirement: Cancelling a pending order
-A pending order can be cancelled by its owner and becomes CANCELLED; other states are unaffected.
+Invariant: Only the order's owner can cancel it, only while it is PENDING, and the result is CANCELLED.
 #### Scenario: Owner cancels a pending order
 - **GIVEN** an order in PENDING owned by the caller
 - **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED and cannot be cancelled again
+- **THEN** it becomes CANCELLED
+- **THEN** a second cancel is refused and changes nothing
 ## Design                            # the shape the build settled on, recorded as it went — not by the plan
 ## Open questions                    # only while planning
 ## Tasks
@@ -165,19 +175,33 @@ persisted-data change also needs `## Migration and rollback`, or an explicit
 `none — why`; any section that doesn't apply is one line, never an empty
 heading. `path:line` citations are checked against the repo when the spec is
 written. Each Acceptance line is one behaviour with `(tests: …)` naming its
-proof, or `(non-testable: …)` saying why no test can.
+proof, or `(non-testable: …)` saying why no test can. Keep each task to one
+coherent change with a targeted `Test:`: the harness runs the full suite after
+the last task, so a task never needs to run it, and work that would bundle
+several changes with that verification is split.
 
 **Requirements accumulate across features.** A change that alters what a
 capability guarantees carries a delta: `## Requirements: <capability>`, then
 `### ADDED`, `### MODIFIED` and `### REMOVED` groups of requirement and scenario
-blocks. ADDED must be new; MODIFIED and REMOVED must exist; MODIFIED replaces
-the requirement whole, and a rename is REMOVED plus ADDED. A scenario's
-`GIVEN` / `WHEN` / `THEN` lines are checked against the built code as review
-criteria. `/pb:archive` merges the delta into `specs/<capability>.md`
-transactionally: a delta that no longer applies stops the archive before
-anything moves, and if the spec can't be archived the living files are
-restored. `pb_write_spec` runs the same check, so a delta is never written
-already broken.
+blocks. The delta opens with `Overview:` — what the capability is and what it
+refuses to do, in a sentence or two. `/pb:archive` writes it into the living
+file's `## Overview` before its `## Requirements`; a delta for a capability that
+has none must supply one, and a new overview replaces the old. It is plain text
+and never a review criterion. Each requirement then opens with an `Invariant:`
+line — the rule that must hold for every input — followed by scenarios as its
+examples. The invariant is the first review criterion (`R1.1`), scenarios follow
+(`R1.2`, …), so the reviewer checks the rule and not only the cases; a
+requirement written before invariants falls back to its statement. Write each
+`THEN` as one observable claim: several claims are several `THEN` lines, so a
+finding can name the one that fails. Add a scenario only where it carries
+information the invariant doesn't — a boundary, a state transition, an abuse,
+precedence between overlapping rules — not a happy path that restates the rule
+or near-duplicate cases. ADDED must be new; MODIFIED and REMOVED must exist;
+MODIFIED replaces the requirement whole, and a rename is REMOVED plus ADDED.
+`/pb:archive` merges the delta into `specs/<capability>.md` transactionally: a
+delta that no longer applies stops the archive before anything moves, and if the
+spec can't be archived the living files are restored. `pb_write_spec` runs the
+same check, so a delta is never written already broken.
 
 `## Out of scope` and `## Acceptance criteria` are optional: a spec is as long
 as the change needs and no longer. Pi points to code instead of copying it, and

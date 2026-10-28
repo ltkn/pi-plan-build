@@ -60,6 +60,7 @@ import {
   specReviewBrief,
   SPEC_REPAIR_SYSTEM,
   SPEC_REVIEWER_SYSTEM,
+  STRUCTURED_EDIT_RULE,
   parseSpecReview,
   taskPrompt,
 } from "./prompts.ts";
@@ -284,6 +285,12 @@ const specWarnings = (md: string, spec: ParsedSpec): string[] => {
     spec.tasks.length > 1 && !new RegExp(`^##\\s+Contracts\\s*$`, "mi").test(md)
       ? [`${spec.tasks.length} tasks and no ## Contracts: pin every seam they share (and which task owns each side); if truly independent, ignore this`]
       : [];
+  const suite = spec.tasks.flatMap((t) => {
+    const line = t.text.split("\n").find((l) => /\b(?:run|runs|running|execute|executes|executing)\b[^\n]*\b(?:(?:full|whole|entire)\s+(?:test\s+)?suite|all\s+(?:the\s+)?tests)\b/i.test(l));
+    if (!line) return [];
+    const excerpt = line.trim().length > 120 ? `${line.trim().slice(0, 117)}...` : line.trim();
+    return [`${t.id} names a full-suite run ("${excerpt}"): the harness runs the full suite after the last task, so keep this task's Test: targeted and split a task that already bundles several changes`];
+  });
   const untestable = spec.tasks.flatMap((t) => {
     if (!redEligible(t) || !acceptanceLine.test(t.text)) return [];
     if (t.test) {
@@ -297,7 +304,7 @@ const specWarnings = (md: string, spec: ParsedSpec): string[] => {
     if (/doc(?:s|umentation)?[- ]only|prose[- ]only/i.test(t.text) && t.text.split("\n").filter((l) => acceptanceLine.test(l)).every((l) => /\(non-testable:/.test(l))) return [];
     return [`${t.id} adds behaviour but has no Test: line — add a targeted command, or leave it out and the reviewer judges its tests at the end`];
   });
-  return [...shared, ...contracts, ...untestable];
+  return [...shared, ...contracts, ...suite, ...untestable];
 };
 
 /** Spec names for argument completion (completions run without a ctx, in Pi's working directory). */
@@ -1137,6 +1144,7 @@ export default function pb(pi: ExtensionAPI) {
           line: Type.Optional(Type.Number()),
           title: Type.String({ description: "the problem, in one sentence" }),
           fix: Type.Optional(Type.String({ description: "a concrete fix" })),
+          outside: Type.Optional(Type.Boolean({ description: "true when the problem pre-dates this change (outside it): still a finding, capped at P2 and advisory" })),
         }),
       ),
       acceptance: Type.Optional(
@@ -2782,7 +2790,7 @@ export default function pb(pi: ExtensionAPI) {
       const mode = cfg.specReviewer.mode;
       const continuing = !!carried && (carried.prior.length > 0 || carried.blockingRounds > 0);
       const automatic = mode === "always" || (mode === "auto" && risk.review) || continuing;
-      const line = (f: Finding, i: number) => `${findingLine(f, i + 1)}${f.outside ? "\n   Outside the change: a pre-existing problem, not caused by this revision." : ""}`;
+      const line = (f: Finding, i: number) => findingLine(f, i + 1);
       if (o.force && gate.action !== "skip") {
         // Accepting the standing findings is part of what --force records: the next reader can
         // see what was overridden, not just that a review was skipped.
@@ -2877,10 +2885,13 @@ export default function pb(pi: ExtensionAPI) {
           const advisoryNote = newAdvisory.length
             ? `\n\nNew advisory findings (not blocking):\n${newAdvisory.map(line).join("\n")}`
             : "";
-          post(`**Spec review** — changes needed before T1:\n${resolutionNote}${body}${advisoryNote}${sessionNote}`);
+          const counts = blocking.length
+            ? ` (${blocking.length} blocking finding${blocking.length === 1 ? "" : "s"}${newAdvisory.length ? `, ${newAdvisory.length} advisory` : ""})`
+            : "";
+          post(`**Spec review** — changes needed before T1${counts}:\n${resolutionNote}${body}${advisoryNote}${sessionNote}`);
         } else if (review.findings.length) {
           const body = review.findings.map(line).join("\n");
-          post(`**Spec review** — advisory findings:\n${resolutionNote}${body}${sessionNote}`);
+          post(`**Spec review** — advisory findings (not blocking):\n${resolutionNote}${body}${sessionNote}`);
         } else if (review.advisory.length) {
           // Carried P2/P3 are context, not fresh findings: do not re-list them.
           post(
@@ -3503,6 +3514,8 @@ export default function pb(pi: ExtensionAPI) {
     o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; changedDuring: string[]; partial: boolean; verificationFailed?: string; thrash?: boolean },
   ) => {
     const findings = [...o.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
+    const inChange = findings.filter((f) => !f.outside);
+    const outside = findings.filter((f) => f.outside);
     const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
     const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left);
     const unparsed = run.passes.filter((x) => x.unparsed && !x.left).map((x) => (x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"));
@@ -3557,8 +3570,9 @@ export default function pb(pi: ExtensionAPI) {
               : []),
           ]
         : []),
-      ...(findings.length ? ["", "**Findings**", "", ...findings.map((f, i) => findingLine(f, i + 1))] : []),
-      ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}] ${d.finding.title} — ${d.evidence}`)] : []),
+      ...(inChange.length ? ["", "**Findings**", "", ...inChange.map((f, i) => findingLine(f, i + 1))] : []),
+      ...(outside.length ? ["", "**Outside the change** — pre-existing, not caused by this revision", "", ...outside.map((f, i) => findingLine(f, i + 1))] : []),
+      ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}${d.finding.outside ? " · Outside the change" : ""}] ${d.finding.title} — ${d.evidence}`)] : []),
       ...(o.changedDuring.length ? ["", `⚠ Files changed while the review ran (left as they are — they may be yours, not the reviewer's): ${o.changedDuring.join(", ")}`] : []),
       ...(run.largeFiles?.length ? ["", `⚠ Untracked files over 20 MB are in no snapshot or diff (read them yourself): ${run.largeFiles.join(", ")}`] : []),
       ...(o.thrash ? ["", "⚠ A review pass compacted repeatedly without new reads and wrapped up early: treat its findings as a partial pass."] : []),
@@ -3910,7 +3924,7 @@ export default function pb(pi: ExtensionAPI) {
     const findings = remaining.map((f, i) => findingLine(f, i + 1)).join("\n");
     const seed =
       `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings}\n\n` +
-      `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line (full suite once at the end); new tests must be seen failing first. ` +
+      `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line (full suite once at the end); new tests must be seen failing first. ${STRUCTURED_EDIT_RULE} ` +
       `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
       `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +
       `When done, call pb_fix_done with fixed ids (titles), skipped ids, and test results; then stop.`;

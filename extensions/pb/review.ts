@@ -247,6 +247,8 @@ export function mergeFindings(findings: Finding[]): Finding[] {
       same.priority = f.priority;
       same.fix = f.fix;
     }
+    // A defect the change is responsible for is not outside it, whichever copy was seen first.
+    if (!f.outside) delete same.outside;
     if (!same.title.includes(f.title)) same.title = `${same.title} / ${f.title}`;
   }
   return out;

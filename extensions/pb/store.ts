@@ -218,7 +218,7 @@ export interface Finding {
   line?: number;
   title: string;
   fix?: string;
-  /** a delta review's pre-existing problem, outside the change under review; only an outside P0 blocks */
+  /** a pre-existing problem outside the change under review: still reported and pickable, at most P2 in a code review; only an outside P0 blocks a spec review */
   outside?: boolean;
 }
 
