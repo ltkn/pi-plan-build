@@ -7,6 +7,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ReviewLedgerEntry } from "./store.ts";
 
 const START = "<!-- pb:map -->";
 const END = "<!-- /pb:map -->";
@@ -185,7 +186,7 @@ What doesn't: a feature's decisions or tasks, versions, history, anything one \`
 
 Say where to look and what isn't obvious, not how things work in detail: the code and the project's own docs hold the detail. Start with the security invariants.
 
-Every claim comes from reading the code, never from a name, a comment or a doc — and for security or data claims, follow the call far enough to see the mechanism: the callers, shared helpers, filters, SQL and constraints the invariant actually depends on. Never write a verdict ("secure", "tenant-safe", "atomic", "non-enumerating") without naming the code that makes it true; if it's enforced indirectly, name the indirect point. Otherwise leave the claim out.
+Every claim comes from reading the code, never from a name, a comment or a doc — and for security or data claims, follow the call far enough to see the mechanism: the callers, shared helpers, filters, SQL and constraints the invariant actually depends on. Review findings in a brief are leads, not evidence: check each against the code as it is now, and leave out one that no longer holds or that a later review resolved. Never write a verdict ("secure", "tenant-safe", "atomic", "non-enumerating") without naming the code that makes it true; if it's enforced indirectly, name the indirect point. Otherwise leave the claim out.
 
 Revisit the whole map, not only the area just worked on: check every path, command and claim against the code as it is now, correct what changed, remove what is no longer true. Paths in backticks, relative to the project root. Short bullet lines, one idea each (no paragraphs), under a few "### " headings. Every area heading carries its path prefix, e.g. "### Levels (src/main/java/ark/ai/regime/levels/)", so a later session reads only the headings covering the paths it touches; "### Security invariants" carries none, it is read in full every time. It is read in every session: keep each line only if it saves a later feature a search or a mistake, and cut what the code, a file name or one \`ls\` already says. As long as the project needs (a small project may need a few lines), as short as it allows; about ${MAP_TOKENS.toLocaleString("en-US")} tokens at most.
 
@@ -194,6 +195,8 @@ Report with the report_map tool: the whole new map (its body, without a top head
 export function cartographerBrief(o: {
   current: string;
   spec?: { name: string; findings: string };
+  /** P0–P2 findings from completed reviews: leads to verify, never evidence to copy. */
+  reviewFindings?: ReviewLedgerEntry[];
   changed?: string[];
   focus?: string;
   unresolved?: { path: string; line: string }[];
@@ -232,6 +235,18 @@ export function cartographerBrief(o: {
     "",
     o.current || "(none yet: write the first one)",
     ...(o.spec ? ["", `# The feature just finished: ${o.spec.name}`, "", "What its planning established (its Findings; the code may have changed since):", "", o.spec.findings || "(no Findings section)"] : []),
+    ...(o.reviewFindings?.length
+      ? [
+          "",
+          `# Review findings for ${o.spec?.name ?? "this feature"} (leads, not evidence)`,
+          "",
+          "An independent review of this change reported these. Each is a lead: verify it against the code as it is now before using it; leave out one that no longer holds or that a later review resolved. The map needs what stays true, not the finding itself.",
+          "",
+          ...o.reviewFindings.map(
+            (f) => `- [${f.priority}${f.outside ? " · outside the change" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}${f.count > 1 ? ` (reported ${f.count} times)` : ""}${f.fix ? `\n  Fix: ${f.fix}` : ""}`,
+          ),
+        ]
+      : []),
     ...(o.changed?.length ? ["", "# Files that feature changed", "", ...o.changed] : []),
     ...(o.focus ? ["", `# Focus: ${o.focus}`] : []),
   ].join("\n");

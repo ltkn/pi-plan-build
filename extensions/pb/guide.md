@@ -515,7 +515,11 @@ final gate additionally runs `lint` and `extraChecks` when configured.
 
 The spec's Goal, Decisions, Contracts, Threats and Acceptance bind the build:
 changing one takes a `pb_ask`. How to build it is the build's: a better way found while
-coding is taken, and a change to the Design goes in Decisions. Where
+coding is taken, and a change to the Design goes in Decisions. Every task handout,
+check retry, coherence pass and fix lap carries those binding sections, the
+requirement and acceptance criteria and the finished tasks' caveats, rejections and
+open items as a compact block; a section cut short says so and names the spec file.
+Where
 the spec is ambiguous, contradicts itself or doesn't match the code, Pi takes
 the sensible reading, records it in the spec's Decisions as an **assumption**,
 and carries on. The build summary lists these choices and the reviewer checks
@@ -538,7 +542,7 @@ build's state, written by pb, not by a model.
 `checkpointAt` (75% of its window, always before Pi would compact), pb resets it
 right there, between two tasks, where nothing is half-done. The build goes on
 from a summary pb writes itself: the build's rules, every task with its
-report (what changed, and the caveats, rejections and open items later tasks can catch on), the assumptions, the spec and the next task. No summarizing model call,
+report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's binding sections and criteria (Tasks and the rest stay in the spec), and the next task. No summarizing model call,
 and nothing of the finished task is needed any more. Should a single task still
 run into Pi's own compaction, pb writes that summary too, adding the files the
 task has changed so far and the files read before, so it carries on instead of
@@ -805,8 +809,10 @@ their path prefix (Security invariants carries none: read it in full every
 time); sessions read only the headings covering the paths they touch.
 
 - **When a feature is done**, `/pb:archive` updates it from what the feature
-  established (its spec's Findings, the files it changed); `"mapOnArchive":
-  false` turns that off.
+  established: its spec's Findings, the design the build settled on, the files
+  it changed, and the completed reviews' P0–P2 findings as leads the
+  cartographer must check against the code (a finding that no longer holds is
+  left out); `"mapOnArchive": false` turns that off.
 - **Any time**, `/pb:map [focus]` refreshes it from the code as it is now.
 - **`/pb:map undo`** puts the previous map back (again: swaps them back).
 

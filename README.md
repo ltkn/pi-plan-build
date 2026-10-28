@@ -114,9 +114,10 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   command the reviewer runs may change files: they're listed, never silently
   reverted.
 - **Memory across features.** Archiving folds what the feature taught about the
-  project into a short map in AGENTS.md, and pb checks every path it names
-  against the repo, so the map doesn't drift. Requirement deltas accumulate in
-  `specs/<capability>.md`.
+  project into a short map in AGENTS.md — its findings, the design it settled
+  on, and the review's P0–P2 findings as leads the cartographer rechecks
+  against the code — and pb checks every path it names against the repo, so the
+  map doesn't drift. Requirement deltas accumulate in `specs/<capability>.md`.
 - **Your standards, once.** Engineering standards live in AGENTS.md, which Pi
   loads into every session; pb offers once to add its default section for your
   stack.

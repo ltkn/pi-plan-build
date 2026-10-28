@@ -413,6 +413,67 @@ export function readEvents(file: string): Record<string, unknown>[] {
   }
 }
 
+/**
+ * A review finding kept for later features: a lead the project map may use, never evidence.
+ * `count` is how many completed reviews reported the same place and title.
+ */
+export interface ReviewLedgerEntry {
+  priority: Priority;
+  file?: string;
+  line?: number;
+  title: string;
+  fix?: string;
+  outside?: boolean;
+  count: number;
+  /** the last review that reported it, for ordering */
+  last: string;
+}
+
+/** Findings kept per review log: the rest stay in review.md, which the ledger never replaces. */
+export const REVIEW_FINDINGS_CAP = 40;
+
+const PRIORITY_RANK: Record<Priority, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+
+/**
+ * The P0–P2 findings of completed reviews, deduped by place and title, highest priority first.
+ * Append-only events, so a finding that recurs across reviews keeps one entry with a count.
+ */
+export function reviewLedger(events: Record<string, unknown>[]): ReviewLedgerEntry[] {
+  const found = new Map<string, ReviewLedgerEntry>();
+  // Findings are model output sent to another model: one line each, never a new bullet or heading.
+  const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
+  for (const event of events) {
+    if (event.type !== "review-findings" || !Array.isArray(event.findings)) continue;
+    const at = typeof event.at === "string" ? event.at : "";
+    for (const raw of event.findings) {
+      if (!raw || typeof raw !== "object") continue;
+      const f = raw as Record<string, unknown>;
+      if (f.priority !== "P0" && f.priority !== "P1" && f.priority !== "P2") continue;
+      const title = typeof f.title === "string" ? oneLine(f.title) : "";
+      if (!title) continue;
+      const file = typeof f.file === "string" && f.file.trim() ? oneLine(f.file) : undefined;
+      const line = typeof f.line === "number" && Number.isInteger(f.line) && f.line > 0 ? f.line : undefined;
+      const fix = typeof f.fix === "string" && f.fix.trim() ? cap(oneLine(f.fix), 500) : undefined;
+      const outside = f.outside === true || undefined;
+      const key = `${file ?? ""}\u0000${line ?? ""}\u0000${title.toLowerCase()}`;
+      const entry = found.get(key);
+      if (!entry) {
+        found.set(key, { priority: f.priority, file, line, title: cap(title, 300), fix, outside, count: 1, last: at });
+        continue;
+      }
+      entry.count += 1;
+      if (PRIORITY_RANK[f.priority] < PRIORITY_RANK[entry.priority]) entry.priority = f.priority;
+      if (fix) entry.fix = fix;
+      // A defect the change is responsible for is not outside it, whichever review saw it first.
+      if (!outside) delete entry.outside;
+      if (at > entry.last) entry.last = at;
+    }
+  }
+  return [...found.values()]
+    .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || (a.last < b.last ? 1 : a.last > b.last ? -1 : 0) || a.title.localeCompare(b.title))
+    .slice(0, REVIEW_FINDINGS_CAP);
+}
+
 export class Store {
   readonly root: string;
   readonly archiveRoot: string;

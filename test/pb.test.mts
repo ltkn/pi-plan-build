@@ -2430,6 +2430,20 @@ test("build: the next task is told what finished tasks touched", async () => {
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
+test("build: every task handout carries the spec's binding context", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.match(
+    t.results[0],
+    /✓ T1[\s\S]*Binding context \(a compact copy of \.pi\/pb\/specs\/order-cancellation\/spec\.md[\s\S]*## Goal\nCancel orders\.[\s\S]*## Decisions[\s\S]*Only PENDING orders[\s\S]*## Contracts[\s\S]*T1 owns T1\.txt[\s\S]*## Acceptance criteria\n- A1: T1\.txt and T2\.txt exist\./,
+  );
+  assert.doesNotMatch(t.results[0], /### T1: first file/); // no whole Tasks section, just the current task
+  const next = t.instructions.find((i) => i.startsWith("✓ T1"))!;
+  assert.match(next, /Task T2[\s\S]*Binding context[\s\S]*## Goal\nCancel orders\./); // the next task carries it too
+});
+
 test("build state summaries show hooks and hide nones", async () => {
   const { buildStateSummary } = await import("../extensions/pb/prompts.ts");
   const p = {
@@ -2444,6 +2458,61 @@ test("build state summaries show hooks and hide nones", async () => {
   const s = buildStateSummary({ p, mechanics: "m", current: "next", reason: "reset" });
   assert.match(s, /- T1 first: done — did T1 · caveat: T2 must keep the hook/);
   assert.doesNotMatch(s, /rejected: none/);
+});
+
+test("build state summaries drop Tasks, keep binding sections, and neither repeat assumptions nor uncap hooks", async () => {
+  const { buildSpecView, buildStateSummary } = await import("../extensions/pb/prompts.ts");
+  const long = "detail ".repeat(80);
+  const p = {
+    spec: "order-cancellation",
+    phase: "building",
+    current: "T2",
+    assumptions: ["Only PENDING orders can be cancelled, because the state machine only allows that transition.", "Assumption (build, T1): the spec refused this one"],
+    tasks: [
+      { id: "T1", title: "first", status: "done", attempts: 1, changed: "did T1", caveat: long, rejected: "none", open: "none" },
+      { id: "T2", title: "second", status: "doing", attempts: 1 },
+    ],
+  } as any;
+  const s = buildStateSummary({ p, markdown: buildSpecView(SPEC()), mechanics: "m", current: "next", reason: "reset" });
+  assert.match(s, /--- spec ---\n# Order cancellation[\s\S]*## Goal\n\nCancel orders\.[\s\S]*## Decisions[\s\S]*Only PENDING orders/);
+  assert.doesNotMatch(s, /## Tasks|### T1: first file/); // the handout carries the current task
+  assert.equal(s.split("Only PENDING orders").length - 1, 1); // Decisions already carries it once
+  assert.match(s, /Assumptions made so far, not in the spec's Decisions:\n- Assumption \(build, T1\): the spec refused this one/);
+  assert.match(s, /caveat: detail[^\n]*…/); // the hook is capped
+  const hook = s.split("\n").find((l) => l.includes("caveat:"))!;
+  assert.ok(hook.length < 230);
+  assert.ok(s.length < 6000);
+});
+
+test("prompts: task, retry and coherence messages carry the binding context, not the whole spec", async () => {
+  const { bindingContext, buildSpecView, coherePrompt, fixText, taskPrompt } = await import("../extensions/pb/prompts.ts");
+  const spec = SPEC().replace("## Contracts\n", "## Design\n- One aggregate, one file.\n## Migration and rollback\nnone — no stored data.\n## Threats and abuse\n- A forged owner id must not cancel.\n## Contracts\n");
+  const markdown = `${spec}\n${REQUIREMENTS}`;
+  const tasks = [
+    { id: "T1", title: "first file", status: "done", attempts: 1, changed: "did T1", caveat: "keep the hook", rejected: "none", open: "check the empty path" },
+  ] as any;
+  const binding = bindingContext("order-cancellation", markdown, tasks);
+  assert.match(binding, /^Binding context \(a compact copy of \.pi\/pb\/specs\/order-cancellation\/spec\.md/);
+  assert.match(binding, /## Goal\nCancel orders\./);
+  assert.match(binding, /## Decisions\n- Only PENDING orders/);
+  assert.match(binding, /## Design\n- One aggregate/);
+  assert.match(binding, /## Contracts\n- T1 owns T1\.txt/);
+  assert.match(binding, /## Migration and rollback\nnone/);
+  assert.match(binding, /## Threats and abuse\n- A forged owner/);
+  assert.match(binding, /## Requirement criteria\n- R1\.1: Cancel a pending order: invariant/);
+  assert.match(binding, /## Acceptance criteria\n- A1: T1\.txt and T2\.txt exist\./);
+  assert.match(binding, /## Prior tasks\n- T1 · caveat: keep the hook · open: check the empty path/);
+  assert.doesNotMatch(binding, /## Tasks|### T1: first file/); // the task is already in the handout
+
+  const view = buildSpecView(markdown);
+  assert.match(view, /^# Order cancellation[\s\S]*## Goal[\s\S]*## Requirement criteria/);
+  assert.doesNotMatch(view, /## Tasks|### T1: first file/);
+
+  const task = parseSpec(markdown).spec!.tasks[0];
+  assert.match(taskPrompt(task, 1, 3, null, false, binding), /Do only this task:[\s\S]*Binding context[\s\S]*## Contracts/);
+  assert.match(fixText("T1", "`true` failed", "output", 1, 3, false, binding), /output\n\nBinding context[\s\S]*Fix the cause/);
+  assert.match(coherePrompt("abc", 1, 3, binding), /never weaken an existing test\.[\s\S]*Binding context/);
+  assert.match(bindingContext("order-cancellation", markdown.replace("Cancel orders.", "x".repeat(2000))), /truncated \d+ chars/);
 });
 
 test("build: verification none runs no checks; no new tests reaches the agent", async () => {
@@ -3415,6 +3484,50 @@ test("review: a finding's class reaches every later rendering, not only its firs
   assert.match(findingLine(finding, 1), /^1\. \[P2 · Outside the change\] src\/order\.ts:30 — the legacy path still trusts the raw header/);
   assert.match(verifierBrief([finding], "abc"), /\[P2 · Outside the change\] src\/order\.ts:30/);
   assert.match(VERIFIER_SYSTEM, /Never reject a finding for being outside/);
+});
+
+test("review ledger: P0–P2 findings dedupe by place and title, count repeats, and cap; P3 stays out", async () => {
+  const { reviewLedger, REVIEW_FINDINGS_CAP } = await import("../extensions/pb/store.ts");
+  const ledger = reviewLedger([
+    {
+      type: "review-findings",
+      at: "2026-01-01T00:00:00.000Z",
+      findings: [
+        { priority: "P2", file: "src/a.ts", line: 3, title: "Name\nit", fix: "rename", outside: true },
+        { priority: "P3", file: "src/b.ts", line: 4, title: "a nit" },
+      ],
+    },
+    {
+      type: "review-findings",
+      at: "2026-01-02T00:00:00.000Z",
+      findings: [
+        { priority: "P1", file: "src/a.ts", line: 3, title: "name it", fix: "rename it" },
+        { priority: "P0", file: "src/c.ts", title: "guard the write" },
+      ],
+    },
+  ]);
+  assert.deepEqual(ledger.map((f) => [f.priority, f.file, f.line, f.title, f.count, f.outside]), [
+    ["P0", "src/c.ts", undefined, "guard the write", 1, undefined],
+    ["P1", "src/a.ts", 3, "Name it", 2, undefined], // an inside report wins over an earlier outside one
+  ]);
+  assert.equal(ledger[1].fix, "rename it");
+
+  const many = Array.from({ length: REVIEW_FINDINGS_CAP + 5 }, (_, i) => ({ priority: "P2", file: `src/f${i}.ts`, title: `finding ${i}` }));
+  assert.equal(reviewLedger([{ type: "review-findings", at: "2026-01-03T00:00:00.000Z", findings: many }]).length, REVIEW_FINDINGS_CAP);
+});
+
+test("review: completed findings are logged as leads for the project map, without P3", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  const logged = t.events("order-cancellation").filter((e: { type: string }) => e.type === "review-findings");
+  assert.equal(logged.length, 1);
+  assert.deepEqual(
+    (logged[0] as { findings: Array<{ priority: string; file: string; line: number; title: string }> }).findings.map((f) => [f.priority, f.file, f.line, f.title]),
+    [["P2", "src/order.ts", 30, "name the constant"]],
+  );
 });
 
 test("review: an outside P2 is advisory, but a mislabeled P0/P1 still blocks", async () => {
@@ -5337,6 +5450,41 @@ test("map: /pb:archive skips the map when the spec established nothing new", asy
   const archived = t.notes.filter((n) => n.startsWith("Archived order-cancellation to "));
   assert.equal(archived.length, 1); // one notice, no map trailer when skipping
   assert.ok(!archived[0].includes("Updating"));
+});
+
+test("map: completed review findings reach the cartographer as a separate lead section", async () => {
+  const t = setup({ verify: "true" });
+  const { writeMap } = await import("../extensions/pb/map.ts");
+  writeMap(t.repo, "- `README`: readme");
+  await written(t); // ## Context, no Findings; the build records no Design
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  const briefFile = path.join(os.tmpdir(), `pb-map-review-${process.pid}.md`);
+  if (fs.existsSync(briefFile)) fs.rmSync(briefFile);
+  process.env.MOCK_BRIEF_OUT = briefFile;
+  try {
+    await t.run("archive");
+  } finally {
+    delete process.env.MOCK_BRIEF_OUT;
+  }
+  const brief = fs.readFileSync(briefFile, "utf8");
+  assert.match(brief, /# Review findings for order-cancellation \(leads, not evidence\)/);
+  assert.match(brief, /\[P2\] src\/order\.ts:30 — name the constant/);
+  assert.match(brief, /verify it against the code as it is now/);
+  // The review findings alone made the map news: the spec has no Findings and no Design.
+  assert.ok(t.notes.some((n) => /Updating the project map from order-cancellation/.test(n)));
+});
+
+test("map: review findings are leads the cartographer must verify against the code", async () => {
+  const { CARTOGRAPHER_SYSTEM, cartographerBrief } = await import("../extensions/pb/map.ts");
+  assert.match(CARTOGRAPHER_SYSTEM, /Review findings in a brief are leads, not evidence: check each against the code as it is now, and leave out one that no longer holds/);
+  const brief = cartographerBrief({
+    current: "- `README`: readme",
+    spec: { name: "x", findings: "" },
+    reviewFindings: [{ priority: "P1", file: "src/a.ts", line: 2, title: "guard the write", fix: "add the guard", count: 2, last: "2026-01-01T00:00:00.000Z" }],
+  });
+  assert.match(brief, /# Review findings for x \(leads, not evidence\)[\s\S]*\[P1\] src\/a\.ts:2 — guard the write \(reported 2 times\)\n  Fix: add the guard/);
 });
 
 test("map: /pb:archive updates it by itself: paths that don't resolve go back once to be fixed, then it's written, and undo swaps back", async () => {

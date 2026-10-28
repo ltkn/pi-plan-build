@@ -6,8 +6,10 @@
  * in your Pi sessions; the explorer, the reviewer and the verifier are separate, fresh calls.
  */
 import { tip } from "./help.ts";
-import { type ParsedSpec, type SpecTask, sectionHeading, specReviewDelta } from "./spec.ts";
-import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, REQUIREMENTS_DIR, type Progress, type SpecResolution, type TaskProgress } from "./store.ts";
+import { headerBlock } from "./markdown.ts";
+import { requirementCriteria } from "./requirements.ts";
+import { acceptanceCriteria, type ParsedSpec, type SpecTask, sectionHeading, sectionOf, specReviewDelta } from "./spec.ts";
+import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, REQUIREMENTS_DIR, type Progress, type SpecResolution, type TaskProgress, cap } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
 
@@ -289,15 +291,113 @@ Before T1, validate the spec against the repo as it is now: the paths, interface
 ${buildMechanics(spec, buildCmd, each, extra)}${standardsBlock(standards)}${markdown ? `\n\n--- spec: ${P}/specs/${name}/spec.md ---\n\n${markdown}` : ""}`;
 }
 
+const isNone = (v: string | undefined) => !v || /^(none|n\/a|-|nothing)\.?$/i.test(v.trim());
+const clip = (text: string, n: number): string => {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > n ? `${flat.slice(0, Math.max(0, n - 1)).trimEnd()}…` : flat;
+};
+
+/** Keep the first n lines, then one line saying how many were left out. */
+const cappedList = (lines: string[], n: number, overflow: (rest: number) => string): string[] => [...lines.slice(0, n), ...(lines.length > n ? [overflow(lines.length - n)] : [])];
+
+/** The sections a task must respect: anything that constrains what it may write or how it will be judged. */
+const BINDING_SECTIONS = ["Goal", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse"] as const;
+const BINDING_SECTION_CAP: Record<(typeof BINDING_SECTIONS)[number], number> = {
+  Goal: 700,
+  Decisions: 1600,
+  Design: 1200,
+  Contracts: 1200,
+  "Migration and rollback": 900,
+  "Threats and abuse": 1100,
+};
+const BINDING_CRITERIA_CAP = 12;
+const BINDING_TOTAL_CAP = 9000;
+const SPEC_VIEW_CAP = 12000;
+
+/** Cut a section body at a line boundary, saying how much stayed in the spec. */
+const cappedSection = (body: string, limit: number): string => {
+  if (body.length <= limit) return body;
+  const cut = body.slice(0, limit);
+  const at = cut.lastIndexOf("\n");
+  const kept = (at > limit / 2 ? cut.slice(0, at) : cut).trimEnd();
+  return `${kept}\n… [truncated ${body.length - kept.length} chars: read the full section in the spec]`;
+};
+
+const criterionLines = (markdown: string): string[] => {
+  const requirements = requirementCriteria(markdown);
+  const acceptance = acceptanceCriteria(markdown).filter((c) => /^A\d+$/.test(c.id));
+  const lines: string[] = [];
+  if (requirements.length) {
+    lines.push("", "## Requirement criteria");
+    const rendered = requirements.map((c) => `- ${c.id}: ${clip(c.text, 300)}`);
+    lines.push(...cappedList(rendered, BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the spec`));
+  }
+  if (acceptance.length) {
+    lines.push("", "## Acceptance criteria");
+    const rendered = acceptance.map((c) => `- ${c.id}: ${clip(c.text, 300)}`);
+    lines.push(...cappedList(rendered, BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the spec`));
+  }
+  return lines;
+};
+
+/**
+ * The compact binding context a task, a retry, the coherence pass or a fix lap carries: what the
+ * spec binds the change to, without the whole document. Sections are capped with the cut disclosed;
+ * the spec path is named so anything left out can be read at the source.
+ */
+export function bindingContext(name: string, markdown: string, tasks: TaskProgress[] = []): string {
+  const lines = [
+    `Binding context (a compact copy of ${P}/specs/${name}/spec.md; the spec is the source of truth — read it when a line is cut or a case isn't here):`,
+  ];
+  for (const section of BINDING_SECTIONS) {
+    const body = sectionOf(markdown, section).trim();
+    if (body) lines.push("", `## ${section}`, cappedSection(body, BINDING_SECTION_CAP[section]));
+  }
+  lines.push(...criterionLines(markdown));
+  const hooks = tasks
+    .filter((t) => t.status === "done")
+    .flatMap((t) => {
+      const found = [
+        ["caveat", t.caveat],
+        ["rejected", t.rejected],
+        ["open", t.open],
+      ].flatMap(([kind, value]) => (value && !isNone(value) ? [`${kind}: ${clip(value, 240)}`] : []));
+      return found.length ? [`- ${t.id} · ${found.join(" · ")}`] : [];
+    });
+  if (hooks.length) lines.push("", "## Prior tasks", ...cappedList(hooks, BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the build state`));
+  return cap(lines.join("\n"), BINDING_TOTAL_CAP);
+}
+
+/**
+ * The build's view of the spec, for a reset or compaction: the parts that bind the work, the
+ * requirement and acceptance criteria, and no Tasks — the current handout carries its own task.
+ * Deterministic: assembled from the sections, never summarized by a model.
+ */
+export function buildSpecView(markdown: string): string {
+  const parts: string[] = [];
+  const header = headerBlock(markdown).trim();
+  if (header) parts.push(header);
+  for (const section of BINDING_SECTIONS) {
+    const body = sectionOf(markdown, section).trim();
+    if (body) parts.push(`## ${section}\n\n${body}`);
+  }
+  const requirements = requirementCriteria(markdown);
+  if (requirements.length) parts.push(`## Requirement criteria\n\n${requirements.map((c) => `- ${c.id}: ${c.text}`).join("\n")}`);
+  const acceptance = acceptanceCriteria(markdown).filter((c) => /^A\d+$/.test(c.id));
+  if (acceptance.length) parts.push(`## Acceptance criteria\n\n${acceptance.map((c) => `- ${c.id}: ${c.text}`).join("\n")}`);
+  return cap(parts.join("\n\n"), SPEC_VIEW_CAP);
+}
+
 /**
  * check: the command pb_task_done will run for this task, if any. red: its new tests must be seen failing first.
+ * binding: the compact context from the spec, so the handout carries what it must respect.
  */
-export function taskPrompt(task: SpecTask, attempt: number, max: number, check: string | null, red = false): string {
+export function taskPrompt(task: SpecTask, attempt: number, max: number, check: string | null, red = false, binding = ""): string {
   return `[pb:build] Task ${task.id}${attempt > 1 ? ` (attempt ${attempt} of ${max})` : ""}. Do only this task:
 
 ${task.text}
 
-Keep the change to this task: if it has grown into several changes, finish the smallest coherent part and report the rest as open. Don't run the full suite — the harness runs it after the last task. ${STRUCTURED_EDIT_RULE}
+${binding ? `${binding}\n\n` : ""}Keep the change to this task: if it has grown into several changes, finish the smallest coherent part and report the rest as open. Don't run the full suite — the harness runs it after the last task. ${STRUCTURED_EDIT_RULE}
 
 ${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red saying which acceptance lines each failing test proves. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}(Comments: describe the code as it is, never its history — no dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""} plus changed/caveat/rejected/open (each required: what changed, what the next task must respect, what was tried and discarded, what is still unchecked — "none" where there is genuinely nothing). If it can't be done properly, status "blocked" with why.`;
 }
@@ -308,23 +408,24 @@ export function continuePrompt(task: SpecTask): string {
 
 /**
  * check: nothing (the final check afterwards guards it). base: the build's base commit for the diff, if known.
+ * binding: the spec's compact binding context.
  */
-export function coherePrompt(base: string | undefined, attempt: number, max: number): string {
+export function coherePrompt(base: string | undefined, attempt: number, max: number, binding = ""): string {
   const diff = base ? `git diff ${base} -- . ':(exclude).pi'` : `git diff HEAD -- . ':(exclude).pi'`;
   return `[pb:build] Coherence pass${attempt > 1 ? ` (attempt ${attempt} of ${max})` : ""}. Do only this task:
 
 Read the whole change of this feature (\`${diff}\`, plus untracked files from git status), looking only for what task slicing leaves behind: duplicated helpers or logic across tasks, dead code a slice made redundant, and inconsistent naming or error handling. Consolidate what is worth consolidating, strictly within what the spec's Goal, Decisions, Contracts, Threats and Acceptance allow: change no behaviour, API, or data, and never weaken an existing test.
 
-${STRUCTURED_EDIT_RULE}
+${binding ? `${binding}\n\n` : ""}${STRUCTURED_EDIT_RULE}
 
 When done, call pb_task_done with task "cohere" plus changed/caveat/rejected/open ("none" where there is genuinely nothing). If it can't be done properly, status "blocked" with why. If there is nothing worth consolidating, say so and finish done anyway.`;
 }
 
-export function fixText(taskId: string, what: string, output: string, attempt: number, max: number, last: boolean): string {
+export function fixText(taskId: string, what: string, output: string, attempt: number, max: number, last: boolean, binding = ""): string {
   const head = `${taskId === "final" ? "The final check" : `The check for ${taskId}`} failed (attempt ${attempt} of ${max}): ${what}`;
   return last
-    ? `${head}\n\n${output}\n\nThat was the last attempt: the build is paused. Stop here; the human decides how to go on.`
-    : `${head}\n\n${output}\n\nFix the cause, then call pb_task_done again with task "${taskId}".`;
+    ? `${head}\n\n${output}\n\n${binding ? `${binding}\n\n` : ""}That was the last attempt: the build is paused. Stop here; the human decides how to go on.`
+    : `${head}\n\n${output}\n\n${binding ? `${binding}\n\n` : ""}Fix the cause, then call pb_task_done again with task "${taskId}".`;
 }
 
 export function nudgePrompt(taskId: string): string {
@@ -335,16 +436,16 @@ export function nudgePrompt(taskId: string): string {
  * One finished task in a state summary: what it changed, plus the hooks a later task can
  * catch on (caveat, rejected, open) — "none" values stay out to keep the context lean.
  * Specs written before hooks existed carry only summary, which renders as the change.
+ * Hooks are capped: a reset summary is context, not a transcript.
  */
-const isNone = (v: string | undefined) => !v || /^(none|n\/a|-|nothing)\.?$/i.test(v.trim());
 const doneLine = (t: TaskProgress): string => {
-  const changed = (t.changed ?? t.summary ?? "").replace(/\s+/g, " ").trim();
+  const changed = clip(t.changed ?? t.summary ?? "", 240);
   if (!changed) return "";
   const hooks = [
     ["caveat", t.caveat],
     ["rejected", t.rejected],
     ["open", t.open],
-  ].flatMap(([k, v]) => (v && !isNone(v) ? [`${k}: ${v.replace(/\s+/g, " ").trim()}`] : []));
+  ].flatMap(([k, v]) => (v && !isNone(v) ? [`${k}: ${clip(v, 180)}`] : []));
   return ` — ${[changed, ...hooks].join(" · ")}`;
 };
 
@@ -369,8 +470,8 @@ export function buildStateSummary(o: {
   const { p } = o;
   const lines = [
     o.reason === "reset"
-      ? `[pb build state: ${p.spec}] The build session was reset between two tasks to free context: nothing is half-done. The finished tasks are in the code and summarized below; the spec is the source of truth.`
-      : `[pb build state: ${p.spec}] This conversation was compacted in the middle of ${p.current}. Carry on with it from where it was: its changes so far are in the files listed below.`,
+      ? `[pb build state: ${p.spec}] The build session was reset between two tasks to free context: nothing is half-done. The finished tasks are in the code and summarized below; the spec is the source of truth (${P}/specs/${p.spec}/spec.md — its Tasks and non-binding sections are left to the spec).`
+      : `[pb build state: ${p.spec}] This conversation was compacted in the middle of ${p.current}. Carry on with it from where it was: its changes so far are in the files listed below; the spec is the source of truth (${P}/specs/${p.spec}/spec.md — its Tasks and non-binding sections are left to the spec).`,
     "",
     "How this build works:",
     o.mechanics,
@@ -378,7 +479,11 @@ export function buildStateSummary(o: {
     "Tasks:",
     ...p.tasks.map((t) => `- ${t.id} ${t.title}: ${t.status}${t.id === p.current ? " (current)" : ""}${t.status === "done" ? doneLine(t) : ""}`),
   ];
-  if (p.assumptions?.length) lines.push("", "Assumptions made so far (in the spec's Decisions):", ...p.assumptions.map((a) => `- ${a}`));
+  // The spec's Decisions carry the recorded assumptions already; only an entry the spec refused
+  // (or the human removed) is missing from the view and has to survive the reset here.
+  const decisions = sectionOf(o.markdown ?? "", "Decisions").replace(/\s+/g, " ");
+  const unrecorded = (p.assumptions ?? []).filter((a) => !decisions.includes(a.replace(/\s+/g, " ").trim()));
+  if (unrecorded.length) lines.push("", "Assumptions made so far, not in the spec's Decisions:", ...unrecorded.map((a) => `- ${a.replace(/\s+/g, " ").trim()}`));
   if (o.changed?.length) lines.push("", `Files ${p.current} has changed so far:`, ...o.changed.map((f) => `- ${f}`));
   if (o.read?.length) lines.push("", "Files read before this point (read again what you need):", ...o.read.slice(0, 40).map((f) => `- ${f}`));
   if (p.lastVerify && p.lastVerify.ok === false) lines.push("", `Last check (failed):\n${p.lastVerify.summary}`);
@@ -551,11 +656,10 @@ export function acceptanceDrift(markdown: string, events: Array<Record<string, u
   const markers = (l: string) => [...l.matchAll(/\((?:tests|non-testable):[^)]*\)/g)].map((m) => m[0]).sort().join(" ");
   if (missing.length === added.length && missing.map(markers).sort().join("\n") === added.map(markers).sort().join("\n"))
     return `Acceptance drift during build: ${missing.length} line${missing.length === 1 ? "" : "s"} reworded since the build started, proofs unchanged — check the rewording didn't narrow the goal.`;
-  const take = (ls: string[]) => [...ls.slice(0, 8), ...(ls.length > 8 ? [`… +${ls.length - 8} more`] : [])];
   return [
     "Acceptance drift during build (judge whether each is a legitimate clarification or a quiet change of the goal):",
-    ...take(missing).map((l) => `- dropped/reworded since build start: ${l}`),
-    ...take(added).map((l) => `- added/reworded during build: ${l}`),
+    ...cappedList(missing, 8, (n) => `… +${n} more`).map((l) => `- dropped/reworded since build start: ${l}`),
+    ...cappedList(added, 8, (n) => `… +${n} more`).map((l) => `- added/reworded during build: ${l}`),
   ].join("\n");
 }
 
