@@ -6192,8 +6192,14 @@ test("spec review: P0 findings stop the build before T1 with the findings shown"
   }
   assert.match(t.posts.at(-1)!, /changes needed before T1/);
   assert.match(t.posts.at(-1)!, /unguarded transition/);
+  assert.match(
+    t.posts.at(-1)!,
+    /\*\*New blocking findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   Evidence: spec\.md:63 names no guard, and src\/order\.ts:42 has none\.\n   Fix: guard it/,
+  );
   assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // never launched
   assert.equal(t.progress("order-cancellation").phase, "written"); // untouched
+  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
+  assert.equal(review.reported[0].evidence, "spec.md:63 names no guard, and src/order.ts:42 has none.");
 });
 
 test("spec review: Markdown bullet findings block and are not mistaken for a pass", async () => {
@@ -6269,13 +6275,14 @@ test("spec review: after amendment the build re-reviews and proceeds on the pass
   assert.match(brief, /## Binding context \(unchanged by this revision\)[\s\S]*# Order cancellation/);
   assert.doesNotMatch(brief, /### T2: second file/); // unchanged tasks are not re-sent
   assert.match(brief, /F1 \[P0\][\s\S]*unguarded transition/);
+  assert.match(brief, /F1 \[P0\] Decisions — unguarded transition\n   Evidence: spec\.md:63 names no guard/); // the trace follows the finding into the follow-up
   assert.match(brief, /STILL OPEN:/); // every earlier blocker must be answered
   assert.equal(reviews[1].resolutions[0].id, "F1");
   assert.equal(reviews[1].resolutions[0].status, "resolved");
   assert.equal(reviews[1].reported.length, 0);
   const passPost = t.posts.find((p) => /pass, no findings/.test(p));
   assert.ok(passPost);
-  assert.match(passPost, /Earlier findings:\n- F1 \[P0\].*unguarded transition — RESOLVED: the current spec now covers it/);
+  assert.match(passPost, /Earlier findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   RESOLVED: the current spec now covers it/);
 });
 
 test("spec review: a still-open earlier blocker keeps blocking even when the verdict says pass", async () => {
@@ -6300,7 +6307,8 @@ test("spec review: a still-open earlier blocker keeps blocking even when the ver
   assert.equal(reviews[1].reported[0].id, "F1");
   assert.equal(reviews[1].resolutions[0].status, "open");
   assert.match(t.posts.at(-1)!, /changes needed before T1/);
-  assert.match(t.posts.at(-1)!, /- F1 \[P0\].*unguarded transition — STILL OPEN: the current spec still permits the failure/);
+  assert.match(t.posts.at(-1)!, /Earlier findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   STILL OPEN: the current spec still permits the failure/);
+  assert.doesNotMatch(t.posts.at(-1)!, /\*\*New blocking findings\*\*/); // the open earlier finding is not repeated as new
   assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
 });
 
@@ -6325,7 +6333,7 @@ test("spec review: a missing resolution fails closed as still open", async () =>
   assert.deepEqual(reviews.map((e) => e.verdict), ["block", "block"]);
   assert.equal(reviews[1].resolutions[0].status, "open");
   assert.equal(reviews[1].resolutions[0].evidence, "No resolution reported.");
-  assert.match(t.posts.at(-1)!, /- F1 \[P0\].*unguarded transition — STILL OPEN: No resolution reported\./);
+  assert.match(t.posts.at(-1)!, /Earlier findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   STILL OPEN: No resolution reported\./);
   assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
 });
 
@@ -6377,7 +6385,7 @@ test("spec review: a resolved blocker and a new finding get sequential stable id
   assert.equal(reviews[1].reported[0].priority, "P2");
   assert.equal(reviews[1].nextId, 3);
   assert.equal(reviews[1].verdict, "pass");
-  assert.match(t.posts.find((p) => /advisory findings/.test(p))!, /F2 \[P2\][\s\S]*unmeasured window/);
+  assert.match(t.posts.find((p) => /advisory findings/.test(p))!, /\*\*Earlier findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   RESOLVED:[\s\S]*\*\*New advisory findings\*\*\nF2 \[P2\][\s\S]*unmeasured window/);
   assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // a new advisory is shown, not a gate
 });
 
@@ -6393,7 +6401,9 @@ test("spec review: carried P2/P3 are not re-listed and do not block or pause", a
   }
   const first = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
   assert.deepEqual(first.reported.map((f: any) => [f.id, f.priority]), [["F1", "P0"], ["F2", "P2"]]);
-  assert.match(t.posts.find((p) => /changes needed before T1/.test(p))!, /changes needed before T1 \(1 blocking finding, 1 advisory\)/);
+  const blockPost = t.posts.find((p) => /changes needed before T1/.test(p))!;
+  assert.match(blockPost, /changes needed before T1 \(1 blocking finding, 1 advisory\)/);
+  assert.match(blockPost, /\*\*New blocking findings\*\*\nF1 \[P0\][\s\S]*\*\*New advisory findings\*\* \(not blocking\)\nF2 \[P2\][\s\S]*unmeasured window/);
   await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
   await t.run("build", "order-cancellation"); // the changed spec is reviewed again; the advisory is only carried
   assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // no new advisory: the build proceeds
@@ -6928,8 +6938,11 @@ test("spec review parser: accepts Markdown bullets, headings and bold tags", asy
       "## Findings",
       "",
       "- [P1] Decisions — first",
+      "  Evidence: spec.md:12 says nothing about the first path",
       "  Fix: fix one",
       "* **[P2]** Contracts — second",
+      "  Fix: fix two",
+      "  Evidence: spec.md:20 names the wrong status",
       "### [P3] Tasks — third",
       "1. [P2] Answers — fourth",
       "",
@@ -6937,8 +6950,8 @@ test("spec review parser: accepts Markdown bullets, headings and bold tags", asy
     ].join("\n"),
   );
   assert.deepEqual(parsed.findings, [
-    { priority: "P1", title: "Decisions — first", fix: "fix one" },
-    { priority: "P2", title: "Contracts — second" },
+    { priority: "P1", title: "Decisions — first", evidence: "spec.md:12 says nothing about the first path", fix: "fix one" },
+    { priority: "P2", title: "Contracts — second", fix: "fix two", evidence: "spec.md:20 names the wrong status" },
     { priority: "P3", title: "Tasks — third" },
     { priority: "P2", title: "Answers — fourth" },
   ]);
@@ -6949,6 +6962,36 @@ test("spec review parser: accepts Markdown bullets, headings and bold tags", asy
   assert.equal(parsed.block, true);
   // The verdict is load-bearing even when the model writes no parseable finding line.
   assert.deepEqual(parseSpecReview("VERDICT: block"), { findings: [], outside: [], resolutions: [], block: true });
+});
+
+test("spec review parser: evidence is its own line, in either order, and legacy answers still parse", async () => {
+  const { findingLine, parseSpecReview } = await import("../extensions/pb/prompts.ts");
+  const ordered = parseSpecReview(
+    ["[P1] Decisions — the guard is missing", "Evidence: spec.md:63 names no guard; src/order.ts:42 has none.", "Fix: add the guard", "VERDICT: block"].join("\n"),
+  );
+  assert.deepEqual(ordered.findings, [
+    {
+      priority: "P1",
+      title: "Decisions — the guard is missing",
+      evidence: "spec.md:63 names no guard; src/order.ts:42 has none.",
+      fix: "add the guard",
+    },
+  ]);
+  // Either order, and bold or bulleted labels, read the same.
+  const reversed = parseSpecReview(
+    ["- [P2] Contracts — the status is unproven", "  **Fix:** cite the code", "  **Evidence:** spec.md:20 names no status", "VERDICT: pass"].join("\n"),
+  );
+  assert.deepEqual(reversed.findings, [
+    { priority: "P2", title: "Contracts — the status is unproven", fix: "cite the code", evidence: "spec.md:20 names no status" },
+  ]);
+  // An answer from before the Evidence line still parses.
+  assert.deepEqual(parseSpecReview("[P2] Contracts — legacy\nFix: keep it\nVERDICT: pass").findings, [
+    { priority: "P2", title: "Contracts — legacy", fix: "keep it" },
+  ]);
+  assert.match(
+    findingLine(ordered.findings[0], 1),
+    /^1\. \[P1\] Decisions — the guard is missing\n   Evidence: spec\.md:63 names no guard; src\/order\.ts:42 has none\.\n   Fix: add the guard$/,
+  );
 });
 
 test("spec review parser: outside-change findings don't leak into the reviewed scope", async () => {
@@ -7147,7 +7190,7 @@ test("spec review: a follow-up brief carries the delta, ids and resolutions", as
   assert.doesNotMatch(fresh, /Earlier review/);
   assert.doesNotMatch(fresh, /STILL OPEN/);
   const followUp = specReviewBrief("order-cancellation", md, {
-    prior: [{ id: "F1", priority: "P0", title: "unguarded transition", fix: "guard it" }],
+    prior: [{ id: "F1", priority: "P0", title: "unguarded transition", evidence: "spec.md:12 has no guard", fix: "guard it" }],
     priorMarkdown: "# Order cancellation\n\n## Decisions\n- Any order can be cancelled.\n",
     advisory: [{ id: "F2", priority: "P2", title: "unmeasured window" }],
     round: 2,
@@ -7158,6 +7201,7 @@ test("spec review: a follow-up brief carries the delta, ids and resolutions", as
   assert.match(followUp, /## Changed since the earlier review[\s\S]*Only PENDING orders can be cancelled\./);
   assert.match(followUp, /## Earlier form of the changed parts[\s\S]*Any order can be cancelled\./);
   assert.match(followUp, /F1 \[P0\][\s\S]*unguarded transition/);
+  assert.match(followUp, /Evidence: spec\.md:12 has no guard/);
   assert.match(followUp, /Fix: guard it/);
   assert.match(followUp, /F2 \[P2\][\s\S]*unmeasured window/);
   assert.match(followUp, /Do not re-report/); // advisory findings are context, not new findings
@@ -7187,6 +7231,8 @@ test("spec review: the brief attacks decisions and demands an exact verdict", as
   assert.match(b, /same concrete fix/);
   assert.match(b, /No findings is fine/);
   assert.match(b, /self-check/i);
+  assert.match(b, /what goes wrong, for whom, and where/);
+  assert.match(b, /Evidence: <the spec quote, code fact or file:line that shows it>/);
   assert.match(b, /VERDICT: (block|pass)/);
 });
 
@@ -7350,6 +7396,8 @@ test("spec: every observable contract value cites the code or test that pins it"
   assert.match(review, /open the cited code path or test and check it produces exactly that value/);
   assert.match(review, /P1 when the build would implement a wrong contract or a test that fails against correct code/);
   assert.match(SPEC_REVIEWER_SYSTEM, /value inferred from the design, or contradicted by its citation, is a finding/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /one sentence a tired human can act on: what goes wrong, for whom, and where/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /supporting trace .* on its Evidence line/);
 });
 
 test("build: a task stays narrow, edits structured files literally, and leaves the full suite to the harness", async () => {

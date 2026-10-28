@@ -217,6 +217,8 @@ export interface Finding {
   file?: string;
   line?: number;
   title: string;
+  /** the trace that shows the problem: quoted spec text, a code fact, or the file:line that proves it */
+  evidence?: string;
   fix?: string;
   /** a pre-existing problem outside the change under review: still reported and pickable, at most P2 in a code review; only an outside P0 blocks a spec review */
   outside?: boolean;

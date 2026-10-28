@@ -2867,15 +2867,23 @@ export default function pb(pi: ExtensionAPI) {
         }
         // The run's transcript is kept with the spec's sessions: linked here, so the words
         // behind the verdict stay reachable. The notification covers you being elsewhere.
-        const sessionNote = review.session ? `\n\nThe whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
-        const resolutionNote = review.resolutions.length
-          ? `Earlier findings:\n${review.resolutions
-              .map(
-                (r) =>
-                  `- ${r.id}${r.priority ? ` [${r.priority}]` : ""}${r.title ? ` ${r.title}` : ""} — ${r.status === "resolved" ? "RESOLVED" : "STILL OPEN"}: ${r.evidence}`,
-              )
-              .join("\n")}\n\n`
+        const sessionNote = review.session ? `The whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
+        const earlierSection = review.resolutions.length
+          ? `**Earlier findings**\n${review.resolutions
+              .map((r) => {
+                const carried = review.findings.find((f) => f.id === r.id);
+                const head = `${r.id}${r.priority ? ` [${r.priority}]` : ""}${r.title ? ` ${r.title}` : ""}`;
+                const status = `   ${r.status === "resolved" ? "RESOLVED" : "STILL OPEN"}: ${r.evidence}`;
+                const details =
+                  r.status === "open" && carried
+                    ? `${carried.evidence ? `\n   Evidence: ${carried.evidence}` : ""}${carried.fix ? `\n   Fix: ${carried.fix}` : ""}`
+                    : "";
+                return `${head}\n${status}${details}`;
+              })
+              .join("\n")}`
           : "";
+        const earlierIds = new Set(review.resolutions.map((r) => r.id));
+        const fresh = review.findings.filter((f) => !f.id || !earlierIds.has(f.id));
         if (cfg.notify)
           notifyDesktop(
             "pb: spec review",
@@ -2889,27 +2897,30 @@ export default function pb(pi: ExtensionAPI) {
           );
         if (review.block) {
           const blocking = review.findings.filter(specReviewBlocks);
-          const newAdvisory = review.findings.filter((f) => !specReviewBlocks(f));
-          const body = blocking.length
-            ? blocking.map(line).join("\n")
-            : `The reviewer blocked without a parseable finding.${review.prose?.trim() ? `\n\n${review.prose.trim()}` : ""}`;
-          const advisoryNote = newAdvisory.length
-            ? `\n\nNew advisory findings (not blocking):\n${newAdvisory.map(line).join("\n")}`
-            : "";
+          const newBlocking = fresh.filter(specReviewBlocks);
+          const newAdvisory = fresh.filter((f) => !specReviewBlocks(f));
           const counts = blocking.length
             ? ` (${blocking.length} blocking finding${blocking.length === 1 ? "" : "s"}${newAdvisory.length ? `, ${newAdvisory.length} advisory` : ""})`
             : "";
-          post(`**Spec review** — changes needed before T1${counts}:\n${resolutionNote}${body}${advisoryNote}${sessionNote}`);
-        } else if (review.findings.length) {
-          const body = review.findings.map(line).join("\n");
-          post(`**Spec review** — advisory findings (not blocking):\n${resolutionNote}${body}${sessionNote}`);
+          const sections = [`**Spec review** — changes needed before T1${counts}:`];
+          if (earlierSection) sections.push(earlierSection);
+          if (newBlocking.length) sections.push(`**New blocking findings**\n${newBlocking.map(line).join("\n")}`);
+          else if (!blocking.length)
+            sections.push(`The reviewer blocked without a parseable finding.${review.prose?.trim() ? `\n\n${review.prose.trim()}` : ""}`);
+          if (newAdvisory.length) sections.push(`**New advisory findings** (not blocking)\n${newAdvisory.map(line).join("\n")}`);
+          post([...sections, sessionNote].filter(Boolean).join("\n\n"));
+        } else if (fresh.length) {
+          const sections = ["**Spec review** — advisory findings (not blocking):"];
+          if (earlierSection) sections.push(earlierSection);
+          sections.push(`**New advisory findings**\n${fresh.map(line).join("\n")}`);
+          post([...sections, sessionNote].filter(Boolean).join("\n\n"));
         } else if (review.advisory.length) {
           // Carried P2/P3 are context, not fresh findings: do not re-list them.
-          post(
-            `**Spec review** — pass, no new findings. ${review.advisory.length} earlier advisory finding${review.advisory.length === 1 ? "" : "s"} carried (not re-listed); the recorded pass covers this text.${resolutionNote ? `\n\n${resolutionNote.trimEnd()}` : ""}${sessionNote}`.trimEnd(),
-          );
+          const pass = `**Spec review** — pass, no new findings. ${review.advisory.length} earlier advisory finding${review.advisory.length === 1 ? "" : "s"} carried (not re-listed); the recorded pass covers this text.`;
+          post([pass, earlierSection, sessionNote].filter(Boolean).join("\n\n"));
         } else {
-          post(`**Spec review** — pass, no findings (the recorded pass covers this text).${resolutionNote ? `\n\n${resolutionNote.trimEnd()}` : ""}${sessionNote}`.trimEnd());
+          const pass = "**Spec review** — pass, no findings (the recorded pass covers this text).";
+          post([pass, earlierSection, sessionNote].filter(Boolean).join("\n\n"));
         }
         if (review.block) {
           ctx.ui.notify(

@@ -577,7 +577,7 @@ A finding marked "outside the change" is pre-existing: confirm it when the probl
 Do not modify any file, and never run git commands that change the working tree or index. Report with the report_verdicts tool: one entry per finding, by its number.`;
 
 export const findingLine = (f: Finding, n?: number) =>
-  `${f.id ? `${f.id} ` : n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}${f.fix ? `\n   Fix: ${f.fix}` : ""}`;
+  `${f.id ? `${f.id} ` : n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}${f.evidence ? `\n   Evidence: ${f.evidence}` : ""}${f.fix ? `\n   Fix: ${f.fix}` : ""}`;
 
 export interface ReviewBrief {
   /** the spec, when the change was built from one */
@@ -750,7 +750,7 @@ export function reviewerBrief(o: ReviewBrief): string {
   return lines.join("\n");
 }
 
-export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review a feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. You may inspect the repository with read-only shell commands (ls, find, cat, head, tail, git status, git log, git diff, rg). Do not create, modify or delete files, redirect output, install anything, or run commands that write. Your findings must be checkable against the spec and the code it cites. Every observable value in a Contract (status, error, header, ordering, event, stored value) must be backed by the code path or test that pins it; a value inferred from the design, or contradicted by its citation, is a finding. Attack the design; do not reward length or polish. A clean pass is a valid result: report nothing rather than invent a finding. When a rule is selected by a classification (a kind, role, mode, type, state, host, tenant), test an input that matches more than one class and say which class must win at each decision — routing, lookup, authorization, default — because two classifiers that disagree are a hole when the disagreement reaches a decision. Be concise: conclusion first. Your answer is all that goes back.`;
+export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review a feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. You may inspect the repository with read-only shell commands (ls, find, cat, head, tail, git status, git log, git diff, rg). Do not create, modify or delete files, redirect output, install anything, or run commands that write. Your findings must be checkable against the spec and the code it cites. Every observable value in a Contract (status, error, header, ordering, event, stored value) must be backed by the code path or test that pins it; a value inferred from the design, or contradicted by its citation, is a finding. Attack the design; do not reward length or polish. A clean pass is a valid result: report nothing rather than invent a finding. When a rule is selected by a classification (a kind, role, mode, type, state, host, tenant), test an input that matches more than one class and say which class must win at each decision — routing, lookup, authorization, default — because two classifiers that disagree are a hole when the disagreement reaches a decision. A finding's first line is one sentence a tired human can act on: what goes wrong, for whom, and where; put the supporting trace (quoted spec text, code fact, file:line) on its Evidence line. Be concise: conclusion first. Your answer is all that goes back.`;
 
 /** The earlier review a follow-up must converge against, plus the advisory findings it has already carried. */
 export interface SpecReviewContext {
@@ -866,7 +866,7 @@ ${
 RESOLVED means the problem is gone, not that your suggested fix was copied. A RESOLVED line with no evidence counts as STILL OPEN. An omitted earlier P0/P1 is treated as STILL OPEN.
 `
     : ""
-}## Findings — new or changed only, one per line: [P0|P1|P2|P3] <spec section or file:line> — <problem>. Next line: Fix: <concrete fix>. Write (none) when nothing survives.
+}## Findings — new or changed only, one per line: [P0|P1|P2|P3] <spec section or file:line> — <one sentence: what goes wrong, for whom, and where>. Next lines, in either order: Evidence: <the spec quote, code fact or file:line that shows it>; Fix: <concrete fix>. Write (none) when nothing survives.
 ${
   deltaReview
     ? `## Outside the change — existing problems the change did not cause, same shape, one per line. Only a P0 here blocks; P1-P3 are advisory. Write (none) when none.
@@ -876,7 +876,7 @@ ${
 }
 
 /** The one-shot reformat of a block whose answer the parser could not read. It only reshapes words already written. */
-export const SPEC_REPAIR_SYSTEM = `You are a SPEC FORMATTER in a fresh context. A spec reviewer already wrote the answer quoted in the brief, but the harness could not parse it. Reformat that answer only: do not read the spec or the repository, do not review, and do not add, remove, or re-rank a problem. Use the reviewer's own evidence and priorities; where it states a priority, keep it. Keep the reviewer's placement: a problem it puts outside the change stays under Outside the change. If the answer states no concrete problem, report no finding rather than inventing one. Be concise: the formatted lines are all that goes back.`;
+export const SPEC_REPAIR_SYSTEM = `You are a SPEC FORMATTER in a fresh context. A spec reviewer already wrote the answer quoted in the brief, but the harness could not parse it. Reformat that answer only: do not read the spec or the repository, do not review, and do not add, remove, or re-rank a problem. Use the reviewer's own evidence and priorities; where it states a priority, keep it. Put the reviewer's own trace on the Evidence line and never invent one; leave evidence out when the answer states none. Keep the reviewer's placement: a problem it puts outside the change stays under Outside the change. If the answer states no concrete problem, report no finding rather than inventing one. Be concise: the formatted lines are all that goes back.`;
 
 /** Ask for the reviewer's existing answer in the harness's shape, with its earlier-finding answers preserved. */
 export function specRepairBrief(o: { name: string; answer: string; prior?: Finding[] }): string {
@@ -901,7 +901,7 @@ ${prior.map((f) => findingLine(f)).join("\n")}
     : ""
 }# Return exactly
 
-## Findings — one per line: [P0|P1|P2|P3] <spec section or file:line> — <problem>. Next line: Fix: <concrete fix>. Write (none) when the answer states no problem.
+## Findings — one per line: [P0|P1|P2|P3] <spec section or file:line> — <one sentence: what goes wrong, for whom, and where>. Next lines, in either order: Evidence: <the trace from the answer>; Fix: <concrete fix>. Write (none) when the answer states no problem.
 ## Outside the change — pre-existing problems the answer places outside the change, same shape. Write (none) when it places none there.
 ${
   prior.length
@@ -963,8 +963,24 @@ export function parseSpecReview(text: string): SpecReviewResult {
     // the line if the reviewer repeats one under Findings instead of resolving it.
     const m = /^(?:#{1,6}\s*)?(?:(?:[-*+]|\d+[.)])\s+)?(?:F\d+\s+)?(?:\*\*)?\[(P[0-3])\](?:\*\*)?\s+([^\n]+)$/.exec(trimmed);
     if (!m) continue;
-    const fix = /^Fix:\s*([^\n]+)$/.exec((lines[i + 1] ?? "").trim());
-    const finding: Finding = { priority: m[1] as Finding["priority"], title: m[2].trim(), ...(fix ? { fix: fix[1].trim() } : {}) };
+    // Evidence and Fix follow the finding, in either order; the first other line ends it.
+    let evidence: string | undefined;
+    let fix: string | undefined;
+    for (let j = i + 1; j < lines.length; j++) {
+      const detail = /^(?:[-*+]\s+)?(?:\*\*(Evidence|Fix):\*\*|\*\*(Evidence|Fix)\*\*:|(Evidence|Fix):)\s*(.+)$/i.exec(
+        lines[j].trim(),
+      );
+      if (!detail) break;
+      const label = (detail[1] ?? detail[2] ?? detail[3]).toLowerCase();
+      if (label === "evidence") evidence = detail[4].trim();
+      else fix = detail[4].trim();
+    }
+    const finding: Finding = {
+      priority: m[1] as Finding["priority"],
+      title: m[2].trim(),
+      ...(evidence ? { evidence } : {}),
+      ...(fix ? { fix } : {}),
+    };
     (area === "outside" ? outside : findings).push(finding);
   }
   const insideBlock = findings.some((f) => f.priority === "P0" || f.priority === "P1");

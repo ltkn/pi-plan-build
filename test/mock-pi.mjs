@@ -49,13 +49,13 @@ if (sys.includes("ATTACKER")) {
   const earlier = [...brief.matchAll(/^(?:- )?(F\d+) \[P[01]\]/gm)].map((m) => m[1]);
   const resolved = earlier.length && mode !== "still-open" && mode !== "no-resolution" ? `${earlier.map((id) => `- ${id} — RESOLVED: the current spec now covers it`).join("\n")}\n\n` : "";
   const stillOpen = earlier.map((id) => `- ${id} — STILL OPEN: the current spec still permits the failure`).join("\n");
-  if (mode === "block") say([{ type: "text", text: `${resolved}[P0] Decisions — unguarded transition\nFix: guard it\n\nVERDICT: block` }]);
+  if (mode === "block") say([{ type: "text", text: `${resolved}[P0] Decisions — unguarded transition\nEvidence: spec.md:63 names no guard, and src/order.ts:42 has none.\nFix: guard it\n\nVERDICT: block` }]);
   else if (mode === "block-bullets")
-    say([{ type: "text", text: `${resolved}## Findings\n\n- [P1] Decisions — unguarded transition\n  Fix: guard it\n\n## Verdict — VERDICT: block` }]);
+    say([{ type: "text", text: `${resolved}## Findings\n\n- [P1] Decisions — unguarded transition\n  Evidence: spec.md:63 names no guard, and src/order.ts:42 has none.\n  Fix: guard it\n\n## Verdict — VERDICT: block` }]);
   else if (mode === "block-untagged") say([{ type: "text", text: `${resolved}The spec has an unstated empty path.\n\nVERDICT: block` }]);
   else if (mode === "block-advisory")
-    say([{ type: "text", text: `${resolved}[P0] Decisions — unguarded transition\nFix: guard it\n[P2] Contracts — unmeasured window\nFix: measure it\n\nVERDICT: block` }]);
-  else if (mode === "advisory") say([{ type: "text", text: `${resolved}[P2] Contracts — unmeasured window\nFix: measure it\n\nVERDICT: pass` }]);
+    say([{ type: "text", text: `${resolved}[P0] Decisions — unguarded transition\nEvidence: spec.md:63 names no guard, and src/order.ts:42 has none.\nFix: guard it\n[P2] Contracts — unmeasured window\nEvidence: Contracts names no measurement for the 30-day window.\nFix: measure it\n\nVERDICT: block` }]);
+  else if (mode === "advisory") say([{ type: "text", text: `${resolved}[P2] Contracts — unmeasured window\nEvidence: Contracts names no measurement for the 30-day window.\nFix: measure it\n\nVERDICT: pass` }]);
   else if (mode === "outside-advisory")
     say([{ type: "text", text: `${resolved}## Findings\n(none)\n\n## Outside the change\n[P1] Context — src/order.ts names a transition with no guard\nFix: guard it in a follow-up\n\nVERDICT: pass` }]);
   else if (mode === "outside-blocker")
@@ -72,7 +72,7 @@ if (sys.includes("ATTACKER")) {
   if (process.env.MOCK_SPEC_REPAIR_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_SPEC_REPAIR_BRIEF_OUT, brief);
   if (process.env.MOCK_SPEC_REPAIR_ARGS_OUT) fs.writeFileSync(process.env.MOCK_SPEC_REPAIR_ARGS_OUT, argv.join("\n"));
   const ok = process.env.MOCK_SPEC_REPAIR === "ok";
-  say([{ type: "text", text: ok ? "[P1] Tasks — unstated empty path\nFix: state the empty behaviour\n\nVERDICT: block" : "The spec has an unstated empty path.\n\nVERDICT: block" }]);
+  say([{ type: "text", text: ok ? "[P1] Tasks — unstated empty path\nEvidence: Tasks says nothing about an empty flush.\nFix: state the empty behaviour\n\nVERDICT: block" : "The spec has an unstated empty path.\n\nVERDICT: block" }]);
 } else if (sys.includes("REVIEWER")) {
   if (process.env.MOCK_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_BRIEF_OUT, brief);
   const findings = [

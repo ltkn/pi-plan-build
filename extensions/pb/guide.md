@@ -406,11 +406,15 @@ session's model by default; set
 you want another model, such as the implementer, to validate the plan.
 
 Only a P0 or P1 stops the build before the first task; P2/P3 are shown and the
-build carries on, with the findings recorded beside the spec. A block means
-amend the spec (or record a rebuttal in Decisions) and run `/pb:build` again:
-the next pass reviews only the changed sections and tasks, against the full
-spec and the earlier findings, and judges each earlier P0/P1 against the new
-text first. An unchanged blocked spec is re-posted, not re-reviewed. After
+build carries on, with the findings recorded beside the spec. A finding's first
+line is one sentence you can act on — what goes wrong, for whom, and where — and
+its trace and fix follow on `Evidence:` and `Fix:` lines. The chat result keeps
+earlier findings (with their resolution status) apart from new blocking ones;
+the full text stays in the recorded review and its linked session. A block
+means amend the spec (or record a rebuttal in Decisions) and run `/pb:build`
+again: the next pass reviews only the changed sections and tasks, against the
+full spec and the earlier findings, and judges each earlier P0/P1 against the
+new text first. An unchanged blocked spec is re-posted, not re-reviewed. After
 `maxRounds` blocking rounds (2 by default) the loop stops and the next changed
 spec waits for you: `/pb:build --review` spends one more round, or
 `/pb:build --force` builds it as it stands and records the standing findings as
