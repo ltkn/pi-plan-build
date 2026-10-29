@@ -430,6 +430,8 @@ const tasksMarkedBy = (mark: (id: string) => string) =>
 const TASKS_WITH_OWN_IDS = tasksMarkedBy((id) => `tests: ${id}`);
 /** The same list proven the only way a red-exempt spec may: no task id claims a red run there. */
 const TASKS_WITH_EXEMPTIONS = (why: string) => tasksMarkedBy(() => `non-testable: ${why}`);
+/** The second task of a two-task fixture list, so a fixture can pair another first task with it. */
+const secondTaskOf = (tasks: string) => tasks.split("\n\n").at(-1)!;
 /** T2 titled `(refactor)`, so its acceptance line carries the exemption a red-exempt task must use. */
 const TASKS_WITH_A_REFACTOR = "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (non-testable: a refactor adds no behaviour)\n- Test: `true`";
 
@@ -1629,7 +1631,7 @@ test("build: with taskChecks each, the check runs inside pb_task_done: one agent
 
 test("build: with taskChecks each, a task without a Test: line is compiled, not run against the full suite", async () => {
   const t = setup({ taskChecks: "each",  verify: "true", build: "echo compiled" });
-  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)" }));
+  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (non-testable: the task has no Test: command)\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (non-testable: the task has no Test: command)" }));
   t.agent.script = diligent;
   await t.run("build");
   const checks = t.events("order-cancellation").filter((e) => e.type === "check");
@@ -1933,7 +1935,7 @@ Create T1.txt.
 
 ### T2: second file
 Create T2.txt.
-- Acceptance: T2.txt exists (tests: T2)`,
+- Acceptance: T2.txt exists (non-testable: the task has no Test: command)`,
     }),
   );
   const said: string[] = [];
@@ -4937,6 +4939,29 @@ test("pb_update_spec changes one section or the status, and writes nothing that 
   assert.match((await t.callTool("pb_update_spec", { name: "nope", section: "Goal", content: "x" })).error!, /No spec "nope"/);
 });
 
+test("pb_update_spec: replacing a section with nothing is refused and the file keeps what it had", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const specPath = ".pi/pb/specs/order-cancellation/spec.md";
+  const before = t.read(specPath);
+  // A blank body would leave the heading standing over nothing — and an empty section satisfies
+  // every evidence gate by deleting what it inspects, Threats and Findings included.
+  for (const section of ["Findings", "Threats and abuse"]) {
+    for (const blank of ["", "   ", "\n \n"]) {
+      assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", section, content: blank })).error!, /leaves it empty/);
+    }
+  }
+  // the refusal names the section as the format writes it, hashes and all in the call stripped out
+  assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "## Findings", content: " " })).error!, /replacing Findings with nothing/);
+  assert.equal(t.read(specPath), before); // a refused write moves nothing in the file
+  // the format's own answer for a section with nothing to say stays legal
+  assert.equal((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Context", content: "none — a docs line, nothing probed" })).error, undefined);
+  assert.match(t.read(specPath), /## Context\nnone — a docs line, nothing probed\n/);
+  // append is not a replacement, so it is untouched by the guard
+  assert.equal((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Context", content: "- Nothing more was probed, because nothing more was needed.", mode: "append" })).error, undefined);
+});
+
 test("pb_update_spec: writing Tasks and ready in one call still runs the full senior gates", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -7085,6 +7110,23 @@ test("task-id proof marker: a red-exempt task or spec may not prove with a task 
   assert.match((await t.callTool("pb_write_spec", { name: "refactor", content: refactor })).error!, /T2 \(tests: T2\)[\s\S]*a task id proves nothing/);
   // the same two tasks with that line exempted are accepted: only the marker changed
   assert.equal((await t.callTool("pb_write_spec", { name: "legal", content: SPEC({ tasks: TASKS_WITH_A_REFACTOR }) })).error, undefined);
+});
+
+// A task with no `Test:` line is never run by the red gate, so a task id on its acceptance line names
+// no red run either — the marker is checked on every task, not only on the ones with a command.
+test("task-id proof marker: a task with no Test: line may not claim a task id", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const docTask = "Update the design doc; documentation-only change, no test command.";
+  // an id naming no task of this spec
+  const ghost = SPEC({ tasks: `### T1: docs for the banner\n${docTask}\n- Acceptance: design doc updated (tests: T9)\n\n${secondTaskOf(TASKS_WITH_OWN_IDS)}` });
+  assert.match((await t.callTool("pb_write_spec", { name: "no-test-ghost", content: ghost })).error!, /T1 \(tests: T9\)[\s\S]*a task id proves nothing/);
+  // an id naming a task that exists but is red-exempt
+  const refactor = SPEC({ tasks: `### T1: docs for the banner\n${docTask}\n- Acceptance: design doc updated (tests: T2)\n\n${secondTaskOf(TASKS_WITH_A_REFACTOR)}` });
+  assert.match((await t.callTool("pb_write_spec", { name: "no-test-refactor", content: refactor })).error!, /T1 \(tests: T2\)[\s\S]*needs no red proof[\s\S]*a task id proves nothing/);
+  // the same task naming its exemption instead is still accepted: only the marker changed
+  const exempt = SPEC({ tasks: `### T1: docs for the banner\n${docTask}\n- Acceptance: design doc updated (non-testable: prose)\n\n${secondTaskOf(TASKS_WITH_A_REFACTOR)}` });
+  assert.equal((await t.callTool("pb_write_spec", { name: "no-test-exempt", content: exempt })).error, undefined);
 });
 
 test("task-id proof marker: both write gates and the spec format teach the red-gate rule", async () => {

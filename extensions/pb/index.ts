@@ -200,17 +200,21 @@ const acceptanceMarkerErrors = (spec: ParsedSpec): string[] =>
  * included), a path-like entry must exist in the repo, and any other entry must occur verbatim in
  * the test files. A named proof that resolves to nothing is a faked mapping, so writers are held to
  * names that hold and the reviewer judges stragglers as P1 candidates.
+ *
+ * A `Tn` entry is checked on every task's acceptance lines, including a task with no `Test:` line:
+ * such a task has no red run of its own, which makes its marker no stronger, not unchecked. Whether
+ * a named file or test name resolves is asked only where a `Test:` line exists to run it.
  */
 const unresolvedMappings = (spec: ParsedSpec, cwd: string): Array<{ task: string; entry: string; reason: string }> => {
   const out: Array<{ task: string; entry: string; reason: string }> = [];
   for (const t of spec.tasks) {
-    if (!t.test) continue;
     for (const entry of testRefsOf(t.text)) {
       const gap = taskIdProofGap(spec, entry);
       if (gap) {
         out.push({ task: t.id, entry, reason: `${gap}, and a task id proves nothing` });
         continue;
       }
+      if (!t.test) continue; // no red run here to resolve a file or test name against
       if (ownTestRef(entry)) continue; // the named task needs red: its Test: run is the proof
       if (pathTestRef(entry)) {
         if (!fs.existsSync(path.join(cwd, entry.trim()))) out.push({ task: t.id, entry, reason: `names \`${entry.trim()}\`, which is not in the repo` });
@@ -827,6 +831,15 @@ export default function pb(pi: ExtensionAPI) {
       const reqErrs = requirementWriteErrors(store, params.content);
       if (reqErrs.length) throw new Error(`The requirement delta can't be merged into the living requirement base:\n- ${reqErrs.join("\n- ")}\nFix it and call pb_write_spec again.`);
       const prev = store.progress(params.name);
+      // Everything the answer needs is settled first: from the write down, the only work left is the
+      // spec file and its two ledger records, so a failing note can't report an error over a spec
+      // that was actually written, and the file never lands without its record.
+      const what = spec.status === "planning" ? "status planning" : `${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}`;
+      const delta = requirementDeltaSummary(params.content);
+      const warnings = [...specWarnings(params.content, spec), ...livingGapWarnings(store, params.name, params.content, spec)];
+      const rw = rewriteWarning(params.name, prev, spec);
+      if (rw) warnings.push(rw);
+      const notes = warnings.map((w) => `\nNote: ${w}.`);
       store.writeSpec(params.name, params.content);
       store.saveProgress({
         ...(prev ?? { spec: params.name, phase: "written" }),
@@ -838,12 +851,6 @@ export default function pb(pi: ExtensionAPI) {
         updatedAt: now(),
       });
       store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, status: spec.status, tokens: tokensOf(params.content) });
-      const what = spec.status === "planning" ? "status planning" : `${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}`;
-      const delta = requirementDeltaSummary(params.content);
-      const warnings = [...specWarnings(params.content, spec), ...livingGapWarnings(store, params.name, params.content, spec)];
-      const rw = rewriteWarning(params.name, prev, spec);
-      if (rw) warnings.push(rw);
-      const notes = warnings.map((w) => `\nNote: ${w}.`);
       return reply(`Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${what}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}${delta ? `; requirement delta ${delta}` : ""}; ${sizeNote(tokensOf(params.content))}.${notes.join("")}`);
     },
   });
@@ -852,7 +859,7 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_update_spec",
     label: "Update spec",
     description:
-      "Change part of an existing pb spec instead of rewriting it: replace or append to one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written.",
+      "Change part of an existing pb spec instead of rewriting it: replace or append to one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, \"none — <why>\".",
     parameters: Type.Object({
       name: Type.Optional(Type.String({ description: "the spec's name; the one this session is building or writing, if omitted" })),
       section: Type.Optional(Type.String({ description: 'the "## " section to change, e.g. Decisions; created if missing' })),
@@ -868,6 +875,10 @@ export default function pb(pi: ExtensionAPI) {
       if (!md) throw new Error(`No spec "${name}": write it with pb_write_spec.`);
       if (params.section) {
         if (params.content === undefined) throw new Error("content is required with section.");
+        // An empty body under replace would leave the heading standing over nothing, and an empty
+        // section answers every evidence gate by deleting what the gate inspects.
+        if ((params.mode ?? "replace") !== "append" && !params.content.trim())
+          throw new Error(`Not written: replacing ${params.section.replace(/^#+\s*/, "").trim()} with nothing leaves it empty — a section with nothing to say is one line, "none — <why>".`);
         md = setSection(md, params.section, params.content, (params.mode as "replace" | "append" | undefined) ?? "replace");
       }
       if (params.status) md = setStatus(md, params.status as "planning" | "ready");
@@ -904,15 +915,16 @@ export default function pb(pi: ExtensionAPI) {
         const pathErrs = specPathErrors(md, ctx.cwd);
         if (pathErrs.length) throw new Error(`Not written: the spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\nFix the path, line or citation; new files need no line number.`);
       }
-      store.writeSpec(name, md);
       const prev = store.progress(name);
-      store.saveProgress({ ...(prev ?? { spec: name, phase: "written" }), spec: name, tasks: syncTasks(spec, prev?.tasks), writtenIn: ctx.sessionManager.getSessionFile(), updatedAt: now() });
-      store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md) });
       const isTasks = sectionName === "tasks";
       const rw = isTasks ? rewriteWarning(name, prev, spec) : undefined;
       const gaps = isTasks || becameReady ? livingGapWarnings(store, name, md, spec) : [];
       const notes = [...(isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])] : []), ...gaps].map((w) => `\nNote: ${w}.`);
       const delta = touchesRequirements ? requirementDeltaSummary(md) : undefined;
+      // Answer built from pre-write values above; what follows is the file and its two ledger records.
+      store.writeSpec(name, md);
+      store.saveProgress({ ...(prev ?? { spec: name, phase: "written" }), spec: name, tasks: syncTasks(spec, prev?.tasks), writtenIn: ctx.sessionManager.getSessionFile(), updatedAt: now() });
+      store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md) });
       return reply(`Updated ${store.rel("specs", name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}${delta ? `; requirement delta ${delta}` : ""}; ${sizeNote(tokensOf(md))}.${notes.join("")}`);
     },
   });
