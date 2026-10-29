@@ -280,10 +280,15 @@ Then the sections:
   for whom, and how you'll know it worked; no implementation.
 - **Findings**: what the analysis established, so nobody redoes it: the files
   and classes involved and their roles, the code to imitate (by path and lines,
-  not pasted), constraints, the test command and baseline. A `path:line` must
-  cite a real line in the repo; a new file needs no line number.
+  not pasted), constraints, the test command and baseline. Each bullet cites
+  its evidence: a `path:line`, a probe (`command` plus its conclusion, or
+  `probe: …; conclusion: …`), or `constraint: …`. A `path:line` must cite a real
+  line in the repo; a new file needs no line number.
 - **Decisions**: each with its reason as it stands now, no history; rejected
-  ideas as "Not doing X, because …", so they aren't reconsidered.
+  ideas as "Not doing X, because …", so they aren't reconsidered. Every bullet
+  carries an explicit reason marker — `because`, `since`, `so`, `so that`,
+  `therefore`, `to avoid`, an em dash, `Rationale:`/`Reason:`, or an
+  `Assumption: …` — because a bare colon states no reason.
 - **Contracts**: no later step sees the whole change at once — tasks are built
   one by one. So pin here every seam the tasks share: public signatures, API
   requests and responses with their error types, the data model and migrations,
@@ -625,7 +630,10 @@ task's own. And a task with no `Test:` command, a refactor, or a spec with
 `New tests: no` or `Verification: build` has no red proof by construction.
 Rewriting a task's `Test:` command drops its proof: the new command must be
 seen failing again — as must edited, swapped or weakened test files, which the
-proof is fingerprinted against. Each case is listed at the end of the build and handed to the reviewer as
+proof is fingerprinted against. `pb_tests_red` also records what the tests are
+claimed to prove and a capped head of the failure it saw; the review brief shows
+both for every proven task, and a failed check retry shows them again so the
+model does not build on a typo or an unrelated broken test. Each case is listed at the end of the build and handed to the reviewer as
 partly proven or unproven — give a task its own targeted command where you
 can, and when tasks share one, make it fail at each task's turn (a conjunction
 over per-task artifacts, so each task still has something to prove). Proof

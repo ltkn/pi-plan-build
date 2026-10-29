@@ -256,6 +256,39 @@ export function redSharing(spec: ParsedSpec): Map<string, string> {
 /** A step of the build by id: a spec task. */
 export const buildTask = (spec: ParsedSpec, id: string | undefined) => spec.tasks.find((t) => t.id === id);
 
+export interface ProofMarker {
+  kind: "tests" | "non-testable";
+  body: string;
+}
+
+const ACCEPTANCE_LINE = /^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/i;
+const PROOF_MARKER = /\((tests|non-testable):\s*([^)]+)\)/gi;
+/** What may follow a real marker: whitespace and sentence punctuation, or the close of a wrapping parenthesis. */
+const MARKER_TRAILER = /^[\s.;,)]*$/;
+
+/** True for a task acceptance line, including qualified variants such as `Acceptance (abuse):`. */
+export const isAcceptanceLine = (line: string): boolean => ACCEPTANCE_LINE.test(line);
+
+/**
+ * The proof markers that end an acceptance line, in order. A marker earlier in the line is prose:
+ * a criterion may explain what a `(tests: Tn)` marker means, and that example must not become the
+ * line's own claim. Only markers in the trailing run are claims.
+ */
+export function proofMarkersOf(line: string): ProofMarker[] {
+  const found = [...line.matchAll(PROOF_MARKER)];
+  const markers: ProofMarker[] = [];
+  let nextStart = line.length;
+  for (let i = found.length - 1; i >= 0; i--) {
+    const match = found[i];
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    if (!MARKER_TRAILER.test(line.slice(end, nextStart))) break;
+    markers.unshift({ kind: match[1].toLowerCase() as ProofMarker["kind"], body: match[2].trim() });
+    nextStart = start;
+  }
+  return markers;
+}
+
 /**
  * `(tests: ...)` proof references named on one task's acceptance lines. A `Tn`-style entry names a
  * task whose red `Test:` run proves the line — its own id or another task's, only where that task
@@ -265,9 +298,10 @@ export const buildTask = (spec: ParsedSpec, id: string | undefined) => spec.task
 export function testRefsOf(taskText: string): string[] {
   const refs: string[] = [];
   for (const line of taskText.split("\n")) {
-    if (!/^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/.test(line)) continue;
-    for (const m of line.matchAll(/\(tests:\s*([^)]+)\)/gi)) {
-      for (const e of m[1].split(/[,;]/).map((s) => s.trim()).filter(Boolean)) refs.push(e);
+    if (!isAcceptanceLine(line)) continue;
+    for (const marker of proofMarkersOf(line)) {
+      if (marker.kind !== "tests") continue;
+      for (const e of marker.body.split(/[,;]/).map((s) => s.trim()).filter(Boolean)) refs.push(e);
     }
   }
   return refs;
@@ -473,6 +507,14 @@ export function sharesSeam(spec: ParsedSpec): boolean {
 }
 
 /**
+ * Whether a spec changes behaviour it must test: a task with a Test: command, or a non-refactor
+ * task with acceptance lines. Contracts and the living-requirement check share this one reading.
+ */
+export function behaviouralChange(spec: ParsedSpec): boolean {
+  return spec.tasks.some((t) => t.test || (/acceptance:/i.test(t.text) && !/^\(refactor\)/i.test(t.title)));
+}
+
+/**
  * A ready spec needs Contracts when it changes an external surface, even with
  * one task, or when a multi-task behavioural spec's tasks share a seam. Disjoint
  * internal tasks need no Contracts section: the existing advisory warning covers
@@ -482,7 +524,7 @@ export function sharesSeam(spec: ParsedSpec): boolean {
 export function contractsErrors(md: string, spec: ParsedSpec): string[] {
   if (spec.status !== "ready") return [];
   const external = EXTERNAL_SURFACE.test(surfaceText(md, spec));
-  const behavioural = spec.tasks.some((t) => t.test || (/acceptance:/i.test(t.text) && !/^\(refactor\)/i.test(t.title)));
+  const behavioural = behaviouralChange(spec);
   const shared = spec.tasks.length > 1 && sharesSeam(spec);
   if (!external && !(shared && behavioural)) return [];
   if (!external && spec.gate === "none" && spec.tasks.every((t) => !t.test)) return [];
@@ -521,35 +563,42 @@ export function migrationErrors(md: string, spec: ParsedSpec): string[] {
 /**
  * Findings bullets (when the section exists) must cite checkable evidence: a
  * path (file:line), a pathed file (with a slash and an extension, so and/or
- * never counts), or a backtick probe (command plus conclusion). Bare words
+ * never counts), a backtick probe (command plus conclusion), an explicit
+ * `probe: …; conclusion: …` pair, or an explicit `constraint: …`. Bare words
  * alone ("baseline", "measured") never count: evidence must point somewhere.
  * Catches unevidenced senior prose without judging its truth, which stays the
  * reviewer's job.
  */
-const EVIDENCE = /(`[^`]+`|[A-Za-z0-9_./-]+\.[a-z]{1,5}:\d+|[\w.-]+\/[\w./-]*\.[\w]{1,5})/;
+export const FINDINGS_EVIDENCE_RULE =
+  'a path (file:line), a probe ("probe: <what you ran>; conclusion: <what it showed>" or a backticked command with its conclusion), or a constraint ("constraint: <what limits the change>")';
+const EVIDENCE = /(`[^`]+`|[A-Za-z0-9_./-]+\.[a-z]{1,5}:\d+|[\w.-]+\/[\w./-]*\.[\w]{1,5}|\bconstraint\s*:\s*\S|\bprobe\s*:[\s\S]*?\bconclusion\s*:\s*\S)/i;
 
 export function findingsEvidenceErrors(md: string, spec: ParsedSpec): string[] {
   if (spec.status !== "ready") return [];
   if (!hasSection(md, "Findings")) return [];
   return sectionBullets(md, "Findings")
     .filter((l) => !EVIDENCE.test(l))
-    .map((l) => `Findings line without evidence: "${l}" — cite a path (file:line), a probe (command plus conclusion), or a constraint`);
+    .map((l) => `Findings line without evidence: "${l}" — cite ${FINDINGS_EVIDENCE_RULE}`);
 }
 
 /**
- * Decisions bullets (when the section exists) must carry a reason: because, an
- * em/en dash or arrow reasoning marker, "so that", an explicit Rationale or
- * Reason:, or a settled guess in Assumption form. A bare colon never counts
- * ("Use X: yes" states no reason). Rejected ideas ("Not doing X") need the same.
+ * Decisions bullets (when the section exists) must carry a reason with an
+ * explicit marker: because, since, so, so that, therefore, to avoid, an em/en
+ * dash or arrow, "Rationale:"/"Reason:", or an Assumption. A bare colon never
+ * counts ("Use X: yes" states no reason). Rejected ideas ("Not doing X") need
+ * the same. The accepted forms are shared with the spec prompt so the rule
+ * taught and the rule enforced cannot drift.
  */
-const REASON = /(because|—|–|→|so that|rationale|reason(?:s|ing)?:|assumption:)/i;
+export const DECISION_REASON_RULE =
+  'because, since, so, so that, therefore, to avoid, an em dash (—), "Rationale:", "Reason:", or "Assumption: <claim> — settles by <how>, because <reason>"';
+const REASON = /(because|since|\bso\b|so that|therefore|to avoid|rationale|reason(?:s|ing)?:|assumption:|—|–|→)/i;
 
 export function decisionsEvidenceErrors(md: string, spec: ParsedSpec): string[] {
   if (spec.status !== "ready") return [];
   if (!hasSection(md, "Decisions")) return [];
   return sectionBullets(md, "Decisions")
     .filter((l) => !REASON.test(l))
-    .map((l) => `Decisions line without a reason: "${l}" — add its reason (because …), or write guesses as "Assumption: <claim> — settles by <how>, because <reason>"`);
+    .map((l) => `Decisions line without a reason: "${l}" — add its reason with an explicit marker: ${DECISION_REASON_RULE}`);
 }
 
 /** All senior-enforcement gates for a ready spec; empty when planning or clean. */
@@ -572,14 +621,16 @@ export interface SpecReviewRisk {
 
 /**
  * Whether a spec carries enough risk to deserve an independent reviewer under "auto": a
- * security-sensitive surface, threats, a migration, persisted data, an external contract, or a
- * large blast radius. Small reversible specs rely on the write-time checks and the human's read.
+ * security-sensitive surface, threats, a migration, persisted data, an external contract, a named
+ * living capability with no delta, or a large blast radius. Small reversible specs rely on the
+ * write-time checks and the human's read.
  */
-export function specReviewRisk(md: string, spec: ParsedSpec): SpecReviewRisk {
+export function specReviewRisk(md: string, spec: ParsedSpec, touchesLiving = false): SpecReviewRisk {
   const scope = surfaceText(md, spec);
   const sensitive = scope.split("\n").find((line) => SENSITIVE_WRITE.test(line.replace(/`[^`]*`/g, "")));
   if (sensitive) return { review: true, reason: `security-sensitive (${sensitive.replace(/`[^`]*`/g, "").match(SENSITIVE_WRITE)?.[0] ?? "surface"})` };
   if (parseRequirementDeltas(md).deltas.length) return { review: true, reason: "changes the requirement base" };
+  if (touchesLiving) return { review: true, reason: "touches a living capability without a delta" };
   if (threatSection(md)) return { review: true, reason: "threats and abuse" };
   const migration = sectionOf(md, "Migration and rollback");
   if (migration && !negativeWithReason(migration)) return { review: true, reason: "a migration" };

@@ -208,7 +208,13 @@ MODIFIED replaces the requirement whole, and a rename is REMOVED plus ADDED.
 `/pb:archive` merges the delta into `specs/<capability>.md` transactionally: a
 delta that no longer applies stops the archive before anything moves, and if the
 spec can't be archived the living files are restored. `pb_write_spec` runs the
-same check, so a delta is never written already broken.
+same check, so a delta is never written already broken. Build handouts and
+review briefs carry the standing requirements (name and invariant) of every
+capability a delta touches, so the work acts against the rules already in
+force. A behavioural spec that names a living capability without a delta is
+flagged at write time and, under `auto`, gets the spec review: the reviewer
+judges whether its guarantees stay as written or need a delta. Detection is
+mechanical; a pure refactor carries no obligation.
 
 `## Out of scope` and `## Acceptance criteria` are optional: a spec is as long
 as the change needs and no longer. Pi points to code instead of copying it, and

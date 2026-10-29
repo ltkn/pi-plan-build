@@ -65,6 +65,8 @@ import {
   specPrompt,
   specRepairBrief,
   specReviewBrief,
+  type RedEvidence,
+  type RedProof,
   SPEC_REPAIR_SYSTEM,
   SPEC_REVIEWER_SYSTEM,
   STRUCTURED_EDIT_RULE,
@@ -76,13 +78,13 @@ import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findin
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, ensureSpecIds, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, taskIdProofGap, testRefsOf, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, behaviouralChange, buildTask, commitMessage, ensureSpecIds, isAcceptanceLine, needsRed, ownTestRef, parseSpec, pathTestRef, proofMarkersOf, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, taskIdProofGap, testRefsOf, tokensOf } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { parseRequirementDeltas, parseRequirementDocument, planArchiveRequirements, requirementDeltaSummary, requirementWriteErrors, writeRequirementPlans } from "./requirements.ts";
+import { parseRequirementDeltas, parseRequirementDocument, planArchiveRequirements, requirementDeltaSummary, requirementGaps, requirementWriteErrors, writeRequirementPlans } from "./requirements.ts";
 import { buildReport } from "./report.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type SpecResolution, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type SpecResolution, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, RED_CLAIM_CAP, RED_OUTPUT_CAP, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -183,14 +185,13 @@ const rewriteWarning = (name: string, prev: Progress | undefined, spec: ParsedSp
  * must not smuggle a line past the gate. Tasks without a Test: line are proven by the gate suite
  * by construction. Readers stay lenient: only the write tools call this, so in-flight specs keep working.
  */
-const acceptanceLine = /^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/m;
 const acceptanceMarkerErrors = (spec: ParsedSpec): string[] =>
   spec.tasks.flatMap((t) => {
     if (!t.test) return [];
     return t.text
       .split("\n")
-      .filter((l) => acceptanceLine.test(l) && !/\(tests:|\(non-testable:/.test(l))
-      .map((l) => `${t.id} ${l.trim()} — add (tests: ...) naming the proving tests, or (non-testable: reason)`);
+      .filter((l) => isAcceptanceLine(l) && proofMarkersOf(l).length === 0)
+      .map((l) => `${t.id} ${l.trim()} — add (tests: ...) naming the proving tests as the line's last element, or (non-testable: reason)`);
   });
 
 /**
@@ -314,7 +315,7 @@ const specWarnings = (md: string, spec: ParsedSpec): string[] => {
     return [`${t.id} names a full-suite run ("${excerpt}"): the harness runs the full suite after the last task, so keep this task's Test: targeted and split a task that already bundles several changes`];
   });
   const untestable = spec.tasks.flatMap((t) => {
-    if (!redEligible(t) || !acceptanceLine.test(t.text)) return [];
+    if (!redEligible(t) || !t.text.split("\n").some(isAcceptanceLine)) return [];
     if (t.test) {
       if (noopCommand(t.test)) return [`${t.id}'s Test: \`${t.test}\` always passes — the build will wedge demanding red; omit Test: (disclosed to the reviewer) or write a command that fails without the change`];
       if (suspiciousCommand(t.test)) return [`${t.id}'s Test: \`${t.test}\` chains shells or reaches the network — it runs with your privileges, so review it before building; the dry-run below doesn't execute it`];
@@ -323,7 +324,7 @@ const specWarnings = (md: string, spec: ParsedSpec): string[] => {
     // A declared doc-only task (doc-only, documentation-only, prose-only) whose every acceptance
     // line is already exempted needs no nudge: the reviewer judges whether the exemption is
     // legitimate, as with any (non-testable:) line.
-    if (/doc(?:s|umentation)?[- ]only|prose[- ]only/i.test(t.text) && t.text.split("\n").filter((l) => acceptanceLine.test(l)).every((l) => /\(non-testable:/.test(l))) return [];
+    if (/doc(?:s|umentation)?[- ]only|prose[- ]only/i.test(t.text) && t.text.split("\n").filter(isAcceptanceLine).every((l) => proofMarkersOf(l).some((m) => m.kind === "non-testable"))) return [];
     return [`${t.id} adds behaviour but has no Test: line — add a targeted command, or leave it out and the reviewer judges its tests at the end`];
   });
   return [...shared, ...contracts, ...suite, ...untestable];
@@ -463,6 +464,8 @@ export default function pb(pi: ExtensionAPI) {
       const red = redKept ? prev!.red : undefined;
       const redCommand = redKept ? prev!.redCommand : undefined;
       const redFiles = redKept ? prev!.redFiles : undefined;
+      const redClaim = redKept ? prev!.redClaim : undefined;
+      const redOutput = redKept ? prev!.redOutput : undefined;
       // A pre-green pointer is valid only when the earlier task still exists before this one,
       // still runs the same command, and still holds its own proof.
       let preGreen: string | undefined;
@@ -485,7 +488,7 @@ export default function pb(pi: ExtensionAPI) {
           preGreen = earlierId;
         }
       }
-      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, changed: prev?.changed, caveat: prev?.caveat, rejected: prev?.rejected, open: prev?.open, red, redCommand, redFiles, redShared: sharing.get(t.id), preGreen };
+      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, changed: prev?.changed, caveat: prev?.caveat, rejected: prev?.rejected, open: prev?.open, red, redClaim, redOutput, redCommand, redFiles, redShared: sharing.get(t.id), preGreen };
     });
   };
 
@@ -576,7 +579,8 @@ export default function pb(pi: ExtensionAPI) {
     const tp = p.tasks.find((t) => t.id === task.id);
     const red = needsRed(spec, task);
     const binding = withBinding ? bindingFor(ctx, store, p) : "";
-    return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.red, binding) + touchedSuffix(ctx, store, p, task.id);
+    const proof = red ? redEvidenceOf(p, task.id) : undefined;
+    return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.red, binding, proof) + touchedSuffix(ctx, store, p, task.id);
   };
 
   /**
@@ -590,6 +594,26 @@ export default function pb(pi: ExtensionAPI) {
       if (!tp?.red) return [`${t.id}: ${redExemption(spec, t) ?? "its new tests were never seen failing"}`];
       return tp.redShared ? [`${t.id}: \`${t.test}\` is also ${tp.redShared}'s Test: command, so that one run doesn't prove ${t.id}'s own tests`] : [];
     });
+
+  /** Every task with a red proof, its claim and the failure head: what the reviewer judges against the missing behaviour. */
+  const redProofsOf = (p: Progress): RedProof[] =>
+    p.tasks
+      .filter((t) => !!t.red)
+      .map((t) => ({ id: t.id, command: t.redCommand, claim: t.redClaim, output: t.redOutput ?? t.red ?? "" }));
+
+  /** A task's red proof, for a retry handout: the claim and the failure it must not repeat. */
+  const redEvidenceOf = (p: Progress, taskId: string): RedEvidence | undefined => {
+    const tp = p.tasks.find((t) => t.id === taskId);
+    return tp?.red ? { claim: tp.redClaim, output: tp.redOutput ?? tp.red } : undefined;
+  };
+
+  /** Living capabilities a behavioural ready spec names but carries no delta for: write warnings and spec-review material. */
+  const livingGapWarnings = (store: Store, name: string, markdown: string, spec: ParsedSpec): string[] => {
+    if (spec.status !== "ready" || !behaviouralChange(spec)) return [];
+    return requirementGaps(store.requirementNames(), name, markdown).map(
+      (gap) => `the spec appears to change living capability "${gap.capability}" (${store.requirementsRel(gap.capability)}) but carries no "## Requirements: ${gap.capability}" delta, because ${gap.because}: state what changes there, or say in Decisions that its guarantees stay as written`,
+    );
+  };
 
   const mark = (t: TaskProgress) => (t.status === "done" ? "✓" : t.status === "doing" ? "▸" : t.status === "blocked" ? "✗" : "·");
   const taskLine = (t: TaskProgress) => `${mark(t)} ${t.id} ${t.title}${t.attempts > 1 ? ` (${t.attempts} attempts)` : ""}`;
@@ -816,7 +840,7 @@ export default function pb(pi: ExtensionAPI) {
       store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, status: spec.status, tokens: tokensOf(params.content) });
       const what = spec.status === "planning" ? "status planning" : `${spec.tasks.length} tasks, verification ${spec.gate}${spec.newTests ? "" : ", no new tests"}`;
       const delta = requirementDeltaSummary(params.content);
-      const warnings = [...specWarnings(params.content, spec)];
+      const warnings = [...specWarnings(params.content, spec), ...livingGapWarnings(store, params.name, params.content, spec)];
       const rw = rewriteWarning(params.name, prev, spec);
       if (rw) warnings.push(rw);
       const notes = warnings.map((w) => `\nNote: ${w}.`);
@@ -886,7 +910,8 @@ export default function pb(pi: ExtensionAPI) {
       store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md) });
       const isTasks = sectionName === "tasks";
       const rw = isTasks ? rewriteWarning(name, prev, spec) : undefined;
-      const notes = isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])].map((w) => `\nNote: ${w}.`) : [];
+      const gaps = isTasks || becameReady ? livingGapWarnings(store, name, md, spec) : [];
+      const notes = [...(isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])] : []), ...gaps].map((w) => `\nNote: ${w}.`);
       const delta = touchesRequirements ? requirementDeltaSummary(md) : undefined;
       return reply(`Updated ${store.rel("specs", name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}${delta ? `; requirement delta ${delta}` : ""}; ${sizeNote(tokensOf(md))}.${notes.join("")}`);
     },
@@ -1292,6 +1317,8 @@ export default function pb(pi: ExtensionAPI) {
         const changed = changedTestFiles(tp.redFiles, fingerprintTestFiles(ctx.cwd));
         if (changed.length) {
           tp.red = undefined;
+          tp.redClaim = undefined;
+          tp.redOutput = undefined;
           tp.redCommand = undefined;
           tp.redFiles = undefined;
           store.saveProgress(p);
@@ -1325,6 +1352,8 @@ export default function pb(pi: ExtensionAPI) {
         const changed = changedTestFiles(tp.redFiles, fingerprintTestFiles(ctx.cwd));
         if (changed.length) {
           tp.red = undefined;
+          tp.redClaim = undefined;
+          tp.redOutput = undefined;
           tp.redCommand = undefined;
           tp.redFiles = undefined;
           store.saveProgress(p);
@@ -1356,6 +1385,8 @@ export default function pb(pi: ExtensionAPI) {
         );
       }
       tp.red = r.summary.split("\n")[0];
+      tp.redClaim = cap(params.tests.trim(), RED_CLAIM_CAP);
+      tp.redOutput = cap(r.summary.trim(), RED_OUTPUT_CAP);
       tp.redCommand = task.test;
       tp.redFiles = fingerprintTestFiles(ctx.cwd);
       store.saveProgress(p);
@@ -1958,15 +1989,16 @@ export default function pb(pi: ExtensionAPI) {
     // failure brief carries it: per-task changed files, harness-computed from checkpoints.
     const finalFiles = p.current === "final" ? changedFilesSection(store, p) : "";
     const withFiles = (t: string) => (finalFiles ? `${t}\n${finalFiles}` : t);
+    const redProof = p.current && p.current !== "final" ? redEvidenceOf(p, p.current) : undefined;
     if (attempts >= cfg.maxAttempts) {
       if (tp) tp.status = "doing";
       pauseBuild(ctx, store, p, `${p.current} still fails after ${attempts} attempts.`, "build.paused-attempts", "attempts", { task: p.current ?? "" });
-      return stop(withFiles(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true, bindingFor(ctx, store, p))));
+      return stop(withFiles(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true, bindingFor(ctx, store, p), redProof)));
     }
     if (tp) tp.attempts += 1;
     store.saveProgress(p);
     showProgress(ctx, p);
-    return reply(withFiles(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false, bindingFor(ctx, store, p))));
+    return reply(withFiles(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false, bindingFor(ctx, store, p), redProof)));
   };
 
   const checkAndAdvance = async (
@@ -2683,6 +2715,18 @@ export default function pb(pi: ExtensionAPI) {
     const cwd = ctx.cwd;
     const reviewModel = cfg.specReviewer.model ?? sessionModel(ctx);
     const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    // The living base is in force here too: the digest of what this spec's delta leaves standing, and
+    // the capabilities it names without a delta, which the reviewer judges against the change.
+    const livingFiles = store.requirementNames();
+    const coveredCapabilities = new Set(parseRequirementDeltas(md).deltas.map((delta) => delta.capability));
+    const livingDigestText = livingFiles.length ? livingFor(store, md) : "";
+    const living = livingFiles.length
+      ? {
+          ...(livingDigestText ? { digest: livingDigestText } : {}),
+          uncovered: livingFiles.filter((capability) => !coveredCapabilities.has(capability)).map((capability) => ({ capability, path: store.requirementsRel(capability) })),
+          named: requirementGaps(livingFiles, name, md).map((gap) => ({ ...gap, path: store.requirementsRel(gap.capability) })),
+        }
+      : undefined;
     const carried = ensureSpecIds([...(o.prior ?? []), ...(o.advisory ?? [])]);
     const prior = carried.findings.filter(specReviewBlocks);
     const priorAdvisory = carried.findings.filter((f) => !specReviewBlocks(f));
@@ -2712,7 +2756,7 @@ export default function pb(pi: ExtensionAPI) {
         cwd,
         role: "spec-review",
         systemPrompt: SPEC_REVIEWER_SYSTEM,
-        brief: specReviewBrief(name, md, { prior, priorMarkdown: o.priorMarkdown, advisory: priorAdvisory, round }),
+        brief: specReviewBrief(name, md, { prior, priorMarkdown: o.priorMarkdown, advisory: priorAdvisory, round, living }),
         prompt: followUp
           ? "Review the spec again in the attached file. Resolve every earlier P0/P1 by id first. Then report the new findings this revision creates or exposes, and any regression — in scope wherever their text sits — and put a problem that predates the revision, in text the revision left alone, under `## Outside the change`."
           : "Review the spec in the attached file.",
@@ -2857,7 +2901,8 @@ export default function pb(pi: ExtensionAPI) {
       const hash = specHash(md);
       const gate = specReviewGate(readEvents(path.join(store.specDir(name), "events.jsonl")), hash, cfg.specReviewer.maxRounds);
       const carried = gate.action === "review" || gate.action === "manual" ? gate : undefined;
-      const risk = specReviewRisk(md, spec);
+      const livingGaps = requirementGaps(store.requirementNames(), name, md);
+      const risk = specReviewRisk(md, spec, behaviouralChange(spec) && livingGaps.length > 0);
       const mode = cfg.specReviewer.mode;
       const continuing = !!carried && (carried.prior.length > 0 || carried.blockingRounds > 0);
       const automatic = mode === "always" || (mode === "auto" && risk.review) || continuing;
@@ -3959,6 +4004,7 @@ export default function pb(pi: ExtensionAPI) {
         previous,
         testChanges: p?.testChanges,
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
+        redProofs: p ? redProofsOf(p) : undefined,
         mappingNotes: loaded ? mappingNotes(loaded.spec, ctx.cwd) : undefined,
         fixReports,
         designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,

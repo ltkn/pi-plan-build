@@ -19,7 +19,7 @@
  * R2.1, …), so the reviewer checks the rule, not only its examples.
  */
 import * as fs from "node:fs";
-import { blankFenced, sectionHeading } from "./markdown.ts";
+import { blankFenced, escapeRegExp, sectionHeading } from "./markdown.ts";
 import { KEBAB_NAME } from "./names.ts";
 import type { Store } from "./store.ts";
 
@@ -473,6 +473,28 @@ export function planArchiveRequirements(store: Store, markdown: string): { plans
 /** Write-time check: the same rules the archive will apply, so a delta is never written already broken. */
 export function requirementWriteErrors(store: Store, markdown: string): string[] {
   return planArchiveRequirements(store, markdown).errors;
+}
+
+/** A capability with a living file that a spec names but carries no delta for. */
+export interface LivingGap {
+  capability: string;
+  /** why the spec looks like it touches the capability */
+  because: string;
+}
+
+/**
+ * The capabilities a spec appears to touch without a delta: the spec is named after the capability,
+ * or it cites the capability's living file. Mechanical on purpose — a name match is a hint for the
+ * spec review, which judges whether the change really alters what the capability guarantees.
+ */
+export function requirementGaps(capabilities: readonly string[], specName: string, markdown: string): LivingGap[] {
+  const covered = new Set(parseRequirementDeltas(markdown).deltas.map((delta) => delta.capability));
+  return capabilities.flatMap((capability) => {
+    if (covered.has(capability)) return [];
+    if (capability === specName) return [{ capability, because: "the spec is named after it" }];
+    const citesFile = new RegExp(`(^|[^\\w-])specs/${escapeRegExp(capability)}\\.md(?!\\.\\w|[\\w-])`);
+    return citesFile.test(markdown) ? [{ capability, because: "the spec cites its living file" }] : [];
+  });
 }
 
 /** The spec review checklist: the invariant first (R1.1), then one criterion per scenario (R1.2, R2.1, …). */
