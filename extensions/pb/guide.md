@@ -316,6 +316,14 @@ Then the sections:
   `/pb:archive` merges it into `specs/<capability>.md` or refuses before moving
   anything. `specs/` is kept with the project, so the requirement base is
   committed and reviewed with it.
+  Nobody has to open that file while the feature is being built: every task
+  handout, reset summary and review brief carries the standing invariants of the
+  capabilities the delta names, one line each, as they will read once this delta
+  lands — the delta's own `Overview:` where it states one, and any requirement it
+  modifies or removes left out, because as written it is no longer in force. A
+  base pb can't read is named by file instead of skipped quietly, and the reviewer
+  is told that breaking a standing invariant is a P1 finding, whether the change
+  broke it or made it unreachable.
 - **Open questions**: only while `Status: planning`.
 - **Tasks**: each as `### T1: <outcome>`, what must be true when it's done
   rather than how to build it, with `- Acceptance:` lines and, when it adds
@@ -517,12 +525,18 @@ its own, which slices work unnaturally and costs a run per task. With `"end"`
 each task is still compiled when done (when a compile command exists), and the
 final gate additionally runs `lint` and `extraChecks` when configured.
 
-The spec's Goal, Decisions, Contracts, Threats and Acceptance bind the build:
-changing one takes a `pb_ask`. How to build it is the build's: a better way found while
+The spec's Goal, Out of scope, Decisions, Design, Contracts, Migration and
+rollback, Threats and abuse (`Threats` reads as the same section) and Acceptance
+bind the build: changing one takes a `pb_ask`. How to build it is the build's: a better way found while
 coding is taken, and a change to the Design goes in Decisions. Every task handout,
 check retry, coherence pass and fix lap carries those binding sections, the
-requirement and acceptance criteria and the finished tasks' caveats, rejections and
-open items as a compact block; a section cut short says so and names the spec file.
+requirement and acceptance criteria, the standing guarantees of any capability its
+requirement delta touches, and the finished tasks' caveats, rejections and open
+items as a compact block. It is sized from your model's context window (a tenth of
+it, with a stated minimum, so even a window too small for the reserve gets a real
+limit), and nothing inside a section is shortened: a block that still runs over
+drops whole sections in a fixed order (Decisions and Contracts last), says which it
+dropped, and names the spec file to read.
 Where
 the spec is ambiguous, contradicts itself or doesn't match the code, Pi takes
 the sensible reading, records it in the spec's Decisions as an **assumption**,
@@ -546,7 +560,7 @@ build's state, written by pb, not by a model.
 `checkpointAt` (75% of its window, always before Pi would compact), pb resets it
 right there, between two tasks, where nothing is half-done. The build goes on
 from a summary pb writes itself: the build's rules, every task with its
-report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's binding sections and criteria (Tasks and the rest stay in the spec), and the next task. No summarizing model call,
+report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's binding view — the same binding sections and criteria, bounded by your model's window with a stated minimum, naming any section it had to drop (Tasks and the rest stay in the spec) — the standing guarantees of what the spec's requirement delta touches, and the next task. The line it resets under leaves room for that view and the step after it, not for the whole spec, so a long spec doesn't force early resets. No summarizing model call,
 and nothing of the finished task is needed any more. Should a single task still
 run into Pi's own compaction, pb writes that summary too, adding the files the
 task has changed so far and the files read before, so it carries on instead of
@@ -820,6 +834,12 @@ time); sessions read only the headings covering the paths they touch.
 - **Any time**, `/pb:map [focus]` refreshes it from the code as it is now.
 - **`/pb:map undo`** puts the previous map back (again: swaps them back).
 
+Nothing pb writes there can break the section: text it stores — a finding's file,
+title or fix, a proposed line — loses control characters and HTML comment markers
+on the way in and on the way back, a finding whose title was nothing but markup
+keeps a `(untitled finding)` placeholder instead of vanishing from the ledger, and
+each tab becomes a space so no line turns into an indented code block.
+
 A fresh, read-only call proposes the whole new map (it revisits all of it, not
 only the new area). Its readers are capable models that explore fast, so it
 holds only what exploring wouldn't show them: security and data invariants with
@@ -836,6 +856,18 @@ first only when something looks off: paths that still don't resolve, or a
 large part of the existing map removed; unanswered, the current map stays.
 `/pb:plan` warns when paths in the map no longer exist (a cheap check, no
 model call).
+
+pb finds its section by its two markers, and counts a marker only on a line of
+its own and outside a fenced example, with fences read from the top of the file:
+a marker you show in a documented example stays documentation wherever the
+example sits — above your map, inside it, or as the only place your AGENTS.md
+mentions them. A ``` you never closed is read past only when it leaves pb no
+marker outside fences at all — typically because it stands above your whole
+section — and there pb reads the file blind to fences rather than refuse.
+Where the markers still can't be resolved (an end missing, or a marker standing
+twice) pb writes nothing at all and names the file and the marker, before any
+cartographer is run: your text after the stray marker and the previous-map
+backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 <!-- /pb -->
 
 <!-- pb:topic status -->

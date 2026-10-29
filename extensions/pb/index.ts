@@ -36,6 +36,7 @@ import {
   buildMechanics,
   buildSpecView,
   buildStateSummary,
+  bindingBudget,
   bindingContext,
   checkpointPrompt,
   checkpointSummary,
@@ -50,10 +51,14 @@ import {
   tryBrief,
   extraBlock,
   findingLine,
+  claimedFindings,
   finishSpecPrompt,
   fixText,
+  livingDigest,
   nudgePrompt,
   planPrompt,
+  PI_RESERVE_TOKENS,
+  RESET_WORKING_TOKENS,
   reviewSessionPrompt,
   reviewerBrief,
   reportRegister,
@@ -65,18 +70,19 @@ import {
   STRUCTURED_EDIT_RULE,
   parseSpecReview,
   taskPrompt,
+  viewBudget,
 } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_TOKENS, cartographerBrief, findingsOf, mapDiff, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findingsOf, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, ensureSpecIds, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { planArchiveRequirements, requirementDeltaSummary, requirementWriteErrors, writeRequirementPlans } from "./requirements.ts";
+import { parseRequirementDeltas, parseRequirementDocument, planArchiveRequirements, requirementDeltaSummary, requirementWriteErrors, writeRequirementPlans } from "./requirements.ts";
 import { buildReport } from "./report.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type SpecResolution, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, REVIEW_FINDINGS_CAP, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type SpecResolution, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -116,10 +122,15 @@ export const sessionGone = (ctx: Pick<ExtensionContext, "hasUI">): boolean => {
 /** Coherence pays off once slices can drift: smaller builds skip the pass. */
 const COHERE_MIN_TASKS = 3;
 
-/** Pi compacts at the context window minus this reserve (its default reserveTokens): a checkpoint must come earlier. */
-const PI_RESERVE_TOKENS = 16384;
 /** Above this, a spec gets a gentle note about its size; never a rejection. */
 const LONG_SPEC_TOKENS = 12000;
+
+/**
+ * The token line a session resets under: Pi's own compaction reserve, plus room for the summary the
+ * reset writes and the step that follows it. `writtenTokens` is that summary's own size — reserving for
+ * a whole spec a reset no longer contains buys earlier resets, and more of them.
+ */
+const resetLimit = (window: number, writtenTokens: number) => window - PI_RESERVE_TOKENS - Math.max(RESET_WORKING_TOKENS, 2 * writtenTokens);
 
 /** What the model is told about a spec's size after writing it. */
 const sizeNote = (tokens: number) =>
@@ -516,10 +527,38 @@ export default function pb(pi: ExtensionAPI) {
     return lines.length ? `\nChanged files, by task (from checkpoints, not the model's report):\n${lines.join("\n")}` : "";
   };
 
+  /**
+   * The guarantees the capabilities this spec's delta touches already hold, as they will read once
+   * that delta lands: read and parsed here (prompts.ts renders, never reads), so a step can act
+   * against a rule without opening specs/<capability>.md, and a rule this spec rewrites isn't shown.
+   */
+  const livingFor = (store: Store, markdown: string): string => {
+    const { deltas } = parseRequirementDeltas(markdown);
+    if (!deltas.length) return "";
+    return livingDigest(
+      deltas.map((delta) => {
+        const path = store.requirementsRel(delta.capability);
+        const text = store.readRequirementFile(delta.capability);
+        if (text === undefined) return { capability: delta.capability, path, delta };
+        const { document, errors } = parseRequirementDocument(text, delta.capability);
+        return errors.length ? { capability: delta.capability, path, errors, delta } : { capability: delta.capability, path, document, delta };
+      }),
+    );
+  };
+
+  /**
+   * The compact spec context a step carries, from markdown already in hand: the one shape every handout
+   * uses (this window's block budget, this spec's standing guarantees), so the four that load the spec
+   * themselves for another reason can't drift from the one that doesn't. `resetView` is its sibling for
+   * a reset, where the whole view goes instead of the block.
+   */
+  const bindingBlock = (ctx: ExtensionContext, store: Store, name: string, markdown: string, tasks: TaskProgress[]): string =>
+    bindingContext(name, markdown, tasks, bindingBudget(ctx.getContextUsage()?.contextWindow), livingFor(store, markdown));
+
   /** The compact spec context a task, retry, coherence pass or fix lap carries. Empty when the spec is gone. */
-  const bindingFor = (store: Store, p: Progress): string => {
+  const bindingFor = (ctx: ExtensionContext, store: Store, p: Progress): string => {
     const loaded = loadSpec(store, p.spec);
-    return loaded ? bindingContext(p.spec, loaded.md, p.tasks) : "";
+    return loaded ? bindingBlock(ctx, store, p.spec, loaded.md, p.tasks) : "";
   };
 
   /** What the agent is told for a step of the build: a spec task. withBinding: false when the summary already carries the spec view. */
@@ -527,7 +566,7 @@ export default function pb(pi: ExtensionAPI) {
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     const tp = p.tasks.find((t) => t.id === task.id);
     const red = needsRed(spec, task);
-    const binding = withBinding ? bindingFor(store, p) : "";
+    const binding = withBinding ? bindingFor(ctx, store, p) : "";
     return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.red, binding) + touchedSuffix(ctx, store, p, task.id);
   };
 
@@ -1323,8 +1362,8 @@ export default function pb(pi: ExtensionAPI) {
     description:
       "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Then stop: the home session runs /pb:review next to check the delta. " + reportRegister,
     parameters: Type.Object({
-      fixed: Type.Array(Type.String(), { description: "titles of the findings this lap fixed" }),
-      skipped: Type.Array(Type.String(), { description: "titles of findings that need a design decision (spec revision), not an edit" }),
+      fixed: Type.Array(Type.String(), { description: "the findings this lap fixed: each one's title, or the line it was shown as in the brief" }),
+      skipped: Type.Array(Type.String(), { description: "findings that need a design decision (spec revision), not an edit: each one's title, or the line it was shown as" }),
       tests: Type.String({ description: "test commands run and what each showed" }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -1837,15 +1876,22 @@ export default function pb(pi: ExtensionAPI) {
             : `Carry on with ${p.current ?? "the build"}; finish it with pb_task_done.`;
     // The spec view carries the binding sections; the current step keeps its instructions only,
     // so a reset doesn't repeat the same context twice.
-    return buildStateSummary({ p, markdown: loaded ? buildSpecView(loaded.md) : undefined, mechanics: loaded ? buildMechanics(loaded.spec, buildCmd, each, store.extra("build")) : "", current, reason, ...extra });
+    return buildStateSummary({ p, markdown: loaded ? resetView(ctx, store, loaded.md) : undefined, mechanics: loaded ? buildMechanics(loaded.spec, buildCmd, each, store.extra("build")) : "", current, reason, ...extra });
   };
 
+  /**
+   * The spec copy a reset hands over: the binding view within this window's budget, with the standing
+   * guarantees. The reset threshold is sized from this text, so the two have one definition of it.
+   */
+  const resetView = (ctx: ExtensionContext, store: Store, markdown: string): string =>
+    buildSpecView(markdown, viewBudget(ctx.getContextUsage()?.contextWindow), livingFor(store, markdown));
+
   /** When a build session should be reset at a task boundary: past checkpointAt, always before Pi would compact. */
-  const pastCheckpoint = (ctx: ExtensionContext, store: Store, specTokens: number) => {
+  const pastCheckpoint = (ctx: ExtensionContext, store: Store, viewTokens: number) => {
     const cfg = store.config();
     const usage = ctx.getContextUsage();
     if (!cfg.checkpointAt || !usage || usage.tokens == null) return undefined;
-    const limit = Math.min((usage.contextWindow * cfg.checkpointAt) / 100, usage.contextWindow - PI_RESERVE_TOKENS - Math.max(12000, 2 * specTokens));
+    const limit = Math.min((usage.contextWindow * cfg.checkpointAt) / 100, resetLimit(usage.contextWindow, viewTokens));
     return usage.tokens >= limit ? Math.round((100 * usage.tokens) / usage.contextWindow) : undefined;
   };
 
@@ -1906,12 +1952,12 @@ export default function pb(pi: ExtensionAPI) {
     if (attempts >= cfg.maxAttempts) {
       if (tp) tp.status = "doing";
       pauseBuild(ctx, store, p, `${p.current} still fails after ${attempts} attempts.`, "build.paused-attempts", "attempts", { task: p.current ?? "" });
-      return stop(withFiles(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true, bindingFor(store, p))));
+      return stop(withFiles(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true, bindingFor(ctx, store, p))));
     }
     if (tp) tp.attempts += 1;
     store.saveProgress(p);
     showProgress(ctx, p);
-    return reply(withFiles(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false, bindingFor(store, p))));
+    return reply(withFiles(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false, bindingFor(ctx, store, p))));
   };
 
   const checkAndAdvance = async (
@@ -2017,7 +2063,7 @@ export default function pb(pi: ExtensionAPI) {
     // Every spec task done: on builds big enough to drift, one coherence pass before the final check.
     if (!final && p.current !== COHERE_TASK_ID && !p.tasks.some((t) => t.id === COHERE_TASK_ID) && needsCohere(spec)) {
       beginCohereEntry(ctx, store, p);
-      return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingFor(store, p))}`);
+      return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingFor(ctx, store, p))}`);
     }
     // Every task done: one full check, unless the last task's check was that already.
     // With extra final gates (lint, project checks) the final step still runs even then.
@@ -2212,7 +2258,8 @@ export default function pb(pi: ExtensionAPI) {
     }
     if (!cfg.checkpointAt || !usage || usage.tokens == null) return;
     const specTokens = store.specsOfPlanning(session).reduce((n, name) => n + tokensOf(store.readSpec(name) ?? ""), 0);
-    const limit = Math.min((usage.contextWindow * cfg.checkpointAt) / 100, usage.contextWindow - PI_RESERVE_TOKENS - Math.max(12000, 2 * specTokens));
+    // A planning reset writes the spec itself, so its room is the whole spec's, not a view of it.
+    const limit = Math.min((usage.contextWindow * cfg.checkpointAt) / 100, resetLimit(usage.contextWindow, specTokens));
     if (usage.tokens < limit) return;
     const quietUntil = checkpointQuiet.get(session);
     if (quietUntil !== undefined && usage.tokens < quietUntil + usage.contextWindow * 0.05) return; // don't insist every turn
@@ -2256,7 +2303,8 @@ export default function pb(pi: ExtensionAPI) {
     if (changed) store.saveCheckpoints(name, cps);
 
     if (!wasBoundary || p.phase !== "building" || !p.current) return;
-    const percent = pastCheckpoint(ctx, store, tokensOf(store.readSpec(name) ?? ""));
+    const loaded = loadSpec(store, name);
+    const percent = pastCheckpoint(ctx, store, loaded ? tokensOf(resetView(ctx, store, loaded.md)) : 0);
     if (percent === undefined) return;
     const cp = cps.find((c) => c.id === p.current);
     if (cp) {
@@ -2363,9 +2411,9 @@ export default function pb(pi: ExtensionAPI) {
       return;
     }
     store.event(name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, task: p.current });
-    // No compacted flag for builds: stateSummary below includes the spec markdown, so the session still
-    // knows it (knowsSpec stays true) and continuePrompt correctly omits resending it. The flag is only
-    // for planning sessions whose compaction drops the spec.
+    // No compacted flag for builds: the summaries below carry the spec's binding view, so the session
+    // still holds what binds it (knowsSpec stays true) and continuePrompt correctly omits resending it. The
+    // flag is only for planning sessions whose compaction drops the spec.
     // What the current task has done so far, from git: the files it changed since its undo point.
     const cp = store.checkpoints(name).find((c) => c.id === p.current);
     const now_ = cp ? snapshot(ctx.cwd, `pb: compaction during ${p.current}`) : undefined;
@@ -2538,7 +2586,7 @@ export default function pb(pi: ExtensionAPI) {
     const task = cohereFirst ? null : beginTask(ctx, store, p, first, { intro: true });
     if (!task && !cohereFirst) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} no longer parses. Fix it (or /${cmd("spec")} ${name}), then /${cmd("build")}.`, "error");
     const marker = cohereFirst ? COHERE_MARKER : task!.marker;
-    const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingContext(name, md, p.tasks)) : task!.prompt;
+    const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingBlock(ctx, store, name, md, p.tasks)) : task!.prompt;
     instruct(
       `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${marker}`,
       `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : md, store.extra("build"))}\n\n${prompt}`,
@@ -2576,7 +2624,7 @@ export default function pb(pi: ExtensionAPI) {
           );
           return;
         }
-        const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingContext(name, md, p.tasks)) : task!.prompt;
+        const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingBlock(c, store, name, md, p.tasks)) : task!.prompt;
         await c.sendMessage(
           {
             customType: "pb",
@@ -3307,13 +3355,13 @@ export default function pb(pi: ExtensionAPI) {
           store.saveProgress(p);
           showProgress(ctx, p);
           const finalFiles = changedFilesSection(store, p);
-          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false, bindingFor(store, p)) + (finalFiles ? `\n${finalFiles}` : "") + from);
+          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false, bindingFor(ctx, store, p)) + (finalFiles ? `\n${finalFiles}` : "") + from);
         }
         if (p.current === COHERE_TASK_ID) {
           const cc = p.tasks.find((t) => t.id === COHERE_TASK_ID);
           if (!cc) {
             beginCohereEntry(ctx, store, p);
-            return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingFor(store, p))}${from}`);
+            return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingFor(ctx, store, p))}${from}`);
           }
           resetExhausted(cc, cfg.maxAttempts);
           const attempt = cc.attempts + 1;
@@ -3322,7 +3370,7 @@ export default function pb(pi: ExtensionAPI) {
           p.pause = undefined;
           store.saveProgress(p);
           showProgress(ctx, p);
-          return instruct("▶ coherence pass", `${coherePrompt(p.baseCommit, attempt, cfg.maxAttempts, bindingFor(store, p))}${from}`);
+          return instruct("▶ coherence pass", `${coherePrompt(p.baseCommit, attempt, cfg.maxAttempts, bindingFor(ctx, store, p))}${from}`);
         }
         // p.current can name a task the list no longer has: a spec rewrite or human edit renamed
         // it. Only a live, undone task keeps its claim; anything else resumes at the next todo,
@@ -3335,7 +3383,7 @@ export default function pb(pi: ExtensionAPI) {
         // Undone past the coherence pass (or a restart that dropped it): all spec tasks done, pass pending.
         if ((!cur || !tp) && needsCohere(loaded.spec) && !p.tasks.some((t) => t.id === COHERE_TASK_ID)) {
           beginCohereEntry(ctx, store, p);
-          return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingContext(p.spec, loaded.md, p.tasks))}${from}`);
+          return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingBlock(ctx, store, p.spec, loaded.md, p.tasks))}${from}`);
         }
         if (!cur || !tp) return ctx.ui.notify("Nothing left to build here.", "info");
         // Your answer to a task that kept failing buys it a fresh set of attempts; other pauses cost none.
@@ -3654,10 +3702,7 @@ export default function pb(pi: ExtensionAPI) {
     if (run.name && p) {
       store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ...checked.tokens, cost: checked.cost });
       // A lead for later features: completed findings survive the review's own files and the archive.
-      const ledger = checked.findings
-        .filter((f) => f.priority !== "P3")
-        .slice(0, REVIEW_FINDINGS_CAP)
-        .map((f) => ({ priority: f.priority, ...(f.file ? { file: cap(f.file, 300) } : {}), ...(f.line ? { line: f.line } : {}), title: cap(f.title, 300), ...(f.fix ? { fix: cap(f.fix, 500) } : {}), ...(f.outside ? { outside: true } : {}) }));
+      const ledger = ledgerFindings(checked.findings);
       if (ledger.length) store.event(run.name, { type: "review-findings", review: run.id, findings: ledger });
       const remaining = p.tasks.filter((t) => t.status !== "done").map((t) => t.id);
       if (m.complete) {
@@ -3891,6 +3936,7 @@ export default function pb(pi: ExtensionAPI) {
       const acceptance = loaded && name ? acceptanceCriteria(loaded.md, loaded.spec) : undefined;
       const brief = reviewerBrief({
         spec: loaded && name ? { name, markdown: loaded.md, parsed: loaded.spec } : undefined,
+        living: loaded && name ? livingFor(store, loaded.md) : "",
         acceptance,
         intent,
         base,
@@ -3951,14 +3997,14 @@ export default function pb(pi: ExtensionAPI) {
   ): Promise<{ live: ExtensionCommandContext; report?: { fixed: string[]; skipped: string[]; tests: string } } | undefined> => {
     const findings = remaining.map((f, i) => findingLine(f, i + 1)).join("\n");
     const loaded = loadSpec(store, spec);
-    const binding = loaded ? bindingContext(spec, loaded.md, store.progress(spec)?.tasks ?? []) : "";
+    const binding = loaded ? bindingBlock(ctx, store, spec, loaded.md, store.progress(spec)?.tasks ?? []) : "";
     const seed =
       `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings}\n\n` +
       `${binding ? `${binding}\n\n` : ""}` +
       `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line (full suite once at the end); new tests must be seen failing first. ${STRUCTURED_EDIT_RULE} ` +
       `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
       `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +
-      `When done, call pb_fix_done with fixed ids (titles), skipped ids, and test results; then stop.`;
+      `When done, call pb_fix_done with fixed (each finding's title or the line it was shown as, not your own summary of it), skipped, and test results; then stop.`;
     let live: ExtensionCommandContext | undefined;
     const since = now();
     const result = await ctx.newSession({
@@ -3991,8 +4037,10 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   /**
-   * Unattended fix loop: lap until every finding is fixed or skipped-as-spec-revision, up to
-   * FIX_LAPS, then come home with the outcome. The human runs /pb:review next.
+   * Unattended fix loop: lap until every finding is fixed or skipped-as-spec-revision, up to FIX_LAPS, then
+   * come home with the outcome. The human runs /pb:review next: a lap's report says what it claims to have
+   * done, so the summary hands the checking over instead of doing it, and counts a finding as done only when
+   * the lap's report could be attached to it.
    */
   const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[]): Promise<void> => {
     const home = ctx.sessionManager.getSessionFile() ?? undefined;
@@ -4002,6 +4050,7 @@ export default function pb(pi: ExtensionAPI) {
     const skipped: string[] = [];
     let laps = 0;
     let silent = false;
+    let unmatched = false;
     while (remaining.length && laps < FIX_LAPS) {
       laps++;
       const out = await runFixLap(live, store, spec, remaining);
@@ -4011,18 +4060,29 @@ export default function pb(pi: ExtensionAPI) {
         silent = true;
         break;
       }
-      fixed.push(...out.report.fixed);
-      skipped.push(...out.report.skipped);
-      const done = new Set([...fixed, ...skipped]);
-      remaining = remaining.filter((f) => !done.has(f.title));
+      const skip = claimedFindings(out.report.skipped, remaining);
+      const done = claimedFindings(out.report.fixed, remaining.filter((f) => !skip.includes(f)));
+      // A report pb cannot attach to a finding would earn the same seed again: the lap answered, so stop and
+      // show the mismatch instead of paying for a lap that can change nothing.
+      if (!done.length && !skip.length) {
+        unmatched = true;
+        break;
+      }
+      fixed.push(...done.map((f) => f.title));
+      skipped.push(...skip.map((f) => f.title));
+      const resolved = new Set([...done, ...skip].map((f) => f.title));
+      remaining = remaining.filter((f) => !resolved.has(f.title));
     }
     const open = remaining.map((f) => f.title);
     const skippedNote = skipped.length ? `; skipped as needing spec revision: ${skipped.join(", ")}` : "";
-    const summary = !open.length && !silent
-      ? `Fixes for \`${spec}\` complete in ${laps} lap(s): fixed ${fixed.join(", ") || "none"}${skippedNote}. Run /pb:review to check the delta.`
+    const checking = " Run /pb:review to check the delta: what a lap reports is its own claim, not a check.";
+    const summary = !open.length && !silent && !unmatched
+      ? `Fixes for \`${spec}\` complete in ${laps} lap(s): fixed ${fixed.join(", ") || "none"}${skippedNote}.${checking}`
       : silent
-        ? `Fix lap for \`${spec}\` went silent (no report after ${FIX_NUDGES} nudges). Fixed so far: ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.`
-        : `Fixes for \`${spec}\` stopped after ${laps} laps: fixed ${fixed.join(", ") || "none"}; still open: ${open.join(", ")}${skippedNote}.`;
+        ? `Fix lap for \`${spec}\` went silent (no report after ${FIX_NUDGES} nudges). Fixed so far: ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.${checking}`
+        : unmatched
+          ? `Fixes for \`${spec}\` stopped after ${laps} lap(s): the lap named none of the findings pb handed it, so pb cannot tell what it fixed and counts nothing as done. Still open: ${open.join(", ")}${skippedNote}.${checking}`
+          : `Fixes for \`${spec}\` stopped after ${laps} laps: fixed ${fixed.join(", ") || "none"}; still open: ${open.join(", ")}${skippedNote}.${checking}`;
     try {
       if (!home) throw new Error("no home session");
       await live.switchSession(home, {
@@ -4106,6 +4166,15 @@ export default function pb(pi: ExtensionAPI) {
   /* ------------------------------ project map ----------------------------- */
 
   /**
+   * What to tell the human when AGENTS.md's map section can't be located: the file, the marker, the
+   * line — and that pb wrote nothing, since the alternative to refusing is deleting what pb can't read.
+   */
+  const mapRefusal = (cwd: string): string => {
+    const defect = mapDefect(cwd);
+    return `${mapFile(cwd)}'s project map markers can't be resolved${defect ? ` (${defect.marker} on line ${defect.line})` : ""}: pb can't tell its map section from your own text there, so pb wrote nothing. The section needs exactly one "${MAP_MARKERS.start}" and one "${MAP_MARKERS.end}" line, with the map between them. Fix that, then run /${cmd("map")} again.`;
+  };
+
+  /**
    * Update the project map in a fresh, read-only call (the session doesn't grow). Paths that don't resolve,
    * and a map over the budget, go back to it once to be corrected; then the map is written, with the change shown and /pb:map undo to
    * go back. It asks first only when something looks off: paths that still don't resolve, or a large part of
@@ -4113,6 +4182,9 @@ export default function pb(pi: ExtensionAPI) {
    */
   const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string; reviewFindings?: ReviewLedgerEntry[] } = {}): Promise<string[] | undefined> => {
     const cwd = ctx.cwd;
+    // Before any cartographer runs: minutes of work are not spent on a file pb cannot write, and the
+    // human reads which marker to fix while the reason is still the live problem.
+    if (mapDefect(cwd)) return void ctx.ui.notify(mapRefusal(cwd), "error");
     const sessionFile = ctx.sessionManager.getSessionFile();
     const cfg = store.config();
     const current = readMap(cwd);
@@ -4206,8 +4278,10 @@ export default function pb(pi: ExtensionAPI) {
         body = normalizeMap(edited);
       } else if (choice !== APPLY) return void ctx.ui.notify("Map not changed.", "info");
     }
+    // The write has the last word on whether the file can be written at all (it may have been edited
+    // while the cartographer ran), and the copy undo goes back to is stored only once it did write.
+    if (!writeMap(ctx.cwd, body)) return void ctx.ui.notify(mapRefusal(ctx.cwd), "error");
     store.saveMapPrevious(current);
-    writeMap(ctx.cwd, body);
     ctx.ui.notify(
       `Project map ${current ? "updated" : "written"} in AGENTS.md (~${tokens} tokens in ${Math.max(1, Math.round((Date.now() - started) / 1000))}s${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}). \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
       "info",
@@ -4244,8 +4318,11 @@ export default function pb(pi: ExtensionAPI) {
       if (args.trim() === "undo") {
         const previous = store.mapPrevious();
         if (previous === undefined) return ctx.ui.notify("No previous map to go back to.", "info");
+        // A broken section is read as a truncated one, and undo writes what it reads with no check
+        // after it: refusing here is what keeps the one good copy of the map from being replaced by that.
+        if (mapDefect(ctx.cwd)) return ctx.ui.notify(mapRefusal(ctx.cwd), "error");
         const now_ = readMap(ctx.cwd);
-        writeMap(ctx.cwd, previous);
+        if (!writeMap(ctx.cwd, previous)) return ctx.ui.notify(mapRefusal(ctx.cwd), "error");
         store.saveMapPrevious(now_);
         return ctx.ui.notify(`The previous project map is back in AGENTS.md (\`/${cmd("map")} undo\` again swaps them back).`, "info");
       }

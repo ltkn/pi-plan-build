@@ -95,7 +95,7 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 - **A lean context.** Broad questions go to `pb_explore`, a separate read-only
   context (on a cheaper model if you like). The baseline runs in the harness,
   in its own worktree, and a build resets between tasks to a summary pb writes
-  from its own state.
+  from its own state, sized from your model's window.
 - **Undo means undo.** `/pb:undo` restores the files and rewinds the
   conversation to before the task, so a discarded attempt doesn't anchor the
   next one, and the cache stays warm.
@@ -117,7 +117,12 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   project into a short map in AGENTS.md — its findings, the design it settled
   on, and the review's P0–P2 findings as leads the cartographer rechecks
   against the code — and pb checks every path it names against the repo, so the
-  map doesn't drift. Requirement deltas accumulate in `specs/<capability>.md`.
+  map doesn't drift. Nothing pb writes there can carry markup that breaks the
+  section, and where the section's own markers can't be resolved pb writes
+  nothing and says which marker, leaving your text and the undo backup alone.
+  Requirement deltas accumulate in `specs/<capability>.md`, and the invariants
+  already standing there are handed to every build step and review of a feature
+  that touches that capability — as they will read once its delta lands.
 - **Your standards, once.** Engineering standards live in AGENTS.md, which Pi
   loads into every session; pb offers once to add its default section for your
   stack.
@@ -168,8 +173,9 @@ Invariant: Only the order's owner can cancel it, only while it is PENDING, and t
 - Test: `mvn -B -q -Dtest=OrderTest test`   # seen failing before the change, then passing
 ```
 
-The spec pins what and how you'll know, not how: Goal, Decisions, Contracts and
-Acceptance bind the build. Contracts are required for any external surface (an
+The spec pins what and how you'll know, not how: Goal, Out of scope, Decisions,
+Design, Contracts, Migration and rollback, Threats and abuse and Acceptance bind the
+build. Contracts are required for any external surface (an
 API, event, schema, config, public signature or stored shape), even for a
 single task, since no later step sees the whole change at once. A
 persisted-data change also needs `## Migration and rollback`, or an explicit

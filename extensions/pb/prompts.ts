@@ -6,9 +6,9 @@
  * in your Pi sessions; the explorer, the reviewer and the verifier are separate, fresh calls.
  */
 import { tip } from "./help.ts";
-import { headerBlock } from "./markdown.ts";
-import { requirementCriteria } from "./requirements.ts";
-import { acceptanceCriteria, type ParsedSpec, type SpecTask, sectionHeading, sectionOf, specReviewDelta } from "./spec.ts";
+import { headerBlock, safeLine } from "./markdown.ts";
+import { requirementCriteria, requirementNameKey, type RequirementDelta, type RequirementDocument } from "./requirements.ts";
+import { acceptanceCriteria, BINDING_SECTIONS, type ParsedSpec, type SpecTask, sectionHeading, sectionOf, specReviewDelta } from "./spec.ts";
 import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, REQUIREMENTS_DIR, type Progress, type SpecResolution, type TaskProgress, cap } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
@@ -300,28 +300,130 @@ const clip = (text: string, n: number): string => {
 /** Keep the first n lines, then one line saying how many were left out. */
 const cappedList = (lines: string[], n: number, overflow: (rest: number) => string): string[] => [...lines.slice(0, n), ...(lines.length > n ? [overflow(lines.length - n)] : [])];
 
-/** The sections a task must respect: anything that constrains what it may write or how it will be judged. */
-const BINDING_SECTIONS = ["Goal", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse"] as const;
-const BINDING_SECTION_CAP: Record<(typeof BINDING_SECTIONS)[number], number> = {
-  Goal: 700,
-  Decisions: 1600,
-  Design: 1200,
-  Contracts: 1200,
-  "Migration and rollback": 900,
-  "Threats and abuse": 1100,
-};
+/** The sections a task must respect come from spec.ts's one BINDING_SECTIONS list, shared with spec review. */
 const BINDING_CRITERIA_CAP = 12;
-const BINDING_TOTAL_CAP = 9000;
-const SPEC_VIEW_CAP = 12000;
 
-/** Cut a section body at a line boundary, saying how much stayed in the spec. */
-const cappedSection = (body: string, limit: number): string => {
-  if (body.length <= limit) return body;
-  const cut = body.slice(0, limit);
-  const at = cut.lastIndexOf("\n");
-  const kept = (at > limit / 2 ? cut.slice(0, at) : cut).trimEnd();
-  return `${kept}\n… [truncated ${body.length - kept.length} chars: read the full section in the spec]`;
-};
+/**
+ * Pi compacts at the context window minus this reserve (its default reserveTokens), so a reset and
+ * everything it hands over has to fit inside it. The one copy: index.ts and the budgets below share it.
+ */
+export const PI_RESERVE_TOKENS = 16384;
+/** Room a reset leaves for the work that follows it: the current step's handout plus its first replies. */
+export const RESET_WORKING_TOKENS = 12000;
+/**
+ * The smallest budget pb will use. `cap` reads `n <= 0` as "no cap", so a window smaller than the
+ * reserve must still be given a real limit — 1k tokens, small enough for any model that exists and
+ * enough to carry Decisions and Contracts.
+ */
+export const BUDGET_MIN_CHARS = 4000;
+
+/** tokensOf's own factor (spec.ts): a context window is counted in tokens, budgets in characters. */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * A budget in characters for a copy of the spec: a share of the live window, the fixed floor only
+ * when no window is reported, then clamped to the room left after the reset reserve — and that clamp
+ * itself floored, so the no-cap sentinel is never reachable. The clamp sits outside the max: written
+ * inside, the floor would win at every window and the share would be dead code.
+ */
+function budgetOf(window: number | undefined, share: number, floor: number): number {
+  if (window === undefined) return floor;
+  const shareChars = Math.floor(window * CHARS_PER_TOKEN * share);
+  const room = Math.max(BUDGET_MIN_CHARS, (window - PI_RESERVE_TOKENS - RESET_WORKING_TOKENS) * CHARS_PER_TOKEN);
+  return Math.min(Math.max(floor, shareChars), room);
+}
+
+/** What a task handout may spend on its copy of the spec: a tenth of the window, clamped. */
+export const bindingBudget = (window?: number): number => budgetOf(window, 0.1, 48_000);
+
+/** What a reset summary may spend on the spec view: a fifth of the window, clamped. */
+export const viewBudget = (window?: number): number => budgetOf(window, 0.2, 96_000);
+
+/**
+ * The order an oversized copy loses sections, first to go; Decisions and Contracts go last, and only
+ * when nothing else is left. Whole sections only, never inside a body: half a rule is worse than none.
+ */
+const CUT_ORDER = ["Design", "Migration and rollback", "Threats and abuse", "Threats", "Out of scope", "Goal", "Decisions", "Contracts"];
+
+/** What a copy says about what it left out: every dropped section, by name, and where to read it. */
+const cutNotice = (name: string | undefined, dropped: readonly string[]) =>
+  `## Cut from this copy\nWhole sections dropped for size: ${dropped.join(", ")}. Read them in ${name ? `${P}/specs/${name}/spec.md` : "the spec named above"}.`;
+
+/** One capability's standing guarantees, as the caller read them: its parsed base, or what reading it reported. */
+export interface LivingCapability {
+  capability: string;
+  /** the capability's living file, project-relative: named whenever the list is capped or can't be read */
+  path: string;
+  /** the parsed base; absent together with `errors` when the capability has no living file yet */
+  document?: RequirementDocument;
+  /** what the parser reported about that file, when it reported anything */
+  errors?: string[];
+  /** what this spec's delta does to it */
+  delta: RequirementDelta;
+}
+
+/** How many standing requirements one capability contributes before the list points at the file instead. */
+export const LIVING_CAP = 12;
+
+/** The heading the digest arrives under in every copy: it names what breaking one of these costs. */
+const LIVING_HEADING = "## Living requirements (guarantees this repo holds; breaking one is a P1 finding)";
+
+/** The line caps a handout uses: 300 for a criterion or a standing guarantee, 240 for a finished task's hook. */
+const CRITERION_LINE_CAP = 300;
+const HOOK_LINE_CAP = 240;
+
+/** One digest line: flat, marker-free, and short enough to stay a line. */
+const digestLine = (text: string) => clip(safeLine(text), CRITERION_LINE_CAP);
+
+/**
+ * The guarantees that will still stand once this spec's own delta is merged, as one flat line per
+ * capability and per requirement: a step can act against them without opening the base files.
+ * A requirement this delta rewrites or removes isn't in force as written, so it is skipped through
+ * the merge's own name key; the Overview shown is the one the merge will produce (the delta's when
+ * it states one). A base that can't be parsed names its file rather than passing on a partial list,
+ * and a capability with no living file contributes nothing.
+ */
+export function livingDigest(capabilities: readonly LivingCapability[]): string {
+  const blocks = capabilities.flatMap((c) => {
+    if (!c.document && !c.errors?.length) return []; // no living file: nothing stands there yet
+    if (!c.document) return [`### ${safeLine(c.capability)}\n${digestLine(`nothing is listed: ${c.path} could not be read — read it before acting against this capability`)}`];
+    const overview = c.delta.overview ?? c.document.overview;
+    const replaced = new Set(c.delta.groups.filter((g) => g.kind !== "ADDED").flatMap((g) => g.requirements.map((r) => requirementNameKey(r.name))));
+    const standing = c.document.requirements.filter((r) => !replaced.has(requirementNameKey(r.name)));
+    const lines = [`### ${safeLine(c.capability)}`, ...(overview ? [digestLine(`Overview: ${overview}`)] : [])];
+    if (!standing.length) return [`${lines.join("\n")}\n${digestLine(`every requirement here is replaced by this spec — read ${c.path}`)}`];
+    const rendered = standing.map((r) => digestLine(`- ${r.name}${r.invariant ? ` — ${r.invariant}` : ""}`));
+    lines.push(...cappedList(rendered, LIVING_CAP, (rest) => digestLine(`- … +${rest} more in ${c.path}`)));
+    return [lines.join("\n")];
+  });
+  return blocks.length ? [LIVING_HEADING, ...blocks].join("\n") : "";
+}
+
+/**
+ * Keep whole binding sections until the copy fits: drop in CUT_ORDER, checking after each, so the
+ * copy is bounded by the budget with every cut disclosed. `rest` is what the copy always carries
+ * (header, criteria, hooks, living guarantees) and is never cut here.
+ */
+function fitSections(markdown: string, maxChars: number, rest: string, name?: string): { kept: { name: string; body: string }[]; dropped: string[] } {
+  const sections = BINDING_SECTIONS.map((section) => ({ name: section, body: sectionOf(markdown, section).trim() })).filter((s) => s.body);
+  const kept = sections.map((s) => s);
+  const dropped: string[] = [];
+  const width = () => rest.length + kept.reduce((n, s) => n + s.body.length + s.name.length + 8, 0) + (dropped.length ? cutNotice(name, dropped).length : 0);
+  for (const cut of CUT_ORDER) {
+    if (width() <= maxChars) break;
+    const at = kept.findIndex((s) => s.name === cut);
+    if (at < 0) continue;
+    kept.splice(at, 1);
+    dropped.push(cut);
+  }
+  return { kept, dropped };
+}
+
+/** `cap` appends its "…[truncated N chars]" after the slice, so it is asked for a little less: the result then truly fits. */
+const CAP_NOTICE_RESERVE = 32;
+
+/** The last bound, for a spec whose always-emitted parts alone outgrow the budget: cut, and say by how much. */
+const withinBudget = (text: string, maxChars: number) => (text.length <= maxChars ? text : cap(text, Math.max(1, maxChars - CAP_NOTICE_RESERVE)));
 
 const criterionLines = (markdown: string): string[] => {
   const requirements = requirementCriteria(markdown);
@@ -329,31 +431,19 @@ const criterionLines = (markdown: string): string[] => {
   const lines: string[] = [];
   if (requirements.length) {
     lines.push("", "## Requirement criteria");
-    const rendered = requirements.map((c) => `- ${c.id}: ${clip(c.text, 300)}`);
+    const rendered = requirements.map((c) => `- ${c.id}: ${clip(c.text, CRITERION_LINE_CAP)}`);
     lines.push(...cappedList(rendered, BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the spec`));
   }
   if (acceptance.length) {
     lines.push("", "## Acceptance criteria");
-    const rendered = acceptance.map((c) => `- ${c.id}: ${clip(c.text, 300)}`);
+    const rendered = acceptance.map((c) => `- ${c.id}: ${clip(c.text, CRITERION_LINE_CAP)}`);
     lines.push(...cappedList(rendered, BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the spec`));
   }
   return lines;
 };
 
-/**
- * The compact binding context a task, a retry, the coherence pass or a fix lap carries: what the
- * spec binds the change to, without the whole document. Sections are capped with the cut disclosed;
- * the spec path is named so anything left out can be read at the source.
- */
-export function bindingContext(name: string, markdown: string, tasks: TaskProgress[] = []): string {
-  const lines = [
-    `Binding context (a compact copy of ${P}/specs/${name}/spec.md; the spec is the source of truth — read it when a line is cut or a case isn't here):`,
-  ];
-  for (const section of BINDING_SECTIONS) {
-    const body = sectionOf(markdown, section).trim();
-    if (body) lines.push("", `## ${section}`, cappedSection(body, BINDING_SECTION_CAP[section]));
-  }
-  lines.push(...criterionLines(markdown));
+/** The finished tasks' non-"none" hooks: what a later task must respect, one line per task. */
+const hookLines = (tasks: TaskProgress[]): string[] => {
   const hooks = tasks
     .filter((t) => t.status === "done")
     .flatMap((t) => {
@@ -361,31 +451,45 @@ export function bindingContext(name: string, markdown: string, tasks: TaskProgre
         ["caveat", t.caveat],
         ["rejected", t.rejected],
         ["open", t.open],
-      ].flatMap(([kind, value]) => (value && !isNone(value) ? [`${kind}: ${clip(value, 240)}`] : []));
+      ].flatMap(([kind, value]) => (value && !isNone(value) ? [`${kind}: ${clip(value, HOOK_LINE_CAP)}`] : []));
       return found.length ? [`- ${t.id} · ${found.join(" · ")}`] : [];
     });
-  if (hooks.length) lines.push("", "## Prior tasks", ...cappedList(hooks, BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the build state`));
-  return cap(lines.join("\n"), BINDING_TOTAL_CAP);
+  return hooks.length ? ["", "## Prior tasks", ...cappedList(hooks, BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the build state`)] : [];
+};
+
+/**
+ * The compact binding context a task, a retry, the coherence pass or a fix lap carries: what the
+ * spec binds the change to, without the whole document. Sections stay whole and the ones that do not
+ * fit `maxChars` (bindingBudget) are dropped in a fixed order and named; the spec path is given so
+ * anything left out can be read at the source.
+ */
+export function bindingContext(name: string, markdown: string, tasks: TaskProgress[], maxChars: number, living: string): string {
+  const head = `Binding context (a compact copy of ${P}/specs/${name}/spec.md; the spec is the source of truth — read it when a line is cut or a case isn't here):`;
+  const tail = [...criterionLines(markdown), ...(living ? ["", living] : []), ...hookLines(tasks)];
+  const { kept, dropped } = fitSections(markdown, maxChars, head + tail.join("\n"), name);
+  const lines = [head, ...(dropped.length ? ["", cutNotice(name, dropped)] : []), ...kept.flatMap((s) => ["", `## ${s.name}`, s.body]), ...tail];
+  return withinBudget(lines.join("\n"), maxChars);
 }
 
 /**
  * The build's view of the spec, for a reset or compaction: the parts that bind the work, the
  * requirement and acceptance criteria, and no Tasks — the current handout carries its own task.
- * Deterministic: assembled from the sections, never summarized by a model.
+ * Deterministic: assembled from the sections, never summarized by a model. Sections that do not fit
+ * `maxChars` (viewBudget) go whole and are named. `living` is this spec's livingDigest: like the
+ * criteria, it is never cut — a guarantee is useless in the one copy that has to survive a reset.
  */
-export function buildSpecView(markdown: string): string {
-  const parts: string[] = [];
+export function buildSpecView(markdown: string, maxChars: number, living: string): string {
   const header = headerBlock(markdown).trim();
-  if (header) parts.push(header);
-  for (const section of BINDING_SECTIONS) {
-    const body = sectionOf(markdown, section).trim();
-    if (body) parts.push(`## ${section}\n\n${body}`);
-  }
   const requirements = requirementCriteria(markdown);
-  if (requirements.length) parts.push(`## Requirement criteria\n\n${requirements.map((c) => `- ${c.id}: ${c.text}`).join("\n")}`);
   const acceptance = acceptanceCriteria(markdown).filter((c) => /^A\d+$/.test(c.id));
-  if (acceptance.length) parts.push(`## Acceptance criteria\n\n${acceptance.map((c) => `- ${c.id}: ${c.text}`).join("\n")}`);
-  return cap(parts.join("\n\n"), SPEC_VIEW_CAP);
+  const tail = [
+    ...(requirements.length ? ["", `## Requirement criteria\n\n${requirements.map((c) => `- ${c.id}: ${c.text}`).join("\n")}`] : []),
+    ...(acceptance.length ? ["", `## Acceptance criteria\n\n${acceptance.map((c) => `- ${c.id}: ${c.text}`).join("\n")}`] : []),
+    ...(living ? ["", living] : []),
+  ];
+  const { kept, dropped } = fitSections(markdown, maxChars, header + tail.join("\n"));
+  const parts = [header, ...(dropped.length ? [cutNotice(undefined, dropped)] : []), ...kept.map((s) => `## ${s.name}\n\n${s.body}`), ...tail];
+  return withinBudget(parts.filter((p) => p).join("\n\n"), maxChars);
 }
 
 /**
@@ -511,6 +615,7 @@ With a spec:
 - Design: the shape the build settled on, recorded as it went — consistent with the Contracts and Decisions, and the code matches it, or the change is recorded in Decisions.
 - Decisions: respected, including every rejected alternative ("Not doing X"); flag anything the build brought back. Flag an assumption (a Decisions entry starting "Assumption", made while writing the spec or building) that looks wrong or second-best.
 - Refactors and threats: tasks titled "(refactor)" keep behaviour unchanged; the spec's Threats and abuse, if any, has each abuse prevented and tested.
+- Living requirements: the brief's standing guarantees are what this repo already holds for the capabilities the change touches — breaking one of them is a P1 finding even when every acceptance line passes, unless the spec's own delta replaces it.
 - The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 Without a spec: whether the change does what the intent in the brief says.
 
@@ -579,6 +684,39 @@ Do not modify any file, and never run git commands that change the working tree 
 export const findingLine = (f: Finding, n?: number) =>
   `${f.id ? `${f.id} ` : n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}${f.evidence ? `\n   Evidence: ${f.evidence}` : ""}${f.fix ? `\n   Fix: ${f.fix}` : ""}`;
 
+/** A finding or a claim about one, in the one form the fix loop compares: numbering pb added stripped, whitespace flat, case out. */
+const claimKey = (text: string): string => text.replace(/^\s*(?:\d+[.)]|[-*+])\.?\s+/, "").replace(/\s+/g, " ").trim().toLowerCase();
+
+/** Below this a fragment is too generic to match on, so only an exact claim counts. */
+const CLAIM_MIN_CHARS = 20;
+
+/** Whether one claim describes one finding: its title, a piece of it, or that with numbering or prose around it. */
+const claimsFinding = (claim: string, title: string, shown: string): boolean =>
+  claim === title ||
+  claim === shown ||
+  (Math.min(claim.length, title.length) >= CLAIM_MIN_CHARS && (claim.includes(title) || title.includes(claim))) ||
+  (Math.min(claim.length, shown.length) >= CLAIM_MIN_CHARS && shown.includes(claim));
+
+/**
+ * Which findings a fix lap's report names, in the order they were given to the lap. A lap answers with what
+ * it was shown: the title alone, the whole line (`1. [P1] src/a.ts:12 — title`), or one of those with a
+ * number, a prefix or prose around it — so a claim matches an exact shape, carries the title, or is a piece
+ * of the title or of the line at least CLAIM_MIN_CHARS long. One claim claims one finding (exact first,
+ * longest claim first), and a claim that matches nothing claims nothing: a finding nobody claimed stays
+ * open rather than going quietly fixed.
+ */
+export function claimedFindings(claims: readonly string[], findings: readonly Finding[]): Finding[] {
+  const keys = [...new Set(claims.map(claimKey).filter(Boolean))].sort((a, b) => b.length - a.length);
+  const shapes = findings.map((f) => ({ finding: f, title: claimKey(f.title), shown: claimKey(findingLine(f)) }));
+  const taken = new Set<Finding>();
+  for (const key of keys) {
+    const open = shapes.filter((s) => !taken.has(s.finding));
+    const hit = open.find((s) => key === s.title || key === s.shown) ?? open.find((s) => claimsFinding(key, s.title, s.shown));
+    if (hit) taken.add(hit.finding);
+  }
+  return findings.filter((f) => taken.has(f));
+}
+
 export interface ReviewBrief {
   /** the spec, when the change was built from one */
   spec?: { name: string; markdown: string; parsed: ParsedSpec };
@@ -613,6 +751,8 @@ export interface ReviewBrief {
   baseWarning?: string;
   /** untracked files over the snapshot cap: in no diff, so the reviewer reads them itself */
   largeFiles?: string[];
+  /** the guarantees the touched capabilities already hold (their livingDigest): breaking one is a P1 finding */
+  living: string;
 }
 
 /**
@@ -702,6 +842,7 @@ export function reviewerBrief(o: ReviewBrief): string {
       "",
     );
   }
+  if (o.living) lines.push(o.living, "", "Each line above is a guarantee the code held before this change. Check the diff against them: one that no longer holds is a P1 finding, whether the change broke it or made it unreachable.", "");
   lines.push(
     "## How to see the change",
     "",

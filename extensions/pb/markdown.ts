@@ -2,9 +2,47 @@
  * The markdown rules shared by specs and living requirement files: a heading inside a fenced
  * code block is never structure, and writers and readers use the same section matcher, so a
  * section the reader accepts can't become a second one to the writer.
+ *
+ * Also the one sanitizer for text pb stores in a markdown container: one builder for a line, one
+ * for a block, both removing control characters before comment markers (a control character inside
+ * `<!--` defeats a marker match, and stripping the marker first then reassembles a live one) and
+ * repeating until stable, because one removal can splice the fragments of another marker together.
  */
 
 const FENCE = /^(\s*)```/;
+
+/** A line that opens or closes a fenced code block. */
+export const isFence = (line: string): boolean => FENCE.test(line);
+
+/** Control characters that must never reach a container: C0, C1, and the two line/paragraph separators. */
+const CONTROL = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g;
+
+/** HTML comment markers: in a container they open or close a section pb (or another tool) reads. */
+const MARKERS = /<!--|-->/g;
+
+/** Control characters, then comment markers, until the text stops changing. */
+const neutralise = (text: string, flatten: (s: string) => string): string => {
+  let out = flatten(text);
+  for (;;) {
+    const next = flatten(out.replace(CONTROL, "").replace(MARKERS, ""));
+    if (next === out) return next;
+    out = next;
+  }
+};
+
+/**
+ * Untrusted text as one line: safe to store in a bullet, a table cell or a one-line ledger field.
+ * Every whitespace run (tabs, newlines) becomes a single space; no control character or comment
+ * marker survives; the words do.
+ */
+export const safeLine = (text: string): string => neutralise(text, (s) => s.replace(/\s+/g, " ")).trim();
+
+/**
+ * Untrusted text kept as a block: lines stay lines — the stripping runs per line so the breaks
+ * survive — each tab becomes a single space so no line can turn into an indented code block, and no
+ * other control character or comment marker survives.
+ */
+export const safeBlock = (text: string): string => text.split("\n").map((line) => neutralise(line, (s) => s.replace(/\t/g, " "))).join("\n");
 
 /** Lines of markdown with fenced code blocks blanked for structure detection. */
 export function blankFenced(md: string): string[] {

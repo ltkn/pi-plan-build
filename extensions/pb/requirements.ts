@@ -82,7 +82,14 @@ const GROUP = /^###\s+(ADDED|MODIFIED|REMOVED)\s*:?\s*$/i;
 const ANY_H2 = /^##\s+(?!#)/;
 
 const normalize = (text: string) => text.replace(/\r\n?/g, "\n");
-const key = (name: string) => name.trim().toLowerCase();
+
+/**
+ * The one normaliser for a requirement's name: what makes two spellings the same requirement — case,
+ * edge space, and a run of inner space, so "cancel A   pending ORDER" is the rule a base already holds.
+ * The archive merge and the handout's standing-guarantee digest both decide on this, so a variant
+ * spelling can't be treated as a different rule by one of them.
+ */
+export const requirementNameKey = (name: string): string => name.trim().replace(/\s+/g, " ").toLowerCase();
 const emptyDocument = (capability: string): RequirementDocument => ({
   capability,
   title: `${capability} requirements`,
@@ -223,9 +230,9 @@ function parseBlocks(lines: string[], blanked: string[], from: number, to: numbe
   for (const draft of drafts) {
     const bad = displayNameError("Requirement", draft.name);
     if (bad) errors.push(`line ${draft.line}: ${bad}`);
-    const duplicate = seen.get(key(draft.name));
+    const duplicate = seen.get(requirementNameKey(draft.name));
     if (duplicate !== undefined) errors.push(`line ${draft.line}: requirement "${draft.name}" also appears at line ${duplicate}; requirement names must be unique`);
-    else seen.set(key(draft.name), draft.line);
+    else seen.set(requirementNameKey(draft.name), draft.line);
 
     const invariant = trimBlank(draft.invariant);
     const statement = trimBlank(draft.statement);
@@ -236,9 +243,9 @@ function parseBlocks(lines: string[], blanked: string[], from: number, to: numbe
     for (const s of draft.scenarios) {
       const scenarioBad = displayNameError("Scenario", s.name);
       if (scenarioBad) errors.push(`line ${s.line}: ${scenarioBad}`);
-      const duplicateScenario = scenarioNames.get(key(s.name));
+      const duplicateScenario = scenarioNames.get(requirementNameKey(s.name));
       if (duplicateScenario !== undefined) errors.push(`line ${s.line}: scenario "${s.name}" appears twice in "${draft.name}" (also line ${duplicateScenario})`);
-      else scenarioNames.set(key(s.name), s.line);
+      else scenarioNames.set(requirementNameKey(s.name), s.line);
 
       const criteria: ScenarioCriterion[] = [];
       for (const line of s.body) {
@@ -399,14 +406,14 @@ export function planRequirementDeltas(deltas: RequirementDelta[], read: (capabil
       continue;
     }
     const before = parsed.document;
-    const existing = new Map(before.requirements.map((r) => [key(r.name), r]));
+    const existing = new Map(before.requirements.map((r) => [requirementNameKey(r.name), r]));
     const seen = new Map<string, RequirementGroup>();
     const added: Requirement[] = [];
     const modified: Requirement[] = [];
     const removed: Requirement[] = [];
     for (const group of delta.groups) {
       for (const requirement of group.requirements) {
-        const name = key(requirement.name);
+        const name = requirementNameKey(requirement.name);
         const prior = seen.get(name);
         if (prior !== undefined) {
           errors.push(`${delta.capability}: requirement "${requirement.name}" appears in both ${prior} and ${group.kind}; one requirement, one group`);
@@ -427,16 +434,16 @@ export function planRequirementDeltas(deltas: RequirementDelta[], read: (capabil
       }
     }
 
-    const removedKeys = new Set(removed.map((r) => key(r.name)));
-    const modifiedBy = new Map(modified.map((r) => [key(r.name), r]));
-    const requirements = before.requirements.filter((r) => !removedKeys.has(key(r.name))).map((r) => modifiedBy.get(key(r.name)) ?? r);
+    const removedKeys = new Set(removed.map((r) => requirementNameKey(r.name)));
+    const modifiedBy = new Map(modified.map((r) => [requirementNameKey(r.name), r]));
+    const requirements = before.requirements.filter((r) => !removedKeys.has(requirementNameKey(r.name))).map((r) => modifiedBy.get(requirementNameKey(r.name)) ?? r);
     requirements.push(...added);
 
     const names = new Map<string, string>();
     for (const requirement of requirements) {
-      const duplicate = names.get(key(requirement.name));
+      const duplicate = names.get(requirementNameKey(requirement.name));
       if (duplicate !== undefined) errors.push(`${delta.capability}: the merged base would hold "${duplicate}" and "${requirement.name}" at once; requirement names must be unique`);
-      else names.set(key(requirement.name), requirement.name);
+      else names.set(requirementNameKey(requirement.name), requirement.name);
     }
     if (!before.overview && !delta.overview) errors.push(`${delta.capability}: the living file has no Overview; write "Overview: <what the capability is and what it refuses to do>" in the delta`);
     if (errors.length) continue;

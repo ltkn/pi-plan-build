@@ -503,7 +503,225 @@ const until = async (cond: () => boolean) => {
   assert.ok(cond(), "timed out");
 };
 
-/* --------------------------------- spec format --------------------------------- */
+/* ------------------------- living guarantees in every handout ------------------------- */
+
+/** A living base with two standing requirements; `Overview` is the base's own. */
+const LIVING_ORDERS = `# order-cancellation requirements
+
+## Overview
+
+Orders move through a small state machine; refunds are another capability's business.
+
+## Requirements
+
+### Requirement: Cancel a pending order
+Invariant: Only the order's owner can cancel it, and only while it is PENDING.
+
+#### Scenario: Owner cancels a pending order
+- **GIVEN** a pending order owned by the caller
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+
+### Requirement: A cancellation is final
+Invariant: A CANCELLED order never returns to PENDING.
+
+#### Scenario: A cancelled order is not revived
+- **GIVEN** a cancelled order
+- **WHEN** a state change is attempted on it
+- **THEN** it stays CANCELLED
+`;
+
+/** A delta that adds a third requirement and rewrites the Overview, leaving both standing ones alone. */
+const DELTA_ADDED = `## Requirements: order-cancellation
+Overview: Orders move through a small state machine, and cancelling is the only way out.
+### ADDED
+### Requirement: Cancelling twice is a no-op
+Invariant: A second cancel of a CANCELLED order changes nothing and answers the same way.
+#### Scenario: Second cancel
+- **GIVEN** a cancelled order
+- **WHEN** the owner cancels it again
+- **THEN** it stays CANCELLED
+`;
+
+const LIVING_HEADING = "## Living requirements (guarantees this repo holds; breaking one is a P1 finding)";
+
+/**
+ * The records index.ts builds per capability: read the living file, parse it, pair it with the delta.
+ * `files` maps a capability to its living text; an absent entry is a capability with no living file yet.
+ */
+async function livingRecords(specMarkdown: string, files: Record<string, string>) {
+  const { parseRequirementDocument, parseRequirementDeltas } = await import("../extensions/pb/requirements.ts");
+  return parseRequirementDeltas(specMarkdown).deltas.map((delta) => {
+    const p = `specs/${delta.capability}.md`;
+    const text = files[delta.capability];
+    if (text === undefined) return { capability: delta.capability, path: p, delta };
+    const { document, errors } = parseRequirementDocument(text, delta.capability);
+    return errors.length ? { capability: delta.capability, path: p, errors, delta } : { capability: delta.capability, path: p, document, delta };
+  });
+}
+
+test("living: a standing requirement is carried by the handout, the summary and the reviewer", async () => {
+  const { bindingBudget, bindingContext, buildSpecView, livingDigest, REVIEWER_SYSTEM, reviewerBrief, viewBudget } = await import("../extensions/pb/prompts.ts");
+  const { parseSpec } = await import("../extensions/pb/spec.ts");
+  const markdown = `${SPEC()}${DELTA_ADDED}`;
+  const living = livingDigest(await livingRecords(markdown, { "order-cancellation": LIVING_ORDERS }));
+
+  // what stands: name and invariant, one line each, no scenarios
+  assert.match(living, new RegExp(`^${LIVING_HEADING.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.match(living, /### order-cancellation/);
+  // the delta states an Overview, so that is the line the digest shows, not the base's
+  assert.match(living, /Overview: Orders move through a small state machine, and cancelling is the only way out\./);
+  assert.doesNotMatch(living, /refunds are another capability/
+  );
+  assert.match(living, /- Cancel a pending order — Only the order's owner can cancel it, and only while it is PENDING\./);
+  assert.match(living, /- A cancellation is final — A CANCELLED order never returns to PENDING\./);
+  assert.doesNotMatch(living, /GIVEN|WHEN|THEN/); // the scenarios are evidence in the file, not the guarantee
+  assert.doesNotMatch(living, /Cancelling twice is a no-op/); // this spec's own addition isn't standing yet
+
+  // the same digest, in all three copies
+  const block = bindingContext("order-cancellation", markdown, [], bindingBudget(), living);
+  const view = buildSpecView(markdown, viewBudget(), living);
+  const brief = reviewerBrief({ spec: { name: "order-cancellation", markdown, parsed: parseSpec(markdown).spec! }, acceptance: [], intent: "", base: "abc", changed: ["src/order.ts"], stat: "1 file", check: "ok", focus: "", living });
+  for (const [where, copy] of [
+    ["handout", block],
+    ["reset view", view],
+    ["reviewer brief", brief],
+  ] as const) {
+    assert.ok(copy.includes(living), `the ${where} doesn't carry the digest`);
+  }
+  // the reviewer is told what breaking one costs, in its own system prompt too
+  assert.match(brief, /## Living requirements[\s\S]*breaking one is a P1 finding/);
+  assert.match(REVIEWER_SYSTEM, /Living requirements[\s\S]*breaking one of them is a P1 finding/);
+  // and with no capability touched, nothing is emitted and the delta's own criteria still render
+  const plain = SPEC();
+  assert.equal(livingDigest(await livingRecords(plain, {})), "");
+  assert.doesNotMatch(bindingContext("order-cancellation", plain, [], bindingBudget(), ""), /## Living requirements/);
+});
+
+test("living: a changed requirement is never stated as in force", async () => {
+  const { livingDigest } = await import("../extensions/pb/prompts.ts");
+  // the delta spells the name with different case and spacing: it is the same requirement, so the old wording goes
+  const delta = `## Requirements: order-cancellation
+### MODIFIED
+### Requirement:    cancel A   pending ORDER
+Invariant: Only the wallet owner, or a holder of their signed mandate, can cancel a PENDING order.
+#### Scenario: Owner cancels a pending order
+- **GIVEN** a pending order owned by the caller
+- **WHEN** the owner cancels it
+- **THEN** it becomes CANCELLED
+### REMOVED
+### Requirement: A cancellation is final
+`;
+  const markdown = `${SPEC()}${delta}`;
+  const living = livingDigest(await livingRecords(markdown, { "order-cancellation": LIVING_ORDERS }));
+  assert.ok(!living.includes("Only the order's owner can cancel it"), "the requirement this spec rewrites was stated as in force");
+  assert.ok(!living.includes("A cancellation is final"), "a requirement this spec removes was stated as in force");
+  assert.ok(!living.includes("- Cancel a pending order"), "the base's spelling of the changed requirement survived");
+  // with every requirement replaced, the capability is still named, with the one line saying so
+  assert.match(living, /### order-cancellation/);
+  assert.match(living, /replaced by this spec/);
+  // and the delta's criteria still state its replacement (the reviewer's own checklist)
+  const { requirementCriteria } = await import("../extensions/pb/requirements.ts");
+  assert.match(requirementCriteria(markdown).map((c) => c.text).join(" "), /signed mandate/);
+
+  // a delta that leaves one alone keeps it, and no Overview in the delta means the base's own
+  const both = `${SPEC()}${DELTA_ADDED}`.replace("Overview: Orders move through a small state machine, and cancelling is the only way out.\n", "");
+  const kept = livingDigest(await livingRecords(both, { "order-cancellation": LIVING_ORDERS }));
+  assert.match(kept, /Overview: Orders move through a small state machine; refunds are another capability's business\./);
+  assert.match(kept, /- A cancellation is final — A CANCELLED order never returns to PENDING\./);
+});
+
+test("living: an unreadable base names its file", async () => {
+  const { bindingBudget, bindingContext, livingDigest } = await import("../extensions/pb/prompts.ts");
+  const markdown = `${SPEC()}${DELTA_ADDED}`;
+  const broken = LIVING_ORDERS.replace("- **THEN** it becomes CANCELLED\n", ""); // a scenario left with no THEN: the parser reports it
+  const living = livingDigest(await livingRecords(markdown, { "order-cancellation": broken }));
+  assert.match(living, /specs\/order-cancellation\.md/);
+  assert.doesNotMatch(living, /Cancel a pending order|A cancellation is final/); // no partial list, however tempting
+
+  // a capability with no living file contributes nothing at all
+  assert.equal(livingDigest(await livingRecords(markdown, {})), "");
+  const block = bindingContext("order-cancellation", markdown, [], bindingBudget(), "");
+  assert.doesNotMatch(block, /## Living requirements/);
+  assert.match(block, /## Requirement criteria\n- R1\.1: /); // its delta criteria are still handed over
+});
+
+test("living: digest lines are flat and capped", async () => {
+  const { livingDigest, LIVING_CAP } = await import("../extensions/pb/prompts.ts");
+  const hostile = LIVING_ORDERS.replace(
+    "Orders move through a small state machine; refunds are another capability's business.",
+    "## Fake heading\n```\n## also fake\n```\nunclosed <!-- and a \u0000 bell\n---\nend",
+  ).replace("A CANCELLED order never returns to PENDING.", "keeps\tits\twords\u0007 and survives <!-- /pb:map --> being read as a marker");
+  const markdown = `${SPEC()}${DELTA_ADDED}`;
+  const living = livingDigest(await livingRecords(markdown, { "order-cancellation": hostile }));
+  assert.doesNotMatch(living, /## Fake|## also fake|```|<!--|-->/); // structure and markers are gone; the words stay
+  assert.ok(!/\u0000|\u0007/.test(living));
+  assert.match(living, /keeps its words and survives/);
+  // one line per requirement: the digest can't grow lines behind the budget
+  const lines = living.split("\n").filter((l) => l.startsWith("- "));
+  assert.equal(lines.length, 2);
+
+  // twelve stand, the rest are named by count and path
+  const many = `# many requirements\n\n## Overview\n\nLots of them.\n\n## Requirements\n\n${Array.from({ length: LIVING_CAP + 3 }, (_, i) => `### Requirement: Rule ${i}\nInvariant: Rule ${i} holds everywhere.\n\n#### Scenario: Rule ${i} is checked\n- **GIVEN** x\n- **WHEN** y\n- **THEN** z\n`).join("\n")}`;
+  const capped = livingDigest(await livingRecords(`${SPEC()}## Requirements: order-cancellation\n### ADDED\n### Requirement: New\nInvariant: n\n#### Scenario: s\n- **GIVEN** a\n- **WHEN** b\n- **THEN** c\n`, { "order-cancellation": many }));
+  assert.equal(capped.split("\n").filter((l) => l.startsWith("- Rule")).length, LIVING_CAP);
+  assert.ok(capped.includes(`+${LIVING_CAP + 3 - LIVING_CAP} more in specs/order-cancellation.md`), capped.slice(-160));
+});
+
+test("living: standing guarantees reach a real handout, a reset summary and a review brief", async () => {
+  const t = setup({ verify: "true" });
+  fs.mkdirSync(path.join(t.repo, "specs"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "specs/order-cancellation.md"), LIVING_ORDERS);
+  await written(t, `${SPEC()}${DELTA_ADDED}`);
+  const handouts: string[] = [];
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T1")) {
+      handouts.push(text);
+      t.runtime().usage = 73; // so the boundary before T2 resets the session
+    }
+    if (text.includes("Task T2")) {
+      handouts.push(text);
+      t.runtime().usage = 5;
+    }
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.equal(handouts.length, 2);
+  for (const [hi, handout] of handouts.entries()) {
+    assert.ok(handout.includes("## Living requirements (guarantees this repo holds; breaking one is a P1 finding)"), `handout ${hi} lacks the digest: ${handout.length} chars, has Binding context: ${handout.includes("Binding context")}`);
+    assert.match(handout, /- Cancel a pending order — Only the order's owner can cancel it, and only while it is PENDING\./);
+  }
+  assert.equal(t.resets.length, 1);
+  assert.match(
+    t.resets[0].summary,
+    /--- spec ---[\s\S]*## Living requirements[\s\S]*- A cancellation is final — A CANCELLED order never returns to PENDING\./,
+  );
+  await t.run("review");
+  assert.match(briefOf(t), /## Living requirements[\s\S]*- Cancel a pending order — /);
+});
+
+test("markdown: safeLine and safeBlock strip markers behind control characters", async () => {
+  const { safeLine, safeBlock } = await import("../extensions/pb/markdown.ts");
+  // a control character inside "<!--" defeats a marker match, so control characters must go first
+  const split = "<\u0000!-- /pb:map -->";
+  assert.equal(safeLine(split), "/pb:map");
+  assert.ok(!safeBlock(split).includes("<!--") && safeBlock(split).includes("/pb:map"), safeBlock(split));
+  // and removal must not stop at the first pass: stripping one marker can join the fragments of another
+  for (const nested of ["<!----<!-->&-->", "<!--<!-->>", "<!-<!--->->", "<\u0000!--x-->-->"]) {
+    for (const out of [safeLine(nested), safeBlock(nested)]) {
+      assert.ok(!out.includes("<!--") && !out.includes("-->"), `a marker survived: ${JSON.stringify(out)}`);
+    }
+  }
+
+  // one line: every whitespace run, tab or newline, becomes a single space; C0, C1 and the separators go
+  assert.equal(safeLine("  name\tthe\u0007 constant \n today\u2028please  "), "name the constant today please");
+  assert.equal(safeLine("a\u0085\u007fb"), "ab");
+  assert.equal(safeLine(""), "");
+
+  // a block: lines survive, each tab is a single space so a line cannot become an indented code block
+  assert.equal(safeBlock("# Map\n\tlead one\tend\r\n  lead two"), "# Map\n lead one end\n  lead two");
+  assert.equal(safeBlock("keep\tthis\nand\u0000this"), "keep this\nandthis");
+});
 
 test("spec: parses the header, sections and tasks; says what's wrong otherwise", () => {
   const { spec, errors } = parseSpec(SPEC({ verification: "build — no suite for this module", newTests: "no — covered by T9" }));
@@ -1553,6 +1771,7 @@ test("review brief: fix reports, mapping notes and acceptance drift render as se
   const reword = acceptanceDrift("- Acceptance: a works well (tests: T1)", [{ type: "build-start", taskTexts: tasks }]);
   assert.match(reword!, /reworded.*proofs unchanged/);
   const brief = reviewerBrief({
+    living: "",
     changed: [],
     stat: "",
     check: "ok",
@@ -1562,12 +1781,13 @@ test("review brief: fix reports, mapping notes and acceptance drift render as se
   });
   assert.match(brief, /## What the fix laps reported[\s\S]*Lap 1 fixed: guard clause[\s\S]*Lap 1 tests: npm test green/);
   assert.match(brief, /## Acceptance proof mapping[\s\S]*ghost/);
-  assert.match(reviewerBrief({ changed: [], stat: "", check: "ok", focus: "", acceptanceDrift: drift }), /## Acceptance drift during build/);
+  assert.match(reviewerBrief({ living: "", changed: [], stat: "", check: "ok", focus: "", acceptanceDrift: drift }), /## Acceptance drift during build/);
 });
 
 test("review brief: every acceptance id is listed; a follow-up carries the previous statuses", async () => {
   const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
   const brief = reviewerBrief({
+    living: "",
     changed: [],
     stat: "",
     check: "ok",
@@ -2150,9 +2370,9 @@ test("spec: senior override: human edits save visibly and the build advises inst
 
 test("spec: senior review carries the human-override note", async () => {
   const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
-  const withNote = reviewerBrief({ changed: [], stat: "", check: "ok", focus: "", humanOverride: "Hand-edited." });
+  const withNote = reviewerBrief({ living: "", changed: [], stat: "", check: "ok", focus: "", humanOverride: "Hand-edited." });
   assert.match(withNote, /## Human override[\s\S]*Hand-edited\./);
-  const without = reviewerBrief({ changed: [], stat: "", check: "ok", focus: "" });
+  const without = reviewerBrief({ living: "", changed: [], stat: "", check: "ok", focus: "" });
   assert.doesNotMatch(without, /Human override/);
 });
 
@@ -2461,7 +2681,7 @@ test("build state summaries show hooks and hide nones", async () => {
 });
 
 test("build state summaries drop Tasks, keep binding sections, and neither repeat assumptions nor uncap hooks", async () => {
-  const { buildSpecView, buildStateSummary } = await import("../extensions/pb/prompts.ts");
+  const { buildSpecView, buildStateSummary, viewBudget } = await import("../extensions/pb/prompts.ts");
   const long = "detail ".repeat(80);
   const p = {
     spec: "order-cancellation",
@@ -2473,7 +2693,7 @@ test("build state summaries drop Tasks, keep binding sections, and neither repea
       { id: "T2", title: "second", status: "doing", attempts: 1 },
     ],
   } as any;
-  const s = buildStateSummary({ p, markdown: buildSpecView(SPEC()), mechanics: "m", current: "next", reason: "reset" });
+  const s = buildStateSummary({ p, markdown: buildSpecView(SPEC(), viewBudget(), ""), mechanics: "m", current: "next", reason: "reset" });
   assert.match(s, /--- spec ---\n# Order cancellation[\s\S]*## Goal\n\nCancel orders\.[\s\S]*## Decisions[\s\S]*Only PENDING orders/);
   assert.doesNotMatch(s, /## Tasks|### T1: first file/); // the handout carries the current task
   assert.equal(s.split("Only PENDING orders").length - 1, 1); // Decisions already carries it once
@@ -2485,13 +2705,13 @@ test("build state summaries drop Tasks, keep binding sections, and neither repea
 });
 
 test("prompts: task, retry and coherence messages carry the binding context, not the whole spec", async () => {
-  const { bindingContext, buildSpecView, coherePrompt, fixText, taskPrompt } = await import("../extensions/pb/prompts.ts");
+  const { bindingContext, buildSpecView, bindingBudget, coherePrompt, fixText, taskPrompt, viewBudget } = await import("../extensions/pb/prompts.ts");
   const spec = SPEC().replace("## Contracts\n", "## Design\n- One aggregate, one file.\n## Migration and rollback\nnone — no stored data.\n## Threats and abuse\n- A forged owner id must not cancel.\n## Contracts\n");
   const markdown = `${spec}\n${REQUIREMENTS}`;
   const tasks = [
     { id: "T1", title: "first file", status: "done", attempts: 1, changed: "did T1", caveat: "keep the hook", rejected: "none", open: "check the empty path" },
   ] as any;
-  const binding = bindingContext("order-cancellation", markdown, tasks);
+  const binding = bindingContext("order-cancellation", markdown, tasks, bindingBudget(), "");
   assert.match(binding, /^Binding context \(a compact copy of \.pi\/pb\/specs\/order-cancellation\/spec\.md/);
   assert.match(binding, /## Goal\nCancel orders\./);
   assert.match(binding, /## Decisions\n- Only PENDING orders/);
@@ -2504,7 +2724,7 @@ test("prompts: task, retry and coherence messages carry the binding context, not
   assert.match(binding, /## Prior tasks\n- T1 · caveat: keep the hook · open: check the empty path/);
   assert.doesNotMatch(binding, /## Tasks|### T1: first file/); // the task is already in the handout
 
-  const view = buildSpecView(markdown);
+  const view = buildSpecView(markdown, viewBudget(), "");
   assert.match(view, /^# Order cancellation[\s\S]*## Goal[\s\S]*## Requirement criteria/);
   assert.doesNotMatch(view, /## Tasks|### T1: first file/);
 
@@ -2512,8 +2732,161 @@ test("prompts: task, retry and coherence messages carry the binding context, not
   assert.match(taskPrompt(task, 1, 3, null, false, binding), /Do only this task:[\s\S]*Binding context[\s\S]*## Contracts/);
   assert.match(fixText("T1", "`true` failed", "output", 1, 3, false, binding), /output\n\nBinding context[\s\S]*Fix the cause/);
   assert.match(coherePrompt("abc", 1, 3, binding), /never weaken an existing test\.[\s\S]*Binding context/);
-  assert.match(bindingContext("order-cancellation", markdown.replace("Cancel orders.", "x".repeat(2000))), /truncated \d+ chars/);
+  assert.ok(binding.length <= bindingBudget(), `the block ran over its budget: ${binding.length}`);
 });
+
+test("binding: one exported list binds the build and the spec review", async () => {
+  const { BINDING_SECTIONS, specReviewDelta } = await import("../extensions/pb/spec.ts");
+  const { bindingBudget, bindingContext } = await import("../extensions/pb/prompts.ts");
+  assert.deepEqual(
+    [...BINDING_SECTIONS],
+    ["Goal", "Out of scope", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse", "Threats"],
+  );
+
+  // the handout carries every name on that one list — including the ones the build's private list left out
+  const spec = SPEC().replace(
+    "## Contracts\n",
+    "## Design\n- One aggregate, one file.\n## Migration and rollback\nnone — no stored data.\n## Threats and abuse\n- A forged owner id must not cancel.\n## Contracts\n",
+  );
+  const block = bindingContext("order-cancellation", `${spec}\n${REQUIREMENTS}`, [], bindingBudget(), "");
+  for (const section of [...BINDING_SECTIONS]) {
+    const heading = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (section === "Threats") continue; // the alias: tested on its own spec below
+    assert.match(block, new RegExp(`## ${heading}\n[^\n]`), `the block dropped ${section}`);
+  }
+  // and the alias heading binds like the full one
+  const aliased = bindingContext("order-cancellation", SPEC().replace("## Decisions", "## Threats\n- A forged owner id must not cancel.\n## Decisions"), [], bindingBudget(), "");
+  assert.match(aliased, /## Threats\n- A forged owner/);
+
+  // spec review's unchanged context is that same list minus Design (a delta round reads the whole spec anyway), plus header and the acceptance list
+  const before = `${spec}\n${REQUIREMENTS}`;
+  const delta = specReviewDelta(before, before.replace("- Acceptance: T2.txt exists (tests: T2)", "- Acceptance: T2.txt exists and is empty (tests: T2)"));
+  assert.match(delta.context, /# Order cancellation/); // header
+  assert.match(delta.context, /## Acceptance criteria/);
+  assert.match(delta.context, /## Requirements: order-cancellation/); // the requirement prefix rule still holds
+  for (const section of BINDING_SECTIONS) {
+    if (section === "Design" || section === "Threats") continue; // Design by the subtraction; Threats is the alias, tested below
+    const heading = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(delta.context, new RegExp(`## ${heading}\n`), `the delta context dropped ${section}`);
+  }
+  assert.doesNotMatch(delta.context, /## Design/); // Design is still never sent as delta context
+  const aliasedDelta = specReviewDelta(`# x\nDepends on: none\nVerification: tests\n\n## Goal\ng\n## Threats\n- forged ids\n## Tasks\n### T1: a\n- Test: \`true\`\n`, `# x\nDepends on: none\nVerification: tests\n\n## Goal\ng\n## Threats\n- forged ids\n## Tasks\n### T1: a\n- Test: \`true\`\n- Acceptance: a works (tests: T1)\n`);
+  assert.match(aliasedDelta.context, /## Threats\n- forged ids/); // the alias binds the review too
+});
+
+/**
+ * The guide and README state the same binding list for a human reader. A rename or a reorder in the
+ * exported list — or in either document — fails this, which is what keeps the two from drifting.
+ */
+test("binding: the guide and README list the binding sections in the exported order", async () => {
+  const { BINDING_SECTIONS } = await import("../extensions/pb/spec.ts");
+  // "Threats" is the short form of "Threats and abuse": one section, two accepted headings, one name in prose
+  const names = [...new Set(BINDING_SECTIONS)].filter((s) => s !== "Threats");
+  for (const [file, rel] of [
+    ["README.md", ["..", "README.md"]],
+    ["guide.md", ["..", "extensions", "pb", "guide.md"]],
+  ] as const) {
+    const doc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), ...rel), "utf8");
+    // The prose that states which sections bind a step is the last passage naming both the first and
+    // the last of them; the spec-format skeleton above it lists sections for a different purpose.
+    const passages = doc
+      .split(/\n\s*\n/)
+      .filter((p) => p.includes("Out of scope") && p.includes("Threats and abuse"))
+      .map((p) => p.replace(/\s+/g, " "));
+    assert.ok(passages.length, `${file} never states which sections bind a step`);
+    const flat = passages.at(-1)!;
+    let last = -1;
+    for (const name of names) {
+      const found = flat.indexOf(name);
+      assert.ok(found >= 0, `${file}'s binding list is missing ${name}`);
+      assert.ok(found > last, `${file}'s binding list puts ${name} out of the exported order`);
+      last = found;
+    }
+  }
+});
+
+test("binding: budgets come from the context window", async () => {
+  const { bindingBudget, viewBudget, BUDGET_MIN_CHARS, PI_RESERVE_TOKENS, RESET_WORKING_TOKENS } = await import("../extensions/pb/prompts.ts");
+  assert.deepEqual([bindingBudget(128_000), viewBudget(128_000)], [51_200, 102_400]);
+  assert.deepEqual([bindingBudget(256_000), viewBudget(256_000)], [102_400, 204_800]);
+  assert.deepEqual([bindingBudget(32_000), viewBudget(32_000)], [14_464, 14_464]); // the clamp beats the floor
+  assert.deepEqual([bindingBudget(16_000), viewBudget(16_000)], [BUDGET_MIN_CHARS, BUDGET_MIN_CHARS]); // the reserve leaves no room
+  assert.deepEqual([bindingBudget(0), viewBudget(0)], [BUDGET_MIN_CHARS, BUDGET_MIN_CHARS]);
+  assert.deepEqual([bindingBudget(), viewBudget()], [48_000, 96_000]); // no window reported: the floors
+  assert.equal(PI_RESERVE_TOKENS, 16384);
+  assert.equal(RESET_WORKING_TOKENS, 12000);
+
+  // cap() switches itself off at n <= 0, so no case — reported or not — may reach that sentinel
+  for (const window of [undefined, 0, 1, 4_000, 16_000, 28_383, 28_384, 32_000, 128_000, 256_000, 1_000_000]) {
+    assert.ok(bindingBudget(window) >= BUDGET_MIN_CHARS, `block budget at ${String(window)}: ${bindingBudget(window)}`);
+    assert.ok(viewBudget(window) >= BUDGET_MIN_CHARS, `view budget at ${String(window)}: ${viewBudget(window)}`);
+  }
+  // the block is a tenth of the window and the view a fifth, and neither outgrows the window itself
+  assert.ok(viewBudget(256_000) < 256_000 * 4 && bindingBudget(128_000) < viewBudget(128_000));
+});
+
+test("binding: an oversized block drops whole sections and names them", async () => {
+  const { bindingBudget, bindingContext, buildSpecView, viewBudget } = await import("../extensions/pb/prompts.ts");
+  const filler = (word: string, n: number) => Array.from({ length: n }, (_, i) => `${word}${i} keeps running with more detail.`).join("\n");
+  const long = "detail ".repeat(80); // 640 chars: over the block's own line cap
+  const markdown = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n" })
+    .replace("## Contracts\n", `## Design\n${filler("design", 40)}\n## Migration and rollback\n${filler("migration", 40)}\n## Threats and abuse\n${filler("threat", 40)}\n## Contracts\n`)
+    .replace("Refunds.", filler("scope", 40));  const tasks = [{ id: "T1", title: "first file", status: "done", attempts: 1, changed: `did T1`, caveat: long, rejected: "none", open: "none" }] as any;
+  const wide = `${REQUIREMENTS}\n### Requirement: A rule worth its words\nInvariant: ${long}\n#### Scenario: It is checked\n- **GIVEN** a pending order\n- **WHEN** the owner cancels it\n- **THEN** it is CANCELLED\n`;
+
+  const block = bindingContext("order-cancellation", `${markdown}\n${wide}`, tasks, BLOCK_BUDGET, "");
+  assert.ok(block.length <= BLOCK_BUDGET, `the block ran over its budget: ${block.length}`);
+  // the four least-binding sections go whole: not one line of them survives
+  for (const gone of ["## Design", "## Migration and rollback", "## Threats and abuse", "## Out of scope"]) assert.ok(!block.includes(gone), `${gone} survived`);
+  for (const word of ["design0", "migration0", "threat0", "scope0"]) assert.ok(!block.includes(word), `${word} survived the cut`);
+  // and each is named, with the source of truth still a read away
+  assert.match(block, /## Cut from this copy[\s\S]*Design[\s\S]*Migration and rollback[\s\S]*Threats and abuse[\s\S]*Out of scope/);
+  assert.match(block, /\.pi\/pb\/specs\/order-cancellation\/spec\.md/);
+  // what binds hardest stays, with both criteria lists and the prior-task hooks
+  assert.match(block, /## Goal\nCancel orders\./);
+  assert.match(block, /## Contracts\n- T1 owns T1\.txt/);
+  assert.match(block, /## Requirement criteria\n- R1\.1: /);
+  assert.match(block, /## Acceptance criteria\n- A1: /);
+  assert.match(block, /## Prior tasks\n- T1 · caveat: /);
+  assert.doesNotMatch(block, /### T1: first file/); // still no Tasks prose
+
+  // a section that binds hardest also goes whole, and is named, when the budget leaves no room for it
+  const goalless = bindingContext("order-cancellation", `${markdown}\n${wide}`, tasks, GOAL_LESS_BUDGET, "");
+  assert.ok(!goalless.includes("## Goal") && !goalless.includes("Cancel orders."), "Goal survived to the last cut");
+  assert.match(goalless, /## Cut from this copy[\s\S]*Goal/);
+
+  // entries inside the always-emitted lists keep the block's own line caps: 300 for a criterion, 240 for a hook
+  const roomy = bindingContext("order-cancellation", `${markdown}\n${wide}`, tasks, 40_000, "");
+  const criterion = roomy.split("\n").find((l) => l.startsWith("- R2.1: "))!;
+  assert.ok(criterion.endsWith("…") && criterion.length <= "- R2.1: ".length + 300, `criterion line: ${criterion.length}`);
+  const hook = roomy.split("\n").find((l) => l.startsWith("- T1 · "))!;
+  const caveat = hook.replace(/^- T1 · caveat: /, "");
+  assert.ok(caveat.endsWith("…") && caveat.length <= 240, `hook line: ${hook.length}`);
+
+  // what binds hardest is never shortened: a Decisions and Contracts pair past the caps this replaces arrive whole, in both copies
+  const clause = "the rule holds because the database says so. ".repeat(60).trimEnd(); // ~2.6k chars on one line
+  const heavy = `${markdown}\n${wide}`
+    .replace("- Only PENDING orders can be cancelled, because the state machine only allows that transition.", `- ${clause}`)
+    .replace("- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.", `- ${clause}`);
+  for (const [where, copy] of [["handout", bindingContext("order-cancellation", heavy, [], bindingBudget(), "")], ["reset view", buildSpecView(heavy, viewBudget(), "")]] as const) {
+    assert.equal(copy.split(clause).length - 1, 2, `Decisions and Contracts were shortened in the ${where}`);
+    assert.ok(!copy.includes("truncated"), `the ${where} still carries a truncation notice`);
+  }
+
+  // the ceiling still holds when the always-emitted parts alone outgrow the budget: 12 criteria at their own line cap
+  const manyRules = Array.from({ length: 12 }, (_, i) => `### Requirement: Rule ${i}\nInvariant: ${"clause ".repeat(60)}`).join("\n");
+  const pathological = bindingContext("order-cancellation", `${markdown}\n${REQUIREMENTS}\n### ADDED\n${manyRules}`, [], BUDGET_MIN, "");
+  assert.ok(pathological.length <= BUDGET_MIN, `a pathological spec outran the smallest budget: ${pathological.length}`);
+  assert.match(pathological, /## Requirement criteria[\s\S]*\+\d+ more in the spec/); // the lists cap themselves before the block has to be cut
+});
+
+/** The smallest budget there is, reached when the window leaves no room at all. */
+const BUDGET_MIN = 4_000;
+
+/** Room for Goal, Decisions and Contracts, both criteria lists and the hooks — not for the four above them. */
+const BLOCK_BUDGET = 2_000;
+/** What is left once the four above have gone: the notice, the lists and Contracts — but no Goal. */
+const GOAL_LESS_BUDGET = 1_400;
 
 test("build: verification none runs no checks; no new tests reaches the agent", async () => {
   const t = setup({ verify: "false" }); // would fail if it ran
@@ -2628,6 +3001,46 @@ test("build: past checkpointAt, the session is reset at the next task boundary; 
   u.agent.script = filling(u);
   await u.run("build");
   assert.equal(u.resets.length, 0);
+});
+
+test("reset: the build reserve is sized from the view it writes", async () => {
+  const { tokensOf } = await import("../extensions/pb/spec.ts");
+  // A spec whose bulk is Findings: repo facts a reset never carries, since the summary holds the binding
+  // view. Reserving for the whole spec would reset such a build long before it needs it.
+  const facts = Array.from({ length: 1200 }, (_, i) => `- \`src/fact${i}.ts\`: what this file is for, and the invariant the code does not show at the call site`).join("\n");
+  const spec = SPEC().replace("## Context\nsrc/order.ts holds the model.", `## Findings\n${facts}`);
+  assert.ok(tokensOf(spec) > 20_000, `${tokensOf(spec)} tokens: not a large spec`);
+  /** The context is this full by the time T1 finishes. */
+  const filledTo = (x: ReturnType<typeof setup>, percent: number): Script => async (text, tool) => {
+    if (text.includes("Task T1")) x.runtime().usage = percent;
+    return diligent(text, tool);
+  };
+  const build = async (percent: number, config = {}) => {
+    const x = setup({ verify: "true", ...config });
+    await written(x, spec);
+    x.agent.script = filledTo(x, percent);
+    await x.run("build");
+    return x;
+  };
+
+  // The room a reset leaves is the view's, so 40% of a 100k window is nowhere near the line.
+  const early = await build(40);
+  assert.equal(early.resets.length, 0);
+  assert.match(early.context(), /\[pb:build order-cancellation\] Build the spec/); // T1's work still in the same session
+  assert.match(early.context(), /\[pb:build\] Task T2\./); // and it went straight on to the next task
+  assert.equal(early.progress("order-cancellation").phase, "built");
+
+  // Past the line the summary's own size sets, it still resets, at that task boundary.
+  const late = await build(73);
+  assert.equal(late.resets.length, 1);
+  assert.ok(late.events("order-cancellation").some((e) => e.type === "reset" && e.task === "T2" && e.percent === 73));
+
+  // Where checkpointAt is the tighter bound, it governs, whatever the spec's size.
+  const under = await build(55, { checkpointAt: 60 });
+  assert.equal(under.resets.length, 0);
+  const at = await build(62, { checkpointAt: 60 });
+  assert.equal(at.resets.length, 1);
+  assert.ok(at.events("order-cancellation").some((e) => e.type === "reset" && e.task === "T2" && e.percent === 62));
 });
 
 /* ------------------------------------- undo -------------------------------------- */
@@ -2794,6 +3207,73 @@ test("fix: an unfinished lap starts the next one automatically", async () => {
   assert.equal(laps, 2);
   assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 2);
   assert.match(t.posts.at(-1)!, /complete[\s\S]*\/pb:review/);
+});
+
+/** A progress.json whose review carries these findings, in the session /pb:fix reads. */
+const pausedWithFindings = (t: ReturnType<typeof setup>, name: string, findings: Record<string, unknown>[]) => {
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, `.pi/pb/specs/${name}/progress.json`),
+    JSON.stringify({ spec: name, phase: "paused", session, tasks: [], review: { at: "2026-10-01 10:00:00", verdict: "changes", findings }, updatedAt: "2026-10-01 10:00:00" }),
+  );
+};
+
+test("fix: a lap that answers with the finding line it was shown closes the loop", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [{ priority: "P1", file: "src/order.ts", line: 30, title: "markers in a fenced example above the map win", fix: "count fences from line 0" }]);
+  let laps = 0;
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    laps++;
+    // a lap answers with the line it was shown: the model echoes the finding, it does not repeat its title
+    const shown = /\n(\d+\. \[P1\][^\n]*)/.exec(text)![1];
+    await tool("pb_fix_done", { fixed: [shown], skipped: [], tests: "ok" });
+  };
+  await t.run("fix");
+  assert.equal(laps, 1, `the report was not attached to the finding, so pb ran ${laps} laps for it`);
+  const post = t.posts.at(-1)!;
+  assert.match(post, /complete in 1 lap/);
+  assert.equal(post.split("markers in a fenced example").length - 1, 1, `the same finding is listed once per lap: ${post}`);
+  assert.match(post, /\/pb:review/);
+});
+
+test("fix: a report pb cannot attach to a finding stops the loop and says so", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 12, title: "name the constant the reviewer named" }]);
+  let laps = 0;
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    laps++;
+    await tool("pb_fix_done", { fixed: ["something about a caching layer entirely"], skipped: [], tests: "ok" });
+  };
+  await t.run("fix");
+  assert.equal(laps, 1, "an unattachable report must not buy the same seed again");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /named none of the findings/);
+  assert.match(post, /name the constant the reviewer named/); // the finding is still open, not quietly done
+  assert.match(post, /\/pb:review/);
+});
+
+test("fix: a report names the finding it was shown, in any of the shapes it was shown it", async () => {
+  const { claimedFindings } = await import("../extensions/pb/prompts.ts");
+  const a = { priority: "P1" as const, file: "src/order.ts", line: 30, title: "markers in a fenced example above the map win", fix: "count fences from line 0" };
+  const b = { priority: "P2" as const, file: "src/cache.ts", title: "short" };
+  const findings = [a, b];
+  const claim = (f: { priority: string; file: string; line?: number; title: string }, n?: number) => `${n !== undefined ? `${n}. ` : ""}[${f.priority}] ${f.file}${f.line ? `:${f.line}` : ""} — ${f.title}`;
+  assert.deepEqual(claimedFindings([a.title], findings), [a]); // the title alone
+  assert.deepEqual(claimedFindings([claim(a)], findings), [a]); // the line as shown, unnumbered
+  assert.deepEqual(claimedFindings(["1. " + claim(a, 1)], findings), [a]); // numbered, as the seed shows it
+  assert.deepEqual(claimedFindings([`Fixed 1: ${claim(a, 1)}, in map.ts`], findings), [a]); // with prose around it
+  assert.deepEqual(claimedFindings(["markers in a fenced example above the map"], findings), [a]); // a substantial fragment
+  assert.deepEqual(claimedFindings([claim(a), claim(b, 2)], findings), [a, b]); // both, in the order the findings were given
+  assert.deepEqual(claimedFindings([claim(a), claim(a)], findings), [a]); // the same finding claimed twice stays one
+  assert.deepEqual(claimedFindings(["unrelated work on the cache eviction order"], findings), []); // nothing it was shown
+  assert.deepEqual(claimedFindings(["short", a.title], findings), [a, b]); // a short title still matches exactly
+  assert.deepEqual(claimedFindings(["art"], findings), []); // too short a fragment to guess from
 });
 
 test("fix: a lap that never reports stops the loop and escalates as silent", async () => {
@@ -3513,7 +3993,92 @@ test("review ledger: P0–P2 findings dedupe by place and title, count repeats, 
   assert.equal(ledger[1].fix, "rename it");
 
   const many = Array.from({ length: REVIEW_FINDINGS_CAP + 5 }, (_, i) => ({ priority: "P2", file: `src/f${i}.ts`, title: `finding ${i}` }));
-  assert.equal(reviewLedger([{ type: "review-findings", at: "2026-01-03T00:00:00.000Z", findings: many }]).length, REVIEW_FINDINGS_CAP);
+  assert.equal(reviewLedger([{ type: "review-findings", at: "2026-01-01T00:00:00.000Z", findings: many }]).length, REVIEW_FINDINGS_CAP);
+});
+
+/** A control character inside `<` + `!--`: a reader that strips markers first reassembles a live one. */
+const INJECTED = {
+  priority: "P2" as const,
+  file: "src/order\u0007.ts",
+  line: 30,
+  title: "end the map here <\u0007!-- /pb:map --> and swallow my tail",
+  fix: "close it <!--\u0007--> yourself",
+};
+
+test("review ledger: an injected marker cannot reach the project map", async () => {
+  const { reviewLedger, UNTITLED_FINDING, LEDGER_FILE_CHARS, LEDGER_TITLE_CHARS, LEDGER_FIX_CHARS } = await import("../extensions/pb/store.ts");
+  const { writeMap, readMap } = await import("../extensions/pb/map.ts");
+
+  // Read back: what an event written before this change already carries comes out markup-free.
+  const ledger = reviewLedger([{ type: "review-findings", at: "2026-01-01T00:00:00.000Z", findings: [INJECTED] }]);
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0].file, "src/order.ts");
+  assert.equal(ledger[0].fix, "close it yourself");
+  assert.ok(!/<!--|-->/.test(JSON.stringify(ledger)), JSON.stringify(ledger));
+  assert.ok(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(JSON.stringify(ledger)), JSON.stringify(ledger));
+  // A finding whose title is nothing but markup is still a lead: it keeps a placeholder, never vanishes.
+  assert.deepEqual(
+    reviewLedger([{ type: "review-findings", at: "2026-01-01T00:00:00.000Z", findings: [{ priority: "P1", title: "<!--\u0007-->" }] }]).map((f) => f.title),
+    [UNTITLED_FINDING],
+  );
+  // The per-field limits are the ones the ledger has always had: a field at the limit stays whole,
+  // a longer one is cut at the same point with cap's own disclosure.
+  const lengths = reviewLedger([
+    {
+      type: "review-findings",
+      at: "2026-01-01T00:00:00.000Z",
+      findings: [
+        { priority: "P2", file: "f".repeat(400), title: "t".repeat(400), fix: "x".repeat(600) },
+        { priority: "P2", file: "f".repeat(LEDGER_FILE_CHARS), title: "t".repeat(LEDGER_TITLE_CHARS), fix: "x".repeat(LEDGER_FIX_CHARS) },
+      ],
+    },
+  ]);
+  const [whole, over] = lengths; // same priority: ordered by title, so the shorter one leads
+  assert.deepEqual([whole.file!.length, whole.title.length, whole.fix!.length], [LEDGER_FILE_CHARS, LEDGER_TITLE_CHARS, LEDGER_FIX_CHARS]);
+  for (const [value, limit] of [[over.file!, LEDGER_FILE_CHARS], [over.title, LEDGER_TITLE_CHARS], [over.fix!, LEDGER_FIX_CHARS]] as [string, number][]) {
+    assert.match(value, new RegExp(`^.{${limit}}\\n…\\[truncated`), value);
+  }
+  assert.equal([LEDGER_FILE_CHARS, LEDGER_TITLE_CHARS, LEDGER_FIX_CHARS].join(), "300,300,500");
+
+  // Written: the event line on disk is already clean, so no later reader has to know the rule.
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [INJECTED, { priority: "P2", title: "\u0007<!-- -->" }];
+  await t.run("review");
+  const line = t
+    .read(".pi/pb/specs/order-cancellation/events.jsonl")
+    .split("\n")
+    .find((l) => l.includes('"review-findings"'))!;
+  assert.ok(line, "the findings event was written");
+  assert.ok(!/<!--|-->/.test(line), line);
+  assert.ok(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]|\\u000/.test(line), line);
+  assert.deepEqual(
+    JSON.parse(line).findings.map((f: { title: string }) => f.title),
+    ["end the map here /pb:map and swallow my tail", UNTITLED_FINDING],
+  );
+
+  // Both leads reach the cartographer: the markup-free words, and the title that was only markup, under the placeholder.
+  const leadBrief = path.join(os.tmpdir(), `pb-map-lead-${process.pid}.md`);
+  fs.rmSync(leadBrief, { force: true });
+  process.env.MOCK_BRIEF_OUT = leadBrief;
+  try {
+    await t.run("archive");
+  } finally {
+    delete process.env.MOCK_BRIEF_OUT;
+  }
+  const leads = fs.readFileSync(leadBrief, "utf8");
+  assert.match(leads, /- \[P2\] src\/order\.ts:30 — end the map here \/pb:map and swallow my tail/);
+  assert.match(leads, /- \[P2\] \(untitled finding\)/);
+
+  // A map written from an unsanitised lead still reads back whole, tail included.
+  fs.writeFileSync(path.join(t.repo, "AGENTS.md"), "# Shop\n\nMy own note, mine to keep.\n");
+  writeMap(t.repo, `### Review leads\n- ${INJECTED.file}: ${INJECTED.title}\n  Fix: ${INJECTED.fix}`);
+  const agents = t.read("AGENTS.md");
+  assert.ok(!/<!--|-->/.test(agents.replace(/<!-- \/?pb:map -->/g, "")), agents);
+  assert.match(readMap(t.repo), /- src\/order\.ts: end the map here\s+\/pb:map\s+and swallow my tail/);
+  assert.match(agents, /My own note, mine to keep\./);
 });
 
 test("review: completed findings are logged as leads for the project map, without P3", async () => {
@@ -5602,6 +6167,166 @@ test("map: the cartographer is told the budget the view warns at", async () => {
   assert.match(CARTOGRAPHER_SYSTEM, /capable models that explore fast[\s\S]*Layout, only where exploring misleads[\s\S]*No module-by-module tour[\s\S]*Start with the security invariants/);
 });
 
+test("map: every map write strips markers and tabs", async () => {
+  const { writeMap, readMap } = await import("../extensions/pb/map.ts");
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  fs.writeFileSync(path.join(t.repo, "AGENTS.md"), "# Shop\n\nMy own note, mine to keep.\n");
+  assert.equal(
+    writeMap(
+      t.repo,
+      "### Layout\n- `src/`:\tthe app\twith words\n### Odd\n-\tleading tab\n\u0007hidden <!-- pb:map --> and <!-- /pb:map --> markers\n",
+    ),
+    true,
+  );
+  const agents = t.read("AGENTS.md");
+  const body = readMap(t.repo);
+  assert.ok(!agents.includes("\t"), agents);
+  assert.ok(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(agents), agents);
+  assert.equal(agents.split("<!-- pb:map -->").length - 1, 1);
+  assert.equal(agents.split("<!-- /pb:map -->").length - 1, 1);
+  assert.match(body, /- `src\/`: the app with words/); // tabs to single spaces, every word intact
+  assert.match(body, /^- leading tab$/m);
+  assert.ok(body.includes("/pb:map"), body); // the words stay: only the markup goes
+  assert.ok(!/^\s/m.test(body), body); // no line becomes an indented code block
+  assert.match(agents, /My own note, mine to keep\./);
+
+  // undo writes the stored previous body through the same guarantee.
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/map-previous.md"), "### Old\n-\ttabbed\tout\n<!-- /pb:map --> smuggled in\n");
+  await t.run("map", "undo");
+  const undone = t.read("AGENTS.md");
+  assert.ok(!undone.includes("\t") && !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(undone), undone);
+  assert.equal(undone.split("<!-- /pb:map -->").length - 1, 1);
+  assert.match(readMap(t.repo), /- tabbed out/);
+  const backup = t.read(".pi/pb/map-previous.md"); // what undo kept is the clean map it replaced
+  assert.ok(!backup.includes("\t") && !/<!--|-->/.test(backup), backup);
+});
+
+test("map: an unbalanced map section is refused", async () => {
+  const { writeMap, readMap, mapDefect } = await import("../extensions/pb/map.ts");
+  const tail = "\nMy own note after pb's section, mine to keep.\n";
+  const doubleEnd = `# Shop\n\n<!-- pb:map -->\n## Project map\n\n- \`README\`: readme\n<!-- /pb:map -->\n<!-- /pb:map -->${tail}`;
+  const noEnd = `# Shop\n\n<!-- pb:map -->\n## Project map\n\n- \`README\`: readme${tail}`;
+
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  fs.writeFileSync(path.join(t.repo, "AGENTS.md"), doubleEnd);
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/map-previous.md"), "### Old\n- older\n");
+  const backup = t.read(".pi/pb/map-previous.md");
+  assert.equal(mapDefect(t.repo)!.marker, "<!-- /pb:map -->");
+  assert.equal(mapDefect(t.repo)!.line, 8);
+  assert.equal(readMap(t.repo), ""); // a body pb can't locate is never handed on
+  assert.equal(writeMap(t.repo, "### Layout\n- `README`: the readme"), false);
+  assert.equal(t.read("AGENTS.md"), doubleEnd);
+
+  const brief = path.join(os.tmpdir(), `pb-map-refused-${process.pid}.md`);
+  fs.rmSync(brief, { force: true });
+  process.env.MOCK_BRIEF_OUT = brief;
+  let notes = 0;
+  try {
+    notes = t.notes.length;
+    await t.run("map");
+  } finally {
+    delete process.env.MOCK_BRIEF_OUT;
+  }
+  assert.ok(!fs.existsSync(brief), "no cartographer run was spent on a file that cannot be written");
+  assert.equal(t.read("AGENTS.md"), doubleEnd); // the human's tail is byte-identical
+  assert.equal(t.read(".pi/pb/map-previous.md"), backup); // and the only good copy is still there
+  const refusal = t.notes.slice(notes).join("\n");
+  assert.match(refusal, /AGENTS\.md/);
+  assert.match(refusal, /<!-- \/pb:map -->/);
+  assert.match(refusal, /wrote nothing/);
+
+  // undo: a broken file never replaces the stored previous map with a truncated read of itself.
+  await t.run("map", "undo");
+  assert.equal(t.read("AGENTS.md"), doubleEnd);
+  assert.equal(t.read(".pi/pb/map-previous.md"), backup);
+
+  // The archive step refuses a start without its end the same way, and still archives the spec.
+  const u = setup({ verify: "true" });
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  process.chdir(u.repo);
+  fs.writeFileSync(path.join(u.repo, "AGENTS.md"), noEnd);
+  assert.equal(mapDefect(u.repo)!.marker, "<!-- /pb:map -->");
+  const brief2 = path.join(os.tmpdir(), `pb-map-archive-refused-${process.pid}.md`);
+  fs.rmSync(brief2, { force: true });
+  process.env.MOCK_BRIEF_OUT = brief2;
+  try {
+    await u.run("archive");
+  } finally {
+    delete process.env.MOCK_BRIEF_OUT;
+  }
+  assert.ok(!fs.existsSync(brief2), "the archive's map step ran no cartographer either");
+  assert.equal(u.read("AGENTS.md"), noEnd);
+  assert.ok(u.notes.some((n) => /wrote nothing/.test(n)), u.notes.join("\n"));
+  assert.ok(!fs.existsSync(path.join(u.repo, ".pi/pb/specs/order-cancellation"))); // the refusal stops the map step, not the archive
+  assert.ok(fs.readdirSync(path.join(u.repo, ".pi/pb-archive")).some((d) => d.endsWith("order-cancellation")));
+});
+
+test("map: a stray fence does not hide the map", async () => {
+  const { readMap, writeMap, mapDefect } = await import("../extensions/pb/map.ts");
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  // An unclosed fence in the author's own prose above the section must not hide pb's own end marker.
+  fs.writeFileSync(
+    path.join(t.repo, "AGENTS.md"),
+    "# Shop\n\nAn example I never closed:\n\n```\ngit config core.bare true\n\n<!-- pb:map -->\n## Project map\n\n- `README`: readme\n<!-- /pb:map -->\n\nMy own note.\n",
+  );
+  assert.equal(mapDefect(t.repo), undefined);
+  assert.equal(readMap(t.repo), "- `README`: readme");
+  assert.equal(writeMap(t.repo, "### Layout\n- `README`: the readme"), true);
+  const agents = t.read("AGENTS.md");
+  assert.match(agents, /git config core\.bare true/);
+  assert.match(agents, /My own note\./);
+  assert.equal(agents.split("<!-- /pb:map -->").length - 1, 1);
+
+  // A marker shown inside a properly fenced example is the section's documentation, not its end.
+  fs.writeFileSync(
+    path.join(t.repo, "AGENTS.md"),
+    "# Shop\n\n<!-- pb:map -->\n## Project map\n\n### Marker syntax\n\n```\n<!-- /pb:map -->\n```\n\n- `README`: readme\n<!-- /pb:map -->\n\nMy own note.\n",
+  );
+  assert.equal(mapDefect(t.repo), undefined);
+  assert.equal(readMap(t.repo), "### Marker syntax\n\n```\n<!-- /pb:map -->\n```\n\n- `README`: readme");
+  assert.equal(writeMap(t.repo, "### Layout\n- `README`: the readme"), true);
+  assert.match(t.read("AGENTS.md"), /My own note\./);
+  assert.equal(t.read("AGENTS.md").split("<!-- /pb:map -->").length - 1, 1);
+
+  // The same example shown above the section: fence state is counted from the top of the file, so the
+  // documented pair is masked where it stands and pb's real section below it is the only section.
+  const example = "```\n<!-- pb:map -->\n## Project map\n\n- the map, as documented\n<!-- /pb:map -->\n```\n";
+  const documented = `# Shop\n\npb's own markers, documented:\n\n${example}\n<!-- pb:map -->\n## Project map\n\n- \`README\`: readme\n<!-- /pb:map -->\n\nMy own note.\n`;
+  fs.writeFileSync(path.join(t.repo, "AGENTS.md"), documented);
+  assert.equal(mapDefect(t.repo), undefined);
+  assert.equal(readMap(t.repo), "- `README`: readme");
+  assert.equal(writeMap(t.repo, "### Layout\n- `README`: the readme"), true);
+  const after = t.read("AGENTS.md");
+  assert.ok(after.startsWith(`# Shop\n\npb's own markers, documented:\n\n${example}`), `the documented example was rewritten: ${after}`);
+  assert.ok(after.endsWith("\nMy own note.\n"), after);
+  assert.equal(after.split("<!-- pb:map -->").length - 1, 2); // the documented pair plus pb's own, never a second section
+  assert.equal(after.split("<!-- /pb:map -->").length - 1, 2);
+  assert.equal(readMap(t.repo), "### Layout\n- `README`: the readme"); // still the one real section after the write
+
+  // The same file with a ``` the author never closed inside pb's own section: the fence-aware pass still
+  // finds pb's start, so the file's own fence state stands and the section is simply unterminated. pb says
+  // so instead of falling back to a fence-blind read, which lands on the documented pair above and would
+  // write the map into the author's example.
+  const unclosed = `# Shop\n\npb's own markers, documented:\n\n${example}\n<!-- pb:map -->\n## Project map\n\n- \`README\`: readme\n\n\`\`\`\n\nMy own note.\n`;
+  fs.writeFileSync(path.join(t.repo, "AGENTS.md"), unclosed);
+  assert.deepEqual(mapDefect(t.repo), { marker: "<!-- /pb:map -->", line: 13 }); // line 13 is pb's own start; its end sits past the fence nobody closed
+  assert.equal(readMap(t.repo), "");
+  assert.equal(writeMap(t.repo, "### Layout\n- `README`: the readme"), false);
+  assert.equal(t.read("AGENTS.md"), unclosed); // the documented example and the tail both stay byte-identical
+
+  // Markers in documentation only, no section yet: the example is not pb's, so a write appends below it.
+  fs.writeFileSync(path.join(t.repo, "AGENTS.md"), `# Shop\n\n${example}`);
+  assert.equal(mapDefect(t.repo), undefined);
+  assert.equal(readMap(t.repo), "");
+  assert.equal(writeMap(t.repo, "### Layout\n- `README`: the readme"), true);
+  assert.equal(t.read("AGENTS.md"), `# Shop\n\n${example}\n<!-- pb:map -->\n## Project map\n\n### Layout\n- \`README\`: the readme\n<!-- /pb:map -->\n`);
+});
+
 test("extra instructions: added to each role's prompt, global ones first, pb's own kept", async () => {
   const { agentDir } = await import("../extensions/pb/standards.ts");
   const global = path.join(agentDir(), "pb", "config.json");
@@ -7311,8 +8036,8 @@ test("review: findings with the same concrete fix merge; distinct ones stay spli
 test("review: the brief carries stale prose references for judgment, absent when clean", async () => {
   const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
   const base = { changed: [], stat: "", check: "", focus: "" };
-  assert.match(reviewerBrief({ ...base, staleRefs: [{ symbol: "oldHelperName", referrers: ["REF.md:1"] }] }), /Possibly stale prose references[\s\S]*oldHelperName: REF\.md:1/);
-  assert.doesNotMatch(reviewerBrief(base), /Possibly stale prose/);
+  assert.match(reviewerBrief({ ...base, living: "", staleRefs: [{ symbol: "oldHelperName", referrers: ["REF.md:1"] }] }), /Possibly stale prose references[\s\S]*oldHelperName: REF\.md:1/);
+  assert.doesNotMatch(reviewerBrief({ ...base, living: "" }), /Possibly stale prose/);
 });
 
 test("build: a rename that orphans a prose citation is flagged at completion", async () => {

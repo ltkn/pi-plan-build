@@ -651,21 +651,34 @@ export interface SpecReviewDelta {
   earlier: string;
   /** labels of sections/tasks that disappeared */
   removed: string[];
-  /** unchanged sections and header that bind the delta: goal, decisions, contracts, migration, threats, acceptance */
+  /**
+   * unchanged sections and header that bind the delta: Goal, Out of scope, Decisions, Contracts,
+   * Migration and rollback, Threats (either spelling) and the top-level Acceptance criteria.
+   * Design is the one binding section left out: a delta round is told to check the full spec too,
+   * so resending the largest section with every unchanged delta buys nothing.
+   */
   context: string;
 }
 
-/** Sections whose text frames every delta review, whether or not they changed themselves. */
-const BINDING_BLOCKS = new Set([
+/**
+ * The sections that bind a step, in the order a handout shows them: what the change must serve,
+ * what it may not walk on, and the promises it keeps. One list for the whole tool — prompts.ts
+ * renders it into every handout, spec review derives its delta context from it below — so the
+ * builder and the reviewer can never disagree about what binds. `Threats` is the alias of
+ * `Threats and abuse`; a spec carries one spelling.
+ */
+export const BINDING_SECTIONS: readonly string[] = ["Goal", "Out of scope", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse", "Threats"];
+
+/**
+ * Blocks a spec-review delta always carries: the list above, the header and the top-level acceptance
+ * criteria — minus Design, stated here as a subtraction rather than kept as a second list. A delta
+ * round reads the whole spec anyway (prompts.ts reviewPrompt), so Design is the one section it does
+ * not need resent with every unchanged delta.
+ */
+const BINDING_BLOCKS = new Set<string>([
   "header",
-  "section:goal",
-  "section:out of scope",
-  "section:decisions",
-  "section:contracts",
-  "section:migration and rollback",
-  "section:threats and abuse",
-  "section:threats",
   "section:acceptance criteria",
+  ...BINDING_SECTIONS.filter((section) => section !== "Design").map((section) => `section:${blockName(section)}`),
 ]);
 
 /** Requirement deltas bind every review: a task change must still fit the requirement it serves. */

@@ -7,6 +7,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isFence, safeBlock } from "./markdown.ts";
 import type { ReviewLedgerEntry } from "./store.ts";
 
 const START = "<!-- pb:map -->";
@@ -18,41 +19,123 @@ export const MAP_TOKENS = 20000;
 
 export const mapFile = (cwd: string) => path.join(cwd, "AGENTS.md");
 
-/** The map's body (without markers and heading), or "" when there is none yet or it is broken. */
-export function readMap(cwd: string): string {
-  let md: string;
+/** pb's own markers around the map section, so a message can name them without a second copy of them. */
+export const MAP_MARKERS = { start: START, end: END } as const;
+
+/** Which of pb's own map markers a line is: only a line of its own is one, prose naming a marker is not. */
+const markerOf = (line: string): string | undefined => {
+  const t = line.trim();
+  return t === START ? START : t === END ? END : undefined;
+};
+
+/** The map section's own marker lines: its start and end, as indexes into `lines`. */
+interface MapSection {
+  start: number;
+  end: number;
+}
+
+/** Why the map section's markers can't be resolved: which marker, on which line (1-based). */
+export interface MapDefect {
+  marker: string;
+  line: number;
+}
+
+/**
+ * Locate the map section, or say why it can't be located. Marker lines count only where the file's own
+ * fence state says they are prose, and that state is counted from line 0 the way every other markdown
+ * reader here counts it: a marker shown inside a properly fenced example stays documentation wherever
+ * the example sits, above pb's section as well as inside it. Only a file whose fences never close is read
+ * blind to fences, and only when that leaves no marker outside a fence at all — where one survives, the
+ * file's own fence state stands, and a section that still won't close is reported, never guessed at.
+ */
+function resolveMap(md: string): { section?: MapSection; defect?: MapDefect } {
+  const lines = md.split("\n");
+  const scan = (fenceAware: boolean) => {
+    const marks: number[] = [];
+    let inFence = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (isFence(lines[i])) {
+        if (fenceAware) inFence = !inFence;
+        continue;
+      }
+      if (inFence) continue;
+      if (markerOf(lines[i])) marks.push(i);
+    }
+    return { marks, fenceOpenAtEnd: inFence };
+  };
+  const endOf = (marks: number[]) => marks.slice(1).find((i) => markerOf(lines[i]) === END);
+  const aware = scan(true);
+  // A ``` the author left open is trusted only where it leaves pb nothing to read: fences unbalanced at
+  // the last line and no marker outside a fence at all — the fence swallowed pb's whole section, and
+  // reading such a file blind to fences beats a refusal that blames pb's check for a fence pb never wrote.
+  // Where the fence-aware pass did find a marker, the file's own fence state is the one pb uses: falling
+  // back then would land on markers a documented example shows, and pb would rewrite the example instead
+  // of its section. Markers sitting only inside properly closed examples are documentation: the file has
+  // no map section yet.
+  const marks = aware.fenceOpenAtEnd && aware.marks.length === 0 ? scan(false).marks : aware.marks;
+  if (!marks.length) return {}; // no map section yet: nothing to resolve, and nothing to refuse
+  if (markerOf(lines[marks[0]]) !== START) return { defect: { marker: END, line: marks[0] + 1 } }; // an end with no start: nobody's section
+  const end = endOf(marks);
+  if (end === undefined) return { defect: { marker: END, line: marks[0] + 1 } }; // a start whose end never turns up
+  const stray = marks.find((i) => i > end);
+  if (stray !== undefined) return { defect: { marker: markerOf(lines[stray])!, line: stray + 1 } }; // a second one: prose or map text, pb can't tell
+  return { section: { start: marks[0], end } };
+}
+
+/** AGENTS.md as it stands, or "" when the project has none yet. */
+const mapText = (cwd: string): string => {
   try {
-    md = fs.readFileSync(mapFile(cwd), "utf8");
+    return fs.readFileSync(mapFile(cwd), "utf8");
   } catch {
     return "";
   }
-  const i = md.indexOf(START);
-  if (i < 0) return "";
-  const j = md.indexOf(END, i);
-  if (j < 0) return ""; // start without end: broken, don't swallow the rest of the file
+};
+
+/**
+ * Why this project's map section can't be read: the marker pb would have to trust is missing or
+ * stands twice. pb writes nothing into a section it can't resolve — once a marker sits inside its own
+ * section, the author's prose and pb's map text are indistinguishable. Undefined when the markers
+ * resolve, or the project has no map section yet.
+ */
+export function mapDefect(cwd: string): MapDefect | undefined {
+  return resolveMap(mapText(cwd)).defect;
+}
+
+/** The map's body (without markers and heading), or "" when there is none yet or its markers can't be resolved. */
+export function readMap(cwd: string): string {
+  const md = mapText(cwd);
+  const { section } = resolveMap(md);
+  if (!section) return "";
   return md
-    .slice(i + START.length, j)
+    .split("\n")
+    .slice(section.start + 1, section.end)
+    .join("\n")
     .trim()
     .replace(new RegExp(`^${HEADING}\\s*\\n`), "")
     .trim();
 }
 
-/** Write the map's body into AGENTS.md: its section replaced, or appended (the file created if missing). */
-export function writeMap(cwd: string, body: string): void {
+/**
+ * Write the map's body into AGENTS.md: its section replaced, or appended (the file created if missing).
+ * Returns whether it wrote: a section whose markers can't be resolved is left exactly as it is, because
+ * replacing what pb can't read would delete the author's own text with no way back.
+ */
+export function writeMap(cwd: string, body: string): boolean {
   const file = mapFile(cwd);
-  const section = `${START}\n${HEADING}\n\n${body.trim()}\n${END}\n`;
-  const prev = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-  const i = prev.indexOf(START);
-  const j = i < 0 ? -1 : prev.indexOf(END, i);
-  let next: string;
-  if (i >= 0 && j >= 0) next = `${prev.slice(0, i)}${section.trimEnd()}${prev.slice(j + END.length)}`;
-  else if (i >= 0) next = `${prev.slice(0, i)}${section}`; // broken marker: replace from START to end
-  else next = `${prev}${prev && !prev.endsWith("\n\n") ? (prev.endsWith("\n") ? "\n" : "\n\n") : ""}${section}`;
+  const prev = mapText(cwd);
+  const { section, defect } = resolveMap(prev);
+  if (defect) return false;
+  const lines = prev.split("\n");
+  const block = `${START}\n${HEADING}\n\n${normalizeMap(body)}\n${END}\n`;
+  const next = section
+    ? [...lines.slice(0, section.start), block.trimEnd(), ...lines.slice(section.end + 1)].join("\n")
+    : `${prev}${prev && !prev.endsWith("\n\n") ? (prev.endsWith("\n") ? "\n" : "\n\n") : ""}${block}`;
   const out = next.endsWith("\n") ? next : `${next}\n`;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, out, "utf8");
   fs.renameSync(tmp, file);
+  return true;
 }
 
 /** Root-level files without an extension that are still files, not routes. */
@@ -121,7 +204,7 @@ export function unresolvedPaths(cwd: string, body: string, files = projectFiles(
   let base: string | undefined;
   let inFence = false;
   for (const line of body.split("\n")) {
-    if (/^(\s*)```/.test(line)) {
+    if (isFence(line)) {
       inFence = !inFence;
       continue;
     }
@@ -135,10 +218,14 @@ export function unresolvedPaths(cwd: string, body: string, files = projectFiles(
 /** The paths the map names that don't exist (a cheap staleness check, no model call). */
 export const missingPaths = (cwd: string, body: string) => [...new Set(unresolvedPaths(cwd, body).map((u) => u.path))];
 
-/** Headings one level below the map's own, no empty headings, no runs of blank lines. */
+/**
+ * The guarantee for every body pb writes into the map: no control character, no tab (each one a single
+ * space, so no line becomes an indented code block) and no comment marker, with the words left alone.
+ * The neutraliser runs again on the result, so the guarantee is this function's own, not one it inherits
+ * from its input. Headings sit one level below the map's own, no empty headings, no runs of blank lines.
+ */
 export function normalizeMap(body: string): string {
-  const lines = body
-    .trim()
+  const lines = safeBlock(body)
     .split("\n")
     .map((l) => l.replace(/^#{1,3}\s+/, "### ").trimEnd());
   const kept = lines.filter((l, i) => {
@@ -146,7 +233,7 @@ export function normalizeMap(body: string): string {
     const next = lines.slice(i + 1).find((x) => x.trim());
     return !!next && !next.startsWith("### ");
   });
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return safeBlock(kept.join("\n")).replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /** Rough token count (4 characters a token). */
@@ -258,7 +345,7 @@ export function findingsOf(markdown: string): string {
   const blanked: string[] = [];
   let inFence = false;
   for (const line of markdown.split("\n")) {
-    if (/^(\s*)```/.test(line)) {
+    if (isFence(line)) {
       inFence = !inFence;
       blanked.push("");
       continue;

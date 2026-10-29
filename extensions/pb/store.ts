@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { safeLine } from "./markdown.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { agentDir } from "./standards.ts";
 
@@ -434,16 +435,49 @@ export interface ReviewLedgerEntry {
 /** Findings kept per review log: the rest stay in review.md, which the ledger never replaces. */
 export const REVIEW_FINDINGS_CAP = 40;
 
+/** The ledger's own field limits: a lead's words are the point, so they are generous and never move. */
+export const LEDGER_FILE_CHARS = 300;
+export const LEDGER_TITLE_CHARS = 300;
+export const LEDGER_FIX_CHARS = 500;
+
+/** A finding whose title is nothing but markup is still a lead: it keeps this instead of vanishing. */
+export const UNTITLED_FINDING = "(untitled finding)";
+
+/** One ledger field as it is stored and as it is read back: one line, no control character, no comment marker. */
+const ledgerField = (text: string, max: number): string => cap(safeLine(text), max);
+
+const ledgerTitle = (title: string): string => ledgerField(title, LEDGER_TITLE_CHARS) || UNTITLED_FINDING;
+
+/** One finding as a `review-findings` event holds it: a ledger entry without what dedupe adds to it. */
+export type StoredReviewFinding = Omit<ReviewLedgerEntry, "count" | "last">;
+
+/**
+ * What a completed review keeps for later features: its P0–P2 findings in the order reported, each
+ * field already safe to store here and in the project map, which is built from these lines.
+ */
+export function ledgerFindings(findings: Finding[]): StoredReviewFinding[] {
+  return findings
+    .filter((f) => f.priority !== "P3")
+    .slice(0, REVIEW_FINDINGS_CAP)
+    .map((f) => ({
+      priority: f.priority,
+      ...(f.file ? { file: ledgerField(f.file, LEDGER_FILE_CHARS) } : {}),
+      ...(f.line ? { line: f.line } : {}),
+      title: ledgerTitle(f.title),
+      ...(f.fix ? { fix: ledgerField(f.fix, LEDGER_FIX_CHARS) } : {}),
+      ...(f.outside ? { outside: true } : {}),
+    }));
+}
+
 const PRIORITY_RANK: Record<Priority, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
 
 /**
  * The P0–P2 findings of completed reviews, deduped by place and title, highest priority first.
  * Append-only events, so a finding that recurs across reviews keeps one entry with a count.
+ * Events already on disk are not re-written, so every field is sanitised here as well as on the way in.
  */
 export function reviewLedger(events: Record<string, unknown>[]): ReviewLedgerEntry[] {
   const found = new Map<string, ReviewLedgerEntry>();
-  // Findings are model output sent to another model: one line each, never a new bullet or heading.
-  const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
   for (const event of events) {
     if (event.type !== "review-findings" || !Array.isArray(event.findings)) continue;
     const at = typeof event.at === "string" ? event.at : "";
@@ -451,16 +485,16 @@ export function reviewLedger(events: Record<string, unknown>[]): ReviewLedgerEnt
       if (!raw || typeof raw !== "object") continue;
       const f = raw as Record<string, unknown>;
       if (f.priority !== "P0" && f.priority !== "P1" && f.priority !== "P2") continue;
-      const title = typeof f.title === "string" ? oneLine(f.title) : "";
+      const title = typeof f.title === "string" ? ledgerTitle(f.title) : "";
       if (!title) continue;
-      const file = typeof f.file === "string" && f.file.trim() ? oneLine(f.file) : undefined;
+      const file = typeof f.file === "string" && f.file.trim() ? ledgerField(f.file, LEDGER_FILE_CHARS) : undefined;
       const line = typeof f.line === "number" && Number.isInteger(f.line) && f.line > 0 ? f.line : undefined;
-      const fix = typeof f.fix === "string" && f.fix.trim() ? cap(oneLine(f.fix), 500) : undefined;
+      const fix = typeof f.fix === "string" && f.fix.trim() ? ledgerField(f.fix, LEDGER_FIX_CHARS) : undefined;
       const outside = f.outside === true || undefined;
       const key = `${file ?? ""}\u0000${line ?? ""}\u0000${title.toLowerCase()}`;
       const entry = found.get(key);
       if (!entry) {
-        found.set(key, { priority: f.priority, file, line, title: cap(title, 300), fix, outside, count: 1, last: at });
+        found.set(key, { priority: f.priority, file, line, title, fix, outside, count: 1, last: at });
         continue;
       }
       entry.count += 1;
