@@ -16,8 +16,9 @@ import { test } from "node:test";
 process.env.PI_PB_PI_COMMAND = path.join(path.dirname(new URL(import.meta.url).pathname), "mock-pi.mjs");
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const { default: pb } = await import("../extensions/pb/index.ts");
-const { parseSpec, acceptanceCriteria, addDecision, needsRed, redExemption, specHash, specReviewDelta, specReviewGate, specReviewRisk } = await import("../extensions/pb/spec.ts");
+const { parseSpec, acceptanceCriteria, addDecision, needsRed, redExemption, specHash, specReviewDelta, specReviewGate, specReviewRisk, capCarriedAdvisories } = await import("../extensions/pb/spec.ts");
 const { parseRequirementDocument, parseRequirementDeltas, planRequirementDeltas, requirementCriteria } = await import("../extensions/pb/requirements.ts");
+const { specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
 
 type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
 type Tool = (name: string, params: object) => Promise<Result>;
@@ -419,6 +420,19 @@ function setup(config: object = {}) {
   };
 }
 
+/**
+ * SPEC's two-file task list with each acceptance line carrying `mark`, so the list a fixture builds
+ * and the list SPEC writes by default cannot drift apart.
+ */
+const tasksMarkedBy = (mark: (id: string) => string) =>
+  `### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (${mark("T1")})\n- Test: \`test -f T1.txt\`\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (${mark("T2")})\n- Test: \`test -f T2.txt\``;
+/** Each line marked by its own task id — legal only where the red gate will demand that task's run. */
+const TASKS_WITH_OWN_IDS = tasksMarkedBy((id) => `tests: ${id}`);
+/** The same list proven the only way a red-exempt spec may: no task id claims a red run there. */
+const TASKS_WITH_EXEMPTIONS = (why: string) => tasksMarkedBy(() => `non-testable: ${why}`);
+/** T2 titled `(refactor)`, so its acceptance line carries the exemption a red-exempt task must use. */
+const TASKS_WITH_A_REFACTOR = "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (non-testable: a refactor adds no behaviour)\n- Test: `true`";
+
 const SPEC = (opts: { verification?: string; newTests?: string; tasks?: string } = {}) => `# Order cancellation
 Depends on: none
 Verification: ${opts.verification ?? "tests"}
@@ -438,18 +452,7 @@ src/order.ts holds the model.
 ## Contracts
 - T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.
 ## Tasks
-${
-  opts.tasks ??
-  `### T1: first file
-Create T1.txt.
-- Acceptance: T1.txt exists (tests: T1)
-- Test: \`test -f T1.txt\`
-
-### T2: second file
-Create T2.txt.
-- Acceptance: T2.txt exists (tests: T2)
-- Test: \`test -f T2.txt\``
-}
+${opts.tasks ?? TASKS_WITH_OWN_IDS}
 `;
 
 /** A requirement delta for the SPEC above: one added requirement with one checkable scenario. */
@@ -1579,7 +1582,7 @@ test("the build: the first task that fixes a shape records it in the spec's Desi
 
 test("red then green: a task's new tests are seen failing first; refactors and no-new-tests specs are exempt", async () => {
   const t = setup({ verify: "true" });
-  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (tests: T2)\n- Test: `true`" }));
+  await written(t, SPEC({ tasks: TASKS_WITH_A_REFACTOR }));
   const said: string[] = [];
   t.agent.script = async (text, tool) => {
     const task = taskOf(text) ?? (text.includes("Continue task T1") ? "T1" : undefined);
@@ -1607,7 +1610,7 @@ test("red then green: a task's new tests are seen failing first; refactors and n
   assert.deepEqual(p.tasks.map((x: any) => x.id), ["T1", "T2"]);
 
   const u = setup({ verify: "true" });
-  await written(u, SPEC({ newTests: "no — a docs-only change" }));
+  await written(u, SPEC({ newTests: "no — a docs-only change", tasks: TASKS_WITH_EXEMPTIONS("the spec asks for no new tests") }));
   u.agent.script = async (text, tool) => {
     const task = taskOf(text);
     if (task && task !== "final") fs.writeFileSync(`${task}.txt`, "x");
@@ -1621,7 +1624,7 @@ test("red then green: a task's new tests are seen failing first; refactors and n
 
 test("red proof is bound to the test files: editing them after red re-requires proof", async () => {
   const t = setup({ verify: "true" });
-  await written(t, SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (tests: T2)\n- Test: `true`" }));
+  await written(t, SPEC({ tasks: TASKS_WITH_A_REFACTOR }));
   const said: string[] = [];
   let weakened = false;
   t.agent.script = async (text, tool) => {
@@ -2096,7 +2099,7 @@ test("spec: Status: ready can't have Open questions; planning can", async () => 
 test("spec: a behaviour task without Test:, or with a no-op one, warns — refactors stay quiet", async () => {
   const t = setup();
   process.chdir(t.repo);
-  const tasks = "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (tests: T2)\n- Test: `true`";
+  const tasks = "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (non-testable: a refactor adds no behaviour)\n- Test: `true`";
   const w = (await t.callTool("pb_write_spec", { name: "a", content: SPEC({ tasks }) })).content![0].text;
   assert.match(w, /Note: T1 adds behaviour but has no Test: line — add a targeted command, or leave it out/);
   assert.doesNotMatch(w, /T2/); // a refactor is exempt: nothing to warn
@@ -2401,7 +2404,7 @@ test("spec: showing it runs each red-eligible Test: once, for approval — small
   assert.match(shown, /- ✗ `test -f T2\.txt` fails \(expected/);
 
   const u = setup({ verify: "true" }); // docs-only: nothing red-eligible, nothing run
-  await written(u, SPEC({ verification: "none — docs", newTests: "no — docs" }));
+  await written(u, SPEC({ verification: "none — docs", newTests: "no — docs", tasks: TASKS_WITH_EXEMPTIONS("the spec asks for no new tests") }));
   new Store(u.repo).setPendingBuild(u.runtime().ctx.sessionManager.getSessionFile());
   u.selects.push("Not now");
   await u.fire("agent_settled", {});
@@ -2890,7 +2893,7 @@ const GOAL_LESS_BUDGET = 1_400;
 
 test("build: verification none runs no checks; no new tests reaches the agent", async () => {
   const t = setup({ verify: "false" }); // would fail if it ran
-  await written(t, SPEC({ verification: "none — docs only", newTests: "no — the human said so" }));
+  await written(t, SPEC({ verification: "none — docs only", newTests: "no — the human said so", tasks: TASKS_WITH_EXEMPTIONS("the spec asks for no new tests") }));
   t.agent.script = diligent;
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "built");
@@ -6872,6 +6875,76 @@ test("spec: acceptance lines on tested tasks name their proof or exemption, or w
   assert.equal((await t.callTool("pb_write_spec", { name: "k", content: namedTest })).error, undefined);
 });
 
+// A `(tests: Tn)` marker is a claim about the red gate: it resolves exactly where the gate will force
+// the named task's Test: command to fail before its change. Elsewhere the legal forms are
+// (non-testable: <why>) or a test file or test name that exists today.
+test("task-id proof marker: a red Test: run is what makes the id resolve", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  // the task's own id, on a task the red gate will force to fail
+  assert.equal((await t.callTool("pb_write_spec", { name: "own", content: SPEC() })).error, undefined);
+  // another task's id, where that task also needs red
+  const cross = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T2)\n- Test: `test -f T1.txt`\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)\n- Test: `test -f T2.txt`" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "cross", content: cross })).error, undefined);
+  // an id naming no task of this spec names no red run either
+  const ghost = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T9)\n- Test: `test -f T1.txt`" });
+  assert.match((await t.callTool("pb_write_spec", { name: "ghost", content: ghost })).error!, /a task id proves nothing/);
+});
+
+test("task-id proof marker: a red-exempt task or spec may not prove with a task id", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  // a verification gate that runs no tests: there is no red proof to name
+  const noRedGate = SPEC({ verification: "none — docs", newTests: "no — docs", tasks: TASKS_WITH_OWN_IDS });
+  assert.match((await t.callTool("pb_write_spec", { name: "docs", content: noRedGate })).error!, /a task id proves nothing/);
+  // a spec that asks for no new tests
+  assert.match((await t.callTool("pb_write_spec", { name: "none", content: SPEC({ newTests: "no — the human said so" }) })).error!, /a task id proves nothing/);
+  // a refactor: its own id names a run that is never demanded red, and it is the marker alone that says so
+  const refactor = SPEC({ tasks: TASKS_WITH_A_REFACTOR.replace("(non-testable: a refactor adds no behaviour)", "(tests: T2)") });
+  assert.match((await t.callTool("pb_write_spec", { name: "refactor", content: refactor })).error!, /T2 \(tests: T2\)[\s\S]*a task id proves nothing/);
+  // the same two tasks with that line exempted are accepted: only the marker changed
+  assert.equal((await t.callTool("pb_write_spec", { name: "legal", content: SPEC({ tasks: TASKS_WITH_A_REFACTOR }) })).error, undefined);
+});
+
+test("task-id proof marker: both write gates and the spec format teach the red-gate rule", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  // pb_write_spec names the rule and the conversion path
+  const gateWrite = SPEC({ verification: "none — docs", newTests: "no — docs", tasks: TASKS_WITH_OWN_IDS });
+  assert.match((await t.callTool("pb_write_spec", { name: "gate-write", content: gateWrite })).error!, /red Test: run/);
+  // and so does the Tasks edit that a blocked spec uses to repair itself
+  await written(t);
+  const edited = await t.callTool("pb_update_spec", {
+    name: "order-cancellation",
+    section: "Tasks",
+    content: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T7)\n- Test: `test -f T1.txt`",
+  });
+  assert.match(edited.error!, /a task id proves nothing/);
+  assert.match(edited.error!, /red Test: run/);
+  // the writer is taught the rule before it can fail on it
+  const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
+  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
+    assert.match(p, /red Test: run/);
+    assert.match(p, /\(non-testable: <why>\)/);
+  }
+});
+
+test("task-id proof marker: a hand-edited exempt marker reaches the code reviewer", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  // a hand edit past the write gate: T2 becomes a refactor still marked with its own id
+  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  fs.writeFileSync(
+    specFile,
+    fs.readFileSync(specFile, "utf8").replace("### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)", "### T2: (refactor) tidy\nNothing new.\n- Acceptance: T2.txt exists (tests: T2)"),
+  );
+  await t.run("review");
+  const brief = t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!;
+  assert.match(brief, /## Acceptance proof mapping[\s\S]*T2 \(tests: T2\)[\s\S]*a task id proves nothing/);
+});
+
 test("spec: a declared doc-only task with exempted lines gets no missing-Test nudge", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -6994,7 +7067,7 @@ test("spec review: after amendment the build re-reviews and proceeds on the pass
   assert.equal(typeof reviews[0].markdown, "string"); // the reviewed text is stored for the comparison
   const brief = fs.readFileSync(briefOut, "utf8");
   assert.match(brief, /# Earlier review/); // the follow-up carries the earlier review
-  assert.match(brief, /delta review: only the changed sections and tasks/);
+  assert.match(brief, /delta round: the revision below is what you are reviewing/);
   assert.match(brief, /## Changed since the earlier review[\s\S]*Rebuttal: the transition is guarded/);
   assert.match(brief, /## Earlier form of the changed parts[\s\S]*Not doing soft delete/);
   assert.match(brief, /## Binding context \(unchanged by this revision\)[\s\S]*# Order cancellation/);
@@ -7487,6 +7560,218 @@ test("spec review: an outside P0 blocks even when the verdict says pass", async 
   assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
 });
 
+// A follow-up spec review scopes by what the revision is responsible for, never by where a
+// problem's text happens to sit. One precedence rule, in the brief and in the follow-up prompt
+// alike. The specs below quote none of the rule's own words, so a match can only come from pb.
+const WINDOW_SPEC = (revision = "") => `# Cancel window
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Refuse a cancellation that arrives after the window.
+## Decisions
+- The window is 30 days from delivery.${revision}
+## Context
+src/order.ts holds the model.
+## Contracts
+- cancel(id) returns 410 after the window.
+## Acceptance criteria
+- T1 owns the guard.
+## Tasks
+### T1: guard the window
+Add the guard to src/order.ts.
+- Acceptance: a cancel on day 31 returns 410 (tests: T1)
+- Test: \`node --test test/cancel.test.mts\`
+`;
+const WINDOW_BLOCKER = { id: "F1", priority: "P1" as const, title: "the window has no stated timezone", evidence: "Contracts counts days without saying in what timezone." };
+const WINDOW_ADVISORY = { id: "F2", priority: "P2" as const, title: "the Test: line names no file", fix: "name the test file" };
+
+test("spec review delta rounds: the brief states one precedence rule", () => {
+  const before = WINDOW_SPEC();
+  const after = WINDOW_SPEC(" Support may extend it by 7 days.");
+  const brief = specReviewBrief("cancel-window", after, { prior: [WINDOW_BLOCKER], advisory: [WINDOW_ADVISORY], priorMarkdown: before, round: 2 });
+  // one rule, both halves: what this revision creates or exposes is in scope wherever its text sits...
+  assert.match(brief, /creates or exposes/);
+  // ...and only a problem that predates the revision, in text it left alone, takes the advisory lane
+  assert.match(brief, /predates the revision/);
+  // that lane is the one the harness already parses, with the consequences it already has
+  assert.match(brief, /## Outside the change — existing problems the change did not cause/);
+  assert.match(brief, /Only a P0 here blocks; P1-P3 are advisory/);
+  assert.match(brief, /VERDICT: block \(a new or still-open P0\/P1, or an outside P0,/);
+  // the two sentences that let one round read opposite scoping are gone, in either shape
+  assert.doesNotMatch(brief, /do not re-review unchanged parts/i);
+  assert.doesNotMatch(brief, /Problems that already existed outside the change are still reported/i);
+  assert.doesNotMatch(brief, /this is a delta review: only the changed sections/i);
+  assert.doesNotMatch(brief, /Report only new or changed findings/i);
+  // with no earlier text recorded, the same round still leaves the outside lane open
+  const noEarlierText = specReviewBrief("cancel-window", after, { advisory: [WINDOW_ADVISORY], round: 2 });
+  assert.doesNotMatch(noEarlierText, /Report only new or changed findings/i);
+  assert.match(noEarlierText, /predates it, in text the revision left alone, under Outside the change/);
+  // and the round still converges: the earlier blocker is answered by id, the delta is shown
+  assert.match(brief, /## Earlier P0\/P1 findings/);
+  assert.match(brief, /F1 \[P1\] the window has no stated timezone/);
+  assert.match(brief, /## Changed since the earlier review/);
+});
+
+test("spec review delta rounds: the first round keeps the full attack and takes no scoping rule", () => {
+  const first = specReviewBrief("cancel-window", WINDOW_SPEC());
+  assert.match(first, /Attack its Decisions/);
+  assert.match(first, /Re-test every "Not doing X" rejection/);
+  assert.match(first, /VERDICT: block/);
+  assert.doesNotMatch(first, /creates or exposes|predates the revision|this is a delta review|do not re-review unchanged parts/i);
+  assert.doesNotMatch(first, /^# Earlier review/m);
+  assert.doesNotMatch(first, /## Outside the change/);
+});
+
+test("spec review delta rounds: the reviewer corrects a drifted citation instead of reporting it", () => {
+  // file and symbol right, number off: fix the number inside the finding, never a finding alone
+  assert.match(SPEC_REVIEWER_SYSTEM, /never a finding on its own/);
+  // a citation whose content contradicts the claim stays as strong a finding as it was
+  assert.match(SPEC_REVIEWER_SYSTEM, /contradicted by its citation,? is a finding/);
+});
+
+test("spec review delta rounds: the follow-up prompt states the same boundary, and one system prompt serves both rounds", async () => {
+  const t = setup({ verify: "true", specReviewer: { mode: "always", maxRounds: 2 } });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const promptLog = path.join(os.tmpdir(), `pb-spec-followup-prompt-${process.pid}.log`);
+  const systemLog = path.join(os.tmpdir(), `pb-spec-system-${process.pid}.log`);
+  for (const f of [promptLog, systemLog]) if (fs.existsSync(f)) fs.rmSync(f);
+  process.env.MOCK_SPEC_REVIEW = "block";
+  process.env.MOCK_SPEC_PROMPT_LOG = promptLog;
+  process.env.MOCK_SPEC_SYSTEM_LOG = systemLog;
+  try {
+    await t.run("build", "order-cancellation"); // round 1 reads the whole spec
+    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the checklist holds the transition, because the state machine enforces it.", mode: "append" });
+    await t.run("build", "order-cancellation"); // round 2 is the delta round
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SPEC_PROMPT_LOG;
+    delete process.env.MOCK_SPEC_SYSTEM_LOG;
+  }
+  const rounds = (file: string) => fs.readFileSync(file, "utf8").split("<<<round>>>").map((s) => s.trim()).filter(Boolean);
+  const [first, followUp] = rounds(promptLog);
+  assert.equal(rounds(promptLog).length, 2);
+  assert.equal(first, "Review the spec in the attached file.");
+  // the last text the follow-up reviewer reads, scoping the same way the brief does
+  assert.match(followUp, /Resolve every earlier P0\/P1 by id first/);
+  assert.match(followUp, /creates or exposes/);
+  assert.match(followUp, /predates the revision/);
+  assert.match(followUp, /Outside the change/);
+  assert.doesNotMatch(followUp, /report only new or changed/i);
+  // one system prompt for every round, so the citation rule binds the first look too
+  const systems = rounds(systemLog);
+  assert.equal(systems.length, 2);
+  for (const sys of systems) assert.match(sys, /never a finding on its own/);
+});
+
+test("spec review delta rounds: an earlier outside advisory rides into the next brief and stays in the record", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const briefOut = path.join(os.tmpdir(), `pb-spec-carry-${process.pid}.md`);
+  if (fs.existsSync(briefOut)) fs.rmSync(briefOut);
+  process.env.MOCK_SPEC_REVIEW = "block-outside-advisory";
+  process.env.MOCK_SPEC_BRIEF_OUT = briefOut;
+  try {
+    await t.run("build", "order-cancellation"); // an in-scope P0 blocks; the outside P1 is carried
+    assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
+    await t.callTool("pb_update_spec", {
+      name: "order-cancellation",
+      section: "Tasks",
+      content: "### T3: third file\nCreate T3.txt.\n- Acceptance: T3.txt exists (tests: T3)\n- Test: `test -f T3.txt`",
+      mode: "append",
+    });
+    delete process.env.MOCK_SPEC_REVIEW; // the revision answers the blocker: the next round passes
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SPEC_BRIEF_OUT;
+  }
+  const brief = fs.readFileSync(briefOut, "utf8");
+  assert.match(brief, /creates or exposes/);
+  assert.match(brief, /predates the revision/);
+  assert.match(brief, /### T3: third file/); // the revision is what it reviews
+  assert.match(brief, /## Earlier advisory findings \(context only\)/);
+  assert.match(brief, /\[P1 · Outside the change\] Context — src\/order\.ts names a transition with no guard/);
+  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
+  assert.equal(reviews.length, 2);
+  assert.equal(reviews[1].verdict, "pass"); // the outside P1 never held the build
+  assert.equal(reviews[1].advisory.filter((f: { outside?: boolean }) => f.outside).length, 1);
+  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
+});
+
+// A follow-up brief shows the advisories carried from earlier rounds, but only as many as keep the
+// revision dominant: the whole list stays in the event and in the human's count.
+const carriedAdvisories = (priority: "P1" | "P2" | "P3", n: number, firstId: number) =>
+  Array.from({ length: n }, (_, i) => ({ id: `F${firstId + i}`, priority, title: `unmeasured window ${firstId + i}` }));
+const advisoryIds = (s: string) => [...s.matchAll(/^F(\d+) \[P[123]\]/gm)].map((m) => Number(m[1]));
+const NOTES = /lower advisories are in the review log/;
+
+test("spec review carry: a flood of P3 and P2 loses P3 first, never a P1", () => {
+  const flood = [...carriedAdvisories("P2", 5, 1), ...carriedAdvisories("P3", 5, 6)]; // F1-F5 P2, F6-F10 P3
+  const brief = specReviewBrief("order-cancellation", WINDOW_SPEC(), { advisory: flood, round: 2 });
+  // eight slots, filled from the top: all five P2 and the three P3 that came first
+  assert.deepEqual(advisoryIds(brief), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.match(brief, NOTES);
+  assert.match(brief, /Dropped 2 of 10 for length/);
+  // with P1s in the carry, every slot they need is kept and only P3 goes
+  const mixed = [...carriedAdvisories("P1", 2, 1), ...carriedAdvisories("P2", 5, 3), ...carriedAdvisories("P3", 5, 8)];
+  const mixedBrief = specReviewBrief("order-cancellation", WINDOW_SPEC(), { advisory: mixed, round: 2 });
+  assert.deepEqual(advisoryIds(mixedBrief), [1, 2, 3, 4, 5, 6, 7, 8]); // both P1s, all five P2s, one P3
+  assert.match(mixedBrief, /Dropped 4 of 12 for length/);
+  assert.deepEqual(capCarriedAdvisories(mixed).filter((f) => f.priority === "P1").length, 2);
+  // a carry of nothing but P1 is shown whole: the cap never trades a P1 away
+  assert.equal(capCarriedAdvisories(carriedAdvisories("P1", 10, 1)).length, 10);
+});
+
+test("spec review carry: dropping keeps input order within a priority", () => {
+  const mixed = [...carriedAdvisories("P1", 2, 1), ...carriedAdvisories("P3", 3, 3), ...carriedAdvisories("P2", 5, 6)];
+  assert.deepEqual(
+    capCarriedAdvisories(mixed).map((f) => f.id),
+    ["F1", "F2", "F3", "F6", "F7", "F8", "F9", "F10"], // the last two P3 go; nothing moves
+  );
+  assert.equal(capCarriedAdvisories(mixed).length, 8); // only as many as needed are dropped
+});
+
+test("spec review carry: eight or fewer advisories render in full with no note", () => {
+  const eight = [...carriedAdvisories("P2", 4, 1), ...carriedAdvisories("P3", 4, 5)];
+  const brief = specReviewBrief("order-cancellation", WINDOW_SPEC(), { advisory: eight, round: 2 });
+  assert.deepEqual(advisoryIds(brief), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.doesNotMatch(brief, NOTES);
+  assert.deepEqual(capCarriedAdvisories(eight), eight); // the limit itself is untouched, note included
+});
+
+test("spec review carry: the event and the post keep all ten advisories the brief dropped", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const briefOut = path.join(os.tmpdir(), `pb-spec-carry-flood-${process.pid}.md`);
+  if (fs.existsSync(briefOut)) fs.rmSync(briefOut);
+  process.env.MOCK_SPEC_REVIEW = "advisory-flood"; // one blocker, ten P2/P3
+  process.env.MOCK_SPEC_BRIEF_OUT = briefOut;
+  try {
+    await t.run("build", "order-cancellation"); // the blocker holds T1; the ten are carried
+    assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
+    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Contracts", content: "- Cancellation writes an audit row before it returns.", mode: "append" });
+    delete process.env.MOCK_SPEC_REVIEW; // the next round answers the blocker and adds nothing
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SPEC_BRIEF_OUT;
+  }
+  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
+  assert.equal(reviews.length, 2);
+  // the reviewer saw eight and was told where the rest lives
+  assert.equal(advisoryIds(fs.readFileSync(briefOut, "utf8")).length, 8);
+  assert.match(fs.readFileSync(briefOut, "utf8"), /Dropped 2 of 10 for length/);
+  // the round-to-round record and the human's count stay whole
+  assert.equal(reviews[1].advisory.length, 10);
+  assert.match(t.posts.find((p) => /not re-listed/.test(p))!, /10 earlier advisory findings carried/);
+  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
+});
+
 test("spec review: restarting a started build never re-gates, however the spec changed", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -7921,7 +8206,7 @@ test("spec review: a follow-up brief carries the delta, ids and resolutions", as
     round: 2,
   });
   assert.match(followUp, /# Earlier review/);
-  assert.match(followUp, /delta review: only the changed sections and tasks/);
+  assert.match(followUp, /delta round: the revision below is what you are reviewing/);
   assert.match(followUp, /## Binding context \(unchanged by this revision\)[\s\S]*# Order cancellation/);
   assert.match(followUp, /## Changed since the earlier review[\s\S]*Only PENDING orders can be cancelled\./);
   assert.match(followUp, /## Earlier form of the changed parts[\s\S]*Any order can be cancelled\./);
@@ -8123,6 +8408,19 @@ test("spec: every observable contract value cites the code or test that pins it"
   assert.match(SPEC_REVIEWER_SYSTEM, /value inferred from the design, or contradicted by its citation, is a finding/);
   assert.match(SPEC_REVIEWER_SYSTEM, /one sentence a tired human can act on: what goes wrong, for whom, and where/);
   assert.match(SPEC_REVIEWER_SYSTEM, /supporting trace .* on its Evidence line/);
+});
+
+test("contract values are computed: the format shows each formula's result for the cases Acceptance pins", async () => {
+  const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
+  const contractsOf = (p: string) => p.slice(p.indexOf("## Contracts"), p.indexOf("## Migration and rollback"));
+  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
+    const contracts = contractsOf(p);
+    // a formula the reader must evaluate by hand is where a wrong value survives a review round
+    assert.match(contracts, /computed value for each case/);
+    // it sits beside the citation rule it complements, in Contracts and not in some other section
+    assert.match(contracts, /Every observable value a Contract states[\s\S]*computed value for each case/);
+    assert.doesNotMatch(p.slice(0, p.indexOf("## Contracts")), /computed value for each case/);
+  }
 });
 
 test("build: a task stays narrow, edits structured files literally, and leaves the full suite to the harness", async () => {

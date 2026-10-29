@@ -29,8 +29,10 @@ if (sys.includes("ATTACKER")) {
 } else if (sys.includes("SPEC REVIEWER")) {
   // MOCK_SPEC_REVIEW=block: a P0 plus a block verdict; =block-bullets: the same finding written
   // as a Markdown list; =block-untagged: a block verdict with no parseable finding; =advisory:
-  // a P2 that travels on; =empty: a P1 on a silent empty path plus a block verdict;
+  // a P2 that travels on; =advisory-flood: a blocking P0 plus ten P2/P3, the carry a follow-up
+  // brief must cap; =empty: a P1 on a silent empty path plus a block verdict;
   // =block-advisory: a blocking P0 plus a P2 in the same answer;
+  // =block-outside-advisory: an in-scope P0 that blocks plus an outside P1 the loop carries;
   // =outside-advisory: an outside P1 plus pass; =outside-blocker: an outside P0 plus pass;
   // =crash: exits nonzero with no answer (the harness must fail closed);
   // =still-open: resolves no earlier blocker but says pass (the harness must fail closed);
@@ -38,8 +40,11 @@ if (sys.includes("ATTACKER")) {
   // =resolved-and-repeated: says resolved but lists the same issue again under Findings.
   // On a follow-up, every mode except those two first resolves the earlier P0/P1 findings, as a
   // good reviewer would. MOCK_SPEC_BRIEF_OUT captures the brief; MOCK_SPEC_EDIT simulates the
-  // human editing the spec mid-review.
+  // human editing the spec mid-review; MOCK_SPEC_PROMPT_LOG and MOCK_SPEC_SYSTEM_LOG append the
+  // instruction and the system prompt of every round, so a test can read what each round was told.
   if (process.env.MOCK_SPEC_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_SPEC_BRIEF_OUT, brief);
+  if (process.env.MOCK_SPEC_PROMPT_LOG) fs.appendFileSync(process.env.MOCK_SPEC_PROMPT_LOG, `${argv.at(-1)}\n<<<round>>>\n`);
+  if (process.env.MOCK_SPEC_SYSTEM_LOG) fs.appendFileSync(process.env.MOCK_SPEC_SYSTEM_LOG, `${sys}\n<<<round>>>\n`);
   if (process.env.MOCK_SPEC_EDIT) fs.appendFileSync(process.env.MOCK_SPEC_EDIT, "- Note: edited while the review ran.\n");
   const mode = process.env.MOCK_SPEC_REVIEW;
   if (mode === "crash") {
@@ -55,7 +60,13 @@ if (sys.includes("ATTACKER")) {
   else if (mode === "block-untagged") say([{ type: "text", text: `${resolved}The spec has an unstated empty path.\n\nVERDICT: block` }]);
   else if (mode === "block-advisory")
     say([{ type: "text", text: `${resolved}[P0] Decisions — unguarded transition\nEvidence: spec.md:63 names no guard, and src/order.ts:42 has none.\nFix: guard it\n[P2] Contracts — unmeasured window\nEvidence: Contracts names no measurement for the 30-day window.\nFix: measure it\n\nVERDICT: block` }]);
+  else if (mode === "block-outside-advisory")
+    say([{ type: "text", text: `${resolved}## Findings\n\n- [P0] Decisions — unguarded transition\n  Evidence: spec.md:63 names no guard, and src/order.ts:42 has none.\n  Fix: guard it\n\n## Outside the change\n\n- [P1] Context — src/order.ts names a transition with no guard\n  Fix: guard it in a follow-up\n\nVERDICT: block` }]);
   else if (mode === "advisory") say([{ type: "text", text: `${resolved}[P2] Contracts — unmeasured window\nEvidence: Contracts names no measurement for the 30-day window.\nFix: measure it\n\nVERDICT: pass` }]);
+  else if (mode === "advisory-flood") {
+    const ten = Array.from({ length: 10 }, (_, i) => `- [P${i < 5 ? 2 : 3}] Contracts — flood note ${i + 1}\n  Evidence: Contracts names no measurement for that window.\n  Fix: measure it`).join("\n");
+    say([{ type: "text", text: `${resolved}## Findings\n\n- [P0] Decisions — unguarded transition\n  Evidence: spec.md:63 names no guard, and src/order.ts:42 has none.\n  Fix: guard it\n\n${ten}\n\nVERDICT: block` }]);
+  }
   else if (mode === "outside-advisory")
     say([{ type: "text", text: `${resolved}## Findings\n(none)\n\n## Outside the change\n[P1] Context — src/order.ts names a transition with no guard\nFix: guard it in a follow-up\n\nVERDICT: pass` }]);
   else if (mode === "outside-blocker")

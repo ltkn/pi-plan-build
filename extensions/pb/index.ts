@@ -76,7 +76,7 @@ import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findin
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, ensureSpecIds, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, testRefsOf, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, ensureSpecIds, needsRed, ownTestRef, parseSpec, pathTestRef, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, taskIdProofGap, testRefsOf, tokensOf } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { parseRequirementDeltas, parseRequirementDocument, planArchiveRequirements, requirementDeltaSummary, requirementWriteErrors, writeRequirementPlans } from "./requirements.ts";
 import { buildReport } from "./report.ts";
@@ -194,17 +194,23 @@ const acceptanceMarkerErrors = (spec: ParsedSpec): string[] =>
   });
 
 /**
- * `(tests: ...)` entries that resolve to nothing: a path-like entry must exist in the repo,
- * any other entry (that isn't the task's own `Tn` id) must occur verbatim in the test files.
- * A named test that proves nothing is a faked mapping, so writers are held to resolvable names
- * and the reviewer judges stragglers as P1 candidates.
+ * `(tests: ...)` entries that resolve to nothing: a `Tn` entry must name a task of this spec that
+ * needs red (the gate forcing that task's `Test:` run to fail is the proof it claims, its own id
+ * included), a path-like entry must exist in the repo, and any other entry must occur verbatim in
+ * the test files. A named proof that resolves to nothing is a faked mapping, so writers are held to
+ * names that hold and the reviewer judges stragglers as P1 candidates.
  */
 const unresolvedMappings = (spec: ParsedSpec, cwd: string): Array<{ task: string; entry: string; reason: string }> => {
   const out: Array<{ task: string; entry: string; reason: string }> = [];
   for (const t of spec.tasks) {
     if (!t.test) continue;
     for (const entry of testRefsOf(t.text)) {
-      if (ownTestRef(entry)) continue;
+      const gap = taskIdProofGap(spec, entry);
+      if (gap) {
+        out.push({ task: t.id, entry, reason: `${gap}, and a task id proves nothing` });
+        continue;
+      }
+      if (ownTestRef(entry)) continue; // the named task needs red: its Test: run is the proof
       if (pathTestRef(entry)) {
         if (!fs.existsSync(path.join(cwd, entry.trim()))) out.push({ task: t.id, entry, reason: `names \`${entry.trim()}\`, which is not in the repo` });
         continue;
@@ -214,6 +220,9 @@ const unresolvedMappings = (spec: ParsedSpec, cwd: string): Array<{ task: string
   }
   return out;
 };
+/** How a proof marker must name its proof, spelled once for both write gates. */
+const MARKER_GUIDANCE =
+  "A Tn entry names a task the red gate will force to fail, so that task must need a red Test: run (its own id or another task's); on a task with no red proof — a (refactor) title, no Test: line, New tests: no, a verification gate other than tests — name a test file or test name that exists today, or use (non-testable: <why>).";
 const acceptanceMappingErrors = (spec: ParsedSpec, cwd: string): string[] =>
   unresolvedMappings(spec, cwd).map((m) => `${m.task} (tests: ${m.entry}) — ${m.reason}`);
 
@@ -790,7 +799,7 @@ export default function pb(pi: ExtensionAPI) {
       if (pathErrs.length) throw new Error(`The spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\nFix the path, line or citation; new files need no line number.`);
       const store = new Store(ctx.cwd);
       const mapErrs = acceptanceMappingErrors(spec, ctx.cwd);
-      if (mapErrs.length) throw new Error(`Acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\nName a file in the repo or a test the test files contain (a T1-style entry means the task's own Test: run).`);
+      if (mapErrs.length) throw new Error(`Acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\n${MARKER_GUIDANCE}`);
       const reqErrs = requirementWriteErrors(store, params.content);
       if (reqErrs.length) throw new Error(`The requirement delta can't be merged into the living requirement base:\n- ${reqErrs.join("\n- ")}\nFix it and call pb_write_spec again.`);
       const prev = store.progress(params.name);
@@ -845,7 +854,7 @@ export default function pb(pi: ExtensionAPI) {
         const markerErrs = acceptanceMarkerErrors(spec);
         if (markerErrs.length) throw new Error(`Not written: acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
         const mapErrs = acceptanceMappingErrors(spec, ctx.cwd);
-        if (mapErrs.length) throw new Error(`Not written: acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\nName a file in the repo or a test the test files contain (a T1-style entry means the task's own Test: run).`);
+        if (mapErrs.length) throw new Error(`Not written: acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\n${MARKER_GUIDANCE}`);
       }
       // A call that makes the spec ready re-checks the full senior shape, whatever else it wrote
       // in the same call (findings and decisions evidence included). A Tasks edit on an already-ready
@@ -2655,11 +2664,12 @@ export default function pb(pi: ExtensionAPI) {
   /**
    * Fresh eyes on the plan before the first task: a spec-sized review that attacks Decisions,
    * re-tests "Not doing X" rejections and flags unmeasured quantitative claims. A pass covers
-   * exactly the text it saw, hash and all, on its {type:"spec-review"} event: a later start
-   * reviews only the changed sections and tasks, re-posts a standing block instead of re-running,
-   * repairs one unparseable block rather than re-reviewing, and --force skips it as recorded
-   * acceptance. Only the way into a build gates; resumes after T1 started never do, however the
-   * spec has changed since.
+   * exactly the text it saw, hash and all, on its {type:"spec-review"} event: a later start reviews
+   * the revision — whatever it creates or exposes, wherever its text sits, with a pre-existing
+   * problem in untouched text under Outside the change — re-posts a standing block instead of
+   * re-running, repairs one unparseable block rather than re-reviewing, and --force skips it as
+   * recorded acceptance. Only the way into a build gates; resumes after T1 started never do, however
+   * the spec has changed since.
    */
   const runSpecReview = async (
     ctx: ExtensionContext,
@@ -2703,7 +2713,9 @@ export default function pb(pi: ExtensionAPI) {
         role: "spec-review",
         systemPrompt: SPEC_REVIEWER_SYSTEM,
         brief: specReviewBrief(name, md, { prior, priorMarkdown: o.priorMarkdown, advisory: priorAdvisory, round }),
-        prompt: followUp ? "Review the spec again in the attached file. Resolve every earlier P0/P1 by id first, then report only new or changed findings." : "Review the spec in the attached file.",
+        prompt: followUp
+          ? "Review the spec again in the attached file. Resolve every earlier P0/P1 by id first. Then report the new findings this revision creates or exposes, and any regression — in scope wherever their text sits — and put a problem that predates the revision, in text the revision left alone, under `## Outside the change`."
+          : "Review the spec in the attached file.",
         tools: ["read", "grep", "find", "ls", "bash"],
         model: reviewModel,
         thinking: cfg.specReviewer.thinking,

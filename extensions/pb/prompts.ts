@@ -8,7 +8,7 @@
 import { tip } from "./help.ts";
 import { headerBlock, safeLine } from "./markdown.ts";
 import { requirementCriteria, requirementNameKey, type RequirementDelta, type RequirementDocument } from "./requirements.ts";
-import { acceptanceCriteria, BINDING_SECTIONS, type ParsedSpec, type SpecTask, sectionHeading, sectionOf, specReviewDelta } from "./spec.ts";
+import { acceptanceCriteria, BINDING_SECTIONS, capCarriedAdvisories, type ParsedSpec, type SpecTask, sectionHeading, sectionOf, specReviewDelta } from "./spec.ts";
 import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, REQUIREMENTS_DIR, type Progress, type SpecResolution, type TaskProgress, cap } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
@@ -149,7 +149,7 @@ What the analysis established, as short as a fresh session needs to not redo it:
 ## Decisions
 Each decision with its reason, as it stands now: no dates, no history, not who decided. Every bullet carries its reason (because …); rejected ideas as "Not doing X, because …", so they aren't reconsidered. Settled guesses as "Assumption: <claim> — settles by <how>, because <reason>", so the reviewer can discharge them. Every quantitative claim (latencies, counts, windows) carries a measurement (command plus result) or is written as such an Assumption.
 ## Contracts
-No later step sees the whole change at once: tasks are built one by one. So pin here every seam other code, clients or stored data depend on — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. A single task that changes an external surface needs this section too; tasks sharing a seam (the same Test: command or a shared file) without it are rejected. Truly independent internal tasks need none, though a one-line "independent" section is accepted, and a keyword false positive can be answered with "none — <why>". Pin exactly these, as they must end up; leave everything behind them to the build. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown. Every observable value a Contract states — an HTTP status, error type, header, ordering, event name or stored value — cites the code path or test that pins it today (file:line), or is written as an Assumption; a value inferred from the design is built as written.
+No later step sees the whole change at once: tasks are built one by one. So pin here every seam other code, clients or stored data depend on — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. A single task that changes an external surface needs this section too; tasks sharing a seam (the same Test: command or a shared file) without it are rejected. Truly independent internal tasks need none, though a one-line "independent" section is accepted, and a keyword false positive can be answered with "none — <why>". Pin exactly these, as they must end up; leave everything behind them to the build. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown. Every observable value a Contract states — an HTTP status, error type, header, ordering, event name or stored value — cites the code path or test that pins it today (file:line), or is written as an Assumption; a value inferred from the design is built as written. A formula or derived figure — a size, limit, count, threshold, window — shows its computed value for each case Acceptance pins, inputs and result together (a tenth of a 128k window = 12800), because a number the reader must recompute by hand is the one that survives a review round wrong.
 ## Migration and rollback
 Only when the change persists or transforms data, a schema or a stored format: how existing data moves to the new shape, how the change is rolled back, and what old and new code do while both run. Say "none — <why>" when nothing outlives the change.
 ## Requirements: <capability>
@@ -176,7 +176,7 @@ Only while Status is planning: what's undecided, the options still being weighed
 ## Tasks
 ### T1: <the outcome, e.g. "a pending order can be cancelled">
 What must be true when it's done, and anything the build must know; not how to build it.
-- Acceptance: <one behaviour, as a test would check it>   (one line each, abuse cases included: they are the tests to write; each carries its proof marker (tests: <the tests that prove it>) or its exemption (non-testable: <why>))
+- Acceptance: <one behaviour, as a test would check it>   (one line each, abuse cases included: they are the tests to write; each carries its proof marker (tests: <the tests that prove it>) or its exemption (non-testable: <why>); a Tn in a marker names a task the red gate will force to fail, so it must be this task's own id or another task's that needs a red Test: run — and a task with no red proof (a (refactor) title, no Test: line, New tests: no, a gate that runs no tests) names a test file or test name that exists today, or says (non-testable: <why>))
 - Test: \`<command that runs this task's tests>\`   (for a task that adds behaviour)
 
 The spec pins what the change must do and how we'll know: Goal, Decisions, Contracts, Threats and Acceptance bind the build. How to build it is left to the build, which settles the shape task by task — the compiler and the tests giving feedback — and records what it settles on in "## Design". So don't write "## Design" yourself, and don't prescribe classes, methods or steps unless they are a Contract. Put what tasks share in Contracts: that is the shape the build must not invent.
@@ -891,7 +891,7 @@ export function reviewerBrief(o: ReviewBrief): string {
   return lines.join("\n");
 }
 
-export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review a feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. You may inspect the repository with read-only shell commands (ls, find, cat, head, tail, git status, git log, git diff, rg). Do not create, modify or delete files, redirect output, install anything, or run commands that write. Your findings must be checkable against the spec and the code it cites. Every observable value in a Contract (status, error, header, ordering, event, stored value) must be backed by the code path or test that pins it; a value inferred from the design, or contradicted by its citation, is a finding. Attack the design; do not reward length or polish. A clean pass is a valid result: report nothing rather than invent a finding. When a rule is selected by a classification (a kind, role, mode, type, state, host, tenant), test an input that matches more than one class and say which class must win at each decision — routing, lookup, authorization, default — because two classifiers that disagree are a hole when the disagreement reaches a decision. A finding's first line is one sentence a tired human can act on: what goes wrong, for whom, and where; put the supporting trace (quoted spec text, code fact, file:line) on its Evidence line. Be concise: conclusion first. Your answer is all that goes back.`;
+export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review a feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. You may inspect the repository with read-only shell commands (ls, find, cat, head, tail, git status, git log, git diff, rg). Do not create, modify or delete files, redirect output, install anything, or run commands that write. Your findings must be checkable against the spec and the code it cites. Every observable value in a Contract (status, error, header, ordering, event, stored value) must be backed by the code path or test that pins it; a value inferred from the design, or contradicted by its citation, is a finding; a citation whose file and symbol are right but whose line number has drifted is corrected in silence inside any real finding about that area, never a finding on its own. Attack the design; do not reward length or polish. A clean pass is a valid result: report nothing rather than invent a finding. When a rule is selected by a classification (a kind, role, mode, type, state, host, tenant), test an input that matches more than one class and say which class must win at each decision — routing, lookup, authorization, default — because two classifiers that disagree are a hole when the disagreement reaches a decision. A finding's first line is one sentence a tired human can act on: what goes wrong, for whom, and where; put the supporting trace (quoted spec text, code fact, file:line) on its Evidence line. Be concise: conclusion first. Your answer is all that goes back.`;
 
 /** The earlier review a follow-up must converge against, plus the advisory findings it has already carried. */
 export interface SpecReviewContext {
@@ -909,12 +909,17 @@ export interface SpecReviewContext {
 export function specReviewBrief(name: string, markdown: string, o: SpecReviewContext = {}): string {
   const prior = o.prior ?? [];
   const advisory = o.advisory ?? [];
+  // The reviewer sees a bounded carry; the event and the human's counts keep every one of them.
+  const shownAdvisory = capCarriedAdvisories(advisory);
+  const droppedAdvisory = advisory.length - shownAdvisory.length;
   const followUp = prior.length > 0 || advisory.length > 0 || o.priorMarkdown !== undefined;
   const delta = o.priorMarkdown !== undefined ? specReviewDelta(o.priorMarkdown, markdown) : undefined;
   const deltaReview = !!delta && (!!delta.changed || delta.removed.length > 0);
   const specPath = `${P}/specs/${name}/spec.md`;
   const subject = deltaReview
-    ? `The full spec is at \`${specPath}\`, but this is a delta review: only the changed sections and tasks below are under review. Read the full spec only for context the delta leaves open; do not re-review unchanged parts.
+    ? `The full spec is at \`${specPath}\`; read it whenever a changed part depends on another. This is a delta round: the revision below is what you are reviewing.
+
+Precedence: whatever this revision creates or exposes is in scope wherever its text sits — a new conflict between revised and untouched text is a blocking Finding. Only a problem that predates the revision, in text the revision left alone, goes under \`## Outside the change\`.
 
 ## Binding context (unchanged by this revision)
 
@@ -939,7 +944,9 @@ ${delta!.earlier || "(the changed parts are new)"}
     : o.priorMarkdown !== undefined
       ? "The current text is shown in full; the revision changed no section or task, so judge the earlier findings against it.\n\n"
       : `The earlier spec text was not recorded. ${
-          prior.length ? "Judge the earlier findings against the current text and say what current-text evidence you relied on." : "Report only new or changed findings."
+          prior.length
+            ? "Judge the earlier findings against the current text and say what current-text evidence you relied on."
+            : "Report what this round's revision creates or exposes, and put a problem that predates it, in text the revision left alone, under Outside the change."
         }\n\n`
 }## Earlier P0/P1 findings
 
@@ -957,7 +964,7 @@ ${
 
 These are already known and carried with the spec. Do not re-report them as new findings. Leave them out unless the change makes one blocking (P0/P1); a fix needs no mention.
 
-${advisory.map((f) => findingLine(f)).join("\n")}
+${shownAdvisory.map((f) => findingLine(f)).join("\n")}${droppedAdvisory ? `\nDropped ${droppedAdvisory} of ${advisory.length} for length — lower advisories are in the review log.` : ""}
 
 `
     : ""
@@ -969,7 +976,7 @@ ${subject}
 
 ${earlier}# Your job
 
-${deltaReview ? `This is a delta review. Check the changed sections and tasks against the binding context, the full spec, and the repo. Problems that already existed outside the change are still reported, under "Outside the change": only an outside P0 blocks; outside P1-P3 are advisory and carried with the spec, not re-reviewed automatically. Do not leave a real problem only in prose, and do not re-report an earlier advisory finding as new.
+${deltaReview ? `This is a delta review. Check the changed sections and tasks against the binding context, the full spec, and the repo. Whatever this revision creates or exposes is a finding wherever its text sits: a revised part that now contradicts untouched text is a blocking Finding, and you name the current-text evidence for it. Only a problem that predates the revision, in text the revision left alone, goes under "Outside the change": only an outside P0 blocks; outside P1-P3 are advisory, carried with the spec, and not re-reviewed automatically. Do not leave a real problem only in prose, and do not re-report an earlier advisory finding as new.
 
 ` : ""}Attack its Decisions: for each decision, say how it could be wrong or abused in production. Re-test every "Not doing X" rejection: what breaks because X was rejected? Flag every quantitative claim (latencies, counts, windows) with no measurement: demand a number or an Assumption. Probe the empty paths: for every behavior the spec describes, ask what it does when there is nothing to do (empty input, all dependencies down, no reportable case) — if the spec is silent, flag it (P1 when a stale artifact would linger for the user, else P2), demanding defined behavior or an Assumption. Check the prose inventory: does every behavior name the docs that must change with it?
 

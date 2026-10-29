@@ -408,8 +408,9 @@ commands resolve, that external surfaces have Contracts, and that
 persisted-data changes have a Migration and rollback answer. Every observable
 value in a Contract — a status, error, header, ordering, event or stored value
 — is checked against the code path or test the spec cites for it; a value with
-no citation, or one its citation contradicts, is a finding. It runs on your
-session's model by default; set
+no citation, or one its citation contradicts, is a finding. A `path:line` whose
+file and symbol are right but whose number has drifted is corrected in place,
+never reported on its own. It runs on your session's model by default; set
 `"specReviewer": {"model": "provider/id"}` (or point it at `buildModel`) when
 you want another model, such as the implementer, to validate the plan.
 
@@ -420,16 +421,24 @@ its trace and fix follow on `Evidence:` and `Fix:` lines. The chat result keeps
 earlier findings (with their resolution status) apart from new blocking ones;
 the full text stays in the recorded review and its linked session. A block
 means amend the spec (or record a rebuttal in Decisions) and run `/pb:build`
-again: the next pass reviews only the changed sections and tasks, against the
-full spec and the earlier findings, and judges each earlier P0/P1 against the
-new text first. An unchanged blocked spec is re-posted, not re-reviewed. After
-`maxRounds` blocking rounds (2 by default) the loop stops and the next changed
-spec waits for you: `/pb:build --review` spends one more round, or
-`/pb:build --force` builds it as it stands and records the standing findings as
-accepted. A block whose answer cannot be parsed is reformatted once; if that
-fails too, the reviewer's own prose is shown and nothing re-runs until you
-amend or ask with `--review`. Only the way into a build is gated: once the
-first task has started, spec edits are the code reviewer's to judge, not
+again: the next pass reviews the revision against the full spec and the
+earlier findings, and judges each earlier P0/P1 against the new text first.
+Scoping there is by responsibility, not location: whatever the revision
+creates or exposes is a finding wherever its text sits — a Decisions edit
+that contradicts untouched Contracts text blocks — and only a problem that
+predates the revision, in text the revision left alone, goes under Outside
+the change, where only a P0 blocks and the rest carries with the spec. That
+carry is bounded in the reviewer's view only: it lists at most eight earlier
+advisories, never dropping a P1 and losing P3 before P2, and names how many
+it left out — the recorded review and the count in the post keep all of
+them. An unchanged blocked spec is re-posted, not re-reviewed. After
+`maxRounds` blocking rounds (2 by default) the loop stops and the next
+changed spec waits for you: `/pb:build --review` spends one more round, or
+`/pb:build --force` builds it as it stands and records the standing findings
+as accepted. A block whose answer cannot be parsed is reformatted once; if
+that fails too, the reviewer's own prose is shown and nothing re-runs until
+you amend or ask with `--review`. Only the way into a build is gated: once
+the first task has started, spec edits are the code reviewer's to judge, not
 re-reviewed at plan level.
 
 **Read the plan yourself, in this order.** The spec reviewer is a second pair
@@ -447,7 +456,8 @@ of eyes, not a substitute for yours:
 5. **Tasks**: does each leave the code working, and does each named test prove
    its acceptance line? Do the tasks build in an order that could actually run?
 6. **Findings (and Context)**: are the facts still true, and does every
-   `path:line` citation still point at the code it describes?
+   `path:line` citation still hold the content it is cited for? A line number
+   that drifted is corrected silently, so judge the content.
 
 A plan you cannot check this way is not ready: amend it with `/pb:spec` before
 building. The pre-T1 review can miss something; this read is where you catch a
@@ -619,8 +629,12 @@ proof is fingerprinted against. Each case is listed at the end of the build and 
 partly proven or unproven — give a task its own targeted command where you
 can, and when tasks share one, make it fail at each task's turn (a conjunction
 over per-task artifacts, so each task still has something to prove). Proof
-markers must name real tests (a file in the repo or a test it contains;
-`T1`-style means the task's own run), or writing is rejected.
+markers must name real proof — a file in the repo, a test it contains, or a
+task id whose task the red gate will force to fail (its own or another's) —
+or writing is rejected. On a task with no red proof, the `(refactor)`,
+no-`Test:`, `New tests: no` and no-test-gate cases above, name a real test
+or use `(non-testable: <why>)`: a task id there claims a red run that will
+never be asked for.
 
 The commands come from `.pi/pb/config.json` (`"verify"` and `"build"`, `"auto"`
 detects Maven, Gradle, npm/TypeScript, Cargo, Go and pytest; `"lint"` uses

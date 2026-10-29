@@ -257,9 +257,10 @@ export function redSharing(spec: ParsedSpec): Map<string, string> {
 export const buildTask = (spec: ParsedSpec, id: string | undefined) => spec.tasks.find((t) => t.id === id);
 
 /**
- * `(tests: ...)` proof references named on one task's acceptance lines. A `T1`-style entry means
- * the task's own Test: run; a path-like entry names a file; anything else must occur verbatim in
- * the test files (a test or file name) — a named test that proves nothing is a faked mapping.
+ * `(tests: ...)` proof references named on one task's acceptance lines. A `Tn`-style entry names a
+ * task whose red `Test:` run proves the line — its own id or another task's, only where that task
+ * needs red; a path-like entry names a file; anything else must occur verbatim in the test files
+ * (a test or file name) — a named test that proves nothing is a faked mapping.
  */
 export function testRefsOf(taskText: string): string[] {
   const refs: string[] = [];
@@ -272,10 +273,25 @@ export function testRefsOf(taskText: string): string[] {
   return refs;
 }
 
-/** A `T1`-style entry: the task's own Test: command run proves it, no file to resolve. */
+/** A `Tn`-shaped entry: it names a task rather than a file; `taskIdProofGap` decides whether that task's red run backs it. */
 export const ownTestRef = (entry: string) => /^T\d+$/i.test(entry.trim());
 /** A path-like entry: must exist in the repo. */
 export const pathTestRef = (entry: string) => /[/\\]/.test(entry) || /\.[A-Za-z0-9]+$/.test(entry.trim());
+
+/**
+ * Why a `Tn` proof entry names no red proof, or undefined when it names one: the id must name a task
+ * of this spec and that task must need red, because the red gate forcing its `Test:` run to fail
+ * before the change is all such a marker claims — which is why an own id is as good as another task's,
+ * and why a `Tn` on a red-exempt task or in a red-exempt spec names nothing. The writer's alternatives
+ * are `(non-testable: <why>)` or a test file or test name that exists today.
+ */
+export function taskIdProofGap(spec: ParsedSpec, entry: string): string | undefined {
+  if (!ownTestRef(entry)) return undefined; // not a task id: the repo decides whether it resolves
+  const named = buildTask(spec, entry.trim().toUpperCase());
+  if (!named) return "names no task of this spec";
+  const exempt = redExemption(spec, named);
+  return exempt ? `names ${named.id}, which needs no red proof (${exempt})` : undefined;
+}
 
 /* ------------------------- senior-enforcement gates ------------------------- */
 
@@ -600,6 +616,28 @@ const SPEC_FINDING_ID = /^F(\d+)$/;
 
 /** Whether a finding holds the build: an in-scope P0/P1, or an outside P0 (pre-existing, but unsafe to build on). */
 export const specReviewBlocks = (f: Finding) => f.priority === "P0" || (f.priority === "P1" && !f.outside);
+
+/** How many carried advisories a follow-up brief lists, so the revision stays the bulk of what it reads. */
+export const CARRIED_ADVISORY_LIMIT = 8;
+
+/**
+ * The carried advisories to show a follow-up reviewer: at most `limit`, dropping the least blocking
+ * first (P3 before P2) and only as many as needed, so a P1 advisory — a real pre-existing weakness
+ * whose only written-out appearance is this brief — survives any flood of polish. Input order
+ * survives within a priority. This narrows what the reviewer reads, never the record: the review
+ * event and the human's counts keep the full list.
+ */
+export function capCarriedAdvisories(items: Finding[], limit = CARRIED_ADVISORY_LIMIT): Finding[] {
+  const kept = [...items];
+  const weight = (f: Finding) => (f.priority === "P1" ? 2 : f.priority === "P2" ? 1 : 0);
+  while (kept.length > limit) {
+    let weakest = -1;
+    for (let i = 0; i < kept.length; i++) if (weight(kept[i]) < 2 && (weakest < 0 || weight(kept[i]) <= weight(kept[weakest]))) weakest = i;
+    if (weakest < 0) break; // more P1 advisories than the limit: a P1 is never dropped
+    kept.splice(weakest, 1);
+  }
+  return kept;
+}
 
 /** Give every legacy or newly parsed finding a stable F id, continuing after the highest one already issued. */
 export function ensureSpecIds(findings: Finding[]): { findings: Finding[]; next: number } {
