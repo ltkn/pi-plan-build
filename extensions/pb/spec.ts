@@ -359,6 +359,44 @@ const sectionBullets = (md: string, name: string): string[] => {
 };
 
 /**
+ * Root files a spec may cite by name without an extension (README:12). Part of the citation grammar
+ * below: `specPathErrors` resolves the refs it finds against the project, `boundOwnerErrors` asks
+ * only whether a bullet carries one, so both read the same text.
+ */
+export const ROOT_FILE_REF = /^(?:Makefile|Dockerfile|LICENSE|README|CHANGELOG|CONTRIBUTING|Gemfile|Rakefile|Procfile|go\.mod|go\.sum|package\.json|tsconfig\.json|pom\.xml|build\.gradle(?:\.kts)?)$/i;
+
+/**
+ * `path:line` references in a spec, outside fences. A path may be backticked or
+ * bare; a line range (`:40-80`) names its first line. New files without a line
+ * are allowed: only a line claim must point at a real file and line.
+ */
+export const specPathRefs = (md: string): Array<{ path: string; line: number; text: string }> => {
+  const refs = new Map<string, { path: string; line: number; text: string }>();
+  const re = /`([^`\s]+):(\d+)(?:-\d+)?`|(?<![\w/`])([A-Za-z0-9_./-]+):(\d+)(?:-\d+)?/g;
+  let inFence = false;
+  for (const raw of md.split("\n")) {
+    if (/^(\s*)```/.test(raw)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    for (const m of raw.matchAll(re)) {
+      const p = (m[1] ?? m[3]).replace(/^\.\//, "").replace(/[/.,;:]+$/, "");
+      const line = Number(m[2] ?? m[4]);
+      if (!p || !Number.isFinite(line) || line < 1) continue;
+      const before = raw.slice(Math.max(0, (m.index ?? 0) - 12), m.index ?? 0);
+      if (before.includes("://") || p.startsWith("/") || p.startsWith("~") || p.includes("://") || p.includes("...")) continue;
+      if (/[<>{}*$@=,;()[\]\s]/.test(p)) continue;
+      if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(p) || /^v?\d+(?:\.\d+){1,3}$/i.test(p)) continue;
+      if (!p.includes("/") && !/\.[A-Za-z0-9]{1,12}$/.test(p) && !ROOT_FILE_REF.test(p)) continue;
+      const key = `${p}:${line}`;
+      if (!refs.has(key)) refs.set(key, { path: p, line, text: raw.trim() });
+    }
+  }
+  return [...refs.values()];
+};
+
+/**
  * High-signal product keywords for the write-time Threats gate. Deliberately
  * narrower than the reviewer's auto-mode heuristic: generic words (status,
  * limit, address, email, job, role) stay reviewer-level, not write-time blocks.
@@ -438,13 +476,30 @@ export function threatsErrors(md: string, spec: ParsedSpec): string[] {
 const QUANTITY = /\b\d+(\.\d+)?\s*(ms|s\b|sec|secs|seconds?|minutes?|mins?|hours?|days?|rows?|reqs?|rps|qps|%|percent|mb|gb|kb)\b|\bp(50|90|95|99)\b|\b\d+\s*(attempts|retries|times|connections|threads|workers|requests)\b|\b(at least|at most|max|maximum|min|minimum|up to|over|under|fewer than|more than|within)\s+\d+\b/i;
 const SUBSECOND = /\bsub-?seconds?\b/i;
 
+/**
+ * Whether a line is an Assumption that names how it settles. Both halves must be present; their
+ * order is free, because the two claims are one sentence in either order. One answer, shared by the
+ * measurement gate and the bound gate.
+ */
+export const ASSUMPTION_WITH_SETTLER = /(?=[\s\S]*assumption:)(?=[\s\S]*settles?\s+by)/i;
+
+/**
+ * How often something runs, said in words: the trigger for a bound that must name its owner. It
+ * never matches a bare count or a unit (`at most 200`, `200ms`) — `QUANTITY` owns those, and their
+ * answer is a measurement, which no `path:line` can give.
+ */
+export const CADENCE = /\b(?:at most once|no more than once|once per|twice per|per (?:calls?|runs?|rounds?|invocations?|requests?|passes)|every (?:calls?|runs?|rounds?|invocations?|requests?|passes)|each (?:calls?|runs?|rounds?|invocations?|requests?|passes)|one (?:calls?|runs?|rounds?|invocations?|requests?|queries) per|at most one [^.;\n]{0,40}?\b(?:calls?|invocations?|runs?|rounds?|passes|queries|lookups?|scans?|fetches|requests?|executions?|walks?|reads?|processes|sends?|writes?))\b/i;
+
+/** A bound whose owner is code that does not exist yet: `new: src/scan.ts`. Angle brackets are prose, never literal. */
+export const NEW_BOUND_OWNER = /\bnew:\s*`?[\w./-]+\.[\w]{1,12}`?/i;
+
 export function quantitativeErrors(md: string, spec: ParsedSpec): string[] {
   if (spec.status !== "ready") return [];
   const out: string[] = [];
   for (const section of ["Decisions", "Contracts"] as const) {
     for (const line of sectionBullets(md, section)) {
       if (!QUANTITY.test(line) && !SUBSECOND.test(line)) continue;
-      if (/assumption:/i.test(line) && /settles?\s+by/i.test(line)) continue;
+      if (ASSUMPTION_WITH_SETTLER.test(line)) continue;
       if (/`[^`]+`/.test(line)) continue;
       out.push(`${section} quantitative claim without measurement or Assumption: "${line}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
     }
@@ -454,7 +509,7 @@ export function quantitativeErrors(md: string, spec: ParsedSpec): string[] {
       const trimmed = line.trim();
       if (!trimmed || /^###\s/.test(trimmed)) continue;
       if (!QUANTITY.test(trimmed) && !SUBSECOND.test(trimmed)) continue;
-      if (/assumption:/i.test(trimmed) && /settles?\s+by/i.test(trimmed)) continue;
+      if (ASSUMPTION_WITH_SETTLER.test(trimmed)) continue;
       if (/`[^`]+`/.test(trimmed)) continue;
       out.push(`${t.id} quantitative claim without measurement or Assumption: "${trimmed}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
     }
@@ -467,7 +522,7 @@ export function quantitativeErrors(md: string, spec: ParsedSpec): string[] {
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed || (!QUANTITY.test(trimmed) && !SUBSECOND.test(trimmed))) continue;
-          if (/assumption:/i.test(trimmed) && /settles?\s+by/i.test(trimmed)) continue;
+          if (ASSUMPTION_WITH_SETTLER.test(trimmed)) continue;
           if (/`[^`]+`/.test(trimmed)) continue;
           out.push(`${delta.capability} requirement "${requirement.name}" has a quantitative claim without measurement or Assumption: "${trimmed}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
         }
@@ -601,14 +656,41 @@ export function decisionsEvidenceErrors(md: string, spec: ParsedSpec): string[] 
     .map((l) => `Decisions line without a reason: "${l}" — add its reason with an explicit marker: ${DECISION_REASON_RULE}`);
 }
 
-/** All senior-enforcement gates for a ready spec; empty when planning or clean. */
-export function semanticErrors(md: string, spec: ParsedSpec): string[] {
-  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...migrationErrors(md, spec), ...findingsEvidenceErrors(md, spec), ...decisionsEvidenceErrors(md, spec)];
+/**
+ * The owner a bound must name, in the writer's words: one sentence shared by this gate's refusal and
+ * SPEC_FORMAT, so the rule taught and the rule enforced cannot drift. A backticked command is
+ * deliberately absent — that is the measurement gate's answer, and the case this gate exists for is a
+ * command quoted with no code named.
+ */
+export const BOUND_OWNER_RULE =
+  'name the code whose call this bounds as path:line, write "new: <path>" if nothing performs it yet, or make it an Assumption with a settler when nothing in the project enforces the cadence — a backticked command measures, it does not own a cadence';
+
+/**
+ * A ready spec's Contracts bullets that bound how often something runs must name the code whose call
+ * they bound: a resolvable `path:line` (resolved for real by `specPathErrors`), a path presented as
+ * new, or an Assumption with a settler for a cadence nothing here enforces. Contracts only — a
+ * cadence in Decisions is rationale, and widening the section doubles the false-refusal surface for
+ * no bound the build would implement.
+ */
+export function boundOwnerErrors(md: string, spec: ParsedSpec): string[] {
+  if (spec.status !== "ready") return [];
+  const out: string[] = [];
+  for (const line of sectionBullets(md, "Contracts")) {
+    if (!CADENCE.test(line)) continue;
+    if (specPathRefs(line).length || NEW_BOUND_OWNER.test(line) || ASSUMPTION_WITH_SETTLER.test(line)) continue;
+    out.push(`Contracts bound without an owner: "${line}" — ${BOUND_OWNER_RULE}`);
+  }
+  return out;
 }
 
-/** The Threats/numbers/Contracts/migration subset: what a Tasks-section update re-checks. */
+/** All senior-enforcement gates for a ready spec; empty when planning or clean. */
+export function semanticErrors(md: string, spec: ParsedSpec): string[] {
+  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...migrationErrors(md, spec), ...findingsEvidenceErrors(md, spec), ...decisionsEvidenceErrors(md, spec), ...boundOwnerErrors(md, spec)];
+}
+
+/** The Threats/numbers/Contracts/migration/bound subset: what a Tasks-section update re-checks. */
 export function taskScopeSemanticErrors(md: string, spec: ParsedSpec): string[] {
-  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...migrationErrors(md, spec)];
+  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...migrationErrors(md, spec), ...boundOwnerErrors(md, spec)];
 }
 
 /** A spec at or above this many tasks has too wide a blast radius to build unreviewed in auto mode. */

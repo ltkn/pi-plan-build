@@ -138,12 +138,29 @@ export function writeMap(cwd: string, body: string): boolean {
   return true;
 }
 
-/** Root-level files without an extension that are still files, not routes. */
-const ROOT_FILES = /^(Makefile|Dockerfile|LICENSE|README|CHANGELOG|CONTRIBUTING|Gemfile|Rakefile|Procfile|go\.mod|go\.sum|package\.json|tsconfig\.json|pom\.xml|build\.gradle(?:\.kts)?)$/i;
+/**
+ * Root-level names that are files even without a slash, because a map names them bare: pb's own and the
+ * ones most projects answer to. It is a list of names, not of suffixes — nothing here claims that a word
+ * with a dot in it is a file.
+ */
+const ROOT_FILES = /^(Makefile|Dockerfile|LICENSE(?:\.md)?|README(?:\.md)?|CHANGELOG\.md|AGENTS\.md|CONTRIBUTING|Gemfile|Rakefile|Procfile|go\.mod|go\.sum|package\.json|tsconfig\.json|pom\.xml|build\.gradle(?:\.kts)?)$/i;
 
 /**
- * Paths the map names: backticked tokens with a slash, a file extension, or a known root file;
- * without spaces, wildcards, placeholders or calls. `module/Class` and package-relative paths count.
+ * Whether a path's last segment names something. A name carries a letter or a digit, so `.` and `..` —
+ * which name no file anywhere, and are how prose writes about the separators themselves — are prose, while
+ * `.pi/` and `../keys.json` stay names.
+ */
+const namesSomething = (p: string): boolean => /[\p{L}\p{N}]/u.test(p.slice(p.lastIndexOf("/") + 1));
+
+/**
+ * Paths the map names, judged by shape alone: a backticked token whose last segment names something and
+ * which carries a slash (`src/a.ts`, `auth/LoginController`), a leading dot (`.pi/`), or one of the root
+ * names above. A dotted word with no slash is never a path: `Store.config`, `process.env` and `thread.lock`
+ * are code, and no list of believable suffixes — nor the suffixes a repo's own files happen to use, which is
+ * how `Cargo.lock` would make `thread.lock` look like a file — tells them apart. So a stale name written
+ * bare (`gone.md`) goes unreported, which is the price of a warning worth trusting; a spec's `path:line`
+ * citation is a stricter reader and still checks one. Tokens with spaces, wildcards, placeholders or calls
+ * are not paths either.
  */
 export function mapPaths(body: string): string[] {
   const found = [...body.matchAll(/`([^`\s]+)`/g)]
@@ -151,11 +168,12 @@ export function mapPaths(body: string): string[] {
     .filter(
       (p) =>
         p &&
+        namesSomething(p) &&
         !p.startsWith("-") &&
         !/^[a-z]+:\/\//i.test(p) &&
         !p.includes("...") &&
         !/[*?{}<>$()=,;@]/.test(p) &&
-        (p.includes("/") || /\.[a-z][a-z0-9]{0,10}$/i.test(p) || ROOT_FILES.test(p)),
+        (p.includes("/") || p.startsWith(".") || ROOT_FILES.test(p)),
     );
   return [...new Set(found)];
 }
@@ -171,14 +189,84 @@ export function projectFiles(cwd: string): string[] {
   }
 }
 
+/** One lookup's bounds: the names it takes, and the time a plan start may spend waiting for them. */
+const IGNORED_TOKEN_LIMIT = 200;
+const IGNORED_LOOKUP_TIMEOUT_MS = 2000;
+
+/** How deep a repo-relative path sits: its number of path components. */
+const depth = (p: string) => p.split("/").length;
+
+/** Whether an absolute path is the project root or below it: the boundary nothing pb resolves may cross. */
+const insideProject = (cwd: string, abs: string): boolean => {
+  const root = path.resolve(cwd);
+  return abs === root || abs.startsWith(root + path.sep);
+};
+
+/** The name a token spells, as a pathspec and a tail match want it: no leading `./` or `/`. */
+const bareName = (token: string) => token.replace(/^\.?\//, "");
+
+/**
+ * Where the working tree keeps a name git's visible list hides: a gitignored file outside
+ * `node_modules/`. One `git ls-files -o -i` answers the whole batch, asking each name both at the root and
+ * at any depth, and a token maps to its shallowest bearer (ties lexicographic), so the same repo always
+ * answers the same way. Git refusing or timing out, a name nothing bears, a name that leaves the project,
+ * and any token past the limit all leave the name absent, which is the warning a caller gives today. This is
+ * the only place the working tree is searched beyond git's visible list.
+ */
+export function ignoredPathsFor(cwd: string, tokens: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  // Deduplicated, kept only when the name stays inside the project (git answers a pathspec above it with a
+  // fatal that costs the whole batch), and at most the first IGNORED_TOKEN_LIMIT.
+  const names = [...new Set(tokens.map(bareName).filter(Boolean))]
+    .filter((n) => insideProject(cwd, path.resolve(cwd, n)))
+    .slice(0, IGNORED_TOKEN_LIMIT);
+  if (!names.length) return out;
+  let listing: string[];
+  try {
+    listing = execFileSync(
+      "git",
+      ["ls-files", "-o", "-i", "--exclude-standard", "--", ":(exclude)node_modules", ...names.flatMap((n) => [n, `*/${n}`])],
+      { cwd, encoding: "utf8", timeout: IGNORED_LOOKUP_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] },
+    )
+      .split("\n")
+      .filter(Boolean);
+  } catch {
+    return out; // a working tree git won't describe is answered with no answers, never a guess
+  }
+  const bearer = new Map<string, string>();
+  for (const name of names) {
+    const want = name.toLowerCase();
+    const tail = `/${want}`;
+    let best: string | undefined;
+    let bestDepth = 0;
+    for (const f of listing) {
+      const g = f.toLowerCase();
+      if (g !== want && !g.endsWith(tail)) continue;
+      const d = depth(f);
+      if (best === undefined || d < bestDepth || (d === bestDepth && f < best)) {
+        best = f;
+        bestDepth = d;
+      }
+    }
+    if (best !== undefined) bearer.set(name, path.resolve(cwd, best));
+  }
+  for (const token of tokens) {
+    const hit = bearer.get(bareName(token));
+    if (hit !== undefined) out.set(token, hit);
+  }
+  return out;
+}
+
 /**
  * The absolute path a project-relative path names: from the project root, or as the end of a
  * tracked/untracked path (with or without an extension: `auth/Login` finds `…/auth/Login.java`).
- * Undefined when nothing matches. Unlike `resolves`, this answers with the file so callers can
- * inspect it (for example, count its lines).
+ * Undefined when nothing matches, and first of all when the name leaves the project: a path above the root
+ * is nothing here, whatever sits on the disk there, so nothing can probe the machine around the repo.
+ * Unlike `resolves`, this answers with the file so callers can inspect it (for example, count its lines).
  */
 export function resolveProjectPath(cwd: string, p: string, files = projectFiles(cwd)): string | undefined {
   const direct = path.resolve(cwd, p);
+  if (!insideProject(cwd, direct)) return undefined;
   if (fs.existsSync(direct)) return direct;
   const tail = `/${p.toLowerCase()}`;
   const esc = tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -191,16 +279,20 @@ export function resolveProjectPath(cwd: string, p: string, files = projectFiles(
 
 /**
  * Whether a path the map names exists: from the project root, under the path the section's heading names,
- * or as the end of a real path.
+ * or as the end of a real path. Every route goes through `resolveProjectPath`, so a name that leaves the
+ * project resolves for none of them.
  */
 function resolves(cwd: string, p: string, base: string | undefined, files: string[]): boolean {
-  if (fs.existsSync(path.resolve(cwd, p)) || (base && fs.existsSync(path.resolve(cwd, base, p)))) return true;
-  return resolveProjectPath(cwd, p, files) !== undefined;
+  if (resolveProjectPath(cwd, p, files) !== undefined) return true;
+  return base !== undefined && resolveProjectPath(cwd, path.join(base, p), files) !== undefined;
 }
 
-/** The paths in the map that don't resolve, with the line naming each. Code fences aren't paths. */
+/**
+ * The paths in the map that don't resolve, with the line naming each. Code fences aren't paths. A name the
+ * visible listing misses gets one working-tree lookup, taken with every other missed name or not at all.
+ */
 export function unresolvedPaths(cwd: string, body: string, files = projectFiles(cwd)): { path: string; line: string }[] {
-  const out: { path: string; line: string }[] = [];
+  const missed: { path: string; line: string }[] = [];
   let base: string | undefined;
   let inFence = false;
   for (const line of body.split("\n")) {
@@ -210,9 +302,11 @@ export function unresolvedPaths(cwd: string, body: string, files = projectFiles(
     }
     if (inFence) continue;
     if (/^#{1,6}\s/.test(line)) base = line.match(/\(([^()\s]+\/)\)/)?.[1];
-    for (const p of mapPaths(line)) if (!resolves(cwd, p, base, files)) out.push({ path: p, line: line.trim() });
+    for (const p of mapPaths(line)) if (!resolves(cwd, p, base, files)) missed.push({ path: p, line: line.trim() });
   }
-  return out;
+  if (!missed.length) return [];
+  const found = ignoredPathsFor(cwd, missed.map((m) => m.path));
+  return missed.filter((m) => !found.has(m.path));
 }
 
 /** The paths the map names that don't exist (a cheap staleness check, no model call). */

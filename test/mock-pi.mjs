@@ -33,6 +33,7 @@ if (sys.includes("ATTACKER")) {
   // brief must cap; =empty: a P1 on a silent empty path plus a block verdict;
   // =block-advisory: a blocking P0 plus a P2 in the same answer;
   // =block-outside-advisory: an in-scope P0 that blocks plus an outside P1 the loop carries;
+  // =block-noted: a blocking P1 whose finding also names the alternative the reviewer rejected;
   // =outside-advisory: an outside P1 plus pass; =outside-blocker: an outside P0 plus pass;
   // =crash: exits nonzero with no answer (the harness must fail closed);
   // =still-open: resolves no earlier blocker but says pass (the harness must fail closed);
@@ -67,6 +68,8 @@ if (sys.includes("ATTACKER")) {
     const ten = Array.from({ length: 10 }, (_, i) => `- [P${i < 5 ? 2 : 3}] Contracts — flood note ${i + 1}\n  Evidence: Contracts names no measurement for that window.\n  Fix: measure it`).join("\n");
     say([{ type: "text", text: `${resolved}## Findings\n\n- [P0] Decisions — unguarded transition\n  Evidence: spec.md:63 names no guard, and src/order.ts:42 has none.\n  Fix: guard it\n\n${ten}\n\nVERDICT: block` }]);
   }
+  else if (mode === "block-noted")
+    say([{ type: "text", text: `${resolved}[P1] Contracts — the bound names no owner\nEvidence: spec.md:12 says the lookup runs once per call and cites no code.\nFix: name src/scan.ts:10 as the owner\nNot: dropping the cadence, because the cost it states is real\n\nVERDICT: block` }]);
   else if (mode === "outside-advisory")
     say([{ type: "text", text: `${resolved}## Findings\n(none)\n\n## Outside the change\n[P1] Context — src/order.ts names a transition with no guard\nFix: guard it in a follow-up\n\nVERDICT: pass` }]);
   else if (mode === "outside-blocker")

@@ -50,6 +50,7 @@ import {
   explorerBrief,
   tryBrief,
   extraBlock,
+  findingDetails,
   findingLine,
   claimedFindings,
   finishSpecPrompt,
@@ -74,11 +75,11 @@ import {
   taskPrompt,
   viewBudget,
 } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findingsOf, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findingsOf, ignoredPathsFor, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, behaviouralChange, buildTask, commitMessage, ensureSpecIds, isAcceptanceLine, needsRed, ownTestRef, parseSpec, pathTestRef, proofMarkersOf, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, taskIdProofGap, testRefsOf, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, behaviouralChange, buildTask, commitMessage, ensureSpecIds, isAcceptanceLine, needsRed, ownTestRef, parseSpec, pathTestRef, proofMarkersOf, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, taskIdProofGap, testRefsOf, tokensOf } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { parseRequirementDeltas, parseRequirementDocument, planArchiveRequirements, requirementDeltaSummary, requirementGaps, requirementWriteErrors, writeRequirementPlans } from "./requirements.ts";
 import { buildReport } from "./report.ts";
@@ -235,40 +236,6 @@ const acceptanceMappingErrors = (spec: ParsedSpec, cwd: string): string[] =>
 const mappingNotes = (spec: ParsedSpec, cwd: string): string[] =>
   unresolvedMappings(spec, cwd).map((m) => `${m.task} (tests: ${m.entry}) ${m.reason}`);
 
-/** Root files a spec may cite by name without an extension (README:12). */
-const ROOT_FILE_REF = /^(?:Makefile|Dockerfile|LICENSE|README|CHANGELOG|CONTRIBUTING|Gemfile|Rakefile|Procfile|go\.mod|go\.sum|package\.json|tsconfig\.json|pom\.xml|build\.gradle(?:\.kts)?)$/i;
-
-/**
- * `path:line` references in a spec, outside fences. A path may be backticked or
- * bare; a line range (`:40-80`) names its first line. New files without a line
- * are allowed: only a line claim must point at a real file and line.
- */
-const specPathRefs = (md: string): Array<{ path: string; line: number; text: string }> => {
-  const refs = new Map<string, { path: string; line: number; text: string }>();
-  const re = /`([^`\s]+):(\d+)(?:-\d+)?`|(?<![\w/`])([A-Za-z0-9_./-]+):(\d+)(?:-\d+)?/g;
-  let inFence = false;
-  for (const raw of md.split("\n")) {
-    if (/^(\s*)```/.test(raw)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    for (const m of raw.matchAll(re)) {
-      const p = (m[1] ?? m[3]).replace(/^\.\//, "").replace(/[/.,;:]+$/, "");
-      const line = Number(m[2] ?? m[4]);
-      if (!p || !Number.isFinite(line) || line < 1) continue;
-      const before = raw.slice(Math.max(0, (m.index ?? 0) - 12), m.index ?? 0);
-      if (before.includes("://") || p.startsWith("/") || p.startsWith("~") || p.includes("://") || p.includes("...")) continue;
-      if (/[<>{}*$@=,;()[\]\s]/.test(p)) continue;
-      if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(p) || /^v?\d+(?:\.\d+){1,3}$/i.test(p)) continue;
-      if (!p.includes("/") && !/\.[A-Za-z0-9]{1,12}$/.test(p) && !ROOT_FILE_REF.test(p)) continue;
-      const key = `${p}:${line}`;
-      if (!refs.has(key)) refs.set(key, { path: p, line, text: raw.trim() });
-    }
-  }
-  return [...refs.values()];
-};
-
 /** The number of lines in a text file, or undefined when it can't be counted (binary, huge). */
 const fileLines = (file: string): number | undefined => {
   try {
@@ -282,11 +249,18 @@ const fileLines = (file: string): number | undefined => {
   }
 };
 
-/** A ready spec's `path:line` citations must resolve to a real file and a real line. */
+/**
+ * A ready spec's `path:line` citations must resolve to a real file and a real line. A citation the visible
+ * file list can't answer is asked of the working tree once for all of them, and the file that answers is
+ * line-checked like any other, so a gitignored file must really carry the line it is cited at.
+ */
 const specPathErrors = (md: string, cwd: string): string[] => {
   const files = projectFiles(cwd);
-  return specPathRefs(md).flatMap((ref) => {
-    const found = resolveProjectPath(cwd, ref.path, files);
+  const refs = specPathRefs(md);
+  const visible = new Map(refs.map((ref) => [ref.path, resolveProjectPath(cwd, ref.path, files)]));
+  const rescued = ignoredPathsFor(cwd, [...new Set(refs.filter((ref) => !visible.get(ref.path)).map((ref) => ref.path))]);
+  return refs.flatMap((ref) => {
+    const found = visible.get(ref.path) ?? rescued.get(ref.path);
     if (!found) return [`the spec cites \`${ref.path}:${ref.line}\`, but that path is not in the project`];
     let isFile = false;
     try {
@@ -2991,10 +2965,7 @@ export default function pb(pi: ExtensionAPI) {
                 const carried = review.findings.find((f) => f.id === r.id);
                 const head = `${r.id}${r.priority ? ` [${r.priority}]` : ""}${r.title ? ` ${r.title}` : ""}`;
                 const status = `   ${r.status === "resolved" ? "RESOLVED" : "STILL OPEN"}: ${r.evidence}`;
-                const details =
-                  r.status === "open" && carried
-                    ? `${carried.evidence ? `\n   Evidence: ${carried.evidence}` : ""}${carried.fix ? `\n   Fix: ${carried.fix}` : ""}`
-                    : "";
+                const details = r.status === "open" && carried ? findingDetails(carried) : "";
                 return `${head}\n${status}${details}`;
               })
               .join("\n")}`
@@ -4071,7 +4042,7 @@ export default function pb(pi: ExtensionAPI) {
     const seed =
       `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings}\n\n` +
       `${binding ? `${binding}\n\n` : ""}` +
-      `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line (full suite once at the end); new tests must be seen failing first. ${STRUCTURED_EDIT_RULE} ` +
+      `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; a finding's Not: line is an alternative the reviewer already rejected — do not implement it; keep the suite green; run each affected task's Test: line (full suite once at the end); new tests must be seen failing first. ${STRUCTURED_EDIT_RULE} ` +
       `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
       `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +
       `When done, call pb_fix_done with fixed (each finding's title or the line it was shown as, not your own summary of it), skipped, and test results; then stop.`;

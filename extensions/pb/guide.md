@@ -296,6 +296,13 @@ Then the sections:
   everything behind them is left to the build, which asks before changing one,
   and the reviewer checks each. A single task that changes an external surface
   needs Contracts too; only truly independent internal tasks can omit it. A
+  bullet that bounds how often something runs also names the code whose call it
+  bounds — a `path:line`, or `new: <path>` when nothing performs it yet, or an
+  `Assumption: … settles by …` when nothing in the project enforces the cadence
+  (a third party's webhook, another service's cron) — or the write is refused,
+  quoting the bullet and spelling all three; a backticked command doesn't own a
+  cadence, so it doesn't satisfy it either. A bare count or duration is a
+  different question and keeps its own answer: a backticked measurement. A
   section that does not apply is one line, "none — why", never an empty heading
   or TBD.
 - **Migration and rollback**: only when data, a schema or a stored format
@@ -422,22 +429,33 @@ you want another model, such as the implementer, to validate the plan.
 Only a P0 or P1 stops the build before the first task; P2/P3 are shown and the
 build carries on, with the findings recorded beside the spec. A finding's first
 line is one sentence you can act on — what goes wrong, for whom, and where — and
-its trace and fix follow on `Evidence:` and `Fix:` lines. The chat result keeps
-earlier findings (with their resolution status) apart from new blocking ones;
-the full text stays in the recorded review and its linked session. A block
-means amend the spec (or record a rebuttal in Decisions) and run `/pb:build`
-again: the next pass reviews the revision against the full spec and the
-earlier findings, and judges each earlier P0/P1 against the new text first.
-Scoping there is by responsibility, not location: whatever the revision
-creates or exposes is a finding wherever its text sits — a Decisions edit
-that contradicts untouched Contracts text blocks — and only a problem that
-predates the revision, in text the revision left alone, goes under Outside
-the change, where only a P0 blocks and the rest carries with the spec. That
-carry is bounded in the reviewer's view only: it lists at most eight earlier
-advisories, never dropping a P1 and losing P3 before P2, and names how many
-it left out — the recorded review and the count in the post keep all of
-them. An unchanged blocked spec is re-posted, not re-reviewed. After
-`maxRounds` blocking rounds (2 by default) the loop stops and the next
+its trace and its one fix follow on `Evidence:` and `Fix:` lines: the single
+change the reviewer would make, with its reason. If it weighed another option
+and rejected it, one `Not:` line says what it was and why it loses; that line
+is kept, shown to you, re-read by the next round, and handed to `/pb:fix`
+labelled as already rejected, so a discarded idea is not quietly
+re-implemented. A choice the reviewer can settle by looking, it settles itself
+with one cheap read-only command and puts the command and its number on
+`Evidence:` — never a full test run, and never an either/or handed back to you;
+what no cheap command settles becomes a one-line question. The chat result
+keeps earlier findings (with their resolution status) apart from new blocking
+ones; the full text stays in the recorded review and its linked session. A
+block means amend the spec (or record a rebuttal in Decisions) and run
+`/pb:build` again: the next pass reviews the revision against the full spec and
+the earlier findings, and judges each earlier P0/P1 against the new text first.
+Scoping there is by responsibility, not location, and it is the same rule for
+everything the reviewer checks: whatever the revision creates or exposes is a
+finding wherever its text sits — a Decisions edit that contradicts untouched
+Contracts text blocks, or a living capability the revision newly touches
+without its delta — and only a problem that predates the revision, in text the
+revision left alone, goes under Outside the change, where only a P0 blocks and
+the rest carries with the spec. The first round has no such section: there,
+everything is in scope. That carry is bounded in the reviewer's view only: it
+lists at most eight earlier advisories, never dropping a P1 and losing P3
+before P2, and names how many it left out — the recorded review and the count
+in the post keep all of them. An unchanged blocked spec is re-posted, not
+re-reviewed. After `maxRounds` blocking rounds (2 by default) the loop stops
+and the next
 changed spec waits for you: `/pb:build --review` spends one more round, or
 `/pb:build --force` builds it as it stands and records the standing findings
 as accepted. A block whose answer cannot be parsed is reformatted once; if
@@ -869,11 +887,20 @@ the code that enforces them, where new code goes and what to copy, known gaps,
 commands and quirks, docs the code contradicts, and layout only where names
 mislead. It's written in short bullet lines, as short as the project allows, up
 to about 20,000 tokens: it's read in every session, so a line stays only if it
-saves a later feature a search or a mistake. Your session doesn't grow. pb
-checks every path it names, from the project root, under the path a heading
-names, and as the end of a real file (`auth/Login` finds
-`…/auth/Login.java`); the ones that still don't resolve go back to it once to
-be corrected, and so does a map over the budget, to be trimmed. Then the map is written and the change is shown. It asks you
+saves a later feature a search or a mistake. Your session doesn't grow. Only a
+name shaped like a path is checked at all: it carries a slash, starts with a
+dot, or is a root file name pb knows (`README`, `package.json`, `pom.xml`). So
+`Store.config`, `process.env` and `thread.lock` stay prose in any repo, however
+many `.lock` or `.config` files that repo tracks, and so do `.` and `..`, which
+name nothing anywhere. A checked name resolves four ways: from the project
+root, under the path a heading names, as the end of a real file (`auth/Login`
+finds `…/auth/Login.java`), or in a gitignored file of the working tree outside
+`node_modules/` (so `pb/config.json` finds `.pi/pb/config.json`). Nothing above
+the project root counts as found, and a name that walks there (`../old/Ctrl`)
+is reported like a missing file. The one price of a warning worth trusting: a
+stale name written bare (`gone.md`) is left alone. The names that still don't
+resolve go back to it once to be corrected, and so does a map over the budget,
+to be trimmed. Then the map is written and the change is shown. It asks you
 first only when something looks off: paths that still don't resolve, or a
 large part of the existing map removed; unanswered, the current map stays.
 `/pb:plan` warns when paths in the map no longer exist (a cheap check, no

@@ -494,6 +494,26 @@ const citedPage = (t: ReturnType<typeof setup>) => {
   fs.writeFileSync(file, Array.from({ length: 30 }, (_, i) => `// line ${i + 1}`).join("\n") + "\n");
 };
 
+/** A ready spec with `finding` as its only Findings line: a spec whose write turns on one citation. */
+const citingSpec = (finding: string) => `# Slow page
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Speed up the page.
+## Findings
+- ${finding}
+## Decisions
+- Paginate the list, because unbounded reads risk timeouts.
+## Contracts
+- T1 owns the list.
+## Tasks
+### T1: fast page
+- Acceptance: loads fast (tests: T1)
+- Test: \`test -f fast.txt\`
+`;
+
 /** A spec written as if a /pb:plan came first: its one-time standards offer is already answered. */
 async function written(t: ReturnType<typeof setup>, spec = SPEC()) {
   process.chdir(t.repo);
@@ -2347,6 +2367,110 @@ Responds within 200ms.
   assert.equal((await t.callTool("pb_update_spec", { name: "planning-scoped", section: "Tasks", content: "### T1: a\n- Acceptance: a" })).error, undefined); // planning exempt
 });
 
+/**
+ * A ready spec whose one Contracts bullet states a cadence; `bullet` is that line, so a test can put
+ * an owner in it or leave it out. Nothing else in the spec is load-bearing.
+ */
+const boundSpec = (bullet: string) => `# Cache the page lookup
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Resolve the page lookup without reading it twice.
+## Decisions
+- Cache the resolved path, because resolving it is pure and repeated.
+## Contracts
+- ${bullet}
+## Tasks
+### T1: cache the lookup
+- Acceptance: a second lookup does not read again (tests: T1)
+- Test: \`test -f cache.txt\`
+`;
+
+const OWNED_ONCE = "The lookup runs at most once per call at src/page.ts:10.";
+const UNOWNED_ONCE = "The lookup runs at most once per call and caches the resolved path.";
+const TASKS_A_B = "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `test -f a.txt`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `test -f b.txt`";
+
+test("spec bound gate: an unowned cadence is refused, naming every way to own it", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  citedPage(t); // src/page.ts with 30 lines, so a citation can be real
+  const err = (await t.callTool("pb_write_spec", { name: "bound-unowned", content: boundSpec(UNOWNED_ONCE) })).error!;
+  assert.match(err, /Contracts bound without an owner/);
+  assert.ok(err.includes(UNOWNED_ONCE), `the refusal quotes the bullet it refused: ${err}`);
+  for (const form of [/path:line/, /new: <path>/, /Assumption with a settler/]) assert.match(err, form);
+
+  // The shape this gate exists for: a backticked command answers a measurement, not a cadence.
+  const backtick = "The lookup runs at most once per call via `git ls-files --ignored -z`.";
+  const errBacktick = (await t.callTool("pb_write_spec", { name: "bound-backtick", content: boundSpec(backtick) })).error!;
+  assert.match(errBacktick, /Contracts bound without an owner/);
+  assert.ok(errBacktick.includes(backtick), errBacktick);
+
+  // Each of the three owners satisfies it, and nothing else about the spec changes.
+  assert.equal((await t.callTool("pb_write_spec", { name: "bound-cited", content: boundSpec(OWNED_ONCE) })).error, undefined);
+  assert.equal((await t.callTool("pb_write_spec", { name: "bound-new", content: boundSpec("The lookup runs at most once per call; new: src/scan.ts will perform it.") })).error, undefined);
+  const assumed = "The lookup runs at most once per call. Assumption: an outside scheduler drives it — settles by the vendor's own docs, because nothing in this project schedules it.";
+  assert.equal((await t.callTool("pb_write_spec", { name: "bound-assumed", content: boundSpec(assumed) })).error, undefined);
+});
+
+test("spec bound gate: planning, counts, durations and rationale stay with the measurement rule", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  citedPage(t);
+  // planning is exempt from every senior gate
+  const planning = boundSpec(UNOWNED_ONCE).replace("# Cache the page lookup\n", "# Cache the page lookup\nStatus: planning\n");
+  assert.equal((await t.callTool("pb_write_spec", { name: "bound-planning", content: planning })).error, undefined);
+
+  // A count and a duration: each still answers to its backticked measurement, and to no owner.
+  const numbers = boundSpec("The prompt is at most 200 tokens (`node tools/count.mjs` says 180).\n- A cold lookup resolves within 200ms (`npm run bench` says 120ms).");
+  assert.equal((await t.callTool("pb_write_spec", { name: "bound-numbers", content: numbers })).error, undefined);
+  // without the measurement the measurement rule is the one that refuses, not this gate
+  const unmeasured = boundSpec("The prompt is at most 200 tokens.");
+  assert.match((await t.callTool("pb_write_spec", { name: "bound-unmeasured", content: unmeasured })).error!, /quantitative claim without measurement/);
+
+  // A cadence in Decisions is rationale: Contracts is the section that binds the build.
+  const rationale = boundSpec(OWNED_ONCE).replace(
+    "- Cache the resolved path, because resolving it is pure and repeated.",
+    "- Cache the resolved path, because resolving it is pure and repeated.\n- The cache is consulted once per call, because rebuilding it would dominate.",
+  );
+  assert.equal((await t.callTool("pb_write_spec", { name: "bound-rationale", content: rationale })).error, undefined);
+});
+
+test("spec bound gate: the shared fixture stays clean and a Tasks edit re-checks the bound", async () => {
+  const t = setup();
+  await written(t); // SPEC() still writes cleanly with the gate in force
+  process.chdir(t.repo);
+  const clean = await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Tasks", content: TASKS_A_B });
+  assert.equal(clean.error, undefined, clean.error ?? "");
+  assert.doesNotMatch(clean.content![0].text, /bound without an owner/);
+
+  // A Contracts edit stays quiet the way it is today; the next Tasks edit re-checks what Contracts says.
+  const contracts = await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Contracts", content: `- ${UNOWNED_ONCE}` });
+  assert.equal(contracts.error, undefined, contracts.error ?? "");
+  assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Tasks", content: TASKS_A_B })).error!, /Contracts bound without an owner/);
+});
+
+test("spec bound gate: the writer is shown the refusal's own rule, and the citation grammar has one home", async () => {
+  const { BOUND_OWNER_RULE } = await import("../extensions/pb/spec.ts");
+  const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
+  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
+    const contracts = p.slice(p.indexOf("## Contracts"), p.indexOf("## Migration and rollback"));
+    assert.ok(contracts.includes(BOUND_OWNER_RULE), "the Contracts paragraph carries the refusal's own sentence");
+    assert.match(contracts, /path:line/);
+    assert.match(contracts, /new: <path>/);
+    assert.match(contracts, /backtick/);
+  }
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const specSrc = fs.readFileSync(path.join(here, "..", "extensions", "pb", "spec.ts"), "utf8");
+  const indexSrc = fs.readFileSync(path.join(here, "..", "extensions", "pb", "index.ts"), "utf8");
+  for (const name of ["specPathRefs", "ROOT_FILE_REF"]) {
+    assert.equal((specSrc.match(new RegExp(`const ${name}\\b`, "g")) ?? []).length, 1, `spec.ts declares ${name} once`);
+    assert.ok(!new RegExp(`const ${name}\\b`).test(indexSrc), `index.ts still declares ${name}`);
+  }
+  assert.match(indexSrc, /specPathRefs[^;\n]*from "\.\/spec\.ts"/);
+});
+
 test("spec: external surfaces need Contracts; persisted data needs Migration and rollback", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -2481,6 +2605,89 @@ Speed up the page.
   assert.equal((await t.callTool("pb_write_spec", { name: "planning-ev", content: planning })).error, undefined);
   const root = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "TODO.md");
   assert.ok(!fs.existsSync(root), "TODO.md is removed; the spec is the source of truth");
+});
+
+test("spec citation: a gitignored file's cited line resolves, a past-the-end line and a dependency copy do not", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  citedPage(t); // src/page.ts with 30 lines, visible to git
+  fs.writeFileSync(path.join(t.repo, ".gitignore"), ".pi/\nsecrets/\nnode_modules/\n");
+  fs.mkdirSync(path.join(t.repo, "secrets/deep"), { recursive: true });
+  const lines = (n: number) => Array.from({ length: n }, (_, i) => `// line ${i + 1}`).join("\n") + "\n";
+  fs.writeFileSync(path.join(t.repo, "secrets/config.json"), lines(27)); // gitignored, and shallower than pb's own config
+  fs.writeFileSync(path.join(t.repo, "secrets/deep/config.json"), lines(3));
+  const write = (name: string, ref: string) => t.callTool("pb_write_spec", { name, content: citingSpec(`\`${ref}\` holds the local override.`) });
+
+  // A name the visible listing misses is in the working tree, and a citation to it is checked by line
+  // exactly like a tracked file's; a visible file keeps resolving as it did.
+  assert.equal((await write("cite-ignored", "config.json:12")).error, undefined);
+  assert.equal((await write("cite-ignored-deep", "deep/config.json:3")).error, undefined);
+  assert.equal((await write("cite-visible", "src/page.ts:12")).error, undefined);
+
+  // Past the end of the file the refusal is the one this gate already gives, and a dependency's copy of
+  // a name is no answer at all. (`tokens.csv`: a name nothing else in this repo bears, unlike config.json,
+  // which pb's own gitignored state bears.)
+  assert.match((await write("cite-ignored-past", "config.json:9999")).error!, /`config\.json` has 27 lines/);
+  assert.match((await write("cite-visible-past", "src/page.ts:9999")).error!, /has 30 lines/);
+  fs.mkdirSync(path.join(t.repo, "node_modules/some/dep"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "node_modules/some/dep/tokens.csv"), "a,b\n");
+  assert.match((await write("cite-vendored", "tokens.csv:1")).error!, /not in the project/);
+  fs.rmSync(path.join(t.repo, "node_modules"), { recursive: true });
+  assert.equal((await write("cite-ignored-again", "deep/config.json:3")).error, undefined);
+});
+
+test("spec citation: nothing above the project root resolves, for the write gate or for the map", async () => {
+  const { resolveProjectPath, unresolvedPaths } = await import("../extensions/pb/map.ts");
+
+  // A project two levels under a directory this test owns, so `../../<name>` names a file that really exists.
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), "pb-above-"));
+  const proj = path.join(outer, "a", "b");
+  fs.mkdirSync(proj, { recursive: true });
+  execSync("git init -q && git config user.email t@t && git config user.name t", { cwd: proj });
+  fs.writeFileSync(path.join(outer, "secrets.json"), "// one\n// two\n// three\n"); // two levels above `proj`
+  fs.writeFileSync(path.join(outer, "a", "keys.json"), "// one\n// two\n// three\n// four\n// five\n"); // and above the harness repo below
+  fs.writeFileSync(path.join(proj, "known.ts"), "export {}\n");
+  execSync("git add . && git commit -qm src", { cwd: proj });
+
+  // The rule lives in the one function both readers use, and it runs before anything touches the disk.
+  assert.equal(resolveProjectPath(proj, "../../secrets.json"), undefined);
+  assert.ok(resolveProjectPath(proj, "known.ts"));
+  assert.deepEqual(unresolvedPaths(proj, "- `../../secrets.json`: two levels up, and real").map((u) => u.path), ["../../secrets.json"]);
+
+  // The write gate refuses the same citation, and says nothing about the file it names.
+  const savedTmp = process.env.TMPDIR;
+  process.env.TMPDIR = proj; // the harness repo lands under `a/b`, so `../../keys.json` is the real file above it
+  try {
+    const g = setup();
+    process.chdir(g.repo);
+    const outside = citingSpec("`../../keys.json:99` holds the model.");
+    const error = (await g.callTool("pb_write_spec", { name: "cite-above", content: outside })).error!;
+    assert.match(error, /that path is not in the project/);
+    assert.doesNotMatch(error, /has \d+ line/);
+  } finally {
+    process.env.TMPDIR = savedTmp;
+  }
+});
+
+test("map and citation grammar: dots alone name nothing, a walk above the root is still caught", async () => {
+  const { mapPaths, unresolvedPaths } = await import("../extensions/pb/map.ts");
+
+  // One convention for what both readers call a path name: the last segment must name something, which
+  // means carrying a letter or a digit. So a bare `.` or `..`, which names no file anywhere, is prose —
+  // prose pb's own map writes when it says a validator rejects "`.`, `..`, separators" — while a hidden
+  // directory and a real name are still paths, checked as before.
+  assert.deepEqual(mapPaths("- rejects `.`, `..` and separators, keeps `.pi/`, `.gitignore` and `src/a.ts`"), [".pi", ".gitignore", "src/a.ts"]);
+
+  // The convention costs nothing in reach: a token that walks above the root is a name, and is reported.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-dots-"));
+  execSync("git init -q", { cwd: dir });
+  fs.writeFileSync(path.join(dir, "..", "keys.json"), "// one\n");
+  assert.deepEqual(unresolvedPaths(dir, "- Both `..` and `.` are prose.\n- `../keys.json` is above the root.").map((u) => u.path), ["../keys.json"]);
+
+  // The gate reads the same way: dots alone are no citation, so they raise no "not in the project".
+  const t = setup();
+  process.chdir(t.repo);
+  assert.doesNotMatch((await t.callTool("pb_write_spec", { name: "cite-dots", content: citingSpec("`..:1` and `.:2` name nothing.") })).error ?? "", /not in the project/);
 });
 
 test("spec: senior shape is strict about bare words, bare colons, and counts", async () => {
@@ -6191,6 +6398,117 @@ test("map: helpers read and write the AGENTS.md section, resolve its paths lenie
   assert.deepEqual(mapDiff("- a\n- b", "- a\n- c"), ["- - b", "+ - c"]);
 });
 
+test("map: resolve its paths leniently: only a name shaped like a path is checked", async () => {
+  const { mapPaths, unresolvedPaths } = await import("../extensions/pb/map.ts");
+
+  // Shape decides, never a suffix vocabulary: a slash, a leading dot, or a root file name pb knows.
+  // A dotted word with no slash is whatever the map means by it — code, prose, a name — so it is not checked.
+  assert.deepEqual(
+    mapPaths("- `Store.config` merges `process.env`, `thread.lock` guards it, `harness.jdbcAs(X)`, `report_map`, `login.ts`, `pom.xml`"),
+    ["pom.xml"],
+  );
+  assert.deepEqual(mapPaths("`AGENTS.md` `.pi/` `auth/LoginController` and `src/a.ts` are paths; `guide.md` and `config.json` are not"), [
+    "AGENTS.md",
+    ".pi",
+    "auth/LoginController",
+    "src/a.ts",
+  ]);
+
+  // The false positives this whole check exists to stop, in the repos that used to hit them: a Rust repo
+  // tracking Cargo.lock, a .NET one tracking App.config.
+  for (const [tracked, symbol] of [
+    ["Cargo.lock", "thread.lock"],
+    ["App.config", "Store.config"],
+    ["main.go", "request.go"],
+  ] as const) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-map-symbol-"));
+    execSync("git init -q", { cwd: dir });
+    fs.writeFileSync(path.join(dir, tracked), "x\n");
+    execSync("git add . && git commit -qm src", { cwd: dir });
+    assert.deepEqual(unresolvedPaths(dir, `- \`${symbol}\` is a member, \`platform/Gone\` is gone`).map((u) => u.path), ["platform/Gone"]);
+  }
+
+  // A gone path is still caught, with the line naming it.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-map-stale-"));
+  execSync("git init -q", { cwd: dir });
+  fs.mkdirSync(path.join(dir, "platform"), { recursive: true });
+  const stale = unresolvedPaths(dir, "### Runtime\n- Sign-in reads `process.env` and `Store.config`.\n- `platform/Gone`: stale");
+  assert.deepEqual(stale.map((u) => u.path), ["platform/Gone"]);
+  assert.deepEqual(stale.map((u) => u.line), ["- `platform/Gone`: stale"]);
+});
+
+test("map: gitignored files in the working tree resolve as map paths, dependencies and look-alikes do not", async () => {
+  const { unresolvedPaths, ignoredPathsFor } = await import("../extensions/pb/map.ts");
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pb-map-ignored-"));
+  execSync("git init -q", { cwd: repo });
+  fs.writeFileSync(path.join(repo, ".gitignore"), ".pi/\n.deep/\n.aa/\n.bb/\n.local/\nnode_modules/\n*.csv\n");
+  const tree: [string, string][] = [
+    [".pi/pb/config.json", "{}\n"], // a gitignored file no visible listing carries
+    [".deep/config.json", "{}\n"], // a shallower bearer of the same name
+    [".aa/db/index.json", "{}\n"],
+    [".bb/db/index.json", "{}\n"], // two bearers at the same depth
+    [".local/nested/settings.json", "{}\n"],
+    ["db/subconfig.csv", "a\n"], // a look-alike no tail match may claim
+    ["tokens.csv", "a\n"], // gitignored at the root, so no `*/name` pathspec can reach it
+    ["src/a.ts", "export {}\n"], // visible, as before
+  ];
+  for (const [rel, text] of tree) {
+    fs.mkdirSync(path.join(repo, path.dirname(rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), text);
+  }
+
+  // Names the visible listing misses resolve from one look-up; a name nothing bears still reports; code
+  // symbols and bare names in the same lines stay unchecked.
+  assert.deepEqual(
+    unresolvedPaths(repo, [
+      "- The project's `config.json` is merged by `Store.config`.",
+      "- Its `pb/config.json`, `nested/settings.json` and `db/index.json` live in gitignored paths.",
+      "- `src/a.ts` resolves; `db/config.csv` bears nothing.",
+    ].join("\n")).map((u) => u.path),
+    ["db/config.csv"],
+  );
+
+  // The lookup answers token → the file to open, deterministically: fewest separators, then lexicographic.
+  const found = ignoredPathsFor(repo, ["config.json", "pb/config.json", "nested/settings.json", "db/index.json", "tokens.csv", "config.json"]);
+  assert.deepEqual([...found.keys()], ["config.json", "pb/config.json", "nested/settings.json", "db/index.json", "tokens.csv"]);
+  assert.equal(found.get("config.json"), path.join(repo, ".deep/config.json"));
+  assert.equal(found.get("db/index.json"), path.join(repo, ".aa/db/index.json"));
+  assert.equal(found.get("pb/config.json"), path.join(repo, ".pi/pb/config.json"));
+  assert.equal(found.get("tokens.csv"), path.join(repo, "tokens.csv")); // the bare pathspec form reaches it
+
+  // A dependency directory holds the name but does not make a dead line live.
+  const dep = fs.mkdtempSync(path.join(os.tmpdir(), "pb-map-vendored-"));
+  execSync("git init -q", { cwd: dep });
+  fs.writeFileSync(path.join(dep, ".gitignore"), "node_modules/\n");
+  fs.mkdirSync(path.join(dep, "node_modules/some/dep"), { recursive: true });
+  fs.writeFileSync(path.join(dep, "node_modules/some/dep/config.json"), "{}\n");
+  assert.deepEqual(unresolvedPaths(dep, "- `dep/config.json` lives in a dependency").map((u) => u.path), ["dep/config.json"]);
+});
+
+test("map: the gitignored lookup's own limits leave every name flagged", async () => {
+  const { unresolvedPaths, ignoredPathsFor } = await import("../extensions/pb/map.ts");
+
+  // Where git refuses the lookup (no repository here), every name it would have answered stays flagged.
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "pb-map-nogit-"));
+  fs.mkdirSync(path.join(bare, "inner/pb"), { recursive: true }); // deeper than the names, so nothing resolves directly
+  fs.writeFileSync(path.join(bare, "inner/pb/config.json"), "{}\n");
+  fs.writeFileSync(path.join(bare, "inner/pb/settings.json"), "{}\n");
+  assert.equal(ignoredPathsFor(bare, ["pb/config.json", "pb/settings.json"]).size, 0);
+  assert.deepEqual(unresolvedPaths(bare, "- `pb/config.json` and `pb/settings.json`").map((u) => u.path), [
+    "pb/config.json",
+    "pb/settings.json",
+  ]);
+
+  // One lookup answers at most 200 names, in the order the map names them; the rest keep their warning.
+  const many = fs.mkdtempSync(path.join(os.tmpdir(), "pb-map-many-"));
+  execSync("git init -q", { cwd: many });
+  fs.writeFileSync(path.join(many, ".gitignore"), "ignored/\n");
+  const tokens = Array.from({ length: 210 }, (_, i) => `gen/g${i + 1}.json`); // each bears a name at one depth below the gitignored root
+  fs.mkdirSync(path.join(many, "ignored/gen"), { recursive: true });
+  for (const t of tokens) fs.writeFileSync(path.join(many, "ignored", t), "{}\n");
+  assert.deepEqual(unresolvedPaths(many, `- ${tokens.map((t) => `\`${t}\``).join(", ")}`).map((u) => u.path), tokens.slice(200));
+});
+
 test("map: the repair pass says what it's fixing", async () => {
   const { mapRepairPhase } = await import("../extensions/pb/map.ts");
   assert.equal(mapRepairPhase(3, 0), "checking 3 paths");
@@ -8250,6 +8568,219 @@ test("spec review parser: a resolution without evidence is still open", async ()
   const { parseSpecReview } = await import("../extensions/pb/prompts.ts");
   assert.deepEqual(parseSpecReview("- F1 — RESOLVED:\n\nVERDICT: pass").resolutions, [{ id: "F1", status: "open", evidence: "" }]);
   assert.deepEqual(parseSpecReview("- F1 — STILL OPEN: first\n- F1 — RESOLVED: second").resolutions, [{ id: "F1", status: "open", evidence: "first" }]); // open wins, whatever the order
+});
+
+test("spec review: a finding's rejected alternative survives the parser, capped, in any order", async () => {
+  const { parseSpecReview } = await import("../extensions/pb/prompts.ts");
+  const { FINDING_NOT_CHARS } = await import("../extensions/pb/store.ts");
+  const parsed = parseSpecReview(
+    ["[P1] Contracts — the bound names no owner", "Evidence: spec.md:12 says once per call and cites no code.", "Fix: name src/scan.ts:10 as the owner", "Not: dropping the cadence, because the cost it states is real", "VERDICT: block"].join("\n"),
+  );
+  assert.deepEqual(parsed.findings, [
+    {
+      priority: "P1",
+      title: "Contracts — the bound names no owner",
+      evidence: "spec.md:12 says once per call and cites no code.",
+      fix: "name src/scan.ts:10 as the owner",
+      alternative: "dropping the cadence, because the cost it states is real",
+    },
+  ]);
+  // A reviewer that writes Not: before Fix keeps both: a known label never ends the block.
+  const reordered = parseSpecReview(["- [P2] Tasks — two fixes in one", "  **Not:** the second option, because it doubles the gate", "  **Fix:** keep the one gate", "VERDICT: pass"].join("\n"));
+  assert.deepEqual(reordered.findings, [
+    { priority: "P2", title: "Tasks — two fixes in one", alternative: "the second option, because it doubles the gate", fix: "keep the one gate" },
+  ]);
+  // The rambling case the cap exists for: one field cannot inflate every later brief and the fix seed.
+  const long = parseSpecReview([`[P2] Tasks — a long rejection\nNot: ${"x".repeat(FINDING_NOT_CHARS + 400)}`, "VERDICT: pass"].join("\n"));
+  const kept = long.findings[0].alternative!;
+  assert.ok(kept.startsWith("x".repeat(FINDING_NOT_CHARS)), `the Not: line is stored at the cap, got ${kept.length}`);
+  assert.ok(kept.length < FINDING_NOT_CHARS + 60, `only the truncation notice is added, got ${kept.length}`);
+  assert.match(kept, /\[truncated /); // the cut is disclosed, as every stored cap does
+  // A line that is none of the three labels still ends the block, so a stray paragraph isn't eaten.
+  const ended = parseSpecReview(["[P2] Tasks — stop here", "Fix: keep it", "Not: one alternative", "A loose sentence after the block", "Fix: not this one", "VERDICT: pass"].join("\n"));
+  assert.deepEqual(ended.findings, [{ priority: "P2", title: "Tasks — stop here", fix: "keep it", alternative: "one alternative" }]);
+});
+
+test("spec review: a finding's rejected alternative is shown to the human and labelled for the fix lap", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  // the human post: the reviewer's Not: line reaches the person who decides
+  process.env.MOCK_SPEC_REVIEW = "block-noted";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.match(t.posts.at(-1)!, /Fix: name src\/scan\.ts:10 as the owner\n   Not: dropping the cadence, because the cost it states is real/);
+  assert.ok(!t.posts.at(-1)!.includes("Not: undefined"), t.posts.at(-1)!);
+
+  // a finding that stays open carries its rejected alternative into the next round's post as well
+  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the cadence is measured, because `npm run bench` says 120ms.", mode: "append" });
+  process.env.MOCK_SPEC_REVIEW = "still-open";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.match(
+    t.posts.at(-1)!,
+    /Earlier findings\*\*\nF1 \[P1\] Contracts — the bound names no owner\n   STILL OPEN: [^\n]*\n   Evidence: [^\n]*\n   Fix: name src\/scan\.ts:10 as the owner\n   Not: dropping the cadence, because the cost it states is real/,
+  );
+
+  // and the fix lap reads it as one rejected alternative, not a second instruction to implement
+  pausedWithFindings(t, "order-cancellation", [
+    { priority: "P1", file: "src/scan.ts", line: 10, title: "the bound names no owner", fix: "name src/scan.ts:10", alternative: "dropping the cadence, because the cost is real" },
+  ]);
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    await tool("pb_fix_done", { fixed: ["the bound names no owner"], skipped: [], tests: "ok" });
+  };
+  await t.run("fix");
+  const seed = t.instructions.find((x) => x.startsWith("[pb:fix"))!;
+  assert.match(seed, /Fix: name src\/scan\.ts:10\n   Not: dropping the cadence, because the cost is real/);
+  assert.match(seed, /already rejected — do not implement it/);
+});
+
+test("spec review: a rejected alternative rides into the next brief, and both shape lines pin its order", async () => {
+  const { specReviewBrief, specRepairBrief, SPEC_REPAIR_SYSTEM, findingLine } = await import("../extensions/pb/prompts.ts");
+  const noted = {
+    priority: "P1" as const,
+    id: "F1",
+    title: "Contracts — the bound names no owner",
+    evidence: "spec.md:12 cites no code",
+    fix: "name src/scan.ts:10",
+    alternative: "dropping the cadence, because the cost is real",
+  };
+  // the carry a delta round reads, and the plain case with no Not: to carry
+  assert.match(specReviewBrief("s", SPEC(), { prior: [noted] }), /Fix: name src\/scan\.ts:10\n   Not: dropping the cadence, because the cost is real/);
+  assert.equal(
+    findingLine({ priority: "P1", title: "Contracts — no owner", evidence: "spec.md:12", fix: "name src/scan.ts:10" }, 1),
+    "1. [P1] Contracts — no owner\n   Evidence: spec.md:12\n   Fix: name src/scan.ts:10",
+  );
+  // both shape lines ask for the three fields in the same order, with those exact labels
+  for (const brief of [specReviewBrief("s", SPEC()), specRepairBrief({ name: "s", answer: "[P1] x — y\nFix: z" })]) {
+    const shape = brief.split("\n").find((l) => l.startsWith("## Findings — "))!;
+    const at = (label: string) => shape.indexOf(label);
+    assert.ok(at("in this order") > 0, `the order is pinned: ${shape}`);
+    assert.ok(!shape.includes("in either order"), shape);
+    assert.ok(at("Evidence:") < at("Fix:"), shape);
+    assert.ok(at("Fix:") < at("Not:"), `the shape asks for Not: too: ${shape}`);
+    assert.ok(/Not: <[^>]+>/.test(shape), `Not: is described, not just named: ${shape}`);
+  }
+  assert.match(SPEC_REPAIR_SYSTEM, /Keep the reviewer's Not: line when the answer states one; never invent or import one\./);
+});
+
+test("review ledger: a rejected alternative is not a lead — no such key reaches the map", async () => {
+  const { ledgerFindings } = await import("../extensions/pb/store.ts");
+  const stored = ledgerFindings([
+    { priority: "P1", file: "src/scan.ts", line: 10, title: "the bound names no owner", fix: "name src/scan.ts:10", alternative: "dropping the cadence" },
+    { priority: "P0", title: "a blocker with no alternative" },
+  ]);
+  assert.deepEqual(stored, [
+    { priority: "P1", file: "src/scan.ts", line: 10, title: "the bound names no owner", fix: "name src/scan.ts:10" },
+    { priority: "P0", title: "a blocker with no alternative" },
+  ]);
+  assert.ok(stored.every((e) => !("alternative" in e)), JSON.stringify(stored));
+  assert.ok(!JSON.stringify(stored).includes('"alternative"'), JSON.stringify(stored));
+});
+
+test("spec reviewer: one fix, a cheap measurement and both bound attacks bind every round", async () => {
+  const { SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  // one fix, and the rejected alternative goes on Not:, not in the same line as an option
+  assert.match(
+    SPEC_REVIEWER_SYSTEM,
+    /Every finding carries one Fix: the single change you would make, with its reason in the same line\. If you weighed another and rejected it, one Not: line names it and why it loses\. If the choice is yours to make, make it — an either\/or inside Fix: is not a finding\./,
+  );
+  // measure it yourself, cheaply, and put the number on Evidence
+  assert.match(
+    SPEC_REVIEWER_SYSTEM,
+    /A fork that read-only inspection can settle, settle before you write, with one cheap, targeted, read-only command — a single git\/grep\/ls query, or one test-name-pattern run that finishes in seconds — and put the command and its result on the Evidence line\. Never the full suite, never a build or an install, and only a handful of commands per review\. What no cheap command settles, put to the human as a one-line question instead of a fork\./,
+  );
+  // the two attacks this spec exists for
+  assert.match(SPEC_REVIEWER_SYSTEM, /A Contract that bounds how often something runs, contradicted by the call frequency of the code it names, is a P1: the build implements the cadence as written\./);
+  assert.match(SPEC_REVIEWER_SYSTEM, /A bound whose owner is claimed as new but already performs that call in the tree is a finding: the escape hatch is being used to skip naming it\./);
+  // and the one sentence that scopes every rule above to the round
+  assert.match(
+    SPEC_REVIEWER_SYSTEM,
+    /In a follow-up round these rules bite on what the revision creates or exposes, wherever its text sits; a problem that predates the revision, in text the revision left alone, belongs under Outside the change\. The first round has no such section — there, everything is in scope\./,
+  );
+});
+
+test("spec reviewer: one fix reaches both rounds, and the living rule is qualified where it is stated", async () => {
+  const t = setup({ verify: "true", specReviewer: { mode: "always", maxRounds: 2 } });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const systemLog = path.join(os.tmpdir(), `pb-spec-one-fix-${process.pid}.log`);
+  fs.rmSync(systemLog, { force: true });
+  process.env.MOCK_SPEC_REVIEW = "block";
+  process.env.MOCK_SPEC_SYSTEM_LOG = systemLog;
+  try {
+    await t.run("build", "order-cancellation");
+    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the checklist holds the transition, because the state machine enforces it.", mode: "append" });
+    await t.run("build", "order-cancellation"); // the delta round
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SPEC_SYSTEM_LOG;
+  }
+  const systems = fs.readFileSync(systemLog, "utf8").split("<<<round>>>").map((s) => s.trim()).filter(Boolean);
+  fs.rmSync(systemLog, { force: true });
+  assert.equal(systems.length, 2);
+  for (const sys of systems) {
+    // one prompt for both rounds: the obligation and its scoping are in the text each round reads
+    assert.match(sys, /Every finding carries one Fix/);
+    assert.match(sys, /In a follow-up round these rules bite on what the revision creates or exposes/);
+  }
+
+  const { specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  const clause = /in a follow-up round, only where this revision created or exposed it; otherwise it belongs under Outside the change/i;
+  // the two brief copies of the living rule carry the clause on the sentence that states it
+  const brief = specReviewBrief("order-cancellation", SPEC(), { living: { digest: "Orders stand until cancelled.", uncovered: [{ capability: "order-cancellation", path: "specs/order-cancellation.md" }] } });
+  const livingLines = brief.split("\n").filter((l) => /living file but no delta/.test(l));
+  assert.equal(livingLines.length, 2, `both brief copies of the living rule are found:\n${livingLines.join("\n")}`);
+  for (const line of livingLines) assert.match(line, clause, line);
+  // the system prompt states the living rule, and its one scoping sentence is what qualifies it there
+  assert.match(SPEC_REVIEWER_SYSTEM, /The living requirement files under specs\/ are in force[\s\S]*?needs none\./);
+});
+
+test("spec reviewer: one fix scoped to its round — the first round has no Outside lane to be sent to", async () => {
+  const { specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  const first = specReviewBrief("order-cancellation", SPEC());
+  const delta = specReviewBrief("order-cancellation", SPEC().replace("Cancel orders.", "Cancel orders, and refund the paid part."), { prior: [WINDOW_BLOCKER], priorMarkdown: SPEC(), round: 2 });
+  // the scoping sentence names its own exception, because the section it points at exists only in a delta round
+  assert.match(SPEC_REVIEWER_SYSTEM, /The first round has no such section — there, everything is in scope\./);
+  assert.ok(!first.includes("## Outside the change"), "the first round's brief must not offer a lane it never parses");
+  assert.match(delta, /## Outside the change — existing problems the change did not cause/);
+});
+
+test("spec reviewer: one fix is a prompt rule — an either/or in Fix: still parses", async () => {
+  const { parseSpecReview } = await import("../extensions/pb/prompts.ts");
+  const hedged = parseSpecReview(["[P1] Contracts — two ways to fix this", "Evidence: spec.md:14 names no owner.", "Fix: either name src/scan.ts:10, or drop the cadence from the Contract", "VERDICT: block"].join("\n"));
+  // a lapse degrades to today's behaviour; it never loses the finding or the review
+  assert.deepEqual(hedged.findings, [
+    { priority: "P1", title: "Contracts — two ways to fix this", evidence: "spec.md:14 names no owner.", fix: "either name src/scan.ts:10, or drop the cadence from the Contract" },
+  ]);
+  assert.equal(hedged.block, true);
+});
+
+test("guide: the spec topic states the bound owner, the single fix per finding and the round's scope", async () => {
+  // /pb:help renders a pb:topic region, so guidance written outside one is invisible to its reader
+  const doc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "extensions", "pb", "guide.md"), "utf8");
+  const topic = doc.slice(doc.indexOf("<!-- pb:topic spec -->"), doc.indexOf("<!-- pb:topic build -->"));
+  assert.ok(topic.length > 1000, "the spec topic region was found");
+  // the guide is hand-wrapped, so a claim is matched across line breaks, never at one wrap point
+  const says = (phrase: string) => new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").split(/\s+/).join("\\s+"), "i");
+  for (const claim of [
+    "bounds how often something runs also names the code whose call it bounds",
+    "`new: <path>` when nothing performs it yet",
+    "`Assumption: … settles by …` when nothing in the project enforces the cadence",
+    "a backticked command doesn't own a cadence",
+    "its one fix follow on `Evidence:` and `Fix:` lines",
+    "one `Not:` line says what it was and why it loses",
+    "`/pb:fix` labelled as already rejected",
+    "never an either/or handed back to you",
+    "first round has no such section: there, everything is in scope",
+  ]) assert.match(topic, says(claim), claim);
 });
 
 test("spec review gate: a pass covers only the text it saw", () => {
