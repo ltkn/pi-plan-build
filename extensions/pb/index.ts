@@ -79,7 +79,7 @@ import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findin
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, behaviouralChange, buildTask, commitMessage, contractHash, ensureSpecIds, isAcceptanceLine, needsRed, ownTestRef, parseSpec, pathTestRef, proofMarkersOf, redExemption, redSharing, sectionHeading, sectionOf, semanticErrors, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, specReviewBlocks, specReviewGate, specReviewRisk, taskScopeSemanticErrors, taskIdProofGap, testRefsOf, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, behaviouralChange, buildTask, commitMessage, contractHash, ensureSpecIds, isAcceptanceLine, needsRed, parseSpec, redExemption, redSharing, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, specReviewBlocks, specReviewGate, specReviewRisk, tokensOf } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { parseRequirementDeltas, parseRequirementDocument, planArchiveRequirements, requirementDeltaSummary, requirementGaps, requirementWriteErrors, writeRequirementPlans } from "./requirements.ts";
 import { buildReport } from "./report.ts";
@@ -179,63 +179,6 @@ const rewriteWarning = (name: string, prev: Progress | undefined, spec: ParsedSp
   return `\`${name}\` was already ${prev.phase} with done tasks: they keep their status. If this is a new change rather than a revision, write a new spec instead — new specs start with all tasks todo`;
 };
 
-/**
- * Acceptance lines on tasks with a Test: line must name their proof `(tests: ...)` or their
- * exemption `(non-testable: ...)`, so uncovered lines can't slip to review unnoticed. Qualified
- * variants (`Acceptance (abuse):`, `Acceptance (race):`) count as acceptance lines too: a label
- * must not smuggle a line past the gate. Tasks without a Test: line are proven by the gate suite
- * by construction. Readers stay lenient: only the write tools call this, so in-flight specs keep working.
- */
-const acceptanceMarkerErrors = (spec: ParsedSpec): string[] =>
-  spec.tasks.flatMap((t) => {
-    if (!t.test) return [];
-    return t.text
-      .split("\n")
-      .filter((l) => isAcceptanceLine(l) && proofMarkersOf(l).length === 0)
-      .map((l) => `${t.id} ${l.trim()} — add (tests: ...) naming the proving tests as the line's last element, or (non-testable: reason)`);
-  });
-
-/**
- * `(tests: ...)` entries that resolve to nothing: a `Tn` entry must name a task of this spec that
- * needs red (the gate forcing that task's `Test:` run to fail is the proof it claims, its own id
- * included), a path-like entry must exist in the repo, and any other entry must occur verbatim in
- * the test files. A named proof that resolves to nothing is a faked mapping, so writers are held to
- * names that hold and the reviewer judges stragglers as P1 candidates.
- *
- * A `Tn` entry is checked on every task's acceptance lines, including a task with no `Test:` line:
- * such a task has no red run of its own, which makes its marker no stronger, not unchecked. Whether
- * a named file or test name resolves is asked only where a `Test:` line exists to run it.
- */
-const unresolvedMappings = (spec: ParsedSpec, cwd: string): Array<{ task: string; entry: string; reason: string }> => {
-  const out: Array<{ task: string; entry: string; reason: string }> = [];
-  for (const t of spec.tasks) {
-    for (const entry of testRefsOf(t.text)) {
-      const gap = taskIdProofGap(spec, entry);
-      if (gap) {
-        out.push({ task: t.id, entry, reason: `${gap}, and a task id proves nothing` });
-        continue;
-      }
-      if (!t.test) continue; // no red run here to resolve a file or test name against
-      if (ownTestRef(entry)) continue; // the named task needs red: its Test: run is the proof
-      if (pathTestRef(entry)) {
-        if (!fs.existsSync(path.join(cwd, entry.trim()))) out.push({ task: t.id, entry, reason: `names \`${entry.trim()}\`, which is not in the repo` });
-        continue;
-      }
-      if (!searchTestFiles(cwd, entry)) out.push({ task: t.id, entry, reason: `names "${entry}", found in no test file` });
-    }
-  }
-  return out;
-};
-/** How a proof marker must name its proof, spelled once for both write gates. */
-const MARKER_GUIDANCE =
-  "A Tn entry names a task the red gate will force to fail, so that task must need a red Test: run (its own id or another task's); on a task with no red proof — a (refactor) title, no Test: line, New tests: no, a verification gate other than tests — name a test file or test name that exists today, or use (non-testable: <why>).";
-const acceptanceMappingErrors = (spec: ParsedSpec, cwd: string): string[] =>
-  unresolvedMappings(spec, cwd).map((m) => `${m.task} (tests: ${m.entry}) — ${m.reason}`);
-
-/** Unresolved proof references for the reviewer: stragglers past the write-time gate (hand edits). */
-const mappingNotes = (spec: ParsedSpec, cwd: string): string[] =>
-  unresolvedMappings(spec, cwd).map((m) => `${m.task} (tests: ${m.entry}) ${m.reason}`);
-
 /** The number of lines in a text file, or undefined when it can't be counted (binary, huge). */
 const fileLines = (file: string): number | undefined => {
   try {
@@ -299,10 +242,9 @@ const specWarnings = (md: string, spec: ParsedSpec): string[] => {
       if (suspiciousCommand(t.test)) return [`${t.id}'s Test: \`${t.test}\` chains shells or reaches the network — it runs with your privileges, so review it before building; the dry-run below doesn't execute it`];
       return [];
     }
-    // A declared doc-only task (doc-only, documentation-only, prose-only) whose every acceptance
-    // line is already exempted needs no nudge: the reviewer judges whether the exemption is
-    // legitimate, as with any (non-testable:) line.
-    if (/doc(?:s|umentation)?[- ]only|prose[- ]only/i.test(t.text) && t.text.split("\n").filter(isAcceptanceLine).every((l) => proofMarkersOf(l).some((m) => m.kind === "non-testable"))) return [];
+    // A declared doc-only task (doc-only, documentation-only, prose-only) needs no Test: nudge:
+    // the reviewer judges its acceptance lines like any other task's.
+    if (/doc(?:s|umentation)?[- ]only|prose[- ]only/i.test(t.text)) return [];
     return [`${t.id} adds behaviour but has no Test: line — add a targeted command, or leave it out and the reviewer judges its tests at the end`];
   });
   return [...shared, ...contracts, ...suite, ...untestable];
@@ -866,14 +808,8 @@ export default function pb(pi: ExtensionAPI) {
         );
       const { spec, errors } = parseSpec(params.content);
       if (!spec) throw new Error(`The spec doesn't parse:\n- ${errors.join("\n- ")}\nFix it and call pb_write_spec again.`);
-      const markerErrs = acceptanceMarkerErrors(spec);
-      if (markerErrs.length) throw new Error(`Acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
-      const semErrs = semanticErrors(params.content, spec);
-      if (semErrs.length) throw new Error(`The spec needs senior shape before it is ready:\n- ${semErrs.join("\n- ")}\nFix it and call pb_write_spec again.`);
       const pathErrs = spec.status === "ready" ? specPathErrors(params.content, ctx.cwd) : [];
       if (pathErrs.length) throw new Error(`The spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\nFix the path, line or citation; new files need no line number.`);
-      const mapErrs = acceptanceMappingErrors(spec, ctx.cwd);
-      if (mapErrs.length) throw new Error(`Acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\n${MARKER_GUIDANCE}`);
       const reqErrs = requirementWriteErrors(store, params.content);
       if (reqErrs.length) throw new Error(`The requirement delta can't be merged into the living requirement base:\n- ${reqErrs.join("\n- ")}\nFix it and call pb_write_spec again.`);
       const prev = store.progress(params.name);
@@ -945,25 +881,11 @@ export default function pb(pi: ExtensionAPI) {
       const { spec, errors } = parseSpec(md);
       if (!spec) throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.join("\n- ")}`);
       const sectionName = params.section?.replace(/^#+\s*/, "").trim().toLowerCase() ?? "";
-      if (sectionName === "tasks") {
-        const markerErrs = acceptanceMarkerErrors(spec);
-        if (markerErrs.length) throw new Error(`Not written: acceptance lines need proof markers:\n- ${markerErrs.join("\n- ")}\nAdd (tests: ...) or (non-testable: reason) to each.`);
-        const mapErrs = acceptanceMappingErrors(spec, ctx.cwd);
-        if (mapErrs.length) throw new Error(`Not written: acceptance proof markers name tests that don't resolve:\n- ${mapErrs.join("\n- ")}\n${MARKER_GUIDANCE}`);
-      }
-      // A call that makes the spec ready re-checks the full senior shape, whatever else it wrote
-      // in the same call (findings and decisions evidence included). A Tasks edit on an already-ready
-      // spec re-checks the task-scoped gates; other section edits stay quiet so build-time notes flow.
+      // A call that makes the spec ready checks the requirement delta it carries; other section
+      // edits stay quiet so build-time notes flow.
       const prevMd = store.readSpec(name) ?? "";
       const wasReady = parseSpec(prevMd).spec?.status === "ready";
       const becameReady = spec.status === "ready" && !wasReady && params.status === "ready";
-      if (becameReady) {
-        const semErrs = semanticErrors(md, spec);
-        if (semErrs.length) throw new Error(`Not written: the spec needs senior shape before it is ready:\n- ${semErrs.join("\n- ")}`);
-      } else if (spec.status === "ready" && sectionName === "tasks") {
-        const taskErrs = taskScopeSemanticErrors(md, spec);
-        if (taskErrs.length) throw new Error(`Not written: the spec needs senior shape before it is ready:\n- ${taskErrs.join("\n- ")}`);
-      }
       const touchesRequirements = sectionName === "requirements" || sectionName.startsWith("requirements:");
       if (touchesRequirements || becameReady) {
         const reqErrs = requirementWriteErrors(store, md);
@@ -1313,7 +1235,7 @@ export default function pb(pi: ExtensionAPI) {
       acceptance: Type.Optional(
         Type.Array(
           Type.Object({
-            criterion: Type.String({ description: 'the checklist id, e.g. "A1", "R1.1" or "T1.1"' }),
+            criterion: Type.String({ description: 'the checklist id, e.g. "T1.1"' }),
             status: StringEnum(["met", "not met", "not verified"]),
             evidence: Type.String({ description: "file:line, test name, or why it is not verified; required for met and not met" }),
           }),
@@ -1906,15 +1828,8 @@ export default function pb(pi: ExtensionAPI) {
       store.writeSpec(name, edited);
       const prev = store.progress(name);
       if (prev) store.saveProgress({ ...prev, tasks: syncTasks(spec, prev.tasks), edited: true });
-      // Human edits save on parse alone: the human is the guardrail here, not the
-      // model. Senior-shape drift is reported visibly (never silently bypassed).
-      const shapeAdvisory = semanticErrors(edited, spec);
-      store.event(name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, by: "human", ...(shapeAdvisory.length ? { override: true, issues: shapeAdvisory.length } : {}) });
-      if (shapeAdvisory.length)
-        return ctx.ui.notify(
-          `Saved ${store.rel("specs", name, "spec.md")} with human override: ${shapeAdvisory.length} senior-shape note(s) bypassed (the reviewer still judges truth):\n- ${shapeAdvisory.join("\n- ")}`,
-          "warning",
-        );
+      // Human edits save on parse alone: the human is the guardrail here, not the model.
+      store.event(name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, by: "human" });
       return ctx.ui.notify(`Saved ${store.rel("specs", name, "spec.md")}.`, "info");
     }
   };
@@ -2245,12 +2160,7 @@ export default function pb(pi: ExtensionAPI) {
         "```",
         `Check: ${p.lastVerify?.summary.split("\n")[0] ?? `none (verification ${spec.gate})`}`,
         p.assumptions?.length ? `\nChoices the build made where the spec was unclear (in the spec's Decisions; the review checks them):\n${p.assumptions.map((a) => `- ${a}`).join("\n")}` : "",
-        (p.unattended ?? []).filter((c) => !c.startsWith("Spec-shape advisory")).length
-          ? `\nDecided without you (no answer in time):\n${(p.unattended ?? []).filter((c) => !c.startsWith("Spec-shape advisory")).map((c) => `- ${c}`).join("\n")}`
-          : "",
-        (p.unattended ?? []).filter((c) => c.startsWith("Spec-shape advisory")).length
-          ? `\nAdvised (not asked — the build proceeded and the review judges):\n${(p.unattended ?? []).filter((c) => c.startsWith("Spec-shape advisory")).map((c) => `- ${c}`).join("\n")}`
-          : "",
+        p.unattended?.length ? `\nDecided without you (no answer in time):\n${p.unattended.map((c) => `- ${c}`).join("\n")}` : "",
         p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
         changedFiles ? `\n${changedFiles}` : "",
         redNotes(spec, p).length ? `\nNew tests never seen failing (the review judges each):\n${redNotes(spec, p).map((n) => `- ${n}`).join("\n")}` : "",
@@ -2651,13 +2561,6 @@ export default function pb(pi: ExtensionAPI) {
     }
     if (!o.checked) baselineExtraWarning(ctx, store, testCmd);
     if (!o.checked && !(await reviewPlanningChanges(ctx, store, notes))) return undefined;
-    // Post-ready drift (e.g. via human edits, which save on parse alone) is advisory
-    // here, never blocking: the human sees it now, the reviewer judges it later.
-    const shapeAdvisory = semanticErrors(md, spec);
-    if (shapeAdvisory.length) {
-      notes.push(`Spec-shape advisory (build proceeds):\n${shapeAdvisory.map((e) => `- ${e}`).join("\n")}`);
-      ctx.ui.notify(`Spec-shape advisory: ${shapeAdvisory.length} senior-shape note(s); listed in the build summary for the reviewer to judge.`, "warning");
-    }
     if (!cfg.checkpoints) ctx.ui.notify("Checkpoints are off: this build runs without undo points, and without the test-tampering checks.", "warning");
     return { spec, md, cfg, buildCmd };
   };
@@ -4145,11 +4048,10 @@ export default function pb(pi: ExtensionAPI) {
         testChanges: p?.testChanges,
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
         redProofs: p ? redProofsOf(p) : undefined,
-        mappingNotes: loaded ? mappingNotes(loaded.spec, ctx.cwd) : undefined,
         fixReports,
         designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
         acceptanceDrift: loaded && name ? acceptanceDrift(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
-        humanOverride: p?.edited ? "This spec was edited by hand after writing, so write-time gates were bypassed visibly rather than silently: judge its shape (Threats, measurements, Contracts, evidence, reasons) as well as its truth." : undefined,
+        humanOverride: p?.edited ? "This spec was edited by hand after writing: judge its shape (Threats, measurements, Contracts, evidence, reasons) as well as its truth." : undefined,
         staleRefs: staleProseRefs(ctx.cwd, base),
         baseWarning,
         largeFiles,

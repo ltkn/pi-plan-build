@@ -10,7 +10,7 @@
  *   New tests: yes | no — <why, if no>
  *
  *   ## Goal · ## Findings · ## Decisions · ## Open questions · ## Tasks
- *   (optional: Out of scope, Acceptance criteria, Contracts, Migration and rollback, Threats and abuse;
+ *   (optional: Out of scope, Contracts, Migration and rollback, Threats and abuse;
  *    Findings recommended; Open questions only while planning)
  *
  * A planning spec is the checkpoint of an unfinished discussion: it needs no Verification line and
@@ -22,7 +22,7 @@
  */
 import { createHash } from "node:crypto";
 import { blankFenced, escapeRegExp, headerBlock, sectionHeading, sectionOf, setSection, unfenced } from "./markdown.ts";
-import { parseRequirementDeltas, requirementCriteria, requirementSurfaceText } from "./requirements.ts";
+import { parseRequirementDeltas, requirementSurfaceText } from "./requirements.ts";
 import type { AcceptanceCriterion, Finding, Gate } from "./store.ts";
 
 export { sectionHeading, sectionOf, setSection };
@@ -144,24 +144,12 @@ const noCriteria = (text: string) => /^(?:none|n\/a|not applicable)\s*(?:[—–
 
 /**
  * The review's acceptance checklist, derived from the spec's current text without changing its format:
- * top-level "## Acceptance criteria" bullets become A1, A2, ...; requirement deltas contribute each
- * touched scenario as R1.1, R1.2, ...; each task's "- Acceptance:" line becomes T1.1, T1.2, ... in
- * reading order. Proof markers stay in the text so the reviewer can judge them.
+ * each task's "- Acceptance:" line becomes T1.1, T1.2, ... in reading order. A task is the build's unit
+ * and its Test: command is the proof, so tasks are the only acceptance form.
  */
 export function acceptanceCriteria(md: string, parsed?: ParsedSpec): AcceptanceCriterion[] {
   const spec = parsed ?? parseSpec(md).spec;
   const out: AcceptanceCriterion[] = [];
-  let lineNo = 0;
-  for (const line of unfenced(sectionOf(md, "Acceptance criteria"))) {
-    const m = /^\s*[-*]\s+(.+)$/.exec(line);
-    if (!m) continue;
-    const text = m[1].trim();
-    if (!text || noCriteria(text)) continue;
-    out.push({ id: `A${++lineNo}`, text });
-  }
-  for (const criterion of requirementCriteria(md)) {
-    out.push({ id: criterion.id, text: criterion.text, capability: criterion.capability, requirement: criterion.requirement });
-  }
   for (const task of spec?.tasks ?? []) {
     let taskLine = 0;
     for (const line of unfenced(task.text)) {
@@ -256,84 +244,18 @@ export function redSharing(spec: ParsedSpec): Map<string, string> {
 /** A step of the build by id: a spec task. */
 export const buildTask = (spec: ParsedSpec, id: string | undefined) => spec.tasks.find((t) => t.id === id);
 
-export interface ProofMarker {
-  kind: "tests" | "non-testable";
-  body: string;
-}
-
+/** A task acceptance line, including qualified variants such as `Acceptance (abuse):`. */
 const ACCEPTANCE_LINE = /^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/i;
-const PROOF_MARKER = /\((tests|non-testable):\s*([^)]+)\)/gi;
-/** What may follow a real marker: whitespace and sentence punctuation, or the close of a wrapping parenthesis. */
-const MARKER_TRAILER = /^[\s.;,)]*$/;
-
-/** True for a task acceptance line, including qualified variants such as `Acceptance (abuse):`. */
+/** True for a task acceptance line; the task's `Test:` command is the proof, with no per-line marker. */
 export const isAcceptanceLine = (line: string): boolean => ACCEPTANCE_LINE.test(line);
 
-/**
- * The proof markers that end an acceptance line, in order. A marker earlier in the line is prose:
- * a criterion may explain what a `(tests: Tn)` marker means, and that example must not become the
- * line's own claim. Only markers in the trailing run are claims.
- */
-export function proofMarkersOf(line: string): ProofMarker[] {
-  const found = [...line.matchAll(PROOF_MARKER)];
-  const markers: ProofMarker[] = [];
-  let nextStart = line.length;
-  for (let i = found.length - 1; i >= 0; i--) {
-    const match = found[i];
-    const start = match.index ?? 0;
-    const end = start + match[0].length;
-    if (!MARKER_TRAILER.test(line.slice(end, nextStart))) break;
-    markers.unshift({ kind: match[1].toLowerCase() as ProofMarker["kind"], body: match[2].trim() });
-    nextStart = start;
-  }
-  return markers;
-}
+/* ------------------- citation grammar and review-risk selection ------------------- */
 
 /**
- * `(tests: ...)` proof references named on one task's acceptance lines. A `Tn`-style entry names a
- * task whose red `Test:` run proves the line — its own id or another task's, only where that task
- * needs red; a path-like entry names a file; anything else must occur verbatim in the test files
- * (a test or file name) — a named test that proves nothing is a faked mapping.
- */
-export function testRefsOf(taskText: string): string[] {
-  const refs: string[] = [];
-  for (const line of taskText.split("\n")) {
-    if (!isAcceptanceLine(line)) continue;
-    for (const marker of proofMarkersOf(line)) {
-      if (marker.kind !== "tests") continue;
-      for (const e of marker.body.split(/[,;]/).map((s) => s.trim()).filter(Boolean)) refs.push(e);
-    }
-  }
-  return refs;
-}
-
-/** A `Tn`-shaped entry: it names a task rather than a file; `taskIdProofGap` decides whether that task's red run backs it. */
-export const ownTestRef = (entry: string) => /^T\d+$/i.test(entry.trim());
-/** A path-like entry: must exist in the repo. */
-export const pathTestRef = (entry: string) => /[/\\]/.test(entry) || /\.[A-Za-z0-9]+$/.test(entry.trim());
-
-/**
- * Why a `Tn` proof entry names no red proof, or undefined when it names one: the id must name a task
- * of this spec and that task must need red, because the red gate forcing its `Test:` run to fail
- * before the change is all such a marker claims — which is why an own id is as good as another task's,
- * and why a `Tn` on a red-exempt task or in a red-exempt spec names nothing. The writer's alternatives
- * are `(non-testable: <why>)` or a test file or test name that exists today.
- */
-export function taskIdProofGap(spec: ParsedSpec, entry: string): string | undefined {
-  if (!ownTestRef(entry)) return undefined; // not a task id: the repo decides whether it resolves
-  const named = buildTask(spec, entry.trim().toUpperCase());
-  if (!named) return "names no task of this spec";
-  const exempt = redExemption(spec, named);
-  return exempt ? `names ${named.id}, which needs no red proof (${exempt})` : undefined;
-}
-
-/* ------------------------- senior-enforcement gates ------------------------- */
-
-/**
- * Senior-enforcement semantic gates: mechanically checkable shape rules that turn
- * senior prompt asks into write-time rejections. Readers stay lenient: only the
- * write tools call these, so in-flight and grandfathered specs keep working.
- * Planning specs are exempt: gates bite only on transition to ready.
+ * A spec's shape is decided by its parser: required sections, unique task ids, resolvable
+ * citations and requirement deltas. Semantic questions — whether evidence is real, a reason is
+ * sound, a threat is covered, a contract or migration is complete — belong to the reviewer and
+ * the human. The heuristics below only choose when a spec gets that review.
  */
 
 const hasSection = (md: string, name: string): boolean => {
@@ -341,27 +263,9 @@ const hasSection = (md: string, name: string): boolean => {
   return blanked.some((l) => sectionHeading(name).test(l));
 };
 
-/** Bullets of a section (fence-aware, "-" or "*" markers). */
-const sectionBullets = (md: string, name: string): string[] => {
-  const body = sectionOf(md, name);
-  if (!body) return [];
-  let inFence = false;
-  const out: string[] = [];
-  for (const line of body.split("\n")) {
-    if (/^(\s*)```/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    if (/^\s*[-*]\s+\S/.test(line)) out.push(line.trim());
-  }
-  return out;
-};
-
 /**
  * Root files a spec may cite by name without an extension (README:12). Part of the citation grammar
- * below: `specPathErrors` resolves the refs it finds against the project, `boundOwnerErrors` asks
- * only whether a bullet carries one, so both read the same text.
+ * below: `specPathErrors` resolves the refs it finds against the project.
  */
 export const ROOT_FILE_REF = /^(?:Makefile|Dockerfile|LICENSE|README|CHANGELOG|CONTRIBUTING|Gemfile|Rakefile|Procfile|go\.mod|go\.sum|package\.json|tsconfig\.json|pom\.xml|build\.gradle(?:\.kts)?)$/i;
 
@@ -397,26 +301,24 @@ export const specPathRefs = (md: string): Array<{ path: string; line: number; te
 };
 
 /**
- * High-signal product keywords for the write-time Threats gate. Deliberately
- * narrower than the reviewer's auto-mode heuristic: generic words (status,
- * limit, address, email, job, role) stay reviewer-level, not write-time blocks.
- * Scanned across the spec's substantive sections, because a trust boundary is
- * just as real when it is first named in Findings or Decisions.
+ * High-signal product keywords that make a spec worth an independent review.
+ * Deliberately narrower than the reviewer's own heuristic: generic words
+ * (status, limit, address, email, job, role) stay reviewer-level. Scanned
+ * across the spec's substantive sections, because a trust boundary is just as
+ * real when it is first named in Findings or Decisions.
  */
 const SENSITIVE_WRITE = /\b(auth\w*|login|logout|sign-?in|password|passwd|credential|secret|api[_-]?key|token|jwt|oauth|saml|sso|permission|privilege|admin|payment|billing|invoice|refund|webhook|upload|download|session|cookie|csrf|cors|endpoint|route|tenant|ownership|quota|replay|balance|credit|debit)\b/i;
 
 /**
  * Language-agnostic words for a surface other code, clients or stored data can
- * observe: an API, event, schema, config, public signature, file format. A hit
- * requires Contracts (or an explicit "none — why").
+ * observe: an API, event, schema, config, public signature, file format.
  */
 const EXTERNAL_SURFACE =
   /\b(?:api|endpoint|route|http|https|rest|graphql|grpc|rpc|webhook|event|message|queue|topic|schema|migration|database|table|column|constraint|json|dto|payload|config|configuration|environment|cli|file\s+format|serializ\w*|deserializ\w*|contract|client|consumer|producer)\b|\bpublic\s+(?:api|interface|signature|contract)\b/i;
 
 /**
- * Words for data that outlives one run and needs a migration/rollback answer:
- * a database, a schema, a stored format, a backfill. A hit requires Migration
- * and rollback (or an explicit "none — why").
+ * Words for data that outlives one run: a database, a schema, a stored format, a backfill. A hit
+ * makes the spec review ask for a migration/rollback answer (or an explicit "none — why").
  */
 const PERSISTED_DATA =
   /\b(?:database|db|schema|migration|persist\w*|storage|stored?\s+(?:data|state|record|file)|file\s+format|serializ\w*|deserializ\w*|backfill|table|column)\b/i;
@@ -435,262 +337,15 @@ const negativeWithReason = (body: string): boolean => {
   return /(?:—|–|\bbecause\b|\bsince\b|:)\s*\S/i.test(text);
 };
 
-/** Whether a section has a real body, not an empty heading, TBD, or a bare "none". */
-const sectionUsable = (md: string, name: string): boolean => {
-  if (!hasSection(md, name)) return false;
-  const body = sectionOf(md, name);
-  if (!body) return false;
-  const first = body.trim().split("\n")[0].trim();
-  if (!/^(?:tbd|tba|todo|n\/a|none|nothing)\b/i.test(first)) return true;
-  return negativeWithReason(body);
-};
-
 const threatSection = (md: string): string | undefined =>
   hasSection(md, "Threats and abuse") ? "Threats and abuse" : hasSection(md, "Threats") ? "Threats" : undefined;
 
 /**
- * A ready spec whose substantive sections look sensitive must carry Threats plus
- * abuse-case acceptance, or an explicit "none — why" that the reviewer can judge.
- */
-export function threatsErrors(md: string, spec: ParsedSpec): string[] {
-  if (spec.status !== "ready") return [];
-  const section = threatSection(md);
-  if (section) {
-    if (sectionUsable(md, section)) return [];
-    return [`"## ${section}" is empty or a placeholder: name who can reach it, what they must prove, how it could be abused, and what prevents each abuse — or write "none — <why>"`];
-  }
-  const scope = surfaceText(md, spec);
-  const hit = scope.split("\n").find((l) => SENSITIVE_WRITE.test(l.replace(/`[^`]*`/g, "")));
-  if (!hit) return [];
-  const word = hit.replace(/`[^`]*`/g, "").match(SENSITIVE_WRITE)![0];
-  return [`ready spec mentions "${word}" but has no "## Threats and abuse": add who can reach it, what they must prove, how it could be abused, what prevents each abuse, and cover the abuse cases in Acceptance (or write "none — <why>")`];
-}
-
-/**
- * Quantitative claims with units or bounded counts (latencies, counts, windows,
- * limits, retries) must carry a measurement (a backtick command on the line) or
- * be an Assumption with a settler. Bare task ids (T1), file names, and line
- * ranges carry no units and never trigger. Scanned in Decisions, Contracts, and
- * Tasks.
- */
-const QUANTITY = /\b\d+(\.\d+)?\s*(ms|s\b|sec|secs|seconds?|minutes?|mins?|hours?|days?|rows?|reqs?|rps|qps|%|percent|mb|gb|kb)\b|\bp(50|90|95|99)\b|\b\d+\s*(attempts|retries|times|connections|threads|workers|requests)\b|\b(at least|at most|max|maximum|min|minimum|up to|over|under|fewer than|more than|within)\s+\d+\b/i;
-const SUBSECOND = /\bsub-?seconds?\b/i;
-
-/**
- * Whether a line is an Assumption that names how it settles. Both halves must be present; their
- * order is free, because the two claims are one sentence in either order. One answer, shared by the
- * measurement gate and the bound gate.
- */
-export const ASSUMPTION_WITH_SETTLER = /(?=[\s\S]*assumption:)(?=[\s\S]*settles?\s+by)/i;
-
-/**
- * How often something runs, said in words: the trigger for a bound that must name its owner. It
- * never matches a bare count or a unit (`at most 200`, `200ms`) — `QUANTITY` owns those, and their
- * answer is a measurement, which no `path:line` can give.
- */
-export const CADENCE = /\b(?:at most once|no more than once|once per|twice per|per (?:calls?|runs?|rounds?|invocations?|requests?|passes)|every (?:calls?|runs?|rounds?|invocations?|requests?|passes)|each (?:calls?|runs?|rounds?|invocations?|requests?|passes)|one (?:calls?|runs?|rounds?|invocations?|requests?|queries) per|at most one [^.;\n]{0,40}?\b(?:calls?|invocations?|runs?|rounds?|passes|queries|lookups?|scans?|fetches|requests?|executions?|walks?|reads?|processes|sends?|writes?))\b/i;
-
-/** A bound whose owner is code that does not exist yet: `new: src/scan.ts`. Angle brackets are prose, never literal. */
-export const NEW_BOUND_OWNER = /\bnew:\s*`?[\w./-]+\.[\w]{1,12}`?/i;
-
-export function quantitativeErrors(md: string, spec: ParsedSpec): string[] {
-  if (spec.status !== "ready") return [];
-  const out: string[] = [];
-  for (const section of ["Decisions", "Contracts"] as const) {
-    for (const line of sectionBullets(md, section)) {
-      if (!QUANTITY.test(line) && !SUBSECOND.test(line)) continue;
-      if (ASSUMPTION_WITH_SETTLER.test(line)) continue;
-      if (/`[^`]+`/.test(line)) continue;
-      out.push(`${section} quantitative claim without measurement or Assumption: "${line}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
-    }
-  }
-  for (const t of spec.tasks) {
-    for (const line of t.text.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || /^###\s/.test(trimmed)) continue;
-      if (!QUANTITY.test(trimmed) && !SUBSECOND.test(trimmed)) continue;
-      if (ASSUMPTION_WITH_SETTLER.test(trimmed)) continue;
-      if (/`[^`]+`/.test(trimmed)) continue;
-      out.push(`${t.id} quantitative claim without measurement or Assumption: "${trimmed}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
-    }
-  }
-  for (const delta of parseRequirementDeltas(md).deltas) {
-    for (const group of delta.groups) {
-      if (group.kind === "REMOVED") continue;
-      for (const requirement of group.requirements) {
-        const lines = [requirement.statement, ...requirement.scenarios.flatMap((s) => s.criteria.map((c) => `${c.keyword} ${c.text}`))];
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || (!QUANTITY.test(trimmed) && !SUBSECOND.test(trimmed))) continue;
-          if (ASSUMPTION_WITH_SETTLER.test(trimmed)) continue;
-          if (/`[^`]+`/.test(trimmed)) continue;
-          out.push(`${delta.capability} requirement "${requirement.name}" has a quantitative claim without measurement or Assumption: "${trimmed}" — add a measurement (command plus result) or write it as "Assumption: <claim> — settles by <how>, because <reason>"`);
-        }
-      }
-    }
-  }
-  return out;
-}
-
-/** File-like tokens in a task (backtick paths and dotted filenames), for seam-overlap detection. */
-const taskFiles = (text: string): Set<string> => {
-  const out = new Set<string>();
-  for (const m of text.matchAll(/`([^`]+)`/g)) {
-    const inner = m[1].trim();
-    if (/[./]/.test(inner)) out.add(inner.toLowerCase());
-  }
-  for (const m of text.matchAll(/(?<![\w./-])([\w.-]+\.[\w]{1,5})(?![\w])/g)) out.add(m[1].toLowerCase());
-  return out;
-};
-
-/**
- * Whether the tasks share a seam: the same Test: command, or a file-like token
- * named by more than one task. Disjoint tasks (different commands, different
- * files) carry no shared seam; missing Contracts there stays advisory.
- */
-export function sharesSeam(spec: ParsedSpec): boolean {
-  if (sharedTestCommands(spec).length) return true;
-  const seen = new Map<string, string>();
-  for (const t of spec.tasks) {
-    for (const f of taskFiles(t.text)) {
-      const owner = seen.get(f);
-      if (owner !== undefined && owner !== t.id) return true;
-      if (owner === undefined) seen.set(f, t.id);
-    }
-  }
-  return false;
-}
-
-/**
  * Whether a spec changes behaviour it must test: a task with a Test: command, or a non-refactor
- * task with acceptance lines. Contracts and the living-requirement check share this one reading.
+ * task with acceptance lines. The living-requirement check and the review risk share this reading.
  */
 export function behaviouralChange(spec: ParsedSpec): boolean {
   return spec.tasks.some((t) => t.test || (/acceptance:/i.test(t.text) && !/^\(refactor\)/i.test(t.title)));
-}
-
-/**
- * A ready spec needs Contracts when it changes an external surface, even with
- * one task, or when a multi-task behavioural spec's tasks share a seam. Disjoint
- * internal tasks need no Contracts section: the existing advisory warning covers
- * them. `none — why` is accepted for the external-surface trigger alone, so a
- * keyword false positive costs one line instead of a fake contract.
- */
-export function contractsErrors(md: string, spec: ParsedSpec): string[] {
-  if (spec.status !== "ready") return [];
-  const external = EXTERNAL_SURFACE.test(surfaceText(md, spec));
-  const behavioural = behaviouralChange(spec);
-  const shared = spec.tasks.length > 1 && sharesSeam(spec);
-  if (!external && !(shared && behavioural)) return [];
-  if (!external && spec.gate === "none" && spec.tasks.every((t) => !t.test)) return [];
-  if (hasSection(md, "Contracts")) {
-    if (!sectionUsable(md, "Contracts")) {
-      return [`"## Contracts" is empty or a placeholder: pin every seam (signatures, API and errors, data, events, and which task owns each side) or write "none — <why>"`];
-    }
-    if (shared && negativeWithReason(sectionOf(md, "Contracts"))) {
-      return [`${spec.tasks.length} tasks share a seam, but ## Contracts says none: pin every seam they share, or make the tasks truly independent`];
-    }
-    return [];
-  }
-  if (external) {
-    return [`ready spec changes an external surface (API, event, schema, config, public signature or stored shape) but has no ## Contracts: pin every seam other code, clients or stored data depend on, with its errors and which task owns each side (or write "none — <why>")`];
-  }
-  return [`${spec.tasks.length} tasks share a seam but have no ## Contracts: pin every seam they share (signatures, API and errors, data, events, and which task owns each side)`];
-}
-
-/**
- * A ready spec that changes persisted data or a stored format must say how the
- * old data moves and how the change is rolled back, or state explicitly why no
- * data outlives the change. The section is optional for every other spec.
- */
-export function migrationErrors(md: string, spec: ParsedSpec): string[] {
-  if (spec.status !== "ready") return [];
-  if (!PERSISTED_DATA.test(surfaceText(md, spec))) return [];
-  if (!hasSection(md, "Migration and rollback")) {
-    return [`ready spec changes persisted data or a stored format but has no "## Migration and rollback": say how existing data moves to the new shape, how it is rolled back, and what old and new code do while both run (or write "none — <why>")`];
-  }
-  if (!sectionUsable(md, "Migration and rollback")) {
-    return [`"## Migration and rollback" is empty or a placeholder: say how existing data moves, how the change is rolled back, and what old and new code do while both run — or write "none — <why>"`];
-  }
-  return [];
-}
-
-/**
- * Findings bullets (when the section exists) must cite checkable evidence: a
- * path (file:line), a pathed file (with a slash and an extension, so and/or
- * never counts), a backtick probe (command plus conclusion), an explicit
- * `probe: …; conclusion: …` pair, or an explicit `constraint: …`. Bare words
- * alone ("baseline", "measured") never count: evidence must point somewhere.
- * Catches unevidenced senior prose without judging its truth, which stays the
- * reviewer's job.
- */
-export const FINDINGS_EVIDENCE_RULE =
-  'a path (file:line), a probe ("probe: <what you ran>; conclusion: <what it showed>" or a backticked command with its conclusion), or a constraint ("constraint: <what limits the change>")';
-const EVIDENCE = /(`[^`]+`|[A-Za-z0-9_./-]+\.[a-z]{1,5}:\d+|[\w.-]+\/[\w./-]*\.[\w]{1,5}|\bconstraint\s*:\s*\S|\bprobe\s*:[\s\S]*?\bconclusion\s*:\s*\S)/i;
-
-export function findingsEvidenceErrors(md: string, spec: ParsedSpec): string[] {
-  if (spec.status !== "ready") return [];
-  if (!hasSection(md, "Findings")) return [];
-  return sectionBullets(md, "Findings")
-    .filter((l) => !EVIDENCE.test(l))
-    .map((l) => `Findings line without evidence: "${l}" — cite ${FINDINGS_EVIDENCE_RULE}`);
-}
-
-/**
- * Decisions bullets (when the section exists) must carry a reason with an
- * explicit marker: because, since, so, so that, therefore, to avoid, an em/en
- * dash or arrow, "Rationale:"/"Reason:", or an Assumption. A bare colon never
- * counts ("Use X: yes" states no reason). Rejected ideas ("Not doing X") need
- * the same. The accepted forms are shared with the spec prompt so the rule
- * taught and the rule enforced cannot drift.
- */
-export const DECISION_REASON_RULE =
-  'because, since, so, so that, therefore, to avoid, an em dash (—), "Rationale:", "Reason:", or "Assumption: <claim> — settles by <how>, because <reason>"';
-const REASON = /(because|since|\bso\b|so that|therefore|to avoid|rationale|reason(?:s|ing)?:|assumption:|—|–|→)/i;
-
-export function decisionsEvidenceErrors(md: string, spec: ParsedSpec): string[] {
-  if (spec.status !== "ready") return [];
-  if (!hasSection(md, "Decisions")) return [];
-  return sectionBullets(md, "Decisions")
-    .filter((l) => !REASON.test(l))
-    .map((l) => `Decisions line without a reason: "${l}" — add its reason with an explicit marker: ${DECISION_REASON_RULE}`);
-}
-
-/**
- * The owner a bound must name, in the writer's words: one sentence shared by this gate's refusal and
- * SPEC_FORMAT, so the rule taught and the rule enforced cannot drift. A backticked command is
- * deliberately absent — that is the measurement gate's answer, and the case this gate exists for is a
- * command quoted with no code named.
- */
-export const BOUND_OWNER_RULE =
-  'name the code whose call this bounds as path:line, write "new: <path>" if nothing performs it yet, or make it an Assumption with a settler when nothing in the project enforces the cadence — a backticked command measures, it does not own a cadence';
-
-/**
- * A ready spec's Contracts bullets that bound how often something runs must name the code whose call
- * they bound: a resolvable `path:line` (resolved for real by `specPathErrors`), a path presented as
- * new, or an Assumption with a settler for a cadence nothing here enforces. Contracts only — a
- * cadence in Decisions is rationale, and widening the section doubles the false-refusal surface for
- * no bound the build would implement.
- */
-export function boundOwnerErrors(md: string, spec: ParsedSpec): string[] {
-  if (spec.status !== "ready") return [];
-  const out: string[] = [];
-  for (const line of sectionBullets(md, "Contracts")) {
-    if (!CADENCE.test(line)) continue;
-    if (specPathRefs(line).length || NEW_BOUND_OWNER.test(line) || ASSUMPTION_WITH_SETTLER.test(line)) continue;
-    out.push(`Contracts bound without an owner: "${line}" — ${BOUND_OWNER_RULE}`);
-  }
-  return out;
-}
-
-/** All senior-enforcement gates for a ready spec; empty when planning or clean. */
-export function semanticErrors(md: string, spec: ParsedSpec): string[] {
-  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...migrationErrors(md, spec), ...findingsEvidenceErrors(md, spec), ...decisionsEvidenceErrors(md, spec), ...boundOwnerErrors(md, spec)];
-}
-
-/** The Threats/numbers/Contracts/migration/bound subset: what a Tasks-section update re-checks. */
-export function taskScopeSemanticErrors(md: string, spec: ParsedSpec): string[] {
-  return [...threatsErrors(md, spec), ...quantitativeErrors(md, spec), ...contractsErrors(md, spec), ...migrationErrors(md, spec), ...boundOwnerErrors(md, spec)];
 }
 
 /** A spec at or above this many tasks has too wide a blast radius to build unreviewed in auto mode. */
@@ -705,7 +360,7 @@ export interface SpecReviewRisk {
  * Whether a spec carries enough risk to deserve an independent reviewer under "auto": a
  * security-sensitive surface, threats, a migration, persisted data, an external contract, a named
  * living capability with no delta, or a large blast radius. Small reversible specs rely on the
- * write-time checks and the human's read.
+ * decidable write checks and the human's read.
  */
 export function specReviewRisk(md: string, spec: ParsedSpec, touchesLiving = false): SpecReviewRisk {
   const scope = surfaceText(md, spec);
@@ -840,7 +495,7 @@ export interface SpecReviewDelta {
   removed: string[];
   /**
    * unchanged sections and header that bind the delta: Goal, Out of scope, Decisions, Contracts,
-   * Migration and rollback, Threats (either spelling) and the top-level Acceptance criteria.
+   * Migration and rollback, Threats (either spelling), plus any requirement sections.
    * Design is the one binding section left out: a delta round is told to check the full spec too,
    * so resending the largest section with every unchanged delta buys nothing.
    */
@@ -857,14 +512,13 @@ export interface SpecReviewDelta {
 export const BINDING_SECTIONS: readonly string[] = ["Goal", "Out of scope", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse", "Threats"];
 
 /**
- * Blocks a spec-review delta always carries: the list above, the header and the top-level acceptance
- * criteria — minus Design, stated here as a subtraction rather than kept as a second list. A delta
- * round reads the whole spec anyway (prompts.ts reviewPrompt), so Design is the one section it does
- * not need resent with every unchanged delta.
+ * Blocks a spec-review delta always carries: the list above and the header — minus Design, stated
+ * here as a subtraction rather than kept as a second list. A delta round reads the whole spec anyway
+ * (prompts.ts reviewPrompt), so Design is the one section it does not need resent with every
+ * unchanged delta. Requirement sections are added by `bindingBlock` below.
  */
 const BINDING_BLOCKS = new Set<string>([
   "header",
-  "section:acceptance criteria",
   ...BINDING_SECTIONS.filter((section) => section !== "Design").map((section) => `section:${blockName(section)}`),
 ]);
 

@@ -7,8 +7,8 @@
  */
 import { tip } from "./help.ts";
 import { headerBlock, safeBlock, safeLine } from "./markdown.ts";
-import { requirementCriteria, requirementNameKey, type RequirementDelta, type RequirementDocument } from "./requirements.ts";
-import { acceptanceCriteria, BINDING_SECTIONS, BOUND_OWNER_RULE, capCarriedAdvisories, DECISION_REASON_RULE, FINDINGS_EVIDENCE_RULE, type ParsedSpec, type SpecTask, sectionHeading, sectionOf, specReviewDelta } from "./spec.ts";
+import { parseRequirementDeltas, requirementNameKey, type RequirementDelta, type RequirementDocument } from "./requirements.ts";
+import { BINDING_SECTIONS, capCarriedAdvisories, type ParsedSpec, type SpecTask, sectionHeading, sectionOf, specReviewDelta } from "./spec.ts";
 import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, FINDING_NOT_CHARS, PB_DIR, RED_CLAIM_CAP, REQUIREMENTS_DIR, type Progress, type SpecResolution, type TaskProgress, cap } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
@@ -145,11 +145,11 @@ New tests: yes | no — <why>
 ## Goal
 The outcome in a few sentences: what is true after the change, for whom, and how we'll know it worked — no implementation. Every task and acceptance line serves it; anything beyond it belongs in Out of scope.
 ## Findings
-What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Every bullet cites its evidence: ${FINDINGS_EVIDENCE_RULE}. A path:line must point at a real line in the repo; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
+What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Each bullet says what makes it checkable — a path:line, a probe (probe: <what you ran>; conclusion: <what it showed>) or a constraint — never a bare conclusion. A path:line must point at a real line in the repo; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
 ## Decisions
-Each decision with its reason, as it stands now: no dates, no history, not who decided. Every bullet carries its reason with an explicit marker: ${DECISION_REASON_RULE}. A bare colon states no reason; rejected ideas as "Not doing X, because …", so they aren't reconsidered. Every quantitative claim (latencies, counts, windows) carries a measurement (command plus result) or is written as an Assumption.
+Each decision with its reason, as it stands now: no dates, no history, not who decided. Say why in plain prose, not with a bare colon; rejected ideas as "Not doing X, because …", so they aren't reconsidered. Every quantitative claim (latencies, counts, windows) carries a measurement (command plus result) or is written as an Assumption.
 ## Contracts
-No later step sees the whole change at once: tasks are built one by one. So pin here every seam other code, clients or stored data depend on — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. A single task that changes an external surface needs this section too; tasks sharing a seam (the same Test: command or a shared file) without it are rejected. Truly independent internal tasks need none, though a one-line "independent" section is accepted, and a keyword false positive can be answered with "none — <why>". Pin exactly these, as they must end up; leave everything behind them to the build. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown. Every observable value a Contract states — an HTTP status, error type, header, ordering, event name or stored value — cites the code path or test that pins it today (file:line), or is written as an Assumption; a value inferred from the design is built as written. A formula or derived figure — a size, limit, count, threshold, window — shows its computed value for each case Acceptance pins, inputs and result together (a tenth of a 128k window = 12800), because a number the reader must recompute by hand is the one that survives a review round wrong. A bound on how often something runs is a claim about a call site, so it names one: ${BOUND_OWNER_RULE}.
+No later step sees the whole change at once: tasks are built one by one. So pin here every seam other code, clients or stored data depend on — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. A single task that changes an external surface needs this section too, and tasks sharing a seam (the same Test: command or a shared file) should pin it. Truly independent internal tasks need none, though a one-line "independent" section is accepted, and a "none — <why>" answer is fine when nothing is shared. Pin exactly these, as they must end up; leave everything behind them to the build. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown. Every observable value a Contract states — an HTTP status, error type, header, ordering, event name or stored value — cites the code path or test that pins it today (file:line), or is written as an Assumption; a value inferred from the design is built as written. A formula or derived figure — a size, limit, count, threshold, window — shows its computed value for each case Acceptance pins, inputs and result together (a tenth of a 128k window = 12800), because a number the reader must recompute by hand is the one that survives a review round wrong. A bound on how often something runs is a claim about a call site, so name the code that owns it — a path:line, new: <path> when nothing performs it yet, or an Assumption when nothing in the project enforces the cadence.
 ## Migration and rollback
 Only when the change persists or transforms data, a schema or a stored format: how existing data moves to the new shape, how the change is rolled back, and what old and new code do while both run. Say "none — <why>" when nothing outlives the change.
 ## Requirements: <capability>
@@ -159,31 +159,26 @@ Overview: <what the capability is and what it refuses to do, in a sentence or tw
 ### Requirement: <name>
 Invariant: <the rule that must hold for every input, in one falsifiable sentence>
 <optional context: why it exists, or what it refuses to do>
-#### Scenario: <name>
-- **GIVEN** <starting state>
-- **WHEN** <action or event>
-- **THEN** <one observable claim>
-- **THEN** <another, when the same act has another observable effect>
 ### MODIFIED
-(same Requirement and Scenario blocks; replaces the existing requirement whole)
+(same Requirement block; replaces the existing requirement whole)
 ### REMOVED
 ### Requirement: <the existing requirement's name>
-Overview is required when the capability has no living file yet or that file has no overview, and replaces the old one when given: start from the existing overview and update it when this delta changes what the capability is or refuses to do. It is plain text and never a review criterion. ADDED must not already exist; MODIFIED and REMOVED must exist, or the write is refused. A rename is REMOVED plus ADDED. Every requirement states its rule as an Invariant: that becomes the first review criterion (R1.1) and is checked against the code for every input, not only the examples; each scenario follows (R1.2, …). Write each THEN as one observable claim: several claims are several THEN lines, so a finding can name the one that fails. Add a scenario only where it carries information the invariant doesn't: a boundary, a state transition, an abuse, precedence between overlapping rules. Don't restate the invariant as a happy path or pad it with near-duplicate cases; the invariant is the rule, the scenarios are its evidence.
+Overview is required when the capability has no living file yet or that file has no overview, and replaces the old one when given: start from the existing overview and update it when this delta changes what the capability is or refuses to do. It is plain text and never a review criterion. ADDED must not already exist; MODIFIED and REMOVED must exist, or the write is refused. A rename is REMOVED plus ADDED. Every requirement states its rule as an Invariant: that rule binds the build and is checked against the code for every input; the tasks' acceptance lines are the examples that prove it. A requirement written before invariants falls back to its statement. Older files may still carry \`#### Scenario:\` blocks, which parse and merge but are not acceptance items.
 ## Threats and abuse
-Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A ready spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks without this section is rejected: add it, or say "none — <why>" if the keyword points at nothing. The acceptance criteria then include the abuse cases.
+Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks should carry this section: say "none — <why>" if the keyword points at nothing. The task acceptance lines then include the abuse cases.
 ## Open questions
 Only while Status is planning: what's undecided, the options still being weighed with what was found for and against each, and where the discussion stands.
 ## Tasks
 ### T1: <the outcome, e.g. "a pending order can be cancelled">
 What must be true when it's done, and anything the build must know; not how to build it.
-- Acceptance: <one behaviour, as a test would check it>   (one line each, abuse cases included: they are the tests to write; each ends with its proof marker (tests: <the tests that prove it>) or its exemption (non-testable: <why>) — an illustrative \`(tests: Tn)\` mid-sentence is prose, not a claim; a Tn in a marker names a task the red gate will force to fail, so it must be this task's own id or another task's that needs a red Test: run — and a task with no red proof (a (refactor) title, no Test: line, New tests: no, a gate that runs no tests) names a test file or test name that exists today, or says (non-testable: <why>))
+- Acceptance: <one behaviour, as a test would check it>   (one line each, abuse cases included: they are the tests to write; the task's Test: command is the proof)
 - Test: \`<command that runs this task's tests>\`   (for a task that adds behaviour)
 
 The spec pins what the change must do and how we'll know: Goal, Decisions, Contracts, Threats and Acceptance bind the build. How to build it is left to the build, which settles the shape task by task — the compiler and the tests giving feedback — and records what it settles on in "## Design". So don't write "## Design" yourself, and don't prescribe classes, methods or steps unless they are a Contract. Put what tasks share in Contracts: that is the shape the build must not invent.
 
-One task, unless a slice is worth reviewing on its own; then vertical slices, each leaving the code working and tested, never a split by layer or a closing "add tests" task. Keep each task narrow: one coherent change with its own targeted Test:, never several independent changes bundled with a full-suite run — the harness runs the suite once after the last task, so split the work instead. A task that adds no behaviour (wiring, configuration, a "(refactor) …") has no Test: line. Name the prose that describes the behavior being changed (map sections, javadoc, schema comments, guides); updating it is a Task, never an afterthought. A doc-only task carries no Test: line — its acceptance lines still say what to check, marked (non-testable: <why>).
+One task, unless a slice is worth reviewing on its own; then vertical slices, each leaving the code working and tested, never a split by layer or a closing "add tests" task. Keep each task narrow: one coherent change with its own targeted Test:, never several independent changes bundled with a full-suite run — the harness runs the suite once after the last task, so split the work instead. A task that adds no behaviour (wiring, configuration, a "(refactor) …") has no Test: line. Name the prose that describes the behavior being changed (map sections, javadoc, schema comments, guides); updating it is a Task, never an afterthought. A doc-only task carries no Test: line — its acceptance lines still say what to check.
 
-Add "## Out of scope" or "## Acceptance criteria" only when they help. When you include a section that does not apply, say so in one line ("none — <why>"), never an empty heading or TBD.
+Add "## Out of scope" only when it helps. When you include a section that does not apply, say so in one line ("none — <why>"), never an empty heading or TBD.
 
 - Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.`;
 
@@ -196,7 +191,7 @@ ${SPEC_FORMAT}
 
 - One spec per change you would merge on its own; if the discussion covers several, say so and write one each.
 - Keep each task narrow: one coherent change with a targeted Test:. Split work that bundles several independent changes with a full verification; the harness runs the full suite once, after the last task, so no task needs to.
-- When the change alters what a capability guarantees, read the capability's living file (\`${REQUIREMENTS_DIR}/<capability>.md\`) if it exists, then add one "## Requirements: <capability>" delta: ADDED, MODIFIED or REMOVED must match that base exactly, because /pb:archive merges it and refuses a delta that doesn't apply. Open the delta with an Overview (the capability in a sentence or two, plain text): required for a new capability, otherwise carry the existing one forward and update it if this change moves it. State each requirement's rule as an Invariant (the reviewer checks it against the code, beyond its scenarios), give each THEN one observable claim, and add scenarios only where they carry information the invariant doesn't — a boundary, a state transition, an abuse, precedence — not a happy path or near-duplicates.
+- When the change alters what a capability guarantees, read the capability's living file (\`${REQUIREMENTS_DIR}/<capability>.md\`) if it exists, then add one "## Requirements: <capability>" delta: ADDED, MODIFIED or REMOVED must match that base exactly, because /pb:archive merges it and refuses a delta that doesn't apply. Open the delta with an Overview (the capability in a sentence or two, plain text): required for a new capability, otherwise carry the existing one forward and update it if this change moves it. State each requirement's rule as an Invariant (the reviewer checks it against the code for every input, not only the examples); the task acceptance lines are its examples, so a new delta needs no scenarios.
 - Refactoring that the standards call for (outdated code in the way) comes first, as tasks titled "(refactor) …" that keep behaviour; a large one is a spec of its own that this one depends on.
 - Before writing, check the spec for contradictions and against the code; fix them in the spec and tell me briefly what you changed.
 - Every observable value in Contracts (status, error, header, ordering, event, stored value) names the file:line or test that pins it today, or is an Assumption. Open that code before writing the value: never infer a status or an order from what the design should do.
@@ -427,21 +422,23 @@ const CAP_NOTICE_RESERVE = 32;
 /** The last bound, for a spec whose always-emitted parts alone outgrow the budget: cut, and say by how much. */
 const withinBudget = (text: string, maxChars: number) => (text.length <= maxChars ? text : cap(text, Math.max(1, maxChars - CAP_NOTICE_RESERVE)));
 
-const criterionLines = (markdown: string): string[] => {
-  const requirements = requirementCriteria(markdown);
-  const acceptance = acceptanceCriteria(markdown).filter((c) => /^A\d+$/.test(c.id));
-  const lines: string[] = [];
-  if (requirements.length) {
-    lines.push("", "## Requirement criteria");
-    const rendered = requirements.map((c) => `- ${c.id}: ${clip(c.text, CRITERION_LINE_CAP)}`);
-    lines.push(...cappedList(rendered, BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the spec`));
-  }
-  if (acceptance.length) {
-    lines.push("", "## Acceptance criteria");
-    const rendered = acceptance.map((c) => `- ${c.id}: ${clip(c.text, CRITERION_LINE_CAP)}`);
-    lines.push(...cappedList(rendered, BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the spec`));
-  }
-  return lines;
+/**
+ * The durable rules this spec's requirement delta adds or changes, as flat binding context. They are
+ * not acceptance items: the tasks' acceptance lines are, and each task's Test: command proves them.
+ */
+const requirementRuleLines = (markdown: string): string[] => {
+  const rules = parseRequirementDeltas(markdown).deltas.flatMap((delta) =>
+    delta.groups
+      .filter((group) => group.kind !== "REMOVED")
+      .flatMap((group) =>
+        group.requirements.flatMap((requirement) => {
+          const rule = (requirement.invariant || requirement.statement).replace(/\s+/g, " ").trim();
+          return rule ? [`- ${delta.capability} · ${requirement.name}: ${rule}`] : [];
+        }),
+      ),
+  );
+  if (!rules.length) return [];
+  return ["", "## Requirement rules", ...cappedList(rules.map((rule) => clip(rule, CRITERION_LINE_CAP)), BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the spec`)];
 };
 
 /** The finished tasks' non-"none" hooks: what a later task must respect, one line per task. */
@@ -467,7 +464,7 @@ const hookLines = (tasks: TaskProgress[]): string[] => {
  */
 export function bindingContext(name: string, markdown: string, tasks: TaskProgress[], maxChars: number, living: string): string {
   const head = `Binding context (a compact copy of ${P}/specs/${name}/spec.md; the spec is the source of truth — read it when a line is cut or a case isn't here):`;
-  const tail = [...criterionLines(markdown), ...(living ? ["", living] : []), ...hookLines(tasks)];
+  const tail = [...requirementRuleLines(markdown), ...(living ? ["", living] : []), ...hookLines(tasks)];
   const { kept, dropped } = fitSections(markdown, maxChars, head + tail.join("\n"), name);
   const lines = [head, ...(dropped.length ? ["", cutNotice(name, dropped)] : []), ...kept.flatMap((s) => ["", `## ${s.name}`, s.body]), ...tail];
   return withinBudget(lines.join("\n"), maxChars);
@@ -475,20 +472,14 @@ export function bindingContext(name: string, markdown: string, tasks: TaskProgre
 
 /**
  * The build's view of the spec, for a reset or compaction: the parts that bind the work, the
- * requirement and acceptance criteria, and no Tasks — the current handout carries its own task.
- * Deterministic: assembled from the sections, never summarized by a model. Sections that do not fit
- * `maxChars` (viewBudget) go whole and are named. `living` is this spec's livingDigest: like the
- * criteria, it is never cut — a guarantee is useless in the one copy that has to survive a reset.
+ * requirement rules, and no Tasks — the current handout carries its own task. Deterministic:
+ * assembled from the sections, never summarized by a model. Sections that do not fit `maxChars`
+ * (viewBudget) go whole and are named. `living` is this spec's livingDigest: like the rules, it is
+ * never cut — a guarantee is useless in the one copy that has to survive a reset.
  */
 export function buildSpecView(markdown: string, maxChars: number, living: string): string {
   const header = headerBlock(markdown).trim();
-  const requirements = requirementCriteria(markdown);
-  const acceptance = acceptanceCriteria(markdown).filter((c) => /^A\d+$/.test(c.id));
-  const tail = [
-    ...(requirements.length ? ["", `## Requirement criteria\n\n${requirements.map((c) => `- ${c.id}: ${c.text}`).join("\n")}`] : []),
-    ...(acceptance.length ? ["", `## Acceptance criteria\n\n${acceptance.map((c) => `- ${c.id}: ${c.text}`).join("\n")}`] : []),
-    ...(living ? ["", living] : []),
-  ];
+  const tail = [...requirementRuleLines(markdown), ...(living ? ["", living] : [])];
   const { kept, dropped } = fitSections(markdown, maxChars, header + tail.join("\n"));
   const parts = [header, ...(dropped.length ? [cutNotice(undefined, dropped)] : []), ...kept.map((s) => `## ${s.name}\n\n${s.body}`), ...tail];
   return withinBudget(parts.filter((p) => p).join("\n\n"), maxChars);
@@ -638,7 +629,7 @@ The harness already ran the check on the current tree; the result is in the brie
 ## What to check
 
 With a spec:
-- Acceptance: every id in the brief's checklist, one by one — met with evidence (file:line or test name), not met (and a P1 finding), or not verified with the reason. An id you leave out is not verified, never met; a criterion you did not check is not verified. Acceptance lines carry (tests: ...) proof markers or (non-testable: ...) exemptions: check each named test really proves its line (a named test that proves nothing is a faked mapping: P1), and each exemption is genuinely untestable behavior (behavior dressed as docs to dodge tests: P1).
+- Acceptance: every task acceptance id in the brief's checklist, one by one — met with evidence (file:line or test name), not met (and a P1 finding), or not verified with the reason. An id you leave out is not verified, never met; a criterion you did not check is not verified. The task's Test: command is the proof: check that the tests it runs really prove each line (a test that proves nothing is a P1), and judge a task with no Test: on whether its acceptance is genuinely untestable or docs-only behavior dressed as prose.
 - Contracts: each exactly as written, or changed with a recorded decision. With no Contracts and more than one task, flag any seam the tasks share but nothing pins (P2).
 - Design: the shape the build settled on, recorded as it went — consistent with the Contracts and Decisions, and the code matches it, or the change is recorded in Decisions.
 - Decisions: respected, including every rejected alternative ("Not doing X"); flag anything the build brought back. Flag an assumption (a Decisions entry starting "Assumption", made while writing the spec or building) that looks wrong or second-best.
@@ -779,8 +770,6 @@ export interface ReviewBrief {
   redNotes?: string[];
   /** every task whose new tests were seen failing before the change: its claim and the failure head the harness saw */
   redProofs?: RedProof[];
-  /** `(tests: ...)` entries resolving to nothing: named tests that prove nothing are faked mappings (P1 candidates) */
-  mappingNotes?: string[];
   /** what the fix laps reported (fixed/skipped titles plus their test results): judge the evidence, not the claim */
   fixReports?: Array<{ fixed: string[]; skipped: string[]; tests: string }>;
   /** where the spec's Design comes from: how hard to look for drift between Design, Decisions and code */
@@ -825,7 +814,7 @@ export function designProvenance(markdown: string, events: Array<Record<string, 
  * Acceptance lines added, dropped or reworded since the build started (advisory only): the
  * build-start event carries the Tasks text as the build saw it. A quiet tightening of the goal
  * mid-build looks exactly like drift here, so the reviewer judges whether each change is a
- * legitimate clarification. Rewordings that keep identical proof markers collapse to one line.
+ * legitimate clarification.
  */
 export function acceptanceDrift(markdown: string, events: Array<Record<string, unknown>>): string | undefined {
   const start = events.find((e) => e.type === "build-start" && Array.isArray(e.taskTexts));
@@ -837,9 +826,6 @@ export function acceptanceDrift(markdown: string, events: Array<Record<string, u
   const missing = before.filter((l) => !after.includes(l));
   const added = after.filter((l) => !before.includes(l));
   if (!missing.length && !added.length) return undefined;
-  const markers = (l: string) => [...l.matchAll(/\((?:tests|non-testable):[^)]*\)/g)].map((m) => m[0]).sort().join(" ");
-  if (missing.length === added.length && missing.map(markers).sort().join("\n") === added.map(markers).sort().join("\n"))
-    return `Acceptance drift during build: ${missing.length} line${missing.length === 1 ? "" : "s"} reworded since the build started, proofs unchanged — check the rewording didn't narrow the goal.`;
   return [
     "Acceptance drift during build (judge whether each is a legitimate clarification or a quiet change of the goal):",
     ...cappedList(missing, 8, (n) => `… +${n} more`).map((l) => `- dropped/reworded since build start: ${l}`),
@@ -882,7 +868,7 @@ export function reviewerBrief(o: ReviewBrief): string {
       "",
       "Report every id below in pb_report_findings's `acceptance` array, with status met, not met, or not verified and evidence. An id left out counts as not verified: a criterion not checked is never met.",
       "",
-      ...o.acceptance.map((c) => `- ${c.id}${c.task ? ` (${c.task})` : c.capability ? ` (${c.capability})` : ""}: ${c.text}`),
+      ...o.acceptance.map((c) => `- ${c.id}${c.task ? ` (${c.task})` : ""}: ${c.text}`),
       "",
     );
   }
@@ -919,9 +905,6 @@ export function reviewerBrief(o: ReviewBrief): string {
             proof.output?.trim() ? failureBlock(proof.output) : "    (no failure output recorded)",
           ]),
         ]
-      : []),
-    ...(o.mappingNotes?.length
-      ? ["", "## Acceptance proof mapping", "", "Each named proof below resolves to no file or test: a named test that proves nothing is a faked mapping (P1 candidate). Exemptions dressed as docs to dodge tests are P1 too.", ...o.mappingNotes.map((n) => `- ${n}`)]
       : []),
     ...(o.fixReports?.length
       ? [
@@ -1086,9 +1069,9 @@ ${deltaReview ? `This is a delta review. Check the changed sections and tasks ag
 Check the spec against itself:
 - Goal and Out of scope: is the outcome testable, and does every task stay inside the goal and outside the exclusions? Flag a task that quietly adds or removes scope.
 - Decisions, Contracts, Migration, Threats and Acceptance: do they agree with each other and with the tasks? A contract the tasks do not implement, an acceptance line that checks a different state, or a threat with no prevention is a finding.
-- Acceptance: can each line be checked by the named test exactly as written? A line that needs interpretation ("works correctly", "handles errors") is not testable; name the observable behavior it should assert.
+- Acceptance: can each line be checked by its task's \`Test:\` command exactly as written? A line that needs interpretation ("works correctly", "handles errors") is not testable; name the observable behavior it should assert.
 - Task size: each task is one coherent change with a targeted Test:. A task that bundles several independent changes, or ends with a full-suite run the harness already performs after the last task, is a finding (P2) naming the split.
-- Requirements: does each Invariant hold for every input the code can see, not only for the scenarios written under it? A scenario set that passes while the rule fails for another input, host or state is a finding; the scenarios are examples, the invariant is the guarantee. A behavioural change to a capability that has a living file but no delta in this spec is a P1 finding (the guarantee it already holds would go stale); a pure refactor, or a change its existing invariant still covers, needs none. In a follow-up round, only where this revision created or exposed it; otherwise it belongs under Outside the change.
+- Requirements: does each Invariant hold for every input the code can see, not only for the acceptance examples? A task set that passes while the rule fails for another input, host or state is a finding; the task acceptance lines are the examples, the invariant is the guarantee. Legacy scenario blocks are examples too, never replacements for the rule. A behavioural change to a capability that has a living file but no delta in this spec is a P1 finding (the guarantee it already holds would go stale); a pure refactor, or a change its existing invariant still covers, needs none. In a follow-up round, only where this revision created or exposed it; otherwise it belongs under Outside the change.
 - Cross-section: does any fact change between Findings, Decisions, Contracts and Tasks? Contradictions are findings, not style.
 
 Ground it in the repo: open every path the spec names, and flag a path:line that does not resolve or a named test that no test file contains. For every observable value in Contracts — status, error type, header, ordering, event name or stored value — open the cited code path or test and check it produces exactly that value; a value with no citation, or whose citation produces a different value, is a finding (P1 when the build would implement a wrong contract or a test that fails against correct code, P2 when it is merely unproven). Check that every external surface (API, event, schema, config, public signature, stored shape) has a Contract or an explicit "none — why"; every persisted-data change has a Migration and rollback answer or an explicit "none — why"; every Test: command is one this repo can run; and every Assumption has a settler. For each entry point or abusable rule, check Threats and abuse covers reach, proof, abuse and prevention, or says why none. Check the task order is buildable and each task leaves the code working.

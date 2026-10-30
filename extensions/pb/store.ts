@@ -249,17 +249,13 @@ export interface SpecResolution {
 /** One acceptance criterion's review result. A criterion left out is never `met`. */
 export type AcceptanceStatus = "met" | "not met" | "not verified";
 
-/** A checklist item derived from the spec for the reviewer; the spec format itself stays unchanged. */
+/** A checklist item derived from a task's acceptance line; tasks are the only acceptance form. */
 export interface AcceptanceCriterion {
-  /** review-only id: A1 for a top-level line, R1.1 for a requirement scenario, T1.1 for a task's acceptance line */
+  /** review-only id: T1.1 for a task's first acceptance line, T1.2 for its second */
   id: string;
   text: string;
-  /** the task id, when the criterion comes from a task's acceptance line */
+  /** the task id the line belongs to */
   task?: string;
-  /** the capability, when the criterion comes from a requirement delta */
-  capability?: string;
-  /** the requirement name, when the criterion comes from a requirement delta */
-  requirement?: string;
 }
 
 /** What a pass reported for one criterion. `met` always carries evidence; otherwise it degrades to not verified. */
@@ -391,7 +387,7 @@ export interface ReviewRun {
   largeFiles?: string[];
   model?: string;
   thinking?: string;
-  /** the spec's acceptance checklist for this review: A1, A2, T1.1, T2.1, ... */
+  /** the spec's task acceptance checklist for this review: T1.1, T2.1, ... */
   acceptance?: AcceptanceCriterion[];
   passes: { role: "review" | "abuse"; findings: Finding[]; acceptance?: AcceptanceCheck[]; prose: string; session: string; left: boolean; unparsed: boolean }[];
   /** you chose to skip the abuse pass when the review was done */

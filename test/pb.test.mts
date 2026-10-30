@@ -17,7 +17,7 @@ process.env.PI_PB_PI_COMMAND = path.join(path.dirname(new URL(import.meta.url).p
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const { default: pb } = await import("../extensions/pb/index.ts");
 const { parseSpec, acceptanceCriteria, addDecision, contractHash, needsRed, redExemption, specHash, specReviewDelta, specReviewGate, specReviewRisk, capCarriedAdvisories } = await import("../extensions/pb/spec.ts");
-const { parseRequirementDocument, parseRequirementDeltas, planRequirementDeltas, requirementCriteria } = await import("../extensions/pb/requirements.ts");
+const { parseRequirementDocument, parseRequirementDeltas, planRequirementDeltas } = await import("../extensions/pb/requirements.ts");
 const { specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
 
 type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
@@ -420,20 +420,20 @@ function setup(config: object = {}) {
   };
 }
 
-/**
- * SPEC's two-file task list with each acceptance line carrying `mark`, so the list a fixture builds
- * and the list SPEC writes by default cannot drift apart.
- */
-const tasksMarkedBy = (mark: (id: string) => string) =>
-  `### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (${mark("T1")})\n- Test: \`test -f T1.txt\`\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (${mark("T2")})\n- Test: \`test -f T2.txt\``;
-/** Each line marked by its own task id — legal only where the red gate will demand that task's run. */
-const TASKS_WITH_OWN_IDS = tasksMarkedBy((id) => `tests: ${id}`);
-/** The same list proven the only way a red-exempt spec may: no task id claims a red run there. */
-const TASKS_WITH_EXEMPTIONS = (why: string) => tasksMarkedBy(() => `non-testable: ${why}`);
+/** SPEC's two-file task list: each acceptance line is plain behaviour, proven by the task's Test:. */
+const TASKS_PLAIN = `### T1: first file
+Create T1.txt.
+- Acceptance: T1.txt exists
+- Test: \`test -f T1.txt\`
+
+### T2: second file
+Create T2.txt.
+- Acceptance: T2.txt exists
+- Test: \`test -f T2.txt\``;
 /** The second task of a two-task fixture list, so a fixture can pair another first task with it. */
 const secondTaskOf = (tasks: string) => tasks.split("\n\n").at(-1)!;
-/** T2 titled `(refactor)`, so its acceptance line carries the exemption a red-exempt task must use. */
-const TASKS_WITH_A_REFACTOR = "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged (non-testable: a refactor adds no behaviour)\n- Test: `true`";
+/** T2 titled `(refactor)`, so the red gate exempts it by its title. */
+const TASKS_WITH_A_REFACTOR = "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`\n\n### T2: (refactor) tidy\nNothing new.\n- Acceptance: behaviour unchanged\n- Test: `true`";
 
 const SPEC = (opts: { verification?: string; newTests?: string; tasks?: string } = {}) => `# Order cancellation
 Depends on: none
@@ -454,7 +454,7 @@ src/order.ts holds the model.
 ## Contracts
 - T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.
 ## Tasks
-${opts.tasks ?? TASKS_WITH_OWN_IDS}
+${opts.tasks ?? TASKS_PLAIN}
 `;
 
 /** A requirement delta for the SPEC above: one added requirement with one checkable scenario. */
@@ -645,9 +645,9 @@ Invariant: Only the wallet owner, or a holder of their signed mandate, can cance
   // with every requirement replaced, the capability is still named, with the one line saying so
   assert.match(living, /### order-cancellation/);
   assert.match(living, /replaced by this spec/);
-  // and the delta's criteria still state its replacement (the reviewer's own checklist)
-  const { requirementCriteria } = await import("../extensions/pb/requirements.ts");
-  assert.match(requirementCriteria(markdown).map((c) => c.text).join(" "), /signed mandate/);
+  // and the delta still states its replacement as the durable rule
+  const replacement = parseRequirementDeltas(markdown).deltas[0]!.groups[0]!.requirements.find((r) => /cancel A   pending ORDER/.test(r.name))!;
+  assert.match(replacement.invariant, /signed mandate/);
 
   // a delta that leaves one alone keeps it, and no Overview in the delta means the base's own
   const both = `${SPEC()}${DELTA_ADDED}`.replace("Overview: Orders move through a small state machine, and cancelling is the only way out.\n", "");
@@ -668,7 +668,7 @@ test("living: an unreadable base names its file", async () => {
   assert.equal(livingDigest(await livingRecords(markdown, {})), "");
   const block = bindingContext("order-cancellation", markdown, [], bindingBudget(), "");
   assert.doesNotMatch(block, /## Living requirements/);
-  assert.match(block, /## Requirement criteria\n- R1\.1: /); // its delta criteria are still handed over
+  assert.match(block, /## Requirement rules\n- order-cancellation · Cancelling twice is a no-op: /); // its delta rules are still handed over
 });
 
 test("living: digest lines are flat and capped", async () => {
@@ -839,77 +839,60 @@ test("spec: parses the header, sections and tasks; says what's wrong otherwise",
   assert.ok(bad.errors.some((e) => e.includes('T1 has no "- Acceptance:" line')));
 });
 
-test("spec: the review checklist derives stable ids without adding syntax to the spec", () => {
+test("spec: the review checklist is tasks only — top-level criteria are legacy prose", () => {
   const markdown = SPEC().replace(
-    "- Acceptance: T1.txt exists (tests: T1)",
-    "- Acceptance: T1.txt exists (tests: T1)\n- Acceptance (abuse): T1.txt can't be swapped in",
+    "- Acceptance: T1.txt exists",
+    "- Acceptance: T1.txt exists\n- Acceptance (abuse): T1.txt can't be swapped in",
   );
   const criteria = acceptanceCriteria(markdown, parseSpec(markdown).spec);
   assert.deepEqual(
     criteria.map((c) => [c.id, c.task, c.text]),
     [
-      ["A1", undefined, "T1.txt and T2.txt exist."],
-      ["T1.1", "T1", "T1.txt exists (tests: T1)"],
+      ["T1.1", "T1", "T1.txt exists"],
       ["T1.2", "T1", "T1.txt can't be swapped in"],
-      ["T2.1", "T2", "T2.txt exists (tests: T2)"],
+      ["T2.1", "T2", "T2.txt exists"],
     ],
   );
-  const none = acceptanceCriteria(SPEC().replace("- T1.txt and T2.txt exist.", "none — the task lines carry the checks."));
-  assert.deepEqual(
-    none.map((c) => c.id),
-    ["T1.1", "T2.1"],
-  );
-  const fenced = acceptanceCriteria(SPEC().replace("- T1.txt and T2.txt exist.", "```\n- not a criterion\n```"));
-  assert.deepEqual(
-    fenced.map((c) => c.id),
-    ["T1.1", "T2.1"],
-  );
-  const taskNone = acceptanceCriteria(SPEC().replace("- Acceptance: T1.txt exists (tests: T1)", "- Acceptance: none — covered by T2"));
+  // The legacy `## Acceptance criteria` section parses but contributes no ids.
+  assert.ok(markdown.includes("## Acceptance criteria"));
+  assert.ok(!criteria.some((c) => c.id.startsWith("A")));
+  const taskNone = acceptanceCriteria(SPEC().replace("- Acceptance: T1.txt exists", "- Acceptance: none — covered by T2"));
   assert.deepEqual(
     taskNone.map((c) => c.id),
-    ["A1", "T2.1"],
+    ["T2.1"],
   );
   const taskFenced = acceptanceCriteria(SPEC().replace("Create T1.txt.", "Create T1.txt.\n\n```\n- Acceptance: fenced example\n```"));
   assert.deepEqual(
     taskFenced.map((c) => c.id),
-    ["A1", "T1.1", "T2.1"],
+    ["T1.1", "T2.1"],
   );
 });
 
-test("requirements: the invariant joins the checklist first, then its scenarios", () => {
+test("requirements: a delta is living rules, never a second acceptance checklist", () => {
   const markdown = `${SPEC()}${REQUIREMENTS}`;
-  const criteria = acceptanceCriteria(markdown, parseSpec(markdown).spec);
-  const invariant = criteria.find((c) => c.id === "R1.1");
-  assert.deepEqual(invariant, {
-    id: "R1.1",
-    text: "Cancel a pending order: invariant — Only the order's owner can cancel it, and only while it is PENDING.",
-    capability: "order-cancellation",
-    requirement: "Cancel a pending order",
-  });
-  const scenario = criteria.find((c) => c.id === "R1.2");
-  assert.deepEqual(scenario, {
-    id: "R1.2",
-    text: "Cancel a pending order: Owner cancels a pending order — GIVEN a pending order owned by the caller; WHEN the owner cancels it; THEN it becomes CANCELLED",
-    capability: "order-cancellation",
-    requirement: "Cancel a pending order",
-  });
-  assert.deepEqual(requirementCriteria(markdown).map((c) => c.id), ["R1.1", "R1.2"]);
-  // REMOVED requirements have no scenario left to check.
-  const removed = `${SPEC().split("## Tasks")[0]}## Requirements: order-cancellation\n### REMOVED\n### Requirement: Cancel a pending order\n\n## Tasks${SPEC().split("## Tasks")[1]}`;
-  assert.deepEqual(requirementCriteria(removed), []);
+  assert.deepEqual(
+    acceptanceCriteria(markdown, parseSpec(markdown).spec).map((c) => c.id),
+    ["T1.1", "T2.1"],
+  );
+  const delta = parseRequirementDeltas(markdown).deltas[0]!;
+  assert.equal(delta.groups[0]!.requirements[0]!.invariant, "Only the order's owner can cancel it, and only while it is PENDING.");
 });
 
-test("requirements: a requirement without an Invariant line is checked by its statement", () => {
+test("requirements: a legacy requirement without an Invariant falls back to its statement", () => {
   const stated = REQUIREMENTS.replace(/^Invariant:.*\n/m, "A pending order can be cancelled by its owner.\n");
-  const criteria = requirementCriteria(`${SPEC()}${stated}`);
-  assert.deepEqual(criteria.map((c) => c.id), ["R1.1", "R1.2"]);
-  assert.equal(criteria[0]!.text, "Cancel a pending order: invariant — A pending order can be cancelled by its owner.");
+  const requirement = parseRequirementDeltas(`${SPEC()}${stated}`).deltas[0]!.groups[0]!.requirements[0]!;
+  assert.equal(requirement.invariant, "");
+  assert.equal(requirement.statement, "A pending order can be cancelled by its owner.");
 });
 
-test("requirements: every THEN line is its own observable claim", () => {
-  const twoClaims = REQUIREMENTS.replace("- **THEN** it becomes CANCELLED", "- **THEN** it becomes CANCELLED\n- **THEN** a second cancel is refused");
-  const scenario = requirementCriteria(`${SPEC()}${twoClaims}`).find((c) => c.id === "R1.2");
-  assert.match(scenario!.text, /THEN it becomes CANCELLED; THEN a second cancel is refused/);
+test("requirements: an Invariant-only delta needs no scenario", () => {
+  const invariantOnly = REQUIREMENTS.replace(/#### Scenario:[\s\S]*$/, "");
+  const parsed = parseRequirementDeltas(`${SPEC()}${invariantOnly}`);
+  assert.deepEqual(parsed.errors, []);
+  const plan = planRequirementDeltas(parsed.deltas, () => undefined);
+  assert.deepEqual(plan.errors, []);
+  assert.match(plan.plans[0]!.markdown, /Invariant: Only the order's owner/);
+  assert.doesNotMatch(plan.plans[0]!.markdown, /#### Scenario:/);
 });
 
 test("requirements: an Invariant must state a rule, appear once, and be enough on its own", () => {
@@ -939,8 +922,8 @@ test("requirements: the delta owns the capability's Overview, and an omitted one
     /^# order-cancellation requirements\n\n## Overview\n\nOrders are cancelled by their owner while pending; nothing else changes\.\n\n## Requirements\n/,
   );
   assert.match(markdown, /### Requirement: Cancel a pending order/);
-  // The overview is documentation, not a checklist item: the invariant is still R1.1.
-  assert.deepEqual(requirementCriteria(`${SPEC()}${REQUIREMENTS}`).map((c) => c.id), ["R1.1", "R1.2"]);
+  // The overview is documentation, not a checklist item; the task acceptance lines are the checklist.
+  assert.deepEqual(acceptanceCriteria(`${SPEC()}${REQUIREMENTS}`).map((c) => c.id), ["T1.1", "T2.1"]);
 
   const modify = (overview?: string) => `## Requirements: order-cancellation
 ${overview ? `${overview}\n` : ""}### MODIFIED
@@ -1018,9 +1001,9 @@ test("spec: the requirements format states the invariant first and one claim per
   assert.match(prompt, /Overview: <what the capability is and what it refuses to do/);
   assert.match(prompt, /Overview is required when the capability has no living file yet/);
   assert.match(prompt, /Invariant: <the rule that must hold for every input/);
-  assert.match(prompt, /one observable claim/);
-  assert.match(prompt, /R1\.2/);
-  assert.match(prompt, /Add a scenario only where it carries information the invariant doesn't/);
+  assert.match(prompt, /the tasks' acceptance lines are the examples that prove it/);
+  assert.match(prompt, /Older files may still carry/);
+  assert.doesNotMatch(prompt, /R1\.2/);
 });
 
 test("requirements: a delta applies exactly, and conflicts are refused", () => {
@@ -1067,12 +1050,12 @@ Only the owner can cancel a pending order.
   const missing = planRequirementDeltas(parseRequirementDeltas(modify).deltas, () => undefined);
   assert.match(missing.errors[0]!, /MODIFIED "Cancel a pending order" does not exist; use ADDED/);
 
-  const bad = parseRequirementDeltas(`## Requirements: order-cancellation
+  const invariantOnly = parseRequirementDeltas(`## Requirements: order-cancellation
 ### ADDED
-### Requirement: No scenario
-A statement with no check.
+### Requirement: A rule with no scenario
+Invariant: Nothing outlives the process.
 `);
-  assert.ok(bad.errors.some((e) => e.includes("needs at least one")));
+  assert.deepEqual(invariantOnly.errors, []);
   const noThen = parseRequirementDeltas(`## Requirements: order-cancellation
 ### ADDED
 ### Requirement: Half a scenario
@@ -1709,7 +1692,7 @@ test("red then green: a task's new tests are seen failing first; refactors and n
   assert.deepEqual(p.tasks.map((x: any) => x.id), ["T1", "T2"]);
 
   const u = setup({ verify: "true" });
-  await written(u, SPEC({ newTests: "no — a docs-only change", tasks: TASKS_WITH_EXEMPTIONS("the spec asks for no new tests") }));
+  await written(u, SPEC({ newTests: "no — a docs-only change", tasks: TASKS_PLAIN }));
   u.agent.script = async (text, tool) => {
     const task = taskOf(text);
     if (task && task !== "final") fs.writeFileSync(`${task}.txt`, "x");
@@ -1881,28 +1864,15 @@ test("lint: auto-detects package.json's lint script; explicit and none resolve",
   assert.equal(resolveLint("./mvnw checkstyle:check", dir), "./mvnw checkstyle:check");
 });
 
-test("spec: testRefsOf parses proof names; own and path entries classify", async () => {
-  const { testRefsOf, ownTestRef, pathTestRef } = await import("../extensions/pb/spec.ts");
-  assert.deepEqual(testRefsOf("- Acceptance: x (tests: T1, src/a.spec.ts)\n- Acceptance: y (tests: cancels order)"), ["T1", "src/a.spec.ts", "cancels order"]);
-  // Only the marker that ends the line is the claim; an example earlier in the criterion is prose.
-  assert.deepEqual(testRefsOf("- Acceptance: an illustrative (tests: Tn) mid-sentence; the claim ends the line (tests: T3)."), ["T3"]);
-  assert.deepEqual(testRefsOf("- Acceptance: the old name (tests: T1) moved into prose, with no marker left"), []);
-  assert.deepEqual(testRefsOf("- Acceptance: two claims end the line (tests: T1) (tests: T2)"), ["T1", "T2"]);
-  assert.ok(ownTestRef("T1") && ownTestRef("t2"));
-  assert.ok(!ownTestRef("login"));
-  assert.ok(pathTestRef("src/a.spec.ts") && pathTestRef("a.ts"));
-  assert.ok(!pathTestRef("cancels order"));
-});
-
-test("review brief: fix reports, mapping notes and acceptance drift render as sections", async () => {
+test("review brief: fix reports and acceptance drift render as sections", async () => {
   const { reviewerBrief, acceptanceDrift } = await import("../extensions/pb/prompts.ts");
   assert.equal(acceptanceDrift("# T", []), undefined); // no build-start: nothing to compare
-  const tasks = ["### T1: a\n- Acceptance: a works (tests: T1)"];
+  const tasks = ["### T1: a\n- Acceptance: a works"];
   assert.equal(acceptanceDrift(tasks.join("\n"), [{ type: "build-start", taskTexts: tasks }]), undefined);
-  const drift = acceptanceDrift("- Acceptance: a works (tests: T1)\n- Acceptance: b works (tests: T1)", [{ type: "build-start", taskTexts: tasks }]);
+  const drift = acceptanceDrift("- Acceptance: a works\n- Acceptance: b works", [{ type: "build-start", taskTexts: tasks }]);
   assert.match(drift!, /Acceptance drift during build[\s\S]*added\/reworded during build: - Acceptance: b works/);
-  const reword = acceptanceDrift("- Acceptance: a works well (tests: T1)", [{ type: "build-start", taskTexts: tasks }]);
-  assert.match(reword!, /reworded.*proofs unchanged/);
+  const reword = acceptanceDrift("- Acceptance: a works well", [{ type: "build-start", taskTexts: tasks }]);
+  assert.match(reword!, /dropped\/reworded since build start: - Acceptance: a works[\s\S]*added\/reworded during build: - Acceptance: a works well/);
   const brief = reviewerBrief({
     living: "",
     changed: [],
@@ -1910,10 +1880,9 @@ test("review brief: fix reports, mapping notes and acceptance drift render as se
     check: "ok",
     focus: "",
     fixReports: [{ fixed: ["guard clause"], skipped: [], tests: "npm test green" }],
-    mappingNotes: ["T1 (tests: ghost) names nothing"],
   });
   assert.match(brief, /## What the fix laps reported[\s\S]*Lap 1 fixed: guard clause[\s\S]*Lap 1 tests: npm test green/);
-  assert.match(brief, /## Acceptance proof mapping[\s\S]*ghost/);
+  assert.doesNotMatch(brief, /## Acceptance proof mapping/);
   assert.match(reviewerBrief({ living: "", changed: [], stat: "", check: "ok", focus: "", acceptanceDrift: drift }), /## Acceptance drift during build/);
 });
 
@@ -1925,20 +1894,17 @@ test("review brief: every acceptance id is listed; a follow-up carries the previ
     stat: "",
     check: "ok",
     focus: "",
-    acceptance: [
-      { id: "A1", text: "cancelling works" },
-      { id: "T1.1", text: "the test proves it (tests: T1)", task: "T1" },
-    ],
+    acceptance: [{ id: "T1.1", text: "the test proves it", task: "T1" }],
     previous: {
       snapshot: "abc",
       findings: [],
       changed: ["T1.txt"],
-      acceptance: [{ criterion: "A1", status: "met", evidence: "src/order.ts:12" }],
+      acceptance: [{ criterion: "T1.1", status: "met", evidence: "src/order.ts:12" }],
     },
   });
   assert.match(
     brief,
-    /## This is a follow-up review[\s\S]*Acceptance at the previous review[\s\S]*- A1: met — src\/order\.ts:12[\s\S]*## Acceptance checklist[\s\S]*Report every id below[\s\S]*- A1: cancelling works[\s\S]*- T1\.1 \(T1\): the test proves it \(tests: T1\)/,
+    /## This is a follow-up review[\s\S]*Acceptance at the previous review[\s\S]*- T1\.1: met — src\/order\.ts:12[\s\S]*## Acceptance checklist[\s\S]*Report every id below[\s\S]*- T1\.1 \(T1\): the test proves it/,
   );
   assert.match(brief, /an id left out counts as not verified/i);
 });
@@ -1950,12 +1916,12 @@ test("build: a task with no Test: command gets no red proof, and that is recorde
     SPEC({
       tasks: `### T1: first file
 Create T1.txt.
-- Acceptance: T1.txt exists (tests: T1)
+- Acceptance: T1.txt exists
 - Test: \`test -f T1.txt\`
 
 ### T2: second file
 Create T2.txt.
-- Acceptance: T2.txt exists (non-testable: the task has no Test: command)`,
+- Acceptance: T2.txt exists`,
     }),
   );
   const said: string[] = [];
@@ -2288,7 +2254,7 @@ test("spec: a behaviour task without Test:, or with a no-op one, warns — refac
   assert.match(chained, /chains shells or reaches the network/); // && is chaining too, and skips the pre-approval dry-run
 });
 
-test("spec: shared seams without Contracts are rejected, disjoint ones warn; shared Test: warns — advisory only", async () => {
+test("spec: shared seams without Contracts warn, never reject; shared Test: warns — advisory only", async () => {
   const t = setup();
   process.chdir(t.repo);
   const withContracts = (await t.callTool("pb_write_spec", { name: "a", content: SPEC() })).content![0].text;
@@ -2297,7 +2263,9 @@ test("spec: shared seams without Contracts are rejected, disjoint ones warn; sha
   const disjoint = (await t.callTool("pb_write_spec", { name: "b", content: stripped })).content![0].text;
   assert.match(disjoint, /no ## Contracts/); // disjoint tasks: advisory warning only
   const sharedNoContracts = SPEC({ tasks: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `test -f shared.txt`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `test -f shared.txt`" }).replace("## Contracts\n- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.\n", "");
-  assert.match((await t.callTool("pb_write_spec", { name: "b2", content: sharedNoContracts })).error!, /share a seam/);
+  const sharedNo = await t.callTool("pb_write_spec", { name: "b2", content: sharedNoContracts });
+  assert.equal(sharedNo.error, undefined, sharedNo.error ?? "");
+  assert.match(sharedNo.content![0].text, /no ## Contracts/); // a warning, not a refusal
   const shared = (await t.callTool("pb_write_spec", {
     name: "c",
     content: SPEC({ tasks: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `true`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `true`" }),
@@ -2311,10 +2279,12 @@ test("spec: shared seams without Contracts are rejected, disjoint ones warn; sha
   assert.doesNotMatch(decisions, /Note:/);
 });
 
-test("spec: senior gates reject sensitive-without-Threats, unmeasured numbers, and missing Contracts", async () => {
+test("spec: semantic shape is the reviewer's, not a write gate", async () => {
   const t = setup();
   process.chdir(t.repo);
-  const { parseSpec } = await import("../extensions/pb/spec.ts");
+  const { parseSpec, specReviewRisk } = await import("../extensions/pb/spec.ts");
+  const risk = (md: string) => specReviewRisk(md, parseSpec(md).spec!);
+
   const sensitive = `# Admin login
 Depends on: none
 Verification: tests
@@ -2331,10 +2301,9 @@ Let admins log in with a password.
 - Acceptance: login succeeds (tests: T1)
 - Test: \`test -f login.txt\`
 `;
-  assert.deepEqual(parseSpec(sensitive).errors, []); // readers stay lenient
-  assert.match((await t.callTool("pb_write_spec", { name: "sensitive", content: sensitive })).error!, /no "## Threats and abuse"/);
-  const withThreats = sensitive.replace("## Tasks", "## Threats and abuse\n- Only admins reach the login; abuse by replay is prevented by the session nonce.\n## Tasks").replace("- Acceptance: login succeeds (tests: T1)", "- Acceptance: login succeeds (tests: T1)\n- Acceptance: replayed logins are rejected (tests: T1)");
-  assert.equal((await t.callTool("pb_write_spec", { name: "sensitive-ok", content: withThreats })).error, undefined);
+  assert.deepEqual(parseSpec(sensitive).errors, []);
+  assert.equal((await t.callTool("pb_write_spec", { name: "sensitive", content: sensitive })).error, undefined);
+  assert.equal(risk(sensitive).reason, "security-sensitive (password)");
 
   const slow = `# Fast list
 Depends on: none
@@ -2353,127 +2322,9 @@ Responds within 200ms.
 - Acceptance: responds fast (tests: T1)
 - Test: \`test -f fast.txt\`
 `;
-  assert.match((await t.callTool("pb_write_spec", { name: "slow", content: slow })).error!, /quantitative claim without measurement or Assumption/);
-  const measured = slow.replace("Responds within 200ms.", "Responds within 200ms via `npm test` (got 120ms).");
-  assert.equal((await t.callTool("pb_write_spec", { name: "measured", content: measured })).error, undefined);
-  const assumed = slow.replace("Responds within 200ms.", "- Assumption: p95 under 200ms — settles by `npm run bench`, because the profiler shows it.");
-  assert.equal((await t.callTool("pb_write_spec", { name: "assumed", content: assumed })).error, undefined);
+  assert.equal((await t.callTool("pb_write_spec", { name: "slow", content: slow })).error, undefined);
+  assert.deepEqual(risk(slow), { review: false }); // no keyword makes this reviewer-worthy
 
-  // Tasks-scope updates re-check; other sections stay quiet.
-  await t.callTool("pb_write_spec", { name: "scoped", content: SPEC() });
-  assert.equal((await t.callTool("pb_update_spec", { name: "scoped", section: "Tasks", content: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `test -f a.txt`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `test -f b.txt`" })).error, undefined); // has Contracts: task-scope passes
-  const stripped = SPEC().replace("## Contracts\n- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.\n", "");
-  await t.callTool("pb_write_spec", { name: "planning-scoped", content: stripped.replace("# Order cancellation", "# Order cancellation\nStatus: planning") });
-  assert.equal((await t.callTool("pb_update_spec", { name: "planning-scoped", section: "Tasks", content: "### T1: a\n- Acceptance: a" })).error, undefined); // planning exempt
-});
-
-/**
- * A ready spec whose one Contracts bullet states a cadence; `bullet` is that line, so a test can put
- * an owner in it or leave it out. Nothing else in the spec is load-bearing.
- */
-const boundSpec = (bullet: string) => `# Cache the page lookup
-Depends on: none
-Verification: tests
-New tests: yes
-
-## Goal
-Resolve the page lookup without reading it twice.
-## Decisions
-- Cache the resolved path, because resolving it is pure and repeated.
-## Contracts
-- ${bullet}
-## Tasks
-### T1: cache the lookup
-- Acceptance: a second lookup does not read again (tests: T1)
-- Test: \`test -f cache.txt\`
-`;
-
-const OWNED_ONCE = "The lookup runs at most once per call at src/page.ts:10.";
-const UNOWNED_ONCE = "The lookup runs at most once per call and caches the resolved path.";
-const TASKS_A_B = "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `test -f a.txt`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `test -f b.txt`";
-
-test("spec bound gate: an unowned cadence is refused, naming every way to own it", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  citedPage(t); // src/page.ts with 30 lines, so a citation can be real
-  const err = (await t.callTool("pb_write_spec", { name: "bound-unowned", content: boundSpec(UNOWNED_ONCE) })).error!;
-  assert.match(err, /Contracts bound without an owner/);
-  assert.ok(err.includes(UNOWNED_ONCE), `the refusal quotes the bullet it refused: ${err}`);
-  for (const form of [/path:line/, /new: <path>/, /Assumption with a settler/]) assert.match(err, form);
-
-  // The shape this gate exists for: a backticked command answers a measurement, not a cadence.
-  const backtick = "The lookup runs at most once per call via `git ls-files --ignored -z`.";
-  const errBacktick = (await t.callTool("pb_write_spec", { name: "bound-backtick", content: boundSpec(backtick) })).error!;
-  assert.match(errBacktick, /Contracts bound without an owner/);
-  assert.ok(errBacktick.includes(backtick), errBacktick);
-
-  // Each of the three owners satisfies it, and nothing else about the spec changes.
-  assert.equal((await t.callTool("pb_write_spec", { name: "bound-cited", content: boundSpec(OWNED_ONCE) })).error, undefined);
-  assert.equal((await t.callTool("pb_write_spec", { name: "bound-new", content: boundSpec("The lookup runs at most once per call; new: src/scan.ts will perform it.") })).error, undefined);
-  const assumed = "The lookup runs at most once per call. Assumption: an outside scheduler drives it — settles by the vendor's own docs, because nothing in this project schedules it.";
-  assert.equal((await t.callTool("pb_write_spec", { name: "bound-assumed", content: boundSpec(assumed) })).error, undefined);
-});
-
-test("spec bound gate: planning, counts, durations and rationale stay with the measurement rule", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  citedPage(t);
-  // planning is exempt from every senior gate
-  const planning = boundSpec(UNOWNED_ONCE).replace("# Cache the page lookup\n", "# Cache the page lookup\nStatus: planning\n");
-  assert.equal((await t.callTool("pb_write_spec", { name: "bound-planning", content: planning })).error, undefined);
-
-  // A count and a duration: each still answers to its backticked measurement, and to no owner.
-  const numbers = boundSpec("The prompt is at most 200 tokens (`node tools/count.mjs` says 180).\n- A cold lookup resolves within 200ms (`npm run bench` says 120ms).");
-  assert.equal((await t.callTool("pb_write_spec", { name: "bound-numbers", content: numbers })).error, undefined);
-  // without the measurement the measurement rule is the one that refuses, not this gate
-  const unmeasured = boundSpec("The prompt is at most 200 tokens.");
-  assert.match((await t.callTool("pb_write_spec", { name: "bound-unmeasured", content: unmeasured })).error!, /quantitative claim without measurement/);
-
-  // A cadence in Decisions is rationale: Contracts is the section that binds the build.
-  const rationale = boundSpec(OWNED_ONCE).replace(
-    "- Cache the resolved path, because resolving it is pure and repeated.",
-    "- Cache the resolved path, because resolving it is pure and repeated.\n- The cache is consulted once per call, because rebuilding it would dominate.",
-  );
-  assert.equal((await t.callTool("pb_write_spec", { name: "bound-rationale", content: rationale })).error, undefined);
-});
-
-test("spec bound gate: the shared fixture stays clean and a Tasks edit re-checks the bound", async () => {
-  const t = setup();
-  await written(t); // SPEC() still writes cleanly with the gate in force
-  process.chdir(t.repo);
-  const clean = await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Tasks", content: TASKS_A_B });
-  assert.equal(clean.error, undefined, clean.error ?? "");
-  assert.doesNotMatch(clean.content![0].text, /bound without an owner/);
-
-  // A Contracts edit stays quiet the way it is today; the next Tasks edit re-checks what Contracts says.
-  const contracts = await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Contracts", content: `- ${UNOWNED_ONCE}` });
-  assert.equal(contracts.error, undefined, contracts.error ?? "");
-  assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Tasks", content: TASKS_A_B })).error!, /Contracts bound without an owner/);
-});
-
-test("spec bound gate: the writer is shown the refusal's own rule, and the citation grammar has one home", async () => {
-  const { BOUND_OWNER_RULE } = await import("../extensions/pb/spec.ts");
-  const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
-  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
-    const contracts = p.slice(p.indexOf("## Contracts"), p.indexOf("## Migration and rollback"));
-    assert.ok(contracts.includes(BOUND_OWNER_RULE), "the Contracts paragraph carries the refusal's own sentence");
-    assert.match(contracts, /path:line/);
-    assert.match(contracts, /new: <path>/);
-    assert.match(contracts, /backtick/);
-  }
-  const here = path.dirname(new URL(import.meta.url).pathname);
-  const specSrc = fs.readFileSync(path.join(here, "..", "extensions", "pb", "spec.ts"), "utf8");
-  const indexSrc = fs.readFileSync(path.join(here, "..", "extensions", "pb", "index.ts"), "utf8");
-  for (const name of ["specPathRefs", "ROOT_FILE_REF"]) {
-    assert.equal((specSrc.match(new RegExp(`const ${name}\\b`, "g")) ?? []).length, 1, `spec.ts declares ${name} once`);
-    assert.ok(!new RegExp(`const ${name}\\b`).test(indexSrc), `index.ts still declares ${name}`);
-  }
-  assert.match(indexSrc, /specPathRefs[^;\n]*from "\.\/spec\.ts"/);
-});
-
-test("spec: external surfaces need Contracts; persisted data needs Migration and rollback", async () => {
-  const t = setup();
-  process.chdir(t.repo);
   const api = `# Order lookup
 Depends on: none
 Verification: tests
@@ -2488,13 +2339,8 @@ Expose GET /api/orders to the client.
 - Acceptance: GET /api/orders returns the list (tests: T1)
 - Test: \`test -f T1.txt\`
 `;
-  assert.match((await t.callTool("pb_write_spec", { name: "api-missing", content: api })).error!, /external surface/);
-  const apiWith = api.replace("## Tasks", "## Contracts\n- GET /api/orders returns 200 with the orders array; errors use the existing problem type.\n## Tasks");
-  assert.equal((await t.callTool("pb_write_spec", { name: "api-ok", content: apiWith })).error, undefined);
-  const apiNegative = api.replace("## Tasks", "## Contracts\nnone — the URL string is only a log label; nothing outside the change observes it.\n## Tasks");
-  assert.equal((await t.callTool("pb_write_spec", { name: "api-negative", content: apiNegative })).error, undefined);
-  const apiPlaceholder = api.replace("## Tasks", "## Contracts\nnone.\n## Tasks");
-  assert.match((await t.callTool("pb_write_spec", { name: "api-placeholder", content: apiPlaceholder })).error!, /empty or a placeholder/);
+  assert.equal((await t.callTool("pb_write_spec", { name: "api-missing", content: api })).error, undefined);
+  assert.equal(risk(api).reason, "an external surface");
 
   const data = `# Stored orders
 Depends on: none
@@ -2512,48 +2358,12 @@ Store orders in the database.
 - Acceptance: the status is saved (tests: T1)
 - Test: \`test -f T1.txt\`
 `;
-  assert.match((await t.callTool("pb_write_spec", { name: "data-missing", content: data })).error!, /Migration and rollback/);
-  const withMigration = data.replace("## Tasks", "## Migration and rollback\nAdd the status column with a backfill; rollback drops it.\n## Tasks");
-  assert.equal((await t.callTool("pb_write_spec", { name: "data-ok", content: withMigration })).error, undefined);
-  const migrationNegative = data.replace("## Tasks", "## Migration and rollback\nnone — orders are only kept in memory; nothing outlives the process.\n## Tasks");
-  assert.equal((await t.callTool("pb_write_spec", { name: "data-negative", content: migrationNegative })).error, undefined);
-  const migrationPlaceholder = data.replace("## Tasks", "## Migration and rollback\nnone.\n## Tasks");
-  assert.match((await t.callTool("pb_write_spec", { name: "data-placeholder", content: migrationPlaceholder })).error!, /empty or a placeholder/);
+  assert.equal((await t.callTool("pb_write_spec", { name: "data-missing", content: data })).error, undefined);
+  assert.equal(risk(data).reason, "persisted data");
 
-  await t.callTool("pb_write_spec", { name: "scope-data", content: SPEC() });
-  const scoped = await t.callTool("pb_update_spec", { name: "scope-data", section: "Tasks", content: "### T1: write\n- Acceptance: stored (tests: T1)\n- Test: `test -f db.txt`\nWrites to the database." });
-  assert.match(scoped.error!, /Migration and rollback/);
-});
-
-test("spec: a sensitive Decisions line needs Threats, not only a sensitive Goal", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  const hidden = `# Session cleanup
-Depends on: none
-Verification: tests
-New tests: yes
-
-## Goal
-Speed up the orders page.
-## Decisions
-- Cache session tokens for a minute, because the lookup is hot.
-## Contracts
-- T1 owns the cache.
-## Tasks
-### T1: cache
-- Acceptance: cached (tests: T1)
-- Test: \`test -f cache.txt\`
-`;
-  assert.match((await t.callTool("pb_write_spec", { name: "decision-sensitive", content: hidden })).error!, /mentions "session"/);
-  const negated = hidden.replace("## Tasks", "## Threats and abuse\nnone — the cache only reads tokens; no entry point changes.\n## Tasks");
-  assert.equal((await t.callTool("pb_write_spec", { name: "decision-sensitive-ok", content: negated })).error, undefined);
-});
-
-test("spec: senior evidence requires Findings citations and Decisions reasons; planning stays exempt", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  citedPage(t);
-  const noEvidence = `# Slow page
+  // The regex shapes the old gates refused: a bare Findings sentence, a bare-colon Decision, and a
+  // count all write. A sensitive Decisions line still selects the review, from wherever it sits.
+  const bareWords = `# Slow page
 Depends on: none
 Verification: tests
 New tests: yes
@@ -2561,9 +2371,10 @@ New tests: yes
 ## Goal
 Speed up the page.
 ## Findings
-- The code is slow.
+- The baseline is green.
 ## Decisions
-- Paginate the list, because unbounded reads risk timeouts.
+- Scope: the list.
+- Allows 3 retries.
 ## Contracts
 - T1 owns the list.
 ## Tasks
@@ -2571,27 +2382,35 @@ Speed up the page.
 - Acceptance: loads fast (tests: T1)
 - Test: \`test -f fast.txt\`
 `;
-  assert.match((await t.callTool("pb_write_spec", { name: "noev", content: noEvidence })).error!, /Findings line without evidence/);
-  const noReason = noEvidence.replace("## Findings\n- The code is slow.", "## Findings\n- `src/page.ts:12` holds the model.").replace("- Paginate the list, because unbounded reads risk timeouts.", "- Paginate the list.");
-  assert.match((await t.callTool("pb_write_spec", { name: "noreason", content: noReason })).error!, /Decisions line without a reason/);
-  // The documented non-path evidence forms are accepted: a probe with its conclusion and a constraint.
-  const probe = noEvidence.replace(
-    "- The code is slow.",
-    "- Sample review log — probe: the third-round review of another capability was pasted into the planning chat; conclusion: it posted 1 blocking and 10 advisory findings.",
-  );
-  assert.equal((await t.callTool("pb_write_spec", { name: "probe", content: probe })).error, undefined);
-  const constraint = noEvidence.replace("- The code is slow.", "- Sample review log — constraint: it was pasted into the planning chat, so it is not a repo artifact to cite.");
-  assert.equal((await t.callTool("pb_write_spec", { name: "constraint", content: constraint })).error, undefined);
-  const probeOnly = noEvidence.replace("- The code is slow.", "- Sample review log — probe: the third-round review of another capability was pasted into the planning chat.");
-  assert.match((await t.callTool("pb_write_spec", { name: "probe-only", content: probeOnly })).error!, /Findings line without evidence/);
-  // A reason in plain prose is accepted when it carries an explicit causal marker.
-  const soReason = noReason.replace("- Paginate the list.", "- Paginate the list, so unbounded reads can't time out.");
-  assert.equal((await t.callTool("pb_write_spec", { name: "so-reason", content: soReason })).error, undefined);
-  const sinceReason = noReason.replace("- Paginate the list.", "- Paginate the list, since unbounded reads risk timeouts.");
-  assert.equal((await t.callTool("pb_write_spec", { name: "since-reason", content: sinceReason })).error, undefined);
-  const proseReason = noReason.replace("- Paginate the list.", "- Paginate the list. Unbounded reads risk timeouts.");
-  assert.match((await t.callTool("pb_write_spec", { name: "prose-reason", content: proseReason })).error!, /Decisions line without a reason/);
-  const good = noEvidence.replace("- The code is slow.", "- `src/page.ts:12` holds the model; baseline `npm test` green.");
+  assert.equal((await t.callTool("pb_write_spec", { name: "bare-words", content: bareWords })).error, undefined);
+  const hidden = bareWords.replace("- Scope: the list.", "- Cache session tokens for a minute.");
+  assert.equal((await t.callTool("pb_write_spec", { name: "decision-sensitive", content: hidden })).error, undefined);
+  assert.equal(risk(hidden).reason, "security-sensitive (session)");
+});
+
+test("spec format: a bound names its owner, and the citation grammar has one home", async () => {
+  const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
+  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
+    const contracts = p.slice(p.indexOf("## Contracts"), p.indexOf("## Migration and rollback"));
+    assert.match(contracts, /name the code that owns it/);
+    assert.match(contracts, /path:line/);
+    assert.match(contracts, /new: <path>/);
+  }
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const specSrc = fs.readFileSync(path.join(here, "..", "extensions", "pb", "spec.ts"), "utf8");
+  const indexSrc = fs.readFileSync(path.join(here, "..", "extensions", "pb", "index.ts"), "utf8");
+  for (const name of ["specPathRefs", "ROOT_FILE_REF"]) {
+    assert.equal((specSrc.match(new RegExp(`const ${name}`, "g")) ?? []).length, 1, `spec.ts declares ${name} once`);
+    assert.ok(!new RegExp(`const ${name}`).test(indexSrc), `index.ts still declares ${name}`);
+  }
+  assert.match(indexSrc, /specPathRefs[^;\n]*from "\.\/spec\.ts"/);
+});
+
+test("spec citation: a stale path is refused on a ready spec, and a planning spec is exempt", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  citedPage(t);
+  const good = citingSpec("`src/page.ts:12` holds the model; baseline `npm test` green.");
   assert.equal((await t.callTool("pb_write_spec", { name: "good", content: good })).error, undefined);
   const badLine = good.replace("src/page.ts:12", "src/page.ts:999");
   assert.match((await t.callTool("pb_write_spec", { name: "bad-line", content: badLine })).error!, /has 30 lines/);
@@ -2601,8 +2420,6 @@ Speed up the page.
   assert.equal((await t.callTool("pb_write_spec", { name: "planning-bad-path", content: planningBad })).error, undefined);
   const updated = await t.callTool("pb_update_spec", { name: "good", section: "Findings", content: "- `src/missing.ts:1` holds the model." });
   assert.match(updated.error!, /not in the project/);
-  const planning = noEvidence.replace("# Slow page", "# Slow page\nStatus: planning");
-  assert.equal((await t.callTool("pb_write_spec", { name: "planning-ev", content: planning })).error, undefined);
   const root = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "TODO.md");
   assert.ok(!fs.existsSync(root), "TODO.md is removed; the spec is the source of truth");
 });
@@ -2690,54 +2507,7 @@ test("map and citation grammar: dots alone name nothing, a walk above the root i
   assert.doesNotMatch((await t.callTool("pb_write_spec", { name: "cite-dots", content: citingSpec("`..:1` and `.:2` name nothing.") })).error ?? "", /not in the project/);
 });
 
-test("spec: senior shape is strict about bare words, bare colons, and counts", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  citedPage(t);
-  const bareWords = `# Slow page
-Depends on: none
-Verification: tests
-New tests: yes
-
-## Goal
-Speed up the page.
-## Findings
-- The baseline is green.
-## Decisions
-- Paginate the list, because unbounded reads risk timeouts.
-## Contracts
-- T1 owns the list.
-## Tasks
-### T1: fast page
-- Acceptance: loads fast (tests: T1)
-- Test: \`test -f fast.txt\`
-`;
-  assert.match((await t.callTool("pb_write_spec", { name: "barewords", content: bareWords })).error!, /Findings line without evidence/);
-  const bareConclusion = bareWords.replace("- The baseline is green.", "- Conclusion: it is fast.");
-  assert.match((await t.callTool("pb_write_spec", { name: "bareconclusion", content: bareConclusion })).error!, /Findings line without evidence/);
-  const bareColon = bareWords
-    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
-    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Scope: the list.");
-  assert.match((await t.callTool("pb_write_spec", { name: "barecolon", content: bareColon })).error!, /Decisions line without a reason/);
-  const reasonLabel = bareWords
-    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
-    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Paginate the list. Reason: unbounded reads risk timeouts.");
-  assert.equal((await t.callTool("pb_write_spec", { name: "reasonlabel", content: reasonLabel })).error, undefined); // an explicit Reason: label counts
-  const retries = bareWords
-    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
-    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Allows 3 retries.");
-  assert.match((await t.callTool("pb_write_spec", { name: "retries", content: retries })).error!, /quantitative claim without measurement or Assumption/);
-  const p95 = bareWords
-    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
-    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- p95 latency is fine.");
-  assert.match((await t.callTool("pb_write_spec", { name: "p95", content: p95 })).error!, /quantitative claim without measurement or Assumption/);
-  const measuredCount = bareWords
-    .replace("- The baseline is green.", "- `src/page.ts:12` holds the model.")
-    .replace("- Paginate the list, because unbounded reads risk timeouts.", "- Allows 3 retries via `npm test`, because the suite flakes, got 1 flake in 20 runs.");
-  assert.equal((await t.callTool("pb_write_spec", { name: "measuredcount", content: measuredCount })).error, undefined);
-});
-
-test("spec: senior override: human edits save visibly and the build advises instead of blocking", async () => {
+test("spec: a human edit saves on parse alone and the build adds no shape advisory", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   await t.run("plan", "cancel orders");
@@ -2748,10 +2518,10 @@ test("spec: senior override: human edits save visibly and the build advises inst
   t.selects.push("Show me the spec first", "Edit the spec first", "Build here (keeps our discussion; the cache stays warm)");
   t.editors.push(SPEC().replace("- Only PENDING orders can be cancelled, because the state machine only allows that transition.", "- Only PENDING orders can be cancelled."));
   await t.run("build");
-  assert.ok(t.notes.some((n) => /human override/.test(n))); // the hand-edit saved visibly, not silently
-  assert.ok(t.events("order-cancellation").some((e: any) => e.override === true));
-  assert.equal(t.progress("order-cancellation").phase, "built"); // advisory, never blocking
-  assert.match(t.posts.at(-1)!, /Spec-shape advisory/); // build-start advisory in the summary
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.ok(!t.notes.some((n) => /human override|Spec-shape advisory/.test(n)));
+  assert.ok(!t.events("order-cancellation").some((e: any) => e.override === true));
+  assert.doesNotMatch(t.posts.at(-1)!, /Spec-shape advisory/);
 });
 
 test("spec: senior review carries the human-override note", async () => {
@@ -2787,7 +2557,7 @@ test("spec: showing it runs each red-eligible Test: once, for approval — small
   assert.match(shown, /- ✗ `test -f T2\.txt` fails \(expected/);
 
   const u = setup({ verify: "true" }); // docs-only: nothing red-eligible, nothing run
-  await written(u, SPEC({ verification: "none — docs", newTests: "no — docs", tasks: TASKS_WITH_EXEMPTIONS("the spec asks for no new tests") }));
+  await written(u, SPEC({ verification: "none — docs", newTests: "no — docs", tasks: TASKS_PLAIN }));
   new Store(u.repo).setPendingBuild(u.runtime().ctx.sessionManager.getSessionFile());
   u.selects.push("Not now");
   await u.fire("agent_settled", {});
@@ -3043,8 +2813,9 @@ test("build: every task handout carries the spec's binding context", async () =>
   await t.run("build");
   assert.match(
     t.results[0],
-    /✓ T1[\s\S]*Binding context \(a compact copy of \.pi\/pb\/specs\/order-cancellation\/spec\.md[\s\S]*## Goal\nCancel orders\.[\s\S]*## Decisions[\s\S]*Only PENDING orders[\s\S]*## Contracts[\s\S]*T1 owns T1\.txt[\s\S]*## Acceptance criteria\n- A1: T1\.txt and T2\.txt exist\./,
+    /✓ T1[\s\S]*Binding context \(a compact copy of \.pi\/pb\/specs\/order-cancellation\/spec\.md[\s\S]*## Goal\nCancel orders\.[\s\S]*## Decisions[\s\S]*Only PENDING orders[\s\S]*## Contracts[\s\S]*T1 owns T1\.txt/,
   );
+  assert.doesNotMatch(t.results[0], /## Acceptance criteria/); // legacy A section is not binding context
   assert.doesNotMatch(t.results[0], /### T1: first file/); // no whole Tasks section, just the current task
   const next = t.instructions.find((i) => i.startsWith("✓ T1"))!;
   assert.match(next, /Task T2[\s\S]*Binding context[\s\S]*## Goal\nCancel orders\./); // the next task carries it too
@@ -3105,13 +2876,13 @@ test("prompts: task, retry and coherence messages carry the binding context, not
   assert.match(binding, /## Contracts\n- T1 owns T1\.txt/);
   assert.match(binding, /## Migration and rollback\nnone/);
   assert.match(binding, /## Threats and abuse\n- A forged owner/);
-  assert.match(binding, /## Requirement criteria\n- R1\.1: Cancel a pending order: invariant/);
-  assert.match(binding, /## Acceptance criteria\n- A1: T1\.txt and T2\.txt exist\./);
+  assert.match(binding, /## Requirement rules\n- order-cancellation · Cancel a pending order: /);
+  assert.doesNotMatch(binding, /## Acceptance criteria/); // the legacy A section contributes nothing
   assert.match(binding, /## Prior tasks\n- T1 · caveat: keep the hook · open: check the empty path/);
   assert.doesNotMatch(binding, /## Tasks|### T1: first file/); // the task is already in the handout
 
   const view = buildSpecView(markdown, viewBudget(), "");
-  assert.match(view, /^# Order cancellation[\s\S]*## Goal[\s\S]*## Requirement criteria/);
+  assert.match(view, /^# Order cancellation[\s\S]*## Goal[\s\S]*## Requirement rules/);
   assert.doesNotMatch(view, /## Tasks|### T1: first file/);
 
   const task = parseSpec(markdown).spec!.tasks[0];
@@ -3144,11 +2915,11 @@ test("binding: one exported list binds the build and the spec review", async () 
   const aliased = bindingContext("order-cancellation", SPEC().replace("## Decisions", "## Threats\n- A forged owner id must not cancel.\n## Decisions"), [], bindingBudget(), "");
   assert.match(aliased, /## Threats\n- A forged owner/);
 
-  // spec review's unchanged context is that same list minus Design (a delta round reads the whole spec anyway), plus header and the acceptance list
+  // spec review's unchanged context is that same list minus Design (a delta round reads the whole spec anyway), plus header and requirement sections
   const before = `${spec}\n${REQUIREMENTS}`;
-  const delta = specReviewDelta(before, before.replace("- Acceptance: T2.txt exists (tests: T2)", "- Acceptance: T2.txt exists and is empty (tests: T2)"));
+  const delta = specReviewDelta(before, before.replace("- Acceptance: T2.txt exists", "- Acceptance: T2.txt exists and is empty"));
   assert.match(delta.context, /# Order cancellation/); // header
-  assert.match(delta.context, /## Acceptance criteria/);
+  assert.doesNotMatch(delta.context, /## Acceptance criteria/); // a legacy A section is no longer binding
   assert.match(delta.context, /## Requirements: order-cancellation/); // the requirement prefix rule still holds
   for (const section of BINDING_SECTIONS) {
     if (section === "Design" || section === "Threats") continue; // Design by the subtraction; Threats is the alias, tested below
@@ -3228,11 +2999,11 @@ test("binding: an oversized block drops whole sections and names them", async ()
   // and each is named, with the source of truth still a read away
   assert.match(block, /## Cut from this copy[\s\S]*Design[\s\S]*Migration and rollback[\s\S]*Threats and abuse[\s\S]*Out of scope/);
   assert.match(block, /\.pi\/pb\/specs\/order-cancellation\/spec\.md/);
-  // what binds hardest stays, with both criteria lists and the prior-task hooks
+  // what binds hardest stays, with the requirement rules and the prior-task hooks
   assert.match(block, /## Goal\nCancel orders\./);
   assert.match(block, /## Contracts\n- T1 owns T1\.txt/);
-  assert.match(block, /## Requirement criteria\n- R1\.1: /);
-  assert.match(block, /## Acceptance criteria\n- A1: /);
+  assert.match(block, /## Requirement rules\n- order-cancellation · Cancel a pending order: /);
+  assert.doesNotMatch(block, /## Acceptance criteria/);
   assert.match(block, /## Prior tasks\n- T1 · caveat: /);
   assert.doesNotMatch(block, /### T1: first file/); // still no Tasks prose
 
@@ -3241,10 +3012,11 @@ test("binding: an oversized block drops whole sections and names them", async ()
   assert.ok(!goalless.includes("## Goal") && !goalless.includes("Cancel orders."), "Goal survived to the last cut");
   assert.match(goalless, /## Cut from this copy[\s\S]*Goal/);
 
-  // entries inside the always-emitted lists keep the block's own line caps: 300 for a criterion, 240 for a hook
+  // entries inside the always-emitted lists keep the block's own line caps: 300 for a rule, 240 for a hook
   const roomy = bindingContext("order-cancellation", `${markdown}\n${wide}`, tasks, 40_000, "");
-  const criterion = roomy.split("\n").find((l) => l.startsWith("- R2.1: "))!;
-  assert.ok(criterion.endsWith("…") && criterion.length <= "- R2.1: ".length + 300, `criterion line: ${criterion.length}`);
+  const prefix = "- order-cancellation · A rule worth its words: ";
+  const ruleLine = roomy.split("\n").find((l) => l.startsWith(prefix))!;
+  assert.ok(ruleLine.endsWith("…") && ruleLine.length <= prefix.length + 300, `rule line: ${ruleLine.length}`);
   const hook = roomy.split("\n").find((l) => l.startsWith("- T1 · "))!;
   const caveat = hook.replace(/^- T1 · caveat: /, "");
   assert.ok(caveat.endsWith("…") && caveat.length <= 240, `hook line: ${hook.length}`);
@@ -3263,20 +3035,20 @@ test("binding: an oversized block drops whole sections and names them", async ()
   const manyRules = Array.from({ length: 12 }, (_, i) => `### Requirement: Rule ${i}\nInvariant: ${"clause ".repeat(60)}`).join("\n");
   const pathological = bindingContext("order-cancellation", `${markdown}\n${REQUIREMENTS}\n### ADDED\n${manyRules}`, [], BUDGET_MIN, "");
   assert.ok(pathological.length <= BUDGET_MIN, `a pathological spec outran the smallest budget: ${pathological.length}`);
-  assert.match(pathological, /## Requirement criteria[\s\S]*\+\d+ more in the spec/); // the lists cap themselves before the block has to be cut
+  assert.match(pathological, /## Requirement rules[\s\S]*\+\d+ more in the spec/); // the rules cap themselves before the block has to be cut
 });
 
 /** The smallest budget there is, reached when the window leaves no room at all. */
 const BUDGET_MIN = 4_000;
 
-/** Room for Goal, Decisions and Contracts, both criteria lists and the hooks — not for the four above them. */
+/** Room for Goal, Decisions and Contracts, the requirement rules and the hooks — not for the four above them. */
 const BLOCK_BUDGET = 2_000;
-/** What is left once the four above have gone: the notice, the lists and Contracts — but no Goal. */
-const GOAL_LESS_BUDGET = 1_400;
+/** What is left once the four above have gone: the notice, the rules and Contracts — but no Goal. */
+const GOAL_LESS_BUDGET = 900;
 
 test("build: verification none runs no checks; no new tests reaches the agent", async () => {
   const t = setup({ verify: "false" }); // would fail if it ran
-  await written(t, SPEC({ verification: "none — docs only", newTests: "no — the human said so", tasks: TASKS_WITH_EXEMPTIONS("the spec asks for no new tests") }));
+  await written(t, SPEC({ verification: "none — docs only", newTests: "no — the human said so", tasks: TASKS_PLAIN }));
   t.agent.script = diligent;
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "built");
@@ -3498,7 +3270,7 @@ test("review: a long prose report with no parseable findings is flagged, not sil
 test("review: acceptance coverage treats silence as unverified, never met", async () => {
   const { acceptanceCoverage, normalizeAcceptance, verdictOf } = await import("../extensions/pb/review.ts");
   const expected = [
-    { id: "A1", text: "the order can be cancelled" },
+    { id: "T3.1", text: "the order can be cancelled" },
     { id: "T1.1", text: "the test proves it", task: "T1" },
     { id: "T2.1", text: "the audit entry exists", task: "T2" },
   ];
@@ -3506,7 +3278,7 @@ test("review: acceptance coverage treats silence as unverified, never met", asyn
     expected,
     normalizeAcceptance(
       [
-        { criterion: "A1", status: "met", evidence: "src/order.ts:12" },
+        { criterion: "T3.1", status: "met", evidence: "src/order.ts:12" },
         { criterion: "T1.1", status: "met", evidence: "  " }, // met without evidence is not met
         { criterion: "T2.1", status: "not met", evidence: "the audit test does not run" },
         { criterion: "X9", status: "met", evidence: "invented" }, // not in the spec: dropped
@@ -3517,7 +3289,7 @@ test("review: acceptance coverage treats silence as unverified, never met", asyn
   assert.deepEqual(
     coverage.lines.map((l) => [l.criterion.id, l.status]),
     [
-      ["A1", "met"],
+      ["T3.1", "met"],
       ["T1.1", "not verified"],
       ["T2.1", "not met"],
     ],
@@ -3818,8 +3590,8 @@ test("review: a pass verdict mid-build keeps the phase and says tasks remain", a
   assert.equal(p.review?.verdict, "pass"); // the follow-up delta baseline is still kept
   assert.match(t.posts.at(-1)!, /still to build/);
   // A manual review while building uses the same acceptance checklist as the final one.
-  assert.match(t.posts.at(-1)!, /\*\*Acceptance\*\* — 3\/3 met/);
-  assert.equal(p.review?.acceptance?.length, 3);
+  assert.match(t.posts.at(-1)!, /\*\*Acceptance\*\* — 2\/2 met/);
+  assert.equal(p.review?.acceptance?.length, 2);
 });
 
 test("review: an explicit spec name wins over this session's spec", async () => {
@@ -4147,14 +3919,14 @@ test("review: compaction resets to role, brief, findings and files read; stalls 
     spec: "order-cancellation",
     run: "run-1",
     findings: [{ priority: "P2", title: "name it" }],
-    acceptance: [{ criterion: "A1", status: "met", evidence: "src/order.ts:1" }],
+    acceptance: [{ criterion: "T1.1", status: "met", evidence: "src/order.ts:1" }],
   });
   store.saveReviewRun({ id: "run-1", cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] });
   const prep = (reads: string[], tokens: number) => ({ firstKeptEntryId: "e1", tokensBefore: tokens, fileOps: { read: new Set(reads), edited: new Set(), written: new Set() } });
   const [r1] = (await t.fire("session_before_compact", { preparation: prep(["a.ts", "b.ts"], 50000), reason: "threshold" })) as any[];
   assert.match(
     r1.compaction.summary,
-    /\[pb review state: order-cancellation\] This review session was compacted[\s\S]*Files read before this point[\s\S]*- a\.ts[\s\S]*--- acceptance so far ---[\s\S]*A1: met — src\/order\.ts:1[\s\S]*--- brief ---[\s\S]*BRIEF[\s\S]*--- findings so far ---[\s\S]*name it/,
+    /\[pb review state: order-cancellation\] This review session was compacted[\s\S]*Files read before this point[\s\S]*- a\.ts[\s\S]*--- acceptance so far ---[\s\S]*T1\.1: met — src\/order\.ts:1[\s\S]*--- brief ---[\s\S]*BRIEF[\s\S]*--- findings so far ---[\s\S]*name it/,
   );
   assert.doesNotMatch(r1.compaction.summary, /report findings with what you have/);
   // Same reads at the same size three more times: the fourth wraps up instead of circling.
@@ -4272,16 +4044,14 @@ test("review: an omitted or unverified acceptance item never passes; the next re
   t.agent.script = diligent;
   await t.run("build");
   t.reviewer.acceptance = [
-    { criterion: "A1", status: "met", evidence: "T1.txt and T2.txt exist in the worktree" },
     { criterion: "T1.1", status: "not verified", evidence: "the named test was not run" },
   ]; // T2.1 omitted on purpose
   await t.run("review");
   const post = t.posts.at(-1)!;
   assert.match(post, /⚠ UNVERIFIED/);
-  assert.match(post, /\*\*Acceptance\*\* — 1\/3 met, 2 not verified/);
-  assert.match(post, /✓ met A1: T1\.txt and T2\.txt exist\./);
-  assert.match(post, /\? not verified T1\.1: T1\.txt exists \(tests: T1\) — the named test was not run/);
-  assert.match(post, /\? not verified \(not reported\) T2\.1: T2\.txt exists \(tests: T2\)/);
+  assert.match(post, /\*\*Acceptance\*\* — 0\/2 met, 2 not verified/);
+  assert.match(post, /\? not verified T1\.1: T1\.txt exists — the named test was not run/);
+  assert.match(post, /\? not verified \(not reported\) T2\.1: T2\.txt exists/);
   assert.match(post, /A missing or unchecked criterion is never a pass/);
   const first = t.progress("order-cancellation");
   assert.equal(first.phase, "built");
@@ -4289,7 +4059,6 @@ test("review: an omitted or unverified acceptance item never passes; the next re
   assert.deepEqual(
     first.review.acceptance.map((a: { criterion: string; status: string }) => [a.criterion, a.status]),
     [
-      ["A1", "met"],
       ["T1.1", "not verified"],
       ["T2.1", "not verified"],
     ],
@@ -4300,9 +4069,9 @@ test("review: an omitted or unverified acceptance item never passes; the next re
   await t.run("review");
   assert.match(
     briefOf(t),
-    /Acceptance at the previous review[\s\S]*A1: met — T1\.txt and T2\.txt exist in the worktree[\s\S]*T1\.1: not verified — the named test was not run[\s\S]*T2\.1: not verified — not reported/,
+    /Acceptance at the previous review[\s\S]*T1\.1: not verified — the named test was not run[\s\S]*T2\.1: not verified — not reported/,
   );
-  assert.match(t.posts.at(-1)!, /✅ PASS[\s\S]*\*\*Acceptance\*\* — 3\/3 met/);
+  assert.match(t.posts.at(-1)!, /✅ PASS[\s\S]*\*\*Acceptance\*\* — 2\/2 met/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
 });
 
@@ -4865,9 +4634,10 @@ test("report: status and stats --json return pb.report/1, and pb-report does too
   assert.equal(status.specs[0].name, "order-cancellation");
   assert.equal(status.specs[0].phase, "written");
   assert.deepEqual(status.specs[0].requirements, [{ capability: "order-cancellation", added: ["Cancel a pending order"], modified: [], removed: [] }]);
-  const scenario = status.specs[0].acceptance.find((a: { id: string }) => a.id === "R1.2");
-  assert.deepEqual([scenario.capability, scenario.requirement, scenario.status], ["order-cancellation", "Cancel a pending order", "not reported"]);
-  assert.equal(status.specs[0].acceptance.find((a: { id: string }) => a.id === "R1.1").text, "Cancel a pending order: invariant — Only the order's owner can cancel it, and only while it is PENDING.");
+  assert.deepEqual(status.specs[0].acceptance.map((a: { id: string }) => a.id), ["T1.1", "T2.1"]);
+  const first = status.specs[0].acceptance[0];
+  assert.deepEqual([first.capability, first.requirement, first.status], [null, null, "not reported"]);
+  assert.equal(first.text, "T1.txt exists");
   assert.equal(status.summary.requirements, 0);
 
   await t.run("stats", "--json");
@@ -4882,7 +4652,7 @@ test("report: status and stats --json return pb.report/1, and pb-report does too
   assert.deepEqual(out.specs[0].review.findings, []);
 });
 
-test("review: a requirement invariant and its scenario are checked and reported", async () => {
+test("review: requirement rules bind the reviewer, but only task lines are acceptance ids", async () => {
   const t = setup({ verify: "true", mapOnArchive: false });
   await written(t, `${SPEC()}${REQUIREMENTS}`);
   t.agent.script = diligent;
@@ -4890,11 +4660,8 @@ test("review: a requirement invariant and its scenario are checked and reported"
   await t.run("review");
   const progress = t.progress("order-cancellation");
   assert.equal(progress.review.verdict, "pass");
-  const invariant = progress.review.acceptance.find((a: { criterion: string }) => a.criterion === "R1.1");
-  assert.equal(invariant.status, "met");
-  const scenario = progress.review.acceptance.find((a: { criterion: string }) => a.criterion === "R1.2");
-  assert.equal(scenario.status, "met");
-  assert.match(scenario.evidence, /^checked/);
+  assert.deepEqual(progress.review.acceptance.map((a: { criterion: string }) => a.criterion), ["T1.1", "T2.1"]);
+  assert.match(briefOf(t), /## Requirements: order-cancellation[\s\S]*Only the order's owner can cancel it/);
 });
 
 test("archive: a name collision never moves the spec into a folder that already exists", async () => {
@@ -5169,11 +4936,10 @@ test("pb_update_spec: replacing a section with nothing is refused and the file k
   assert.equal((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Context", content: "- Nothing more was probed, because nothing more was needed.", mode: "append" })).error, undefined);
 });
 
-test("pb_update_spec: writing Tasks and ready in one call still runs the full senior gates", async () => {
+test("pb_update_spec: writing Tasks and ready in one call still runs the decidable checks", async () => {
   const t = setup();
   process.chdir(t.repo);
-  // A planning spec that passes the task-scoped gates (Threats, numbers, Contracts: one task, no
-  // seam) but whose Decisions line has no reason — only the full gates catch that.
+  // The bare-colon Decision is semantic: it is the reviewer's question, not a write refusal.
   const planning = `# Order cancellation
 Status: planning
 Depends on: none
@@ -5182,21 +4948,31 @@ New tests: yes
 
 ## Goal
 Cancel orders.
-## Findings
-- src/order.ts:12 holds the state machine.
 ## Decisions
 - Only PENDING orders can be cancelled.
 ## Tasks
 `;
   assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: planning })).error, undefined);
+
+  // A task without an Acceptance line is structural, so the same call is refused and nothing lands.
   const r = await t.callTool("pb_update_spec", {
+    name: "order-cancellation",
+    section: "Tasks",
+    content: "### T1: first step\nCap the list.\n- Test: `test -f T1.txt`",
+    status: "ready",
+  });
+  assert.match(r.error!, /no "- Acceptance:" line/);
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /Status: planning/); // nothing was written
+
+  // With the structure right, the spec becomes ready even though its Decision states no reason.
+  const ok = await t.callTool("pb_update_spec", {
     name: "order-cancellation",
     section: "Tasks",
     content: "### T1: first step\nCap the list.\n- Acceptance: the list is capped (tests: T1)\n- Test: `test -f T1.txt`",
     status: "ready",
   });
-  assert.match(r.error!, /Not written: the spec needs senior shape[\s\S]*Decisions line without a reason/);
-  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /Status: planning/); // nothing was written
+  assert.equal(ok.error, undefined, ok.error ?? "");
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /Status: ready/);
 });
 
 test("spec size is reported, with a gentle note (never a rejection) when it's long", async () => {
@@ -7344,11 +7120,11 @@ test("/pb:approach without an idea infers it from the discussion", async () => {
   assert.match(t.instructions.at(-1)!, /^\[pb:approach\][\s\S]*Infer the idea from our discussion/);
 });
 
-test("review: acceptance-proof mapping is checked, faked or dodged mappings are P1", async () => {
+test("review: a task's Test: command is the proof; there is no marker mapping", async () => {
   const { REVIEWER_SYSTEM, taskPrompt } = await import("../extensions/pb/prompts.ts");
   const { parseSpec } = await import("../extensions/pb/spec.ts");
-  assert.match(REVIEWER_SYSTEM, /faked mapping/);
-  assert.match(REVIEWER_SYSTEM, /non-testable/);
+  assert.match(REVIEWER_SYSTEM, /The task's Test: command is the proof/);
+  assert.doesNotMatch(REVIEWER_SYSTEM, /non-testable|faked mapping/);
   assert.match(REVIEWER_SYSTEM, /met with evidence/);
   assert.match(REVIEWER_SYSTEM, /an id you leave out is not verified/i);
   assert.match(REVIEWER_SYSTEM, /not met.*P1 finding/);
@@ -7356,145 +7132,32 @@ test("review: acceptance-proof mapping is checked, faked or dodged mappings are 
   assert.match(taskPrompt(spec.tasks[0], 1, 3, null, true), /which acceptance lines each failing test proves/);
 });
 
-test("spec: acceptance lines on tested tasks name their proof or exemption, or writing fails", async () => {
+test("spec: acceptance lines are plain behaviour; old proof markers are inert prose", async () => {
   const t = setup();
   process.chdir(t.repo);
   const bare = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`" });
-  const r = await t.callTool("pb_write_spec", { name: "a", content: bare });
-  assert.match(r.error!, /T1.*T1\.txt exists/); // the rejection names the bare line
-  assert.match(r.error!, /tests:|non-testable/);
-  const marked = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`" });
-  assert.equal((await t.callTool("pb_write_spec", { name: "b", content: marked })).error, undefined);
-  // An example marker inside the criterion is prose; only the marker that ends the line is the claim.
-  const example = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: In a hand-edited spec, an illustrative (tests: Tn) mid-sentence is prose; the claim ends the line (tests: T1)\n- Test: `test -f T1.txt`" });
-  assert.equal((await t.callTool("pb_write_spec", { name: "example", content: example })).error, undefined);
-  const exampleOnly = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: In a hand-edited spec, an illustrative (tests: Tn) mid-sentence names no proof\n- Test: `test -f T1.txt`" });
-  const exampleErr = (await t.callTool("pb_write_spec", { name: "example-only", content: exampleOnly })).error!;
-  assert.match(exampleErr, /add \(tests:/);
-  assert.doesNotMatch(exampleErr, /names "Tn"/);
-  const mixed = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Acceptance: map paragraph updated (non-testable: docs)\n- Test: `test -f T1.txt`" });
-  assert.equal((await t.callTool("pb_write_spec", { name: "c", content: mixed })).error, undefined);
-  const commandless = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists" });
-  assert.equal((await t.callTool("pb_write_spec", { name: "d", content: commandless })).error, undefined); // no Test: line: gate suite proves it, no marker needed
-  const retasked = await t.callTool("pb_update_spec", { name: "b", section: "Tasks", content: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`" });
-  assert.match(retasked.error!, /T1.*T1\.txt exists/); // Tasks rewrites are held to the same rule
-  // Qualified variants count as acceptance lines: a label must not smuggle a line past the gate.
-  const bareVariant = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance (abuse): T1.txt survives replays\n- Test: `test -f T1.txt`" });
-  assert.match((await t.callTool("pb_write_spec", { name: "e", content: bareVariant })).error!, /T1.*Acceptance \(abuse\)/);
-  const markedVariant = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance (abuse): T1.txt survives replays (tests: T1)\n- Test: `test -f T1.txt`" });
-  assert.equal((await t.callTool("pb_write_spec", { name: "f", content: markedVariant })).error, undefined);
-  // An asterisk bullet is the same acceptance line: it must carry its proof marker too.
-  const bareStar = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n* Acceptance: T1.txt exists\n- Test: `test -f T1.txt`" });
-  assert.match((await t.callTool("pb_write_spec", { name: "g", content: bareStar })).error!, /T1.*T1\.txt exists/);
-  const markedStar = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n* Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`" });
-  assert.equal((await t.callTool("pb_write_spec", { name: "h", content: markedStar })).error, undefined);
-  // Proof names must resolve: a missing file and an unknown test name are rejected.
-  const missingFile = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: no/such.spec.ts)\n- Test: `test -f T1.txt`" });
-  assert.match((await t.callTool("pb_write_spec", { name: "i", content: missingFile })).error!, /not in the repo/);
-  const unknownTest = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: does-not-exist-anywhere)\n- Test: `test -f T1.txt`" });
-  assert.match((await t.callTool("pb_write_spec", { name: "j", content: unknownTest })).error!, /found in no test file/);
-  // A name contained in a test file resolves.
-  fs.writeFileSync("exists.test.mjs", "test('T1.txt exists', () => {})\n");
-  const namedTest = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1.txt exists)\n- Test: `test -f T1.txt`" });
-  assert.equal((await t.callTool("pb_write_spec", { name: "k", content: namedTest })).error, undefined);
+  assert.equal((await t.callTool("pb_write_spec", { name: "bare", content: bare })).error, undefined);
+  // A spec written before this change keeps its marker as text; nothing resolves or refuses it.
+  const legacy = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: no/such.spec.ts)\n- Acceptance: docs updated (non-testable: prose)\n- Test: `test -f T1.txt`" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "legacy", content: legacy })).error, undefined);
+  // Qualified variants and asterisk bullets are ordinary acceptance lines.
+  const variant = SPEC({ tasks: "### T1: real file\nCreate T1.txt.\n- Acceptance (abuse): T1.txt survives replays\n* Acceptance: T1.txt exists\n- Test: `test -f T1.txt`" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "variant", content: variant })).error, undefined);
+  // The Tasks rewrite is held to the same parse, not to a proof marker.
+  const edited = await t.callTool("pb_update_spec", { name: "bare", section: "Tasks", content: "### T1: real file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt`" });
+  assert.equal(edited.error, undefined, edited.error ?? "");
+  // A task with no Test: line is a doc/refactor task; its plain acceptance line is enough.
+  const commandless = SPEC({ tasks: "### T1: docs for the banner\nUpdate the design doc; documentation-only change, no test command.\n- Acceptance: design doc updated" });
+  assert.equal((await t.callTool("pb_write_spec", { name: "commandless", content: commandless })).error, undefined);
 });
 
-// A `(tests: Tn)` marker is a claim about the red gate: it resolves exactly where the gate will force
-// the named task's Test: command to fail before its change. Elsewhere the legal forms are
-// (non-testable: <why>) or a test file or test name that exists today.
-test("task-id proof marker: a red Test: run is what makes the id resolve", async () => {
+test("spec: a declared doc-only task gets no missing-Test nudge", async () => {
   const t = setup();
   process.chdir(t.repo);
-  // the task's own id, on a task the red gate will force to fail
-  assert.equal((await t.callTool("pb_write_spec", { name: "own", content: SPEC() })).error, undefined);
-  // another task's id, where that task also needs red
-  const cross = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T2)\n- Test: `test -f T1.txt`\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)\n- Test: `test -f T2.txt`" });
-  assert.equal((await t.callTool("pb_write_spec", { name: "cross", content: cross })).error, undefined);
-  // an id naming no task of this spec names no red run either
-  const ghost = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T9)\n- Test: `test -f T1.txt`" });
-  assert.match((await t.callTool("pb_write_spec", { name: "ghost", content: ghost })).error!, /a task id proves nothing/);
-});
-
-test("task-id proof marker: a red-exempt task or spec may not prove with a task id", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  // a verification gate that runs no tests: there is no red proof to name
-  const noRedGate = SPEC({ verification: "none — docs", newTests: "no — docs", tasks: TASKS_WITH_OWN_IDS });
-  assert.match((await t.callTool("pb_write_spec", { name: "docs", content: noRedGate })).error!, /a task id proves nothing/);
-  // a spec that asks for no new tests
-  assert.match((await t.callTool("pb_write_spec", { name: "none", content: SPEC({ newTests: "no — the human said so" }) })).error!, /a task id proves nothing/);
-  // a refactor: its own id names a run that is never demanded red, and it is the marker alone that says so
-  const refactor = SPEC({ tasks: TASKS_WITH_A_REFACTOR.replace("(non-testable: a refactor adds no behaviour)", "(tests: T2)") });
-  assert.match((await t.callTool("pb_write_spec", { name: "refactor", content: refactor })).error!, /T2 \(tests: T2\)[\s\S]*a task id proves nothing/);
-  // the same two tasks with that line exempted are accepted: only the marker changed
-  assert.equal((await t.callTool("pb_write_spec", { name: "legal", content: SPEC({ tasks: TASKS_WITH_A_REFACTOR }) })).error, undefined);
-});
-
-// A task with no `Test:` line is never run by the red gate, so a task id on its acceptance line names
-// no red run either — the marker is checked on every task, not only on the ones with a command.
-test("task-id proof marker: a task with no Test: line may not claim a task id", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  const docTask = "Update the design doc; documentation-only change, no test command.";
-  // an id naming no task of this spec
-  const ghost = SPEC({ tasks: `### T1: docs for the banner\n${docTask}\n- Acceptance: design doc updated (tests: T9)\n\n${secondTaskOf(TASKS_WITH_OWN_IDS)}` });
-  assert.match((await t.callTool("pb_write_spec", { name: "no-test-ghost", content: ghost })).error!, /T1 \(tests: T9\)[\s\S]*a task id proves nothing/);
-  // an id naming a task that exists but is red-exempt
-  const refactor = SPEC({ tasks: `### T1: docs for the banner\n${docTask}\n- Acceptance: design doc updated (tests: T2)\n\n${secondTaskOf(TASKS_WITH_A_REFACTOR)}` });
-  assert.match((await t.callTool("pb_write_spec", { name: "no-test-refactor", content: refactor })).error!, /T1 \(tests: T2\)[\s\S]*needs no red proof[\s\S]*a task id proves nothing/);
-  // the same task naming its exemption instead is still accepted: only the marker changed
-  const exempt = SPEC({ tasks: `### T1: docs for the banner\n${docTask}\n- Acceptance: design doc updated (non-testable: prose)\n\n${secondTaskOf(TASKS_WITH_A_REFACTOR)}` });
-  assert.equal((await t.callTool("pb_write_spec", { name: "no-test-exempt", content: exempt })).error, undefined);
-});
-
-test("task-id proof marker: both write gates and the spec format teach the red-gate rule", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  // pb_write_spec names the rule and the conversion path
-  const gateWrite = SPEC({ verification: "none — docs", newTests: "no — docs", tasks: TASKS_WITH_OWN_IDS });
-  assert.match((await t.callTool("pb_write_spec", { name: "gate-write", content: gateWrite })).error!, /red Test: run/);
-  // and so does the Tasks edit that a blocked spec uses to repair itself
-  await written(t);
-  const edited = await t.callTool("pb_update_spec", {
-    name: "order-cancellation",
-    section: "Tasks",
-    content: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T7)\n- Test: `test -f T1.txt`",
-  });
-  assert.match(edited.error!, /a task id proves nothing/);
-  assert.match(edited.error!, /red Test: run/);
-  // the writer is taught the rule before it can fail on it
-  const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
-  for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
-    assert.match(p, /red Test: run/);
-    assert.match(p, /\(non-testable: <why>\)/);
-  }
-});
-
-test("task-id proof marker: a hand-edited exempt marker reaches the code reviewer", async () => {
-  const t = setup({ verify: "true" });
-  await written(t);
-  t.agent.script = diligent;
-  await t.run("build");
-  // a hand edit past the write gate: T2 becomes a refactor still marked with its own id
-  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
-  fs.writeFileSync(
-    specFile,
-    fs.readFileSync(specFile, "utf8").replace("### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)", "### T2: (refactor) tidy\nNothing new.\n- Acceptance: T2.txt exists (tests: T2)"),
-  );
-  // The hand edit changed the contract: /pb:build re-approves the revision before the review judges it.
-  await t.run("build", "order-cancellation");
-  await t.run("review");
-  const brief = t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!;
-  assert.match(brief, /## Acceptance proof mapping[\s\S]*T2 \(tests: T2\)[\s\S]*a task id proves nothing/);
-});
-
-test("spec: a declared doc-only task with exempted lines gets no missing-Test nudge", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  const docOnly = SPEC({ tasks: "### T1: docs for the banner\nNaming the prose that must follow the behaviour; doc-only, no test command.\n- Acceptance: javadoc updated (non-testable: prose)" });
+  const docOnly = SPEC({ tasks: "### T1: docs for the banner\nNaming the prose that must follow the behaviour; doc-only, no test command.\n- Acceptance: javadoc updated" });
   const w = (await t.callTool("pb_write_spec", { name: "a", content: docOnly })).content![0].text;
   assert.doesNotMatch(w, /adds behaviour but has no Test/);
-  const documented = SPEC({ tasks: "### T1: docs for the banner\nUpdate the design doc; documentation-only change, no test command.\n- Acceptance: design doc updated (non-testable: prose)" });
+  const documented = SPEC({ tasks: "### T1: docs for the banner\nUpdate the design doc; documentation-only change, no test command.\n- Acceptance: design doc updated" });
   assert.doesNotMatch((await t.callTool("pb_write_spec", { name: "c", content: documented })).content![0].text, /adds behaviour but has no Test/); // "documentation-only" is the same declaration
   // Without the declaration the nudge stays: the reviewer then judges the tests at the end.
   const vague = SPEC({ tasks: "### T1: misc polish\nSmall behaviour touch-ups.\n- Acceptance: polish applied" });
@@ -8370,8 +8033,8 @@ test("build: a spec rewrite that renumbers a task doesn't strand the resume at '
     fs
       .readFileSync(specFile, "utf8")
       .replace(
-        "### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)\n- Test: `test -f T2.txt`",
-        "### T3: second file\nCreate T3.txt.\n- Acceptance: T3.txt exists (tests: T3)\n- Test: `test -f T3.txt`",
+        "### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists\n- Test: `test -f T2.txt`",
+        "### T3: second file\nCreate T3.txt.\n- Acceptance: T3.txt exists\n- Test: `test -f T3.txt`",
       ),
   );
   // Resume must build the renamed task, not read the stale current id as "build finished".
@@ -8395,7 +8058,7 @@ test("build: the approved contract is frozen while the build runs", async () => 
     if (!text.includes("Task T1")) return;
     // The whole spec can't be rewritten, and only Design and Decisions may change.
     assert.match((await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error!, /approved spec can't be rewritten/);
-    assert.match((await tool("pb_update_spec", { name: "order-cancellation", section: "Tasks", content: TASKS_WITH_OWN_IDS })).error!, /only its Design and Decisions may change/);
+    assert.match((await tool("pb_update_spec", { name: "order-cancellation", section: "Tasks", content: TASKS_PLAIN })).error!, /only its Design and Decisions may change/);
     assert.match((await tool("pb_update_spec", { name: "order-cancellation", section: "Goal", content: "Cancel orders fast." })).error!, /only its Design and Decisions may change/);
     assert.equal((await tool("pb_update_spec", { name: "order-cancellation", section: "Design", content: "- One `Order` aggregate per file." })).error, undefined);
     assert.equal((await tool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- A build-time assumption.", mode: "append" })).error, undefined);
@@ -8874,10 +8537,10 @@ test("guide: the spec topic states the bound owner, the single fix per finding a
   // the guide is hand-wrapped, so a claim is matched across line breaks, never at one wrap point
   const says = (phrase: string) => new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").split(/\s+/).join("\\s+"), "i");
   for (const claim of [
-    "bounds how often something runs also names the code whose call it bounds",
+    "bounds how often something runs should name the code whose call it bounds",
     "`new: <path>` when nothing performs it yet",
     "`Assumption: … settles by …` when nothing in the project enforces the cadence",
-    "a backticked command doesn't own a cadence",
+    "a backticked command is a measurement, not an owner",
     "its one fix follow on `Evidence:` and `Fix:` lines",
     "one `Not:` line says what it was and why it loses",
     "`/pb:fix` labelled as already rejected",
@@ -9038,12 +8701,12 @@ test("spec review config: the defaults are auto and 2, and bad values fall back 
 
 test("spec review delta: only changed sections and tasks move, with the binding context", () => {
   const before = SPEC();
-  const after = before.replace("- Acceptance: T2.txt exists (tests: T2)", "- Acceptance: T2.txt exists and is empty (tests: T2)");
+  const after = before.replace("- Acceptance: T2.txt exists", "- Acceptance: T2.txt exists and is empty");
   const delta = specReviewDelta(before, after);
   assert.match(delta.changed, /### T2: second file/);
   assert.match(delta.changed, /exists and is empty/);
   assert.doesNotMatch(delta.changed, /### T1: first file/); // unchanged tasks stay out
-  assert.match(delta.earlier, /T2\.txt exists \(tests: T2\)/);
+  assert.match(delta.earlier, /T2\.txt exists/);
   assert.match(delta.context, /## Decisions/);
   assert.match(delta.context, /## Contracts/);
   assert.match(delta.context, /# Order cancellation/);
@@ -9313,14 +8976,15 @@ test("spec: a task naming a full-suite run gets an advisory, not a rejection", a
   assert.doesNotMatch(quiet.content![0].text, /full-suite run/);
 });
 
-test("spec: the format teaches the acceptance proof markers and doc-only acceptance lines", async () => {
+test("spec: the format gives one acceptance form — task lines plus a Test: command", async () => {
   const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
   for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
-    assert.match(p, /each ends with its proof marker \(tests:/);
-    assert.match(p, /an illustrative `\(tests: Tn\)` mid-sentence is prose/);
+    assert.match(p, /- Acceptance: <one behaviour, as a test would check it>/);
+    assert.match(p, /the task's Test: command is the proof/);
+    assert.doesNotMatch(p, /\(tests:|non-testable|## Acceptance criteria/);
     assert.match(p, /probe: <what you ran>; conclusion:/);
-    assert.match(p, /explicit marker: because, since, so,/);
-    assert.match(p, /A doc-only task carries no Test: line — its acceptance lines still say what to check, marked \(non-testable:/);
+    assert.match(p, /Say why in plain prose, not with a bare colon/);
+    assert.match(p, /A doc-only task carries no Test: line — its acceptance lines still say what to check/);
   }
 });
 

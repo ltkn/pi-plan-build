@@ -285,46 +285,40 @@ Then the sections:
   `probe: …; conclusion: …`), or `constraint: …`. A `path:line` must cite a real
   line in the repo; a new file needs no line number.
 - **Decisions**: each with its reason as it stands now, no history; rejected
-  ideas as "Not doing X, because …", so they aren't reconsidered. Every bullet
-  carries an explicit reason marker — `because`, `since`, `so`, `so that`,
-  `therefore`, `to avoid`, an em dash, `Rationale:`/`Reason:`, or an
-  `Assumption: …` — because a bare colon states no reason.
+  ideas as "Not doing X, because …", so they aren't reconsidered. The reason is
+  prose the reviewer can judge, not a word from a list; a bare colon states no
+  reason.
 - **Contracts**: no later step sees the whole change at once — tasks are built
   one by one. So pin here every seam the tasks share: public signatures, API
   requests and responses with their error types, the data model and migrations,
   events, and which task owns each side. They're pinned as they must end up;
   everything behind them is left to the build, which asks before changing one,
   and the reviewer checks each. A single task that changes an external surface
-  needs Contracts too; only truly independent internal tasks can omit it. A
-  bullet that bounds how often something runs also names the code whose call it
-  bounds — a `path:line`, or `new: <path>` when nothing performs it yet, or an
+  should have Contracts too; only truly independent internal tasks can omit it.
+  A bullet that bounds how often something runs should name the code whose call
+  it bounds — a `path:line`, or `new: <path>` when nothing performs it yet, or an
   `Assumption: … settles by …` when nothing in the project enforces the cadence
-  (a third party's webhook, another service's cron) — or the write is refused,
-  quoting the bullet and spelling all three; a backticked command doesn't own a
-  cadence, so it doesn't satisfy it either. A bare count or duration is a
-  different question and keeps its own answer: a backticked measurement. A
-  section that does not apply is one line, "none — why", never an empty heading
-  or TBD.
+  (a third party's webhook, another service's cron); the reviewer checks it, and
+  a backticked command is a measurement, not an owner. A bare count or duration
+  keeps its own answer: a measurement. A section that does not apply is one line,
+  "none — why", never an empty heading or TBD.
 - **Migration and rollback**: only when data, a schema or a stored format
   outlives the change: how existing data moves, how it is rolled back, and what
   old and new code do while both run. "none — why" when nothing persists.
 - **Requirements: <capability>**: only when the change alters what a capability
   guarantees. One section per capability, opened by `Overview:` — what the
   capability is and what it refuses to do, in a sentence or two — then
-  `### ADDED`, `### MODIFIED` and `### REMOVED` groups of `### Requirement:` /
-  `#### Scenario:` blocks. `/pb:archive` writes the overview into the living
-  file's `## Overview`; a capability that has none must supply one, and a new
-  overview replaces the old. It is plain text and never a review criterion. Each
+  `### ADDED`, `### MODIFIED` and `### REMOVED` groups of `### Requirement:`
+  blocks. `/pb:archive` writes the overview into the living file's
+  `## Overview`; a capability that has none must supply one, and a new overview
+  replaces the old. It is plain text and never a review criterion. Each
   requirement opens with an `Invariant:` line — the rule that must hold for
-  every input — and its scenarios are examples. The invariant becomes the first
-  review criterion (`R1.1`), each scenario follows (`R1.2`, …); a requirement
-  written before invariants falls back to its statement. Each `THEN` is one
-  observable claim, so several claims are several `THEN` lines. Add a scenario
-  only where it carries information the invariant doesn't — a boundary, a state
-  transition, an abuse, precedence between overlapping rules — not a happy path
-  that restates the rule or near-duplicate cases. ADDED must be new; MODIFIED
-  and REMOVED must exist; MODIFIED replaces the requirement whole, and a rename
-  is REMOVED plus ADDED. The delta is checked when the spec is written, and
+  every input; the tasks' acceptance lines are the examples that prove it. A
+  requirement written before invariants falls back to its statement. Older files
+  may still carry `#### Scenario:` blocks: they parse and merge, but they are
+  examples, never acceptance items. ADDED must be new; MODIFIED and REMOVED
+  must exist; MODIFIED replaces the requirement whole, and a rename is REMOVED
+  plus ADDED. The delta is checked when the spec is written, and
   `/pb:archive` merges it into `specs/<capability>.md` or refuses before moving
   anything. `specs/` is kept with the project, so the requirement base is
   committed and reviewed with it.
@@ -340,7 +334,8 @@ Then the sections:
 - **Tasks**: each as `### T1: <outcome>`, what must be true when it's done
   rather than how to build it, with `- Acceptance:` lines and, when it adds
   behaviour, `- Test: \`command\``. Each Acceptance line is one behaviour as a
-  test would check it, abuse cases included: they are the tests to write. One
+  test would check it, abuse cases included: they are the tests to write. The
+  task's `Test:` command is the proof; there is no per-line proof marker. One
   task, unless a slice is worth reviewing on its own; then vertical slices, each
   working and tested, never a split by layer or a closing "add tests" task.
   Keep each task narrow: one coherent change with its own targeted `Test:`,
@@ -359,9 +354,8 @@ left to the build, where the compiler and the tests give feedback. When a
 decision rests on something only running code shows (a library's limits,
 performance), planning tries it in a scratch copy first.
 
-**Out of scope** and **Acceptance criteria** are optional. The aim: a fresh or
-reset session starts where the discussion ended, without re-analysing and
-without being buried. Pi points to code instead of copying it and states each
+**Out of scope** is optional. The aim: a fresh or reset session starts where
+the discussion ended, without re-analysing and without being buried. Pi points to code instead of copying it and states each
 fact once; `pb_write_spec` reports the size and only suggests tightening a long
 spec. `pb_update_spec` changes one section at a time.
 
@@ -469,8 +463,8 @@ of eyes, not a substitute for yours:
 
 1. **Goal and Out of scope**: does this solve the right problem, and is the
    boundary in the right place?
-2. **Acceptance criteria and requirement scenarios**: is each one checkable, and would it prove the goal
-   rather than merely describe the work?
+2. **Task acceptance lines**: is each one checkable, and would its task's
+   `Test:` command prove it rather than merely describe the work?
 3. **Decisions**: is each reason still true, and is every rejected alternative
    rejected deliberately ("Not doing X, because …")?
 4. **Contracts, Migration and rollback, Threats and abuse**: are the shared
@@ -492,7 +486,7 @@ plan that is checkable but aimed at the wrong outcome.
   limits, quotas, state), the spec gets a `## Threats and abuse` section: who can
   reach it and with what, what they must prove or be allowed, how it could be
   abused (including by quantity, repetition, reordering or racing), and what
-  prevents each abuse. Its acceptance criteria include the abuse cases.
+  prevents each abuse. Its task acceptance lines include the abuse cases.
   That's the cheapest place to catch a design hole, before any code exists.
 - **Refactoring first.** When outdated code stands in the way (your standards
   ask for current practice), the spec starts with tasks titled `(refactor) …`
@@ -570,7 +564,7 @@ rollback, Threats and abuse (`Threats` reads as the same section) and Acceptance
 bind the build: changing one takes a `pb_ask`. How to build it is the build's: a better way found while
 coding is taken, and a change to the Design goes in Decisions. Every task handout,
 check retry, coherence pass and fix lap carries those binding sections, the
-requirement and acceptance criteria, the standing guarantees of any capability its
+requirement rules and task acceptance lines, the standing guarantees of any capability its
 requirement delta touches, and the finished tasks' caveats, rejections and open
 items as a compact block. It is sized from your model's context window (a tenth of
 it, with a stated minimum, so even a window too small for the reserve gets a real
@@ -600,7 +594,7 @@ build's state, written by pb, not by a model.
 `checkpointAt` (75% of its window, always before Pi would compact), pb resets it
 right there, between two tasks, where nothing is half-done. The build goes on
 from a summary pb writes itself: the build's rules, every task with its
-report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's binding view — the same binding sections and criteria, bounded by your model's window with a stated minimum, naming any section it had to drop (Tasks and the rest stay in the spec) — the standing guarantees of what the spec's requirement delta touches, and the next task. The line it resets under leaves room for that view and the step after it, not for the whole spec, so a long spec doesn't force early resets. No summarizing model call,
+report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's binding view — the same binding sections and requirement rules, bounded by your model's window with a stated minimum, naming any section it had to drop (Tasks and the rest stay in the spec) — the standing guarantees of what the spec's requirement delta touches, and the next task. The line it resets under leaves room for that view and the step after it, not for the whole spec, so a long spec doesn't force early resets. No summarizing model call,
 and nothing of the finished task is needed any more. Should a single task still
 run into Pi's own compaction, pb writes that summary too, adding the files the
 task has changed so far and the files read before, so it carries on instead of
@@ -661,13 +655,10 @@ both for every proven task, and a failed check retry shows them again so the
 model does not build on a typo or an unrelated broken test. Each case is listed at the end of the build and handed to the reviewer as
 partly proven or unproven — give a task its own targeted command where you
 can, and when tasks share one, make it fail at each task's turn (a conjunction
-over per-task artifacts, so each task still has something to prove). Proof
-markers must name real proof — a file in the repo, a test it contains, or a
-task id whose task the red gate will force to fail (its own or another's) —
-or writing is rejected. On a task with no red proof, the `(refactor)`,
-no-`Test:`, `New tests: no` and no-test-gate cases above, name a real test
-or use `(non-testable: <why>)`: a task id there claims a red run that will
-never be asked for.
+over per-task artifacts, so each task still has something to prove). A task's
+`Test:` command is the proof of its acceptance lines. A task with no red proof
+— a `(refactor)`, no `Test:`, `New tests: no` or a no-test gate — is judged by
+the reviewer on whether its acceptance is genuinely untestable or docs-only.
 
 The commands come from `.pi/pb/config.json` (`"verify"` and `"build"`, `"auto"`
 detects Maven, Gradle, npm/TypeScript, Cargo, Go and pytest; `"lint"` uses
@@ -721,9 +712,8 @@ every acceptance criterion as met with evidence, not met, or not verified. It
 also checks the decisions (including rejected
 alternatives and the build's assumptions), `(refactor)` tasks for unchanged
 behaviour, the existing tests the build changed, the tasks whose new tests
-carry no proof (with why each), unresolvable `(tests: …)` proof names (a named
-test that proves nothing is a faked mapping), the fix laps' own reports on a
-follow-up (claims plus test results, judged as evidence), acceptance lines
+carry no proof (with why each), the fix laps' own reports on a follow-up
+(claims plus test results, judged as evidence), acceptance lines
 that moved during the build, and where the spec's Design comes from (how
 hard to look for drift between Design, Decisions and code), comments, your
 standards and security, and reports each finding through a tool, not as prose
@@ -759,10 +749,10 @@ host, tenant) and checks which class wins at each decision — routing, lookup,
 authorization, default — since a guard can trust a different classifier than
 the router and be skipped.
 
-**Every acceptance criterion is a checklist item.** The spec's top-level
-criteria become `A1`, `A2`, …, each requirement's invariant becomes `R1.1`,
-its scenarios follow (`R1.2`, …), and each task's `- Acceptance:` lines become
-`T1.1`, `T1.2`, …
+**Every task acceptance line is a checklist item.** Each task's
+`- Acceptance:` lines become `T1.1`, `T1.2`, … in reading order. Requirement
+invariants are binding rules checked for regressions, and legacy scenarios are
+examples — neither is a checklist id.
 The reviewer reports each one as **met** with evidence (file:line or test
 name), **not met**, or **not verified** with the reason.
 The checklist follows the spec as written, and every spec review uses the same
@@ -1027,7 +1017,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 
 ### Review could not verify everything
 <!-- pb:tip review.unverified -->
-**What now** — the review found nothing blocking, but some acceptance criteria were not verified
+**What now** — the review found nothing blocking, but some task acceptance items were not verified
 - Read the acceptance list above: every `not verified` or missing id needs evidence, not silence.
 - Check that behaviour yourself or run the named test, then `/pb:review` again. If nothing else changed, `/pb:review --full` re-checks the whole change. If the criterion is not checkable as written, amend the spec with `/pb:spec`.
 <!-- /pb -->

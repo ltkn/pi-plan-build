@@ -8,15 +8,11 @@
  *   ### ADDED
  *   ### Requirement: Cancel a pending order
  *   Invariant: Only the order's owner can cancel it, and only while it is pending.
- *   #### Scenario: Owner cancels
- *   - **GIVEN** an order in PENDING owned by the caller
- *   - **WHEN** the owner cancels it
- *   - **THEN** it becomes CANCELLED
- *
  * ADDED must not exist, MODIFIED and REMOVED must exist; MODIFIED replaces the requirement whole
  * (a rename is REMOVED + ADDED). A delta that does not apply exactly is refused, so the base never
- * half-merges. The invariant is the first review criterion (R1.1) and each scenario follows (R1.2,
- * R2.1, …), so the reviewer checks the rule, not only its examples.
+ * half-merges. A requirement states its durable rule as an `Invariant:` line; task acceptance lines
+ * are the examples that prove it. Legacy files may still carry `#### Scenario:` blocks, which parse
+ * and merge but are not review acceptance items.
  */
 import * as fs from "node:fs";
 import { blankFenced, escapeRegExp, sectionHeading } from "./markdown.ts";
@@ -131,8 +127,9 @@ const trimBlank = (lines: string[]): string => {
 
 /**
  * Parse the Requirement/Scenario blocks in lines [from, to). `mode` decides whether an empty
- * requirement is an error and whether scenarios are allowed. Structural violations are errors;
- * the returned requirements are the ones that could be read, for a partial report.
+ * requirement is an error and whether scenarios are allowed; scenarios are optional legacy content.
+ * Structural violations are errors; the returned requirements are the ones that could be read, for
+ * a partial report.
  */
 function parseBlocks(lines: string[], blanked: string[], from: number, to: number, mode: RequirementGroup | "document", errors: string[]): { requirements: Requirement[]; intro: string } {
   const drafts: RequirementDraft[] = [];
@@ -268,7 +265,6 @@ function parseBlocks(lines: string[], blanked: string[], from: number, to: numbe
       if (draft.scenarios.length) errors.push(`line ${draft.line}: REMOVED names the requirement only; remove its scenarios from the delta (they leave with the requirement)`);
       requirements.push({ name: draft.name, invariant, statement, scenarios: [] });
     } else {
-      if (!draft.scenarios.length) errors.push(`line ${draft.line}: requirement "${draft.name}" needs at least one "#### Scenario:" so it can be checked`);
       requirements.push({ name: draft.name, invariant, statement, scenarios });
     }
   }
@@ -497,53 +493,7 @@ export function requirementGaps(capabilities: readonly string[], specName: strin
   });
 }
 
-/** The spec review checklist: the invariant first (R1.1), then one criterion per scenario (R1.2, R2.1, …). */
-export interface RequirementCriterion {
-  id: string;
-  text: string;
-  capability: string;
-  requirement: string;
-}
-
-export function requirementCriteria(markdown: string): RequirementCriterion[] {
-  const { deltas } = parseRequirementDeltas(markdown);
-  const out: RequirementCriterion[] = [];
-  let requirementIndex = 0;
-  for (const delta of deltas) {
-    for (const group of delta.groups) {
-      if (group.kind === "REMOVED") continue;
-      for (const requirement of group.requirements) {
-        requirementIndex++;
-        let criterionIndex = 0;
-        // The rule is checked before its examples: an explicit Invariant line, or the statement it
-        // was written as before invariants existed. Scenarios are evidence for the rule, not the rule.
-        const invariant = (requirement.invariant || requirement.statement).replace(/\s+/g, " ").trim();
-        if (invariant) {
-          criterionIndex++;
-          out.push({
-            id: `R${requirementIndex}.${criterionIndex}`,
-            text: `${requirement.name}: invariant — ${invariant}`,
-            capability: delta.capability,
-            requirement: requirement.name,
-          });
-        }
-        for (const scenario of requirement.scenarios) {
-          criterionIndex++;
-          const criteria = scenario.criteria.map((c) => `${c.keyword} ${c.text}`).join("; ");
-          out.push({
-            id: `R${requirementIndex}.${criterionIndex}`,
-            text: `${requirement.name}: ${scenario.name}${criteria ? ` — ${criteria}` : ""}`,
-            capability: delta.capability,
-            requirement: requirement.name,
-          });
-        }
-      }
-    }
-  }
-  return out;
-}
-
-/** The text a delta adds or changes, for the spec's semantic gates. */
+/** The text a delta adds or changes, for the spec's review-risk selection. */
 export function requirementSurfaceText(markdown: string): string {
   const { deltas } = parseRequirementDeltas(markdown);
   return deltas

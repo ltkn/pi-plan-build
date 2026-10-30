@@ -199,8 +199,9 @@ function reportSpec(store: Store, name: string, options: ReportOptions, stats: M
       id: criterion.id,
       text: criterion.text,
       task: criterion.task ?? null,
-      capability: criterion.capability ?? null,
-      requirement: criterion.requirement ?? null,
+      // Kept for the pb.report/1 shape: requirements are no longer acceptance criteria.
+      capability: null,
+      requirement: null,
       status: result?.status ?? "not reported",
       evidence: result?.evidence ?? null,
     };

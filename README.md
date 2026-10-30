@@ -104,11 +104,12 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   before T1: its Decisions are attacked, every "Not doing X" re-tested,
   unmeasured numbers flagged. A P0/P1 stops the build; `maxRounds` caps the
   loop (`--review` spends one more round, `--force` records the standing
-  findings as accepted). Every acceptance line names its proof.
+  findings as accepted). Every acceptance line is proven by its task's `Test:`.
 - **Fresh eyes on the build.** A spec pass, then an adversarial pass, each in a
-  fresh read-only session you watch. The spec's acceptance criteria, requirement
-  invariants and scenarios (`R1.1`, …) and task acceptance lines are answered
-  one by one; a missing item is unverified, never a pass. Blocking findings get a second look,
+  fresh read-only session you watch. Each task acceptance line is answered one
+  by one; a missing item is unverified, never a pass. Requirement invariants are
+  checked as standing rules, and legacy scenarios are examples, not checklist
+  ids. Blocking findings get a second look,
   and pb offers another model family. A pre-existing problem is reported as an
   outside finding (advisory, capped at P2), never left as a prose note. A
   command the reviewer runs may change files: they're listed, never silently
@@ -158,54 +159,45 @@ Overview: Pending orders can be cancelled by their owner; nothing else changes s
 ### ADDED
 ### Requirement: Cancelling a pending order
 Invariant: Only the order's owner can cancel it, only while it is PENDING, and the result is CANCELLED.
-#### Scenario: Owner cancels a pending order
-- **GIVEN** an order in PENDING owned by the caller
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-- **THEN** a second cancel is refused and changes nothing
 ## Design                            # the shape the build settled on, recorded as it went — not by the plan
 ## Open questions                    # only while planning
 ## Tasks
 ### T1: A pending order can be cancelled
 …what must be true when it's done; how to build it is the build's…
-- Acceptance: cancel() on PENDING sets CANCELLED (tests: cancels-pending)
-- Acceptance: cancel() on any other state throws, and changes nothing (tests: rejects-other-states)
+- Acceptance: cancel() on PENDING sets CANCELLED
+- Acceptance: cancel() on any other state throws, and changes nothing
 - Test: `mvn -B -q -Dtest=OrderTest test`   # seen failing before the change, then passing
 ```
 
 The spec pins what and how you'll know, not how: Goal, Out of scope, Decisions,
 Design, Contracts, Migration and rollback, Threats and abuse and Acceptance bind the
-build. Contracts are required for any external surface (an
+build. Contracts are expected for any external surface (an
 API, event, schema, config, public signature or stored shape), even for a
-single task, since no later step sees the whole change at once. A
-persisted-data change also needs `## Migration and rollback`, or an explicit
-`none — why`; any section that doesn't apply is one line, never an empty
-heading. `path:line` citations are checked against the repo when the spec is
-written. Each Acceptance line is one behaviour with `(tests: …)` naming its
-proof, or `(non-testable: …)` saying why no test can. Keep each task to one
-coherent change with a targeted `Test:`: the harness runs the full suite after
-the last task, so a task never needs to run it, and work that would bundle
-several changes with that verification is split. Once the build starts, that
+single task, since no later step sees the whole change at once; the reviewer
+checks it. A persisted-data change also needs `## Migration and rollback`, or
+an explicit `none — why`; any section that doesn't apply is one line, never an
+empty heading. `path:line` citations are checked against the repo when the spec
+is written. Each Acceptance line is one behaviour; the task's `Test:` command
+is its proof. Keep each task to one coherent change with a targeted `Test:`:
+the harness runs the full suite after the last task, so a task never needs to
+run it, and work that would bundle several changes with that verification is
+split. Once the build starts, that
 contract is frozen: the build may change only Design and Decisions, and a hand
 edit to anything else pauses it until `/pb:build` re-approves the revision.
 
 **Requirements accumulate across features.** A change that alters what a
 capability guarantees carries a delta: `## Requirements: <capability>`, then
-`### ADDED`, `### MODIFIED` and `### REMOVED` groups of requirement and scenario
-blocks. The delta opens with `Overview:` — what the capability is and what it
-refuses to do, in a sentence or two. `/pb:archive` writes it into the living
-file's `## Overview` before its `## Requirements`; a delta for a capability that
-has none must supply one, and a new overview replaces the old. It is plain text
-and never a review criterion. Each requirement then opens with an `Invariant:`
-line — the rule that must hold for every input — followed by scenarios as its
-examples. The invariant is the first review criterion (`R1.1`), scenarios follow
-(`R1.2`, …), so the reviewer checks the rule and not only the cases; a
-requirement written before invariants falls back to its statement. Write each
-`THEN` as one observable claim: several claims are several `THEN` lines, so a
-finding can name the one that fails. Add a scenario only where it carries
-information the invariant doesn't — a boundary, a state transition, an abuse,
-precedence between overlapping rules — not a happy path that restates the rule
-or near-duplicate cases. ADDED must be new; MODIFIED and REMOVED must exist;
+`### ADDED`, `### MODIFIED` and `### REMOVED` groups of requirement blocks. The
+delta opens with `Overview:` — what the capability is and what it refuses to
+do, in a sentence or two. `/pb:archive` writes it into the living file's
+`## Overview` before its `## Requirements`; a delta for a capability that has
+none must supply one, and a new overview replaces the old. It is plain text and
+never a review criterion. Each requirement then opens with an `Invariant:`
+line — the rule that must hold for every input; the tasks' acceptance lines are
+the examples that prove it. A requirement written before invariants falls back
+to its statement. Older files may still carry `#### Scenario:` blocks: they
+parse and merge, but they are examples, not acceptance items. ADDED must be
+new; MODIFIED and REMOVED must exist;
 MODIFIED replaces the requirement whole, and a rename is REMOVED plus ADDED.
 `/pb:archive` merges the delta into `specs/<capability>.md` transactionally: a
 delta that no longer applies stops the archive before anything moves, and if the
@@ -218,8 +210,8 @@ flagged at write time and, under `auto`, gets the spec review: the reviewer
 judges whether its guarantees stay as written or need a delta. Detection is
 mechanical; a pure refactor carries no obligation.
 
-`## Out of scope` and `## Acceptance criteria` are optional: a spec is as long
-as the change needs and no longer. Pi points to code instead of copying it, and
+`## Out of scope` is optional: a spec is as long as the change needs and no
+longer. Pi points to code instead of copying it, and
 `pb_update_spec` changes single sections, so a checkpoint rewrites only what
 moved. One spec per feature you'd merge on its own; one planning session can
 produce several (`Depends on:` orders them).

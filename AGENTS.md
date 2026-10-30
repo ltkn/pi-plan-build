@@ -28,10 +28,10 @@
 - `/pb:undo` restores files, task state and conversation but never moves the branch; the task snapshot in each checkpoint is what drops red proofs with the files.
 
 ### Spec write gates (extensions/pb/spec.ts, extensions/pb/index.ts)
-- Every shape rule is a pure `…Errors(md, spec)` in `spec.ts`, called from both `pb_write_spec` and `pb_update_spec` (whole-spec on the transition to ready, task-scoped on a `Tasks` edit). Readers stay lenient; in-flight and hand-edited specs keep working.
-- `(tests: …)` markers have exactly one implementation: `testRefsOf`/`proofMarkersOf`/`taskIdProofGap` in `spec.ts` → `unresolvedMappings` in `index.ts`, which feeds BOTH write gates (`acceptanceMappingErrors`) and the code reviewer's `mappingNotes`. A `Tn` resolves iff `needsRed(spec, namedTask)` — own id included; `redExemption` is the single reason list for red-exempt tasks.
-- A `replace` whose body is blank is refused in `pb_update_spec`: an empty section would answer every evidence gate by deleting what the gate inspects.
-- Write-refusal wording lives in one const (`MARKER_GUIDANCE`) interpolated into both gates, and the writer-facing format is `SPEC_FORMAT` (`extensions/pb/prompts.ts`) — a new rule needs both or the writer is held to text it never saw.
+- The write tools refuse only what the parser can decide: parse errors, required sections, unique task ids, cited `path:line` claims and requirement deltas. Semantic shape — Threats, measurements, evidence, reasons, Contracts, migration answers, proof quality — is the reviewer's and the human's job; `specReviewRisk` (`spec.ts`) uses the high-signal words only to choose whether `auto` starts that review.
+- Task acceptance is the only review checklist: `acceptanceCriteria` (`spec.ts`) yields `T1.1`, `T1.2`, … from each task's `- Acceptance:` lines. A task's `Test:` command is its proof; there is no per-line proof-marker or mapping layer. Requirement deltas are durable rules, rendered as `## Requirement rules` binding context by `requirementRuleLines` (`prompts.ts`), never as acceptance ids.
+- A `replace` whose body is blank is refused in `pb_update_spec`: the heading would stand over nothing and silently empty what later readers and the reviewer rely on.
+- The writer-facing format is `SPEC_FORMAT` (`extensions/pb/prompts.ts`); its semantic guidance is advice the reviewer checks, not a rule a write gate enforces. Requirement deltas are the one semantic shape still checked for merge validity (`requirementWriteErrors`, `requirements.ts`).
 
 ### Spec review rounds (extensions/pb/prompts.ts, extensions/pb/spec.ts)
 - One system prompt (`SPEC_REVIEWER_SYSTEM`) is passed to round 1 and every follow-up, so any reviewer rule written there binds all rounds by construction.
@@ -47,7 +47,7 @@
 
 ### Living requirements (extensions/pb/requirements.ts, extensions/pb/store.ts, specs/)
 - The base is `specs/<capability>.md` at the project root — deliberately outside `.pi/` (which this repo gitignores wholesale) because it is durable project knowledge; `Store.isGitIgnored` warns when it is not committable.
-- The one reading of "behavioural change" (`behaviouralChange`, `spec.ts`) decides both the Contracts gate and the living-gap nudge, and `specReviewRisk` forces a spec review for a named capability with no delta.
+- The one reading of "behavioural change" (`behaviouralChange`, `spec.ts`) decides the living-gap nudge, and `specReviewRisk` forces a spec review for a named capability with no delta. New requirement deltas are invariant-only; legacy `#### Scenario:` blocks still parse and merge but are examples, not criteria.
 - `livingFor` (`extensions/pb/index.ts`) builds the digest once from the spec's own deltas; a requirement the delta rewrites or removes is skipped by the merge's own name key, so nothing that no longer stands is presented as in force.
 
 ### Fresh sub-agent runs (extensions/pb/runner.ts, extensions/pb/review.ts)
@@ -59,7 +59,7 @@
 - `BINDING_SECTIONS` (`spec.ts`) is the single list rendered into every handout, and the guide and README must state it in the exported order (test "binding: the guide and README list the binding sections in the exported order"); the delta's always-carried context derives from the same list, minus Design.
 
 ### Tests and commands (test/, package.json)
-- `npm test` → `node --test test/pb.test.mts` (391 tests, ~165s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
+- `npm test` → `node --test test/pb.test.mts` (401 tests, ~180s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
 - The suite drives the real commands/tools against a simulated Pi; `PI_PB_PI_COMMAND` points fresh sub-processes at `test/mock-pi.mjs`, whose `MOCK_SPEC_REVIEW` modes include `block-outside-advisory` (in-scope P0 + outside P1, the only way to carry an outside advisory into a real delta round) and `advisory-flood` (a 10-item carry for the cap). `MOCK_SPEC_BRIEF_OUT` captures the latest brief; `MOCK_SPEC_PROMPT_LOG`/`MOCK_SPEC_SYSTEM_LOG` append one entry per round, split by `<<<round>>>`.
 - `setup()` forces `specReviewer: {mode:"always"}` and `reviewer.idleSec: 0`; `PI_CODING_AGENT_DIR` is redirected to a temp dir so nothing touches the real user agent dir.
 - `written()` asserts an error-free `pb_write_spec`, so any new write gate must be satisfied by the shared fixtures: `SPEC()` plus the one task-list builder `tasksMarkedBy` behind `TASKS_WITH_OWN_IDS` and `TASKS_WITH_EXEMPTIONS`.
@@ -67,6 +67,5 @@
 
 ### Known gaps
 - The living-capability rule is stated in three reviewer-facing places (`SPEC_REVIEWER_SYSTEM`, the `## Living capability check` tail, the `Requirements` bullet in `Your job`) as "a missing delta is a P1 finding", none qualified by the delta precedence rule — a follow-up round can still block on a living gap that predates the revision, the same two-readings shape this feature removed elsewhere.
-- A named (non-`Tn`) proof marker on a task with no `Test:` line is never resolved: `unresolvedMappings` skips path and test-name resolution there, so `(tests: does-not-exist)` on such a task writes silently — while `guide.md`'s marker paragraph and `SPEC_FORMAT` imply any unresolved marker is refused.
 - `extensions/pb/guide.md` still cites line numbers from an older tree for the review/scoping text; re-anchor by quoted text before editing.
 <!-- /pb:map -->
