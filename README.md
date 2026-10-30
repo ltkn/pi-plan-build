@@ -185,7 +185,9 @@ written. Each Acceptance line is one behaviour with `(tests: …)` naming its
 proof, or `(non-testable: …)` saying why no test can. Keep each task to one
 coherent change with a targeted `Test:`: the harness runs the full suite after
 the last task, so a task never needs to run it, and work that would bundle
-several changes with that verification is split.
+several changes with that verification is split. Once the build starts, that
+contract is frozen: the build may change only Design and Decisions, and a hand
+edit to anything else pauses it until `/pb:build` re-approves the revision.
 
 **Requirements accumulate across features.** A change that alters what a
 capability guarantees carries a delta: `## Requirements: <capability>`, then

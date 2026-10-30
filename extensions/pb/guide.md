@@ -504,7 +504,8 @@ plan that is checkable but aimed at the wrong outcome.
   fresh; when a later build finds the code has moved on, it resolves the
   difference and lists what it chose.
 - **Small related changes** can share a spec.
-- **You can edit a spec by hand.** It just has to keep the format.
+- **You can edit a spec by hand.** It just has to keep the format. A running
+  build pauses at its next step until `/pb:build` re-approves the edit.
 <!-- /pb -->
 
 <!-- pb:topic build -->
@@ -537,6 +538,12 @@ worked around.
    `## Design`. A task that has grown into several changes finishes the smallest
    coherent part and reports the rest as open, so it can become its own task
    instead of one long run.
+
+   Once the first task starts, the spec's contract is frozen: the build may add
+   to `## Design` and `## Decisions`, and change nothing else — not through
+   `pb_update_spec`, not by editing the file. If the spec itself must change,
+   the build stops and asks; editing it by hand pauses the build at its next
+   step, and `/pb:build` re-approves the revision (finished tasks stay done).
 2. **Structured files are edited literally.** `pom.xml`, JSON, YAML and other
    structured files are changed by exact literal replacement or line-based
    edits, never by a regex that can backtrack — a nested-quantifier pattern such

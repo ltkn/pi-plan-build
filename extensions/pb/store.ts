@@ -1,6 +1,6 @@
 /**
  * On-disk state: .pi/pb/config.json, one folder per spec under .pi/pb/specs/<name>/
- * (spec.md, progress.json, checkpoints.json, events.jsonl), finished specs
+ * (spec.md, approved.md, progress.json, checkpoints.json, events.jsonl), finished specs
  * under .pi/pb-archive/, which ignores itself in git, and the living requirement
  * base under specs/ in the project, which is meant to be committed.
  */
@@ -280,6 +280,15 @@ export interface ReviewState {
   acceptance?: AcceptanceCheck[];
 }
 
+/** The text a build may not rewrite: recorded when the build starts and re-recorded only on re-approval. */
+export interface SpecApproval {
+  at: string;
+  /** hash of the whole approved text, for provenance */
+  hash: string;
+  /** hash of the contract only: the text that binds the build, minus Design and Decisions */
+  contractHash: string;
+}
+
 export interface Progress {
   spec: string;
   phase: Phase;
@@ -287,6 +296,11 @@ export interface Progress {
   session?: string;
   /** the session whose conversation wrote the spec (a build there needs no copy of it) */
   writtenIn?: string;
+  /**
+   * What the build was approved against: the hash of the whole spec and of its contract, with the
+   * approved text kept beside it in approved.md. Design and Decisions are outside the contract.
+   */
+  approval?: SpecApproval;
   /** you edited the spec since the session wrote it: that session's copy is stale */
   edited?: boolean;
   /** the session that wrote it was compacted since, without the spec in the summary: its copy is gone */
@@ -587,6 +601,18 @@ export class Store {
   }
   writeSpec(name: string, markdown: string): void {
     writeFileAtomic(path.join(this.specDir(name), "spec.md"), markdown.endsWith("\n") ? markdown : `${markdown}\n`);
+  }
+
+  /** The text a build was approved against: the build may add Design and Decisions, never rewrite this. */
+  readApprovedSpec(name: string): string | undefined {
+    try {
+      return fs.readFileSync(path.join(this.specDir(name), "approved.md"), "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+  writeApprovedSpec(name: string, markdown: string): void {
+    writeFileAtomic(path.join(this.specDir(name), "approved.md"), markdown.endsWith("\n") ? markdown : `${markdown}\n`);
   }
 
   /* ----------------------------- requirements ----------------------------- */

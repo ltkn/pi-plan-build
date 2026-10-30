@@ -725,6 +725,22 @@ export function specReviewRisk(md: string, spec: ParsedSpec, touchesLiving = fal
 /** A review answers for the exact markdown it saw: a pass stops covering the spec the moment the text changes. */
 export const specHash = (markdown: string) => createHash("sha256").update(markdown).digest("hex");
 
+/**
+ * A spec's contract: every block that binds the build except Design and Decisions, the two
+ * sections the build itself may change. A build is approved against this text; a change to it
+ * outside the build pauses the build until the human re-approves the revised spec.
+ */
+export function contractText(markdown: string): string {
+  return specTextBlocks(markdown)
+    .filter((block) => block.key !== "section:design" && block.key !== "section:decisions")
+    .map((block) => block.text)
+    .join("\n\n")
+    .trim();
+}
+
+/** The contract's fingerprint: what an approval binds, independent of the build's own Design and Decisions. */
+export const contractHash = (markdown: string) => createHash("sha256").update(contractText(markdown)).digest("hex");
+
 /** The prior state a changed spec's review needs: open blockers, carried advisories, and the text they came from. */
 export interface SpecReviewCarry {
   /** earlier blocking findings, with stable ids: in-scope P0/P1 and outside P0 */

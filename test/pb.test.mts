@@ -16,7 +16,7 @@ import { test } from "node:test";
 process.env.PI_PB_PI_COMMAND = path.join(path.dirname(new URL(import.meta.url).pathname), "mock-pi.mjs");
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const { default: pb } = await import("../extensions/pb/index.ts");
-const { parseSpec, acceptanceCriteria, addDecision, needsRed, redExemption, specHash, specReviewDelta, specReviewGate, specReviewRisk, capCarriedAdvisories } = await import("../extensions/pb/spec.ts");
+const { parseSpec, acceptanceCriteria, addDecision, contractHash, needsRed, redExemption, specHash, specReviewDelta, specReviewGate, specReviewRisk, capCarriedAdvisories } = await import("../extensions/pb/spec.ts");
 const { parseRequirementDocument, parseRequirementDeltas, planRequirementDeltas, requirementCriteria } = await import("../extensions/pb/requirements.ts");
 const { specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
 
@@ -7481,6 +7481,8 @@ test("task-id proof marker: a hand-edited exempt marker reaches the code reviewe
     specFile,
     fs.readFileSync(specFile, "utf8").replace("### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)", "### T2: (refactor) tidy\nNothing new.\n- Acceptance: T2.txt exists (tests: T2)"),
   );
+  // The hand edit changed the contract: /pb:build re-approves the revision before the review judges it.
+  await t.run("build", "order-cancellation");
   await t.run("review");
   const brief = t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!;
   assert.match(brief, /## Acceptance proof mapping[\s\S]*T2 \(tests: T2\)[\s\S]*a task id proves nothing/);
@@ -8347,20 +8349,31 @@ test("build: a spec rewrite that renumbers a task doesn't strand the resume at '
   // T1 gets built; the build rests at T2 (the script does nothing more).
   t.agent.script = async (text, tool) => {
     if (!text.includes("Task T1")) return;
+    // The Tasks section is the contract: a mid-build rewrite through the tool is refused.
+    const edited = await tool("pb_update_spec", {
+      name: "order-cancellation",
+      section: "Tasks",
+      content:
+        "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T3: second file\nCreate T3.txt.\n- Acceptance: T3.txt exists (tests: T3)\n- Test: `test -f T3.txt`",
+    });
+    assert.match(edited.error!, /only its Design and Decisions may change/);
     await tool("pb_tests_red", { task: "T1", tests: "T1.txt exists" });
     fs.writeFileSync(path.join(t.repo, "T1.txt"), "x");
     await tool("pb_task_done", { task: "T1", status: "done", changed: "T1", caveat: "none", rejected: "none", open: "none" });
   };
   await t.run("build");
   assert.equal(t.progress("order-cancellation").current, "T2");
-  // The Tasks section is rewritten mid-build: the pending second task is renamed T3.
-  const edited = await t.callTool("pb_update_spec", {
-    name: "order-cancellation",
-    section: "Tasks",
-    content:
-      "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n- Test: `test -f T1.txt`\n\n### T3: second file\nCreate T3.txt.\n- Acceptance: T3.txt exists (tests: T3)\n- Test: `test -f T3.txt`",
-  });
-  assert.equal(edited.error, undefined, edited.error ?? "");
+  // The human edits the file and re-approves with /pb:build: the pending second task is renamed T3.
+  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  fs.writeFileSync(
+    specFile,
+    fs
+      .readFileSync(specFile, "utf8")
+      .replace(
+        "### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists (tests: T2)\n- Test: `test -f T2.txt`",
+        "### T3: second file\nCreate T3.txt.\n- Acceptance: T3.txt exists (tests: T3)\n- Test: `test -f T3.txt`",
+      ),
+  );
   // Resume must build the renamed task, not read the stale current id as "build finished".
   t.agent.script = async (text, tool) => {
     if (!text.includes("Task T3")) return;
@@ -8369,9 +8382,99 @@ test("build: a spec rewrite that renumbers a task doesn't strand the resume at '
     await tool("pb_task_done", { task: "T3", status: "done", changed: "T3", caveat: "none", rejected: "none", open: "none" });
   };
   await t.run("build");
+  assert.ok(t.posts.some((x) => /Spec re-approved/.test(x)));
   assert.ok(!t.notes.some((n) => /Nothing left to build here/.test(n)));
   assert.ok(t.instructions.some((x) => /Task T3/.test(x)));
   assert.equal(t.progress("order-cancellation").phase, "built"); // T1 + T3 done, the suite checked
+});
+
+test("build: the approved contract is frozen while the build runs", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = async (text, tool) => {
+    if (!text.includes("Task T1")) return;
+    // The whole spec can't be rewritten, and only Design and Decisions may change.
+    assert.match((await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error!, /approved spec can't be rewritten/);
+    assert.match((await tool("pb_update_spec", { name: "order-cancellation", section: "Tasks", content: TASKS_WITH_OWN_IDS })).error!, /only its Design and Decisions may change/);
+    assert.match((await tool("pb_update_spec", { name: "order-cancellation", section: "Goal", content: "Cancel orders fast." })).error!, /only its Design and Decisions may change/);
+    assert.equal((await tool("pb_update_spec", { name: "order-cancellation", section: "Design", content: "- One `Order` aggregate per file." })).error, undefined);
+    assert.equal((await tool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- A build-time assumption.", mode: "append" })).error, undefined);
+    // A direct write into the spec's folder is blocked like the tool: the snapshot can't be touched either.
+    assert.match((await tool("write", { path: ".pi/pb/specs/order-cancellation/spec.md", content: "# rewritten" })).error!, /approved spec is read-only/);
+    assert.match((await tool("write", { path: ".pi/pb/specs/order-cancellation/approved.md", content: "# rewritten" })).error!, /approved spec is read-only/);
+    await tool("pb_tests_red", { task: "T1", tests: "T1.txt exists" });
+    fs.writeFileSync(path.join(t.repo, "T1.txt"), "x");
+    await tool("pb_task_done", { task: "T1", status: "done", changed: "T1", caveat: "none", rejected: "none", open: "none" });
+  };
+  await t.run("build");
+  const p = t.progress("order-cancellation");
+  assert.equal(p.current, "T2"); // T1 done, the build rests mid-run
+  const live = t.read(".pi/pb/specs/order-cancellation/spec.md");
+  assert.match(live, /## Design\n- One `Order` aggregate per file\./);
+  // Design and Decisions are outside the contract: the approval still covers the spec as it stands.
+  assert.equal(p.approval.contractHash, contractHash(live));
+  // The approved snapshot is the text the build may not rewrite: the build's Design isn't in it.
+  assert.doesNotMatch(t.read(".pi/pb/specs/order-cancellation/approved.md"), /One `Order` aggregate per file/);
+});
+
+test("build: a contract edited outside the build pauses it; /pb:build re-approves and resumes", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  let stopped = "";
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T1")) {
+      await tool("pb_tests_red", { task: "T1", tests: "T1.txt exists" });
+      fs.writeFileSync(path.join(t.repo, "T1.txt"), "x");
+      await tool("pb_task_done", { task: "T1", status: "done", changed: "T1", caveat: "none", rejected: "none", open: "none" });
+      return;
+    }
+    if (text.includes("Task T2")) {
+      // The human edits the contract while T2 runs, past every write gate.
+      fs.writeFileSync(specFile, fs.readFileSync(specFile, "utf8").replace("Cancel orders.", "Cancel orders before they ship."));
+      const done = await tool("pb_task_done", { task: "T2", status: "done", changed: "T2", caveat: "none", rejected: "none", open: "none" });
+      stopped = done.content?.[0].text ?? "";
+    }
+  };
+  await t.run("build");
+  assert.match(stopped, /contract no longer matches its approval/);
+  const paused = t.progress("order-cancellation");
+  assert.equal(paused.phase, "paused");
+  assert.match(paused.pause, /contract was edited after it was approved/);
+  assert.ok(t.posts.some((x) => /Build paused/.test(x)));
+  // The revision is approved by /pb:build, and the build carries on from where it stopped.
+  t.agent.script = async (text, tool) => {
+    if (!/Continue task T2/.test(text)) return;
+    await tool("pb_tests_red", { task: "T2", tests: "T2.txt exists" });
+    fs.writeFileSync(path.join(t.repo, "T2.txt"), "x");
+    await tool("pb_task_done", { task: "T2", status: "done", changed: "T2", caveat: "none", rejected: "none", open: "none" });
+  };
+  await t.run("build");
+  assert.ok(t.posts.some((x) => /Spec re-approved/.test(x)));
+  const built = t.progress("order-cancellation");
+  assert.equal(built.phase, "built");
+  assert.equal(built.edited, true); // the reviewer is told the write gates were bypassed
+  assert.equal(built.approval.contractHash, contractHash(fs.readFileSync(specFile, "utf8")));
+  assert.match(t.read(".pi/pb/specs/order-cancellation/approved.md"), /Cancel orders before they ship/);
+});
+
+test("review: a contract edited after approval is refused until /pb:build re-approves", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  fs.writeFileSync(specFile, fs.readFileSync(specFile, "utf8").replace("Cancel orders.", "Cancel orders before they ship."));
+  const before = t.instructions.length;
+  await t.run("review");
+  assert.equal(t.instructions.length, before); // no reviewer started
+  assert.match(t.notes.at(-1)!, /contract changed since the build was approved/);
+  // /pb:build re-approves without building anything; the review then judges the spec as it stands.
+  await t.run("build", "order-cancellation");
+  assert.ok(t.posts.some((x) => /Spec re-approved/.test(x)));
+  await t.run("review");
+  assert.ok(t.instructions.some((x) => x.startsWith("[pb:review]")));
 });
 
 test("spec review: a spec edited while the review runs is not built on the stale pass", async () => {
