@@ -7,7 +7,6 @@
 import { acceptanceCriteria, parseSpec } from "./spec.ts";
 import { loadStats, summarize, type SpecStats } from "./stats.ts";
 import type { AcceptanceStatus, Finding, Gate, Phase, Priority, Store } from "./store.ts";
-import { parseRequirementDeltas, requirementInventory } from "./requirements.ts";
 
 export const REPORT_SCHEMA = "pb.report/1";
 
@@ -19,7 +18,6 @@ export interface ReportTask {
 }
 
 export interface ReportFinding {
-  id: string | null;
   priority: Priority;
   file: string | null;
   line: number | null;
@@ -32,8 +30,6 @@ export interface ReportAcceptance {
   id: string;
   text: string;
   task: string | null;
-  capability: string | null;
-  requirement: string | null;
   status: AcceptanceStatus | "not reported";
   evidence: string | null;
 }
@@ -66,13 +62,6 @@ export interface ReportStats {
   cost: { build: number; review: number; explore: number };
   context: { compactions: number; resets: number; nudges: number; asks: number };
   ms: number;
-}
-
-export interface ReportRequirementDelta {
-  capability: string;
-  added: string[];
-  modified: string[];
-  removed: string[];
 }
 
 export interface ReportReview {
@@ -108,8 +97,6 @@ export interface ReportSpec {
   review: ReportReview;
   /** every acceptance criterion, with the latest review's status where one was reported */
   acceptance: ReportAcceptance[];
-  requirements: ReportRequirementDelta[];
-  requirementErrors: string[];
   stats?: ReportStats;
 }
 
@@ -118,13 +105,10 @@ export interface Report {
   generatedAt: string;
   cwd: string;
   specs: ReportSpec[];
-  requirements: Array<{ capability: string; path: string; requirements: number; scenarios: number; errors: string[] }>;
   summary: {
     specs: number;
     byPhase: Record<string, number>;
     openFindings: number;
-    requirements: number;
-    scenarios: number;
   };
 }
 
@@ -143,7 +127,6 @@ const iso = (at: string | undefined): string | null => {
 };
 
 const reportFinding = (finding: Finding): ReportFinding => ({
-  id: finding.id ?? null,
   priority: finding.priority,
   file: finding.file ?? null,
   line: finding.line ?? null,
@@ -199,17 +182,9 @@ function reportSpec(store: Store, name: string, options: ReportOptions, stats: M
       id: criterion.id,
       text: criterion.text,
       task: criterion.task ?? null,
-      // Kept for the pb.report/1 shape: requirements are no longer acceptance criteria.
-      capability: null,
-      requirement: null,
       status: result?.status ?? "not reported",
       evidence: result?.evidence ?? null,
     };
-  });
-  const deltas = parseRequirementDeltas(markdown);
-  const requirements = deltas.deltas.map((delta) => {
-    const names = (kind: "ADDED" | "MODIFIED" | "REMOVED") => delta.groups.find((g) => g.kind === kind)?.requirements.map((r) => r.name) ?? [];
-    return { capability: delta.capability, added: names("ADDED"), modified: names("MODIFIED"), removed: names("REMOVED") };
   });
   const specStats = stats?.get(name);
   return {
@@ -242,17 +217,14 @@ function reportSpec(store: Store, name: string, options: ReportOptions, stats: M
       ...(options.review ? { findings: findings.map(reportFinding) } : {}),
     },
     acceptance,
-    requirements,
-    requirementErrors: deltas.errors,
     ...(specStats ? { stats: reportStats(specStats) } : {}),
   };
 }
 
-/** Build the pb.report/1 document for the store's live specs and living requirement base. */
+/** Build the pb.report/1 document for the store's live specs. */
 export function buildReport(store: Store, options: ReportOptions = {}): Report {
   const stats = options.stats ? new Map(loadStats(store).map((s) => [s.name, s])) : undefined;
   const specs = store.specNames().map((name) => reportSpec(store, name, options, stats));
-  const requirements = requirementInventory(store);
   const byPhase: Record<string, number> = {};
   for (const spec of specs) byPhase[spec.phase] = (byPhase[spec.phase] ?? 0) + 1;
   return {
@@ -260,13 +232,10 @@ export function buildReport(store: Store, options: ReportOptions = {}): Report {
     generatedAt: new Date().toISOString(),
     cwd: store.cwd,
     specs,
-    requirements,
     summary: {
       specs: specs.length,
       byPhase,
       openFindings: specs.reduce((n, spec) => n + spec.review.open, 0),
-      requirements: requirements.reduce((n, entry) => n + entry.requirements, 0),
-      scenarios: requirements.reduce((n, entry) => n + entry.scenarios, 0),
     },
   };
 }

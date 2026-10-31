@@ -22,8 +22,7 @@
  */
 import { createHash } from "node:crypto";
 import { blankFenced, escapeRegExp, headerBlock, sectionHeading, sectionOf, setSection, unfenced } from "./markdown.ts";
-import { parseRequirementDeltas, requirementSurfaceText } from "./requirements.ts";
-import type { AcceptanceCriterion, Finding, Gate } from "./store.ts";
+import type { AcceptanceCriterion, Gate } from "./store.ts";
 
 export { sectionHeading, sectionOf, setSection };
 
@@ -249,19 +248,13 @@ const ACCEPTANCE_LINE = /^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/i;
 /** True for a task acceptance line; the task's `Test:` command is the proof, with no per-line marker. */
 export const isAcceptanceLine = (line: string): boolean => ACCEPTANCE_LINE.test(line);
 
-/* ------------------- citation grammar and review-risk selection ------------------- */
+/* -------------------------------- citation grammar -------------------------------- */
 
 /**
- * A spec's shape is decided by its parser: required sections, unique task ids, resolvable
- * citations and requirement deltas. Semantic questions — whether evidence is real, a reason is
- * sound, a threat is covered, a contract or migration is complete — belong to the reviewer and
- * the human. The heuristics below only choose when a spec gets that review.
+ * A spec's shape is decided by its parser: required sections, unique task ids and resolvable
+ * citations. Semantic questions — whether evidence is real, a reason is sound, a threat is
+ * covered, a contract or migration is complete — belong to the reviewer and the human.
  */
-
-const hasSection = (md: string, name: string): boolean => {
-  const blanked = blankFenced(md);
-  return blanked.some((l) => sectionHeading(name).test(l));
-};
 
 /**
  * Root files a spec may cite by name without an extension (README:12). Part of the citation grammar
@@ -300,82 +293,35 @@ export const specPathRefs = (md: string): Array<{ path: string; line: number; te
   return [...refs.values()];
 };
 
-/**
- * High-signal product keywords that make a spec worth an independent review.
- * Deliberately narrower than the reviewer's own heuristic: generic words
- * (status, limit, address, email, job, role) stay reviewer-level. Scanned
- * across the spec's substantive sections, because a trust boundary is just as
- * real when it is first named in Findings or Decisions.
- */
-const SENSITIVE_WRITE = /\b(auth\w*|login|logout|sign-?in|password|passwd|credential|secret|api[_-]?key|token|jwt|oauth|saml|sso|permission|privilege|admin|payment|billing|invoice|refund|webhook|upload|download|session|cookie|csrf|cors|endpoint|route|tenant|ownership|quota|replay|balance|credit|debit)\b/i;
+/** The sections that bind a step, in the order a handout shows them. */
+export const BINDING_SECTIONS: readonly string[] = ["Goal", "Out of scope", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse", "Threats"];
 
-/**
- * Language-agnostic words for a surface other code, clients or stored data can
- * observe: an API, event, schema, config, public signature, file format.
- */
-const EXTERNAL_SURFACE =
-  /\b(?:api|endpoint|route|http|https|rest|graphql|grpc|rpc|webhook|event|message|queue|topic|schema|migration|database|table|column|constraint|json|dto|payload|config|configuration|environment|cli|file\s+format|serializ\w*|deserializ\w*|contract|client|consumer|producer)\b|\bpublic\s+(?:api|interface|signature|contract)\b/i;
+/** A spec's distinct text blocks: its header and each `##` section, keyed by heading. */
+interface SpecTextBlock {
+  key: string;
+  text: string;
+}
 
-/**
- * Words for data that outlives one run: a database, a schema, a stored format, a backfill. A hit
- * makes the spec review ask for a migration/rollback answer (or an explicit "none — why").
- */
-const PERSISTED_DATA =
-  /\b(?:database|db|schema|migration|persist\w*|storage|stored?\s+(?:data|state|record|file)|file\s+format|serializ\w*|deserializ\w*|backfill|table|column)\b/i;
+const blockName = (heading: string) => heading.trim().toLowerCase().replace(/\s+/g, " ").replace(/:$/, "");
 
-/** The sections whose prose describes the change, never the headings themselves. */
-const SURFACE_SECTIONS = ["Goal", "Findings", "Context", "Decisions", "Contracts"] as const;
-
-const surfaceText = (md: string, spec: ParsedSpec): string =>
-  [...SURFACE_SECTIONS.map((name) => sectionOf(md, name)), ...spec.tasks.map((t) => t.text), requirementSurfaceText(md)].filter(Boolean).join("\n");
-
-/** A section body that says why it does not apply: "none — no external surface". */
-const negativeWithReason = (body: string): boolean => {
-  const text = body.trim();
-  const first = text.split("\n")[0].trim();
-  if (!/^(?:none|n\/a|not applicable|nothing)\b/i.test(first)) return false;
-  return /(?:—|–|\bbecause\b|\bsince\b|:)\s*\S/i.test(text);
+const specTextBlocks = (md: string): SpecTextBlock[] => {
+  const lines = md.split("\n");
+  const blanked = blankFenced(md);
+  const blocks: SpecTextBlock[] = [];
+  const firstHeading = blanked.findIndex((l) => /^##\s+(?!#)/.test(l));
+  const headerText = lines.slice(0, firstHeading < 0 ? lines.length : firstHeading).join("\n").trim();
+  if (headerText) blocks.push({ key: "header", text: headerText });
+  const headings: number[] = [];
+  blanked.forEach((line, i) => {
+    if (/^##\s+(?!#)/.test(line)) headings.push(i);
+  });
+  for (const [k, at] of headings.entries()) {
+    const end = headings[k + 1] ?? lines.length;
+    const heading = blanked[at].replace(/^##\s+/, "").replace(/\s*:?\s*$/, "").trim();
+    blocks.push({ key: `section:${blockName(heading)}`, text: lines.slice(at, end).join("\n").trim() });
+  }
+  return blocks;
 };
-
-const threatSection = (md: string): string | undefined =>
-  hasSection(md, "Threats and abuse") ? "Threats and abuse" : hasSection(md, "Threats") ? "Threats" : undefined;
-
-/**
- * Whether a spec changes behaviour it must test: a task with a Test: command, or a non-refactor
- * task with acceptance lines. The living-requirement check and the review risk share this reading.
- */
-export function behaviouralChange(spec: ParsedSpec): boolean {
-  return spec.tasks.some((t) => t.test || (/acceptance:/i.test(t.text) && !/^\(refactor\)/i.test(t.title)));
-}
-
-/** A spec at or above this many tasks has too wide a blast radius to build unreviewed in auto mode. */
-export const LARGE_SPEC_TASKS = 4;
-
-export interface SpecReviewRisk {
-  review: boolean;
-  reason?: string;
-}
-
-/**
- * Whether a spec carries enough risk to deserve an independent reviewer under "auto": a
- * security-sensitive surface, threats, a migration, persisted data, an external contract, a named
- * living capability with no delta, or a large blast radius. Small reversible specs rely on the
- * decidable write checks and the human's read.
- */
-export function specReviewRisk(md: string, spec: ParsedSpec, touchesLiving = false): SpecReviewRisk {
-  const scope = surfaceText(md, spec);
-  const sensitive = scope.split("\n").find((line) => SENSITIVE_WRITE.test(line.replace(/`[^`]*`/g, "")));
-  if (sensitive) return { review: true, reason: `security-sensitive (${sensitive.replace(/`[^`]*`/g, "").match(SENSITIVE_WRITE)?.[0] ?? "surface"})` };
-  if (parseRequirementDeltas(md).deltas.length) return { review: true, reason: "changes the requirement base" };
-  if (touchesLiving) return { review: true, reason: "touches a living capability without a delta" };
-  if (threatSection(md)) return { review: true, reason: "threats and abuse" };
-  const migration = sectionOf(md, "Migration and rollback");
-  if (migration && !negativeWithReason(migration)) return { review: true, reason: "a migration" };
-  if (PERSISTED_DATA.test(scope)) return { review: true, reason: "persisted data" };
-  if (EXTERNAL_SURFACE.test(scope)) return { review: true, reason: "an external surface" };
-  if (spec.tasks.length >= LARGE_SPEC_TASKS) return { review: true, reason: `${spec.tasks.length} tasks` };
-  return { review: false };
-}
 
 /** A review answers for the exact markdown it saw: a pass stops covering the spec the moment the text changes. */
 export const specHash = (markdown: string) => createHash("sha256").update(markdown).digest("hex");
@@ -395,210 +341,3 @@ export function contractText(markdown: string): string {
 
 /** The contract's fingerprint: what an approval binds, independent of the build's own Design and Decisions. */
 export const contractHash = (markdown: string) => createHash("sha256").update(contractText(markdown)).digest("hex");
-
-/** The prior state a changed spec's review needs: open blockers, carried advisories, and the text they came from. */
-export interface SpecReviewCarry {
-  /** earlier blocking findings, with stable ids: in-scope P0/P1 and outside P0 */
-  prior: Finding[];
-  /** earlier P2/P3 findings, carried as context and never re-listed as new */
-  advisory: Finding[];
-  /** the exact text the earlier review saw, when the event has it */
-  markdown?: string;
-  nextId: number;
-  round: number;
-  /** blocking rounds since the last pass or forced acceptance; an unreadable block counts too */
-  blockingRounds: number;
-}
-
-export type SpecReviewGate =
-  | { action: "skip" }
-  | { action: "repost"; findings: Finding[]; advisory: Finding[] }
-  | ({ action: "manual"; reason: "cap" | "unparsed"; prose?: string } & SpecReviewCarry)
-  | ({ action: "review" } & SpecReviewCarry);
-
-const SPEC_FINDING_ID = /^F(\d+)$/;
-
-/** Whether a finding holds the build: an in-scope P0/P1, or an outside P0 (pre-existing, but unsafe to build on). */
-export const specReviewBlocks = (f: Finding) => f.priority === "P0" || (f.priority === "P1" && !f.outside);
-
-/** How many carried advisories a follow-up brief lists, so the revision stays the bulk of what it reads. */
-export const CARRIED_ADVISORY_LIMIT = 8;
-
-/**
- * The carried advisories to show a follow-up reviewer: at most `limit`, dropping the least blocking
- * first (P3 before P2) and only as many as needed, so a P1 advisory — a real pre-existing weakness
- * whose only written-out appearance is this brief — survives any flood of polish. Input order
- * survives within a priority. This narrows what the reviewer reads, never the record: the review
- * event and the human's counts keep the full list.
- */
-export function capCarriedAdvisories(items: Finding[], limit = CARRIED_ADVISORY_LIMIT): Finding[] {
-  const kept = [...items];
-  const weight = (f: Finding) => (f.priority === "P1" ? 2 : f.priority === "P2" ? 1 : 0);
-  while (kept.length > limit) {
-    let weakest = -1;
-    for (let i = 0; i < kept.length; i++) if (weight(kept[i]) < 2 && (weakest < 0 || weight(kept[i]) <= weight(kept[weakest]))) weakest = i;
-    if (weakest < 0) break; // more P1 advisories than the limit: a P1 is never dropped
-    kept.splice(weakest, 1);
-  }
-  return kept;
-}
-
-/** Give every legacy or newly parsed finding a stable F id, continuing after the highest one already issued. */
-export function ensureSpecIds(findings: Finding[]): { findings: Finding[]; next: number } {
-  let next = findings.reduce((highest, f) => Math.max(highest, Number(SPEC_FINDING_ID.exec(f.id ?? "")?.[1] ?? 0)), 0) + 1;
-  return { findings: findings.map((f) => (f.id ? f : { ...f, id: `F${next++}` })), next };
-}
-
-const findingKey = (f: Finding) => f.id ?? f.title.trim().toLowerCase().replace(/\s+/g, " ");
-
-/** The distinct text blocks a spec is reviewed in: its header, its ## sections and each task. */
-interface SpecTextBlock {
-  key: string;
-  label: string;
-  text: string;
-}
-
-const blockName = (heading: string) => heading.trim().toLowerCase().replace(/\s+/g, " ").replace(/:$/, "");
-
-const specTextBlocks = (md: string): SpecTextBlock[] => {
-  const lines = md.split("\n");
-  const blanked = blankFenced(md);
-  const blocks: SpecTextBlock[] = [];
-  const firstHeading = blanked.findIndex((l) => /^##\s+(?!#)/.test(l));
-  const header = lines.slice(0, firstHeading < 0 ? lines.length : firstHeading).join("\n").trim();
-  if (header) blocks.push({ key: "header", label: "Header", text: header });
-  const headings: number[] = [];
-  blanked.forEach((line, i) => {
-    if (/^##\s+(?!#)/.test(line)) headings.push(i);
-  });
-  for (const [k, at] of headings.entries()) {
-    const end = headings[k + 1] ?? lines.length;
-    const heading = blanked[at].replace(/^##\s+/, "").replace(/\s*:?\s*$/, "").trim();
-    blocks.push({ key: `section:${blockName(heading)}`, label: `## ${heading}`, text: lines.slice(at, end).join("\n").trim() });
-  }
-  return blocks;
-};
-
-/** Each task under ## Tasks is its own block: changing one does not resend the whole task list. */
-const withTaskBlocks = (md: string, blocks: SpecTextBlock[]): SpecTextBlock[] => {
-  const spec = parseSpec(md).spec;
-  if (!spec) return blocks;
-  return blocks.flatMap((b) => (b.key === "section:tasks" ? spec.tasks.map((t) => ({ key: `task:${t.id}`, label: `### ${t.id}: ${t.title}`, text: t.text })) : [b]));
-};
-
-export interface SpecReviewDelta {
-  /** current text of the sections and tasks that changed */
-  changed: string;
-  /** their earlier text, plus sections removed since */
-  earlier: string;
-  /** labels of sections/tasks that disappeared */
-  removed: string[];
-  /**
-   * unchanged sections and header that bind the delta: Goal, Out of scope, Decisions, Contracts,
-   * Migration and rollback, Threats (either spelling), plus any requirement sections.
-   * Design is the one binding section left out: a delta round is told to check the full spec too,
-   * so resending the largest section with every unchanged delta buys nothing.
-   */
-  context: string;
-}
-
-/**
- * The sections that bind a step, in the order a handout shows them: what the change must serve,
- * what it may not walk on, and the promises it keeps. One list for the whole tool — prompts.ts
- * renders it into every handout, spec review derives its delta context from it below — so the
- * builder and the reviewer can never disagree about what binds. `Threats` is the alias of
- * `Threats and abuse`; a spec carries one spelling.
- */
-export const BINDING_SECTIONS: readonly string[] = ["Goal", "Out of scope", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse", "Threats"];
-
-/**
- * Blocks a spec-review delta always carries: the list above and the header — minus Design, stated
- * here as a subtraction rather than kept as a second list. A delta round reads the whole spec anyway
- * (prompts.ts reviewPrompt), so Design is the one section it does not need resent with every
- * unchanged delta. Requirement sections are added by `bindingBlock` below.
- */
-const BINDING_BLOCKS = new Set<string>([
-  "header",
-  ...BINDING_SECTIONS.filter((section) => section !== "Design").map((section) => `section:${blockName(section)}`),
-]);
-
-/** Requirement deltas bind every review: a task change must still fit the requirement it serves. */
-const bindingBlock = (key: string) => BINDING_BLOCKS.has(key) || key.startsWith("section:requirements");
-
-/**
- * What changed between two reviewed spec texts, compared by section and task so a delta round
- * sends only the parts that moved. A text whose blocks all match returns an empty delta: the
- * caller then falls back to a full review, because a hash change alone is not worth re-reading.
- */
-export function specReviewDelta(previous: string, current: string): SpecReviewDelta {
-  const before = withTaskBlocks(previous, specTextBlocks(previous));
-  const after = withTaskBlocks(current, specTextBlocks(current));
-  const beforeBy = new Map(before.map((b) => [b.key, b]));
-  const changed = after.filter((b) => beforeBy.get(b.key)?.text.trim() !== b.text.trim());
-  const afterKeys = new Set(after.map((b) => b.key));
-  const removed = before.filter((b) => !afterKeys.has(b.key) && b.key !== "header");
-  const changedKeys = new Set(changed.map((b) => b.key));
-  const earlierParts = [
-    ...changed.map((b) => beforeBy.get(b.key)?.text).filter((text): text is string => !!text),
-    ...removed.map((b) => b.text),
-  ];
-  return {
-    changed: changed.map((b) => b.text).join("\n\n").trim(),
-    earlier: earlierParts.join("\n\n").trim(),
-    removed: removed.map((b) => b.label),
-    context: after
-      .filter((b) => bindingBlock(b.key) && !changedKeys.has(b.key))
-      .map((b) => b.text)
-      .join("\n\n")
-      .trim(),
-  };
-}
-
-/**
- * What a build start owes the spec review, from its {type:"spec-review"} events and the current
- * text's hash: a pass on this text skips it, a block on this text with open P0/P1 findings is
- * re-posted (a re-run would re-find the same), and anything else runs with the earlier blockers
- * and advisory findings first. Only an in-scope P0/P1 or an outside P0 blocks; anything else is
- * carried as advisory. A block with no open blocker is re-run because there is nothing to re-post.
- * After `maxRounds` blocking rounds since the last pass, a human decides instead: the automatic
- * loop stops and the standing findings stay visible. An unreadable block counts too, since it
- * cannot be shown harmless. Legacy events without ids get them here, once.
- */
-export function specReviewGate(events: Array<Record<string, unknown>>, hash: string, maxRounds = 2): SpecReviewGate {
-  const last = events.filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block")).at(-1);
-  if (!last) return { action: "review", prior: [], advisory: [], nextId: 1, round: 1, blockingRounds: 0 };
-  const reported = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
-  const carried = Array.isArray(last.advisory) ? (last.advisory as Finding[]) : [];
-  const seen = new Set<string>();
-  const combined = [...reported, ...carried].filter((f) => {
-    const key = findingKey(f);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  const ids = ensureSpecIds(combined);
-  const prior = ids.findings.filter(specReviewBlocks);
-  const advisory = ids.findings.filter((f) => !specReviewBlocks(f));
-  const nextId = Math.max(ids.next, typeof last.nextId === "number" ? last.nextId : 1);
-  const round = (typeof last.round === "number" ? last.round : 1) + 1;
-  const markdown = typeof last.markdown === "string" ? last.markdown : undefined;
-  // A pass or a forced acceptance closes the cycle: only blocks after it can reach the cap.
-  const reset = events.reduce((at, e, i) => (e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "forced") ? i : at), -1);
-  const blockingRounds = events.slice(reset + 1).filter((e) => {
-    if (e.type !== "spec-review" || e.verdict !== "block") return false;
-    const findings = Array.isArray(e.reported) ? (e.reported as Finding[]) : [];
-    const open = Array.isArray(e.resolutions) ? (e.resolutions as Array<{ status?: string }>).some((r) => r.status === "open") : false;
-    return findings.some(specReviewBlocks) || open || e.unparsed === true || (!Array.isArray(e.reported) && typeof e.findings === "number" && e.findings > 0);
-  }).length;
-  const carry = { prior, advisory, ...(markdown !== undefined ? { markdown } : {}), nextId, round, blockingRounds };
-  const prose = typeof last.prose === "string" ? last.prose : undefined;
-  const cap = Math.max(1, Math.floor(maxRounds));
-  if (last.hash !== hash) {
-    if (blockingRounds >= cap) return { action: "manual", reason: "cap", ...(prose !== undefined ? { prose } : {}), ...carry };
-    return { action: "review", ...carry };
-  }
-  if (last.verdict === "pass") return { action: "skip" };
-  if (prior.length) return { action: "repost", findings: prior, advisory };
-  if (last.unparsed) return { action: "manual", reason: "unparsed", ...(prose !== undefined ? { prose } : {}), ...carry, prior: [] };
-  return { action: "review", ...carry, prior: [] };
-}

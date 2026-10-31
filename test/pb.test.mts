@@ -16,8 +16,7 @@ import { test } from "node:test";
 process.env.PI_PB_PI_COMMAND = path.join(path.dirname(new URL(import.meta.url).pathname), "mock-pi.mjs");
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const { default: pb } = await import("../extensions/pb/index.ts");
-const { parseSpec, acceptanceCriteria, addDecision, contractHash, needsRed, redExemption, specHash, specReviewDelta, specReviewGate, specReviewRisk, capCarriedAdvisories } = await import("../extensions/pb/spec.ts");
-const { parseRequirementDocument, parseRequirementDeltas, planRequirementDeltas } = await import("../extensions/pb/requirements.ts");
+const { parseSpec, acceptanceCriteria, addDecision, contractHash, needsRed, redExemption, specHash } = await import("../extensions/pb/spec.ts");
 const { specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
 
 type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
@@ -39,8 +38,7 @@ function setup(config: object = {}) {
       notify: false,
       ...config,
       reviewer: { idleSec: 0.2, ...(c.reviewer ?? {}) },
-      // Tests that predate risk-based review assert the pass itself; explicit auto-mode tests opt out.
-      specReviewer: { mode: "always", ...(c.specReviewer ?? {}) },
+      specReviewer: { ...(c.specReviewer ?? {}) },
     }),
   );
 
@@ -457,19 +455,6 @@ src/order.ts holds the model.
 ${opts.tasks ?? TASKS_PLAIN}
 `;
 
-/** A requirement delta for the SPEC above: one added requirement with one checkable scenario. */
-const REQUIREMENTS = `
-## Requirements: order-cancellation
-Overview: Orders are cancelled by their owner while pending; nothing else changes.
-### ADDED
-### Requirement: Cancel a pending order
-Invariant: Only the order's owner can cancel it, and only while it is PENDING.
-#### Scenario: Owner cancels a pending order
-- **GIVEN** a pending order owned by the caller
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-`;
-
 /** The task an instruction or tool result is about. */
 const taskOf = (text: string) => text.match(/Task (T\d+)/)?.[1] ?? text.match(/task "(\w+)"/)?.[1];
 
@@ -527,565 +512,6 @@ const until = async (cond: () => boolean) => {
   for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 20));
   assert.ok(cond(), "timed out");
 };
-
-/* ------------------------- living guarantees in every handout ------------------------- */
-
-/** A living base with two standing requirements; `Overview` is the base's own. */
-const LIVING_ORDERS = `# order-cancellation requirements
-
-## Overview
-
-Orders move through a small state machine; refunds are another capability's business.
-
-## Requirements
-
-### Requirement: Cancel a pending order
-Invariant: Only the order's owner can cancel it, and only while it is PENDING.
-
-#### Scenario: Owner cancels a pending order
-- **GIVEN** a pending order owned by the caller
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-
-### Requirement: A cancellation is final
-Invariant: A CANCELLED order never returns to PENDING.
-
-#### Scenario: A cancelled order is not revived
-- **GIVEN** a cancelled order
-- **WHEN** a state change is attempted on it
-- **THEN** it stays CANCELLED
-`;
-
-/** A delta that adds a third requirement and rewrites the Overview, leaving both standing ones alone. */
-const DELTA_ADDED = `## Requirements: order-cancellation
-Overview: Orders move through a small state machine, and cancelling is the only way out.
-### ADDED
-### Requirement: Cancelling twice is a no-op
-Invariant: A second cancel of a CANCELLED order changes nothing and answers the same way.
-#### Scenario: Second cancel
-- **GIVEN** a cancelled order
-- **WHEN** the owner cancels it again
-- **THEN** it stays CANCELLED
-`;
-
-const LIVING_HEADING = "## Living requirements (guarantees this repo holds; breaking one is a P1 finding)";
-
-/**
- * The records index.ts builds per capability: read the living file, parse it, pair it with the delta.
- * `files` maps a capability to its living text; an absent entry is a capability with no living file yet.
- */
-async function livingRecords(specMarkdown: string, files: Record<string, string>) {
-  const { parseRequirementDocument, parseRequirementDeltas } = await import("../extensions/pb/requirements.ts");
-  return parseRequirementDeltas(specMarkdown).deltas.map((delta) => {
-    const p = `specs/${delta.capability}.md`;
-    const text = files[delta.capability];
-    if (text === undefined) return { capability: delta.capability, path: p, delta };
-    const { document, errors } = parseRequirementDocument(text, delta.capability);
-    return errors.length ? { capability: delta.capability, path: p, errors, delta } : { capability: delta.capability, path: p, document, delta };
-  });
-}
-
-test("living: a standing requirement is carried by the handout, the summary and the reviewer", async () => {
-  const { bindingBudget, bindingContext, buildSpecView, livingDigest, REVIEWER_SYSTEM, reviewerBrief, viewBudget } = await import("../extensions/pb/prompts.ts");
-  const { parseSpec } = await import("../extensions/pb/spec.ts");
-  const markdown = `${SPEC()}${DELTA_ADDED}`;
-  const living = livingDigest(await livingRecords(markdown, { "order-cancellation": LIVING_ORDERS }));
-
-  // what stands: name and invariant, one line each, no scenarios
-  assert.match(living, new RegExp(`^${LIVING_HEADING.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-  assert.match(living, /### order-cancellation/);
-  // the delta states an Overview, so that is the line the digest shows, not the base's
-  assert.match(living, /Overview: Orders move through a small state machine, and cancelling is the only way out\./);
-  assert.doesNotMatch(living, /refunds are another capability/
-  );
-  assert.match(living, /- Cancel a pending order — Only the order's owner can cancel it, and only while it is PENDING\./);
-  assert.match(living, /- A cancellation is final — A CANCELLED order never returns to PENDING\./);
-  assert.doesNotMatch(living, /GIVEN|WHEN|THEN/); // the scenarios are evidence in the file, not the guarantee
-  assert.doesNotMatch(living, /Cancelling twice is a no-op/); // this spec's own addition isn't standing yet
-
-  // the same digest, in all three copies
-  const block = bindingContext("order-cancellation", markdown, [], bindingBudget(), living);
-  const view = buildSpecView(markdown, viewBudget(), living);
-  const brief = reviewerBrief({ spec: { name: "order-cancellation", markdown, parsed: parseSpec(markdown).spec! }, acceptance: [], intent: "", base: "abc", changed: ["src/order.ts"], stat: "1 file", check: "ok", focus: "", living });
-  for (const [where, copy] of [
-    ["handout", block],
-    ["reset view", view],
-    ["reviewer brief", brief],
-  ] as const) {
-    assert.ok(copy.includes(living), `the ${where} doesn't carry the digest`);
-  }
-  // the reviewer is told what breaking one costs, in its own system prompt too
-  assert.match(brief, /## Living requirements[\s\S]*breaking one is a P1 finding/);
-  assert.match(REVIEWER_SYSTEM, /Living requirements[\s\S]*breaking one of them is a P1 finding/);
-  // and with no capability touched, nothing is emitted and the delta's own criteria still render
-  const plain = SPEC();
-  assert.equal(livingDigest(await livingRecords(plain, {})), "");
-  assert.doesNotMatch(bindingContext("order-cancellation", plain, [], bindingBudget(), ""), /## Living requirements/);
-});
-
-test("living: a changed requirement is never stated as in force", async () => {
-  const { livingDigest } = await import("../extensions/pb/prompts.ts");
-  // the delta spells the name with different case and spacing: it is the same requirement, so the old wording goes
-  const delta = `## Requirements: order-cancellation
-### MODIFIED
-### Requirement:    cancel A   pending ORDER
-Invariant: Only the wallet owner, or a holder of their signed mandate, can cancel a PENDING order.
-#### Scenario: Owner cancels a pending order
-- **GIVEN** a pending order owned by the caller
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-### REMOVED
-### Requirement: A cancellation is final
-`;
-  const markdown = `${SPEC()}${delta}`;
-  const living = livingDigest(await livingRecords(markdown, { "order-cancellation": LIVING_ORDERS }));
-  assert.ok(!living.includes("Only the order's owner can cancel it"), "the requirement this spec rewrites was stated as in force");
-  assert.ok(!living.includes("A cancellation is final"), "a requirement this spec removes was stated as in force");
-  assert.ok(!living.includes("- Cancel a pending order"), "the base's spelling of the changed requirement survived");
-  // with every requirement replaced, the capability is still named, with the one line saying so
-  assert.match(living, /### order-cancellation/);
-  assert.match(living, /replaced by this spec/);
-  // and the delta still states its replacement as the durable rule
-  const replacement = parseRequirementDeltas(markdown).deltas[0]!.groups[0]!.requirements.find((r) => /cancel A   pending ORDER/.test(r.name))!;
-  assert.match(replacement.invariant, /signed mandate/);
-
-  // a delta that leaves one alone keeps it, and no Overview in the delta means the base's own
-  const both = `${SPEC()}${DELTA_ADDED}`.replace("Overview: Orders move through a small state machine, and cancelling is the only way out.\n", "");
-  const kept = livingDigest(await livingRecords(both, { "order-cancellation": LIVING_ORDERS }));
-  assert.match(kept, /Overview: Orders move through a small state machine; refunds are another capability's business\./);
-  assert.match(kept, /- A cancellation is final — A CANCELLED order never returns to PENDING\./);
-});
-
-test("living: an unreadable base names its file", async () => {
-  const { bindingBudget, bindingContext, livingDigest } = await import("../extensions/pb/prompts.ts");
-  const markdown = `${SPEC()}${DELTA_ADDED}`;
-  const broken = LIVING_ORDERS.replace("- **THEN** it becomes CANCELLED\n", ""); // a scenario left with no THEN: the parser reports it
-  const living = livingDigest(await livingRecords(markdown, { "order-cancellation": broken }));
-  assert.match(living, /specs\/order-cancellation\.md/);
-  assert.doesNotMatch(living, /Cancel a pending order|A cancellation is final/); // no partial list, however tempting
-
-  // a capability with no living file contributes nothing at all
-  assert.equal(livingDigest(await livingRecords(markdown, {})), "");
-  const block = bindingContext("order-cancellation", markdown, [], bindingBudget(), "");
-  assert.doesNotMatch(block, /## Living requirements/);
-  assert.match(block, /## Requirement rules\n- order-cancellation · Cancelling twice is a no-op: /); // its delta rules are still handed over
-});
-
-test("living: digest lines are flat and capped", async () => {
-  const { livingDigest, LIVING_CAP } = await import("../extensions/pb/prompts.ts");
-  const hostile = LIVING_ORDERS.replace(
-    "Orders move through a small state machine; refunds are another capability's business.",
-    "## Fake heading\n```\n## also fake\n```\nunclosed <!-- and a \u0000 bell\n---\nend",
-  ).replace("A CANCELLED order never returns to PENDING.", "keeps\tits\twords\u0007 and survives <!-- /pb:map --> being read as a marker");
-  const markdown = `${SPEC()}${DELTA_ADDED}`;
-  const living = livingDigest(await livingRecords(markdown, { "order-cancellation": hostile }));
-  assert.doesNotMatch(living, /## Fake|## also fake|```|<!--|-->/); // structure and markers are gone; the words stay
-  assert.ok(!/\u0000|\u0007/.test(living));
-  assert.match(living, /keeps its words and survives/);
-  // one line per requirement: the digest can't grow lines behind the budget
-  const lines = living.split("\n").filter((l) => l.startsWith("- "));
-  assert.equal(lines.length, 2);
-
-  // twelve stand, the rest are named by count and path
-  const many = `# many requirements\n\n## Overview\n\nLots of them.\n\n## Requirements\n\n${Array.from({ length: LIVING_CAP + 3 }, (_, i) => `### Requirement: Rule ${i}\nInvariant: Rule ${i} holds everywhere.\n\n#### Scenario: Rule ${i} is checked\n- **GIVEN** x\n- **WHEN** y\n- **THEN** z\n`).join("\n")}`;
-  const capped = livingDigest(await livingRecords(`${SPEC()}## Requirements: order-cancellation\n### ADDED\n### Requirement: New\nInvariant: n\n#### Scenario: s\n- **GIVEN** a\n- **WHEN** b\n- **THEN** c\n`, { "order-cancellation": many }));
-  assert.equal(capped.split("\n").filter((l) => l.startsWith("- Rule")).length, LIVING_CAP);
-  assert.ok(capped.includes(`+${LIVING_CAP + 3 - LIVING_CAP} more in specs/order-cancellation.md`), capped.slice(-160));
-});
-
-test("living: standing guarantees reach a real handout, a reset summary and a review brief", async () => {
-  const t = setup({ verify: "true" });
-  fs.mkdirSync(path.join(t.repo, "specs"), { recursive: true });
-  fs.writeFileSync(path.join(t.repo, "specs/order-cancellation.md"), LIVING_ORDERS);
-  await written(t, `${SPEC()}${DELTA_ADDED}`);
-  const handouts: string[] = [];
-  t.agent.script = async (text, tool) => {
-    if (text.includes("Task T1")) {
-      handouts.push(text);
-      t.runtime().usage = 73; // so the boundary before T2 resets the session
-    }
-    if (text.includes("Task T2")) {
-      handouts.push(text);
-      t.runtime().usage = 5;
-    }
-    return diligent(text, tool);
-  };
-  await t.run("build");
-  assert.equal(handouts.length, 2);
-  for (const [hi, handout] of handouts.entries()) {
-    assert.ok(handout.includes("## Living requirements (guarantees this repo holds; breaking one is a P1 finding)"), `handout ${hi} lacks the digest: ${handout.length} chars, has Binding context: ${handout.includes("Binding context")}`);
-    assert.match(handout, /- Cancel a pending order — Only the order's owner can cancel it, and only while it is PENDING\./);
-  }
-  assert.equal(t.resets.length, 1);
-  assert.match(
-    t.resets[0].summary,
-    /--- spec ---[\s\S]*## Living requirements[\s\S]*- A cancellation is final — A CANCELLED order never returns to PENDING\./,
-  );
-  await t.run("review");
-  assert.match(briefOf(t), /## Living requirements[\s\S]*- Cancel a pending order — /);
-});
-
-test("living: a spec names a capability without a delta only when it names it or cites its file", async () => {
-  const { requirementGaps } = await import("../extensions/pb/requirements.ts");
-  const capabilities = ["order-cancellation", "refunds"];
-  // the spec is named after the capability: the strongest mechanical hint that it touches it
-  assert.deepEqual(requirementGaps(capabilities, "order-cancellation", SPEC()), [{ capability: "order-cancellation", because: "the spec is named after it" }]);
-  // a citation counts, including one that ends a sentence, but a different file with the name as its stem does not
-  assert.deepEqual(requirementGaps(capabilities, "checkout", `${SPEC()}\nSee \`specs/refunds.md\` for the rest.\n`), [{ capability: "refunds", because: "the spec cites its living file" }]);
-  assert.deepEqual(requirementGaps(capabilities, "checkout", `${SPEC()}\nSee specs/refunds.md.\n`), [{ capability: "refunds", because: "the spec cites its living file" }]);
-  assert.deepEqual(requirementGaps(capabilities, "checkout", `${SPEC()}\nSee specs/refunds.md.bak and myrefunds.md.\n`), []);
-  // its own delta is the touch: nothing is missing
-  assert.deepEqual(requirementGaps(capabilities, "order-cancellation", `${SPEC()}${DELTA_ADDED}`), []);
-  // a covered capability can still be a gap for another one, named or cited
-  assert.deepEqual(requirementGaps(capabilities, "order-cancellation", `${SPEC()}${DELTA_ADDED}\nSee \`specs/refunds.md\`.`), [{ capability: "refunds", because: "the spec cites its living file" }]);
-  // nothing living matches: no gap at all
-  assert.deepEqual(requirementGaps(capabilities, "checkout", SPEC()), []);
-});
-
-test("spec review: the brief carries the living base and names what looks touched without a delta", () => {
-  const digest = `${LIVING_HEADING}\n\n### order-cancellation\nOverview: Orders move through a small state machine.\n- Cancel a pending order — Only the order's owner can cancel it, and only while it is PENDING.`;
-  const living = {
-    digest,
-    uncovered: [
-      { capability: "order-cancellation", path: "specs/order-cancellation.md" },
-      { capability: "refunds", path: "specs/refunds.md" },
-    ],
-    named: [{ capability: "order-cancellation", path: "specs/order-cancellation.md", because: "the spec is named after it" }],
-  };
-  const brief = specReviewBrief("order-cancellation", SPEC(), { living });
-  assert.ok(brief.includes(digest), "the reviewer's brief doesn't carry the digest");
-  assert.match(brief, /## Living capability check/);
-  assert.match(brief, /Capabilities with a living file and no delta in this spec: order-cancellation \(specs\/order-cancellation\.md\), refunds \(specs\/refunds\.md\)\./);
-  assert.match(brief, /These look touched but carry no delta \(judge each\):\n- order-cancellation \(specs\/order-cancellation\.md\): the spec is named after it/);
-  assert.match(brief, /behavioural change to a capability with a living file but no delta is a P1 finding[\s\S]*pure refactor/);
-  // with no living base, the section is absent rather than empty
-  assert.doesNotMatch(specReviewBrief("order-cancellation", SPEC()), /## Living capability check/);
-  assert.doesNotMatch(specReviewBrief("order-cancellation", SPEC(), { living: { digest: "", uncovered: [], named: [] } }), /## Living capability check/);
-});
-
-test("living: a behavioural spec that names a living capability without a delta warns and forces the spec review", async () => {
-  const t = setup({ verify: "true", specReviewer: { mode: "auto" } });
-  fs.mkdirSync(path.join(t.repo, "specs"), { recursive: true });
-  fs.writeFileSync(path.join(t.repo, "specs/order-cancellation.md"), LIVING_ORDERS);
-  process.chdir(t.repo);
-  const wrote = await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  assert.equal(wrote.error, undefined, wrote.error ?? "");
-  assert.match(
-    wrote.content![0].text,
-    /Note: the spec appears to change living capability "order-cancellation" \(specs\/order-cancellation\.md\) but carries no "## Requirements: order-cancellation" delta, because the spec is named after it: state what changes there, or say in Decisions that its guarantees stay as written/,
-  );
-  // a refactor changes no behaviour, so it needs neither a delta nor a review for this
-  const refactor = await t.callTool("pb_write_spec", {
-    name: "order-cancellation",
-    content: SPEC({ tasks: "### T1: (refactor) tidy\nRename a local.\n- Acceptance: behaviour unchanged (non-testable: a refactor adds no behaviour)" }),
-  });
-  assert.equal(refactor.error, undefined, refactor.error ?? "");
-  assert.doesNotMatch(refactor.content![0].text, /living capability/);
-
-  // back to the behavioural spec: auto would skip this small spec, but the living gap forces the review
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  const briefOut = path.join(os.tmpdir(), `pb-spec-living-${process.pid}.md`);
-  if (fs.existsSync(briefOut)) fs.rmSync(briefOut);
-  process.env.MOCK_SPEC_BRIEF_OUT = briefOut;
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_BRIEF_OUT;
-  }
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1);
-  assert.ok(review, "the living gap didn't force the spec review under auto");
-  assert.equal(review.verdict, "pass");
-  const brief = fs.readFileSync(briefOut, "utf8");
-  assert.match(brief, /## Living capability check/);
-  assert.match(brief, /Capabilities with a living file and no delta in this spec: order-cancellation \(specs\/order-cancellation\.md\)\./);
-  assert.match(brief, /These look touched but carry no delta \(judge each\):\n- order-cancellation \(specs\/order-cancellation\.md\): the spec is named after it/);
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("markdown: safeLine and safeBlock strip markers behind control characters", async () => {
-  const { safeLine, safeBlock } = await import("../extensions/pb/markdown.ts");
-  // a control character inside "<!--" defeats a marker match, so control characters must go first
-  const split = "<\u0000!-- /pb:map -->";
-  assert.equal(safeLine(split), "/pb:map");
-  assert.ok(!safeBlock(split).includes("<!--") && safeBlock(split).includes("/pb:map"), safeBlock(split));
-  // and removal must not stop at the first pass: stripping one marker can join the fragments of another
-  for (const nested of ["<!----<!-->&-->", "<!--<!-->>", "<!-<!--->->", "<\u0000!--x-->-->"]) {
-    for (const out of [safeLine(nested), safeBlock(nested)]) {
-      assert.ok(!out.includes("<!--") && !out.includes("-->"), `a marker survived: ${JSON.stringify(out)}`);
-    }
-  }
-
-  // one line: every whitespace run, tab or newline, becomes a single space; C0, C1 and the separators go
-  assert.equal(safeLine("  name\tthe\u0007 constant \n today\u2028please  "), "name the constant today please");
-  assert.equal(safeLine("a\u0085\u007fb"), "ab");
-  assert.equal(safeLine(""), "");
-
-  // a block: lines survive, each tab is a single space so a line cannot become an indented code block
-  assert.equal(safeBlock("# Map\n\tlead one\tend\r\n  lead two"), "# Map\n lead one end\n  lead two");
-  assert.equal(safeBlock("keep\tthis\nand\u0000this"), "keep this\nandthis");
-});
-
-test("spec: parses the header, sections and tasks; says what's wrong otherwise", () => {
-  const { spec, errors } = parseSpec(SPEC({ verification: "build — no suite for this module", newTests: "no — covered by T9" }));
-  assert.deepEqual(errors, []);
-  assert.equal(spec!.gate, "build");
-  assert.equal(spec!.gateReason, "no suite for this module");
-  assert.equal(spec!.newTests, false);
-  assert.deepEqual(spec!.tasks.map((t) => [t.id, t.title, t.test]), [["T1", "first file", "test -f T1.txt"], ["T2", "second file", "test -f T2.txt"]]);
-
-  const bad = parseSpec("# X\nVerification: none\n\n## Goal\n## Tasks\n### T1: a\nno acceptance\n");
-  assert.ok(bad.errors.some((e) => e.includes('"Verification: none" needs a reason')));
-  assert.ok(bad.errors.some((e) => e.includes('missing the "## Decisions" section')));
-  assert.ok(bad.errors.some((e) => e.includes('T1 has no "- Acceptance:" line')));
-});
-
-test("spec: the review checklist is tasks only — top-level criteria are legacy prose", () => {
-  const markdown = SPEC().replace(
-    "- Acceptance: T1.txt exists",
-    "- Acceptance: T1.txt exists\n- Acceptance (abuse): T1.txt can't be swapped in",
-  );
-  const criteria = acceptanceCriteria(markdown, parseSpec(markdown).spec);
-  assert.deepEqual(
-    criteria.map((c) => [c.id, c.task, c.text]),
-    [
-      ["T1.1", "T1", "T1.txt exists"],
-      ["T1.2", "T1", "T1.txt can't be swapped in"],
-      ["T2.1", "T2", "T2.txt exists"],
-    ],
-  );
-  // The legacy `## Acceptance criteria` section parses but contributes no ids.
-  assert.ok(markdown.includes("## Acceptance criteria"));
-  assert.ok(!criteria.some((c) => c.id.startsWith("A")));
-  const taskNone = acceptanceCriteria(SPEC().replace("- Acceptance: T1.txt exists", "- Acceptance: none — covered by T2"));
-  assert.deepEqual(
-    taskNone.map((c) => c.id),
-    ["T2.1"],
-  );
-  const taskFenced = acceptanceCriteria(SPEC().replace("Create T1.txt.", "Create T1.txt.\n\n```\n- Acceptance: fenced example\n```"));
-  assert.deepEqual(
-    taskFenced.map((c) => c.id),
-    ["T1.1", "T2.1"],
-  );
-});
-
-test("requirements: a delta is living rules, never a second acceptance checklist", () => {
-  const markdown = `${SPEC()}${REQUIREMENTS}`;
-  assert.deepEqual(
-    acceptanceCriteria(markdown, parseSpec(markdown).spec).map((c) => c.id),
-    ["T1.1", "T2.1"],
-  );
-  const delta = parseRequirementDeltas(markdown).deltas[0]!;
-  assert.equal(delta.groups[0]!.requirements[0]!.invariant, "Only the order's owner can cancel it, and only while it is PENDING.");
-});
-
-test("requirements: a legacy requirement without an Invariant falls back to its statement", () => {
-  const stated = REQUIREMENTS.replace(/^Invariant:.*\n/m, "A pending order can be cancelled by its owner.\n");
-  const requirement = parseRequirementDeltas(`${SPEC()}${stated}`).deltas[0]!.groups[0]!.requirements[0]!;
-  assert.equal(requirement.invariant, "");
-  assert.equal(requirement.statement, "A pending order can be cancelled by its owner.");
-});
-
-test("requirements: an Invariant-only delta needs no scenario", () => {
-  const invariantOnly = REQUIREMENTS.replace(/#### Scenario:[\s\S]*$/, "");
-  const parsed = parseRequirementDeltas(`${SPEC()}${invariantOnly}`);
-  assert.deepEqual(parsed.errors, []);
-  const plan = planRequirementDeltas(parsed.deltas, () => undefined);
-  assert.deepEqual(plan.errors, []);
-  assert.match(plan.plans[0]!.markdown, /Invariant: Only the order's owner/);
-  assert.doesNotMatch(plan.plans[0]!.markdown, /#### Scenario:/);
-});
-
-test("requirements: an Invariant must state a rule, appear once, and be enough on its own", () => {
-  const base = (body: string) => `## Requirements: order-cancellation
-### ADDED
-### Requirement: Cancel a pending order
-${body}
-#### Scenario: Owner cancels a pending order
-- **GIVEN** a pending order owned by the caller
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-`;
-  assert.deepEqual(parseRequirementDeltas(base("Invariant: Only the owner can cancel it.")).errors, []);
-  assert.ok(parseRequirementDeltas(base("Invariant:")).errors.some((e) => e.includes('"Invariant:" needs the rule it states')));
-  assert.ok(
-    parseRequirementDeltas(base("Invariant: One.\nInvariant: Two.")).errors.some((e) => e.includes("already has an Invariant line")),
-  );
-});
-
-test("requirements: the delta owns the capability's Overview, and an omitted one keeps the old", () => {
-  const first = planRequirementDeltas(parseRequirementDeltas(REQUIREMENTS).deltas, () => undefined);
-  assert.deepEqual(first.errors, []);
-  const markdown = first.plans[0]!.markdown;
-  // A new capability opens with its overview, before the requirements it summarises.
-  assert.match(
-    markdown,
-    /^# order-cancellation requirements\n\n## Overview\n\nOrders are cancelled by their owner while pending; nothing else changes\.\n\n## Requirements\n/,
-  );
-  assert.match(markdown, /### Requirement: Cancel a pending order/);
-  // The overview is documentation, not a checklist item; the task acceptance lines are the checklist.
-  assert.deepEqual(acceptanceCriteria(`${SPEC()}${REQUIREMENTS}`).map((c) => c.id), ["T1.1", "T2.1"]);
-
-  const modify = (overview?: string) => `## Requirements: order-cancellation
-${overview ? `${overview}\n` : ""}### MODIFIED
-### Requirement: Cancel a pending order
-Invariant: Only the owner can cancel it.
-#### Scenario: Owner cancels
-- **GIVEN** a pending order
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-`;
-  const kept = planRequirementDeltas(parseRequirementDeltas(modify()).deltas, () => markdown);
-  assert.deepEqual(kept.errors, []);
-  assert.match(kept.plans[0]!.markdown, /Orders are cancelled by their owner while pending/);
-
-  const refreshed = planRequirementDeltas(
-    parseRequirementDeltas(modify("Overview: Cancellation and refunds for pending orders.")).deltas,
-    () => markdown,
-  );
-  assert.deepEqual(refreshed.errors, []);
-  assert.match(refreshed.plans[0]!.markdown, /## Overview\n\nCancellation and refunds for pending orders\./);
-  assert.doesNotMatch(refreshed.plans[0]!.markdown, /Orders are cancelled by their owner while pending/);
-  // The refreshed overview stays before Requirements, even if it was written after them.
-  const misplaced = `${markdown.replace(/## Overview\n\n.*?\n\n/, "").trimEnd()}\n\n## Overview\n\nMisplaced.\n`;
-  const moved = planRequirementDeltas(parseRequirementDeltas(modify("Overview: Cancellation and refunds.")).deltas, () => misplaced);
-  assert.deepEqual(moved.errors, []);
-  assert.match(moved.plans[0]!.markdown, /## Overview\n\nCancellation and refunds\.\n\n## Requirements/);
-});
-
-test("requirements: a capability without an Overview is refused until the delta writes one", () => {
-  const noOverview = REQUIREMENTS.replace(/^Overview:.*\n/m, "");
-  const fresh = planRequirementDeltas(parseRequirementDeltas(noOverview).deltas, () => undefined);
-  assert.match(fresh.errors[0]!, /has no Overview; write "Overview: <what the capability is and what it refuses to do>"/);
-
-  const first = planRequirementDeltas(parseRequirementDeltas(REQUIREMENTS).deltas, () => undefined);
-  const stripped = first.plans[0]!.markdown.replace(/## Overview\n\n.*?\n\n/, "");
-  const modify = (overview?: string) => `## Requirements: order-cancellation
-${overview ? `${overview}\n` : ""}### MODIFIED
-### Requirement: Cancel a pending order
-Invariant: Only the owner can cancel it.
-#### Scenario: Owner cancels
-- **GIVEN** a pending order
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-`;
-  const existing = planRequirementDeltas(parseRequirementDeltas(modify()).deltas, () => stripped);
-  assert.match(existing.errors[0]!, /has no Overview; write "Overview:/);
-  const supplied = planRequirementDeltas(parseRequirementDeltas(modify("Overview: Orders can be cancelled.")).deltas, () => stripped);
-  assert.deepEqual(supplied.errors, []);
-  assert.match(supplied.plans[0]!.markdown, /## Overview\n\nOrders can be cancelled\.\n\n## Requirements/);
-});
-
-test("requirements: the Overview is one plain line before the first group", () => {
-  const delta = (line: string) => `## Requirements: order-cancellation
-${line}
-### ADDED
-### Requirement: Cancel a pending order
-Invariant: Only the owner can cancel it.
-#### Scenario: Owner cancels
-- **GIVEN** a pending order
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-`;
-  assert.deepEqual(parseRequirementDeltas(delta("Overview: Orders can be cancelled.")).errors, []);
-  assert.ok(parseRequirementDeltas(delta("Overview:")).errors.some((e) => e.includes("has an empty Overview")));
-  assert.ok(parseRequirementDeltas(delta("Overview: # Heading")).errors.some((e) => e.includes("must be plain text")));
-  assert.ok(parseRequirementDeltas(delta("Overview: One.\nOverview: Two.")).errors.some((e) => e.includes("more than one Overview line")));
-  assert.ok(parseRequirementDeltas(delta("Orders can be cancelled.")).errors.some((e) => e.includes("has text before its first group")));
-  const duplicateSections = "# order-cancellation requirements\n\n## Overview\nOne.\n\n## Overview\nTwo.\n\n## Requirements\n";
-  assert.ok(parseRequirementDocument(duplicateSections, "order-cancellation").errors.some((e) => e.includes('duplicate "## Overview" section')));
-});
-
-test("spec: the requirements format states the invariant first and one claim per THEN", async () => {
-  const { specPrompt } = await import("../extensions/pb/prompts.ts");
-  const prompt = specPrompt("", []);
-  assert.match(prompt, /Overview: <what the capability is and what it refuses to do/);
-  assert.match(prompt, /Overview is required when the capability has no living file yet/);
-  assert.match(prompt, /Invariant: <the rule that must hold for every input/);
-  assert.match(prompt, /the tasks' acceptance lines are the examples that prove it/);
-  assert.match(prompt, /Older files may still carry/);
-  assert.doesNotMatch(prompt, /R1\.2/);
-});
-
-test("requirements: a delta applies exactly, and conflicts are refused", () => {
-  const added = parseRequirementDeltas(REQUIREMENTS);
-  assert.deepEqual(added.errors, []);
-  assert.deepEqual(
-    added.deltas.map((d) => [d.capability, d.groups.map((g) => [g.kind, g.requirements.map((r) => r.name)])]),
-    [["order-cancellation", [["ADDED", ["Cancel a pending order"]]]]],
-  );
-  const first = planRequirementDeltas(added.deltas, () => undefined);
-  assert.deepEqual(first.errors, []);
-  assert.match(first.plans[0].markdown, /^# order-cancellation requirements$/m);
-  assert.match(first.plans[0].markdown, /### Requirement: Cancel a pending order/);
-  assert.match(first.plans[0].markdown, /Invariant: Only the order's owner can cancel it, and only while it is PENDING\./);
-  assert.match(first.plans[0].markdown, /- \*\*WHEN\*\* the owner cancels it/);
-  assert.deepEqual([first.plans[0].added, first.plans[0].modified, first.plans[0].removed], [["Cancel a pending order"], [], []]);
-
-  const modify = `## Requirements: order-cancellation
-### MODIFIED
-### Requirement: Cancel a pending order
-Only the owner can cancel a pending order.
-#### Scenario: Someone else cannot cancel it
-- **GIVEN** a pending order owned by another user
-- **WHEN** the caller tries to cancel it
-- **THEN** it stays PENDING
-`;
-  const second = planRequirementDeltas(parseRequirementDeltas(modify).deltas, () => first.plans[0].markdown);
-  assert.deepEqual(second.errors, []);
-  assert.deepEqual([second.plans[0].modified, second.plans[0].added], [["Cancel a pending order"], []]);
-  assert.match(second.plans[0].markdown, /Only the owner can cancel a pending order\./);
-  assert.doesNotMatch(second.plans[0].markdown, /A pending order can be cancelled by its owner\./);
-
-  const removed = `## Requirements: order-cancellation
-### REMOVED
-### Requirement: Cancel a pending order
-`;
-  const third = planRequirementDeltas(parseRequirementDeltas(removed).deltas, () => second.plans[0].markdown);
-  assert.deepEqual(third.errors, []);
-  assert.deepEqual(third.plans[0].removed, ["Cancel a pending order"]);
-  assert.doesNotMatch(third.plans[0].markdown, /Requirement: Cancel a pending order/);
-
-  const conflict = planRequirementDeltas(parseRequirementDeltas(REQUIREMENTS).deltas, () => first.plans[0].markdown);
-  assert.match(conflict.errors[0]!, /ADDED "Cancel a pending order" already exists; use MODIFIED/);
-  const missing = planRequirementDeltas(parseRequirementDeltas(modify).deltas, () => undefined);
-  assert.match(missing.errors[0]!, /MODIFIED "Cancel a pending order" does not exist; use ADDED/);
-
-  const invariantOnly = parseRequirementDeltas(`## Requirements: order-cancellation
-### ADDED
-### Requirement: A rule with no scenario
-Invariant: Nothing outlives the process.
-`);
-  assert.deepEqual(invariantOnly.errors, []);
-  const noThen = parseRequirementDeltas(`## Requirements: order-cancellation
-### ADDED
-### Requirement: Half a scenario
-A statement.
-#### Scenario: Half
-- **GIVEN** something
-- **WHEN** it happens
-`);
-  assert.ok(noThen.errors.some((e) => e.includes("needs at least one **THEN** line")));
-});
-
-test("spec: 'Depends on: none' allows a trailing note; real names still resolve", () => {
-  assert.equal(parseSpec(SPEC()).spec!.dependsOn, undefined);
-  assert.equal(parseSpec(SPEC().replace("Depends on: none", "Depends on: none (follows the shipped gex-update-banner-delete-first)")).spec!.dependsOn, undefined);
-  assert.equal(parseSpec(SPEC().replace("Depends on: none", "Depends on: none-foo")).spec!.dependsOn, "none-foo");
-});
-
-test("spec: decisions are added under Decisions, before the next section", () => {
-  const md = addDecision(SPEC(), "Cancelling twice is a no-op.");
-  assert.match(md, /- Not doing soft delete, because audit lives elsewhere\.\n- Cancelling twice is a no-op\.\n\n## Context/);
-});
-
-test("spec: a colon heading is the same section to writers and readers, never a second one", () => {
-  const colon = SPEC().replace("## Decisions\n", "## Decisions:\n");
-  const md = addDecision(colon, "Cancelling twice is a no-op.");
-  assert.equal((md.match(/^##\s+Decisions\s*:?\s*$/gim) ?? []).length, 1); // one heading, not one per writer
-  assert.match(md, /- Cancelling twice is a no-op\.\n\n## Context/);
-  assert.equal(parseSpec(md).spec?.status, "ready"); // and it still parses
-  assert.deepEqual(parseSpec(md).errors, []);
-});
 
 /* --------------------------------- plan and spec --------------------------------- */
 
@@ -1774,6 +1200,115 @@ test("spec review leaves the project untouched: stray writes are put back", asyn
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
+test("spec review: one pass on the frozen draft, with the whole text in its brief", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const briefOut = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pb-brief-")), "brief.md"); // outside the project: the run is reverted
+  process.env.MOCK_SPEC_BRIEF_OUT = briefOut;
+  t.agent.script = diligent;
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_BRIEF_OUT;
+  }
+  const brief = fs.readFileSync(briefOut, "utf8");
+  assert.match(brief, /^# Spec to review: order-cancellation\n/);
+  assert.ok(brief.includes(SPEC().trim()), "the brief does not carry the frozen draft");
+  assert.match(brief, /# Your job[\s\S]*empty list is a pass; only a P0 blocks/);
+  // one pass: one saved run for this build, however many times the start is repeated
+  await t.run("build", "order-cancellation");
+  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length, 1);
+});
+
+test("spec review: a P0 stops the build before T1 and is recorded against the spec text", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "block";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.progress("order-cancellation").phase, "written");
+  assert.match(t.posts.join("\n"), /\*\*Spec review\*\* — P0 blocks T1:[\s\S]*\*\*P0\*\*[\s\S]*unguarded transition/);
+  assert.ok(!t.instructions.some((i) => /Task T1/.test(i)));
+  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
+  assert.equal(event.verdict, "block");
+  assert.equal(event.hash, specHash(fs.readFileSync(specFile, "utf8")));
+  assert.equal(event.reported[0].priority, "P0");
+});
+
+test("spec review: P1 and P2 are advisory and the build proceeds", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.match(t.posts.join("\n"), /\*\*Spec review\*\* — pass; advisory findings[\s\S]*\[P1\][\s\S]*\[P2\]/);
+  const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
+  assert.equal(event.verdict, "pass");
+  assert.deepEqual(event.reported.map((f: any) => f.priority), ["P1", "P2"]);
+});
+
+test("spec review: an unchanged spec re-posts the block without a second run; an edit reviews again", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const runs = () => fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length;
+  process.env.MOCK_SPEC_REVIEW = "block";
+  try {
+    await t.run("build", "order-cancellation");
+    const afterFirst = runs();
+    await t.run("build", "order-cancellation");
+    assert.equal(runs(), afterFirst); // the recorded block still covers this text
+    assert.match(t.posts.at(-1)!, /P0 blocks T1 \(the spec is unchanged since that review\)/);
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  fs.writeFileSync(specFile, fs.readFileSync(specFile, "utf8").replace("Cancel orders.", "Cancel orders before they ship."));
+  t.agent.script = diligent;
+  process.env.MOCK_SPEC_REVIEW = "pass";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(runs(), 2);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("spec review: a run that reports no findings fails closed", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "crash";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.progress("order-cancellation").phase, "written");
+  assert.match(t.posts.at(-1)!, /reviewer returned no findings; no review of this text was recorded/);
+  assert.ok(!t.instructions.some((i) => /Task T1/.test(i)));
+  const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
+  assert.equal(event.verdict, "error");
+});
+
+test("spec review: the configured model and thinking run the pass and are recorded", async () => {
+  const t = setup({ verify: "true", specReviewer: { model: "other/model", thinking: "high" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build", "order-cancellation");
+  const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
+  assert.equal(event.model, "other/model");
+  assert.equal(event.thinking, "high");
+});
+
 test("build: with taskChecks end, each task is still compiled when a build command exists", async () => {
   const t = setup({ verify: "true", build: "false" });
   await written(t);
@@ -1874,7 +1409,6 @@ test("review brief: fix reports and acceptance drift render as sections", async 
   const reword = acceptanceDrift("- Acceptance: a works well", [{ type: "build-start", taskTexts: tasks }]);
   assert.match(reword!, /dropped\/reworded since build start: - Acceptance: a works[\s\S]*added\/reworded during build: - Acceptance: a works well/);
   const brief = reviewerBrief({
-    living: "",
     changed: [],
     stat: "",
     check: "ok",
@@ -1883,13 +1417,12 @@ test("review brief: fix reports and acceptance drift render as sections", async 
   });
   assert.match(brief, /## What the fix laps reported[\s\S]*Lap 1 fixed: guard clause[\s\S]*Lap 1 tests: npm test green/);
   assert.doesNotMatch(brief, /## Acceptance proof mapping/);
-  assert.match(reviewerBrief({ living: "", changed: [], stat: "", check: "ok", focus: "", acceptanceDrift: drift }), /## Acceptance drift during build/);
+  assert.match(reviewerBrief({ changed: [], stat: "", check: "ok", focus: "", acceptanceDrift: drift }), /## Acceptance drift during build/);
 });
 
 test("review brief: every acceptance id is listed; a follow-up carries the previous statuses", async () => {
   const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
   const brief = reviewerBrief({
-    living: "",
     changed: [],
     stat: "",
     check: "ok",
@@ -2279,115 +1812,6 @@ test("spec: shared seams without Contracts warn, never reject; shared Test: warn
   assert.doesNotMatch(decisions, /Note:/);
 });
 
-test("spec: semantic shape is the reviewer's, not a write gate", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  const { parseSpec, specReviewRisk } = await import("../extensions/pb/spec.ts");
-  const risk = (md: string) => specReviewRisk(md, parseSpec(md).spec!);
-
-  const sensitive = `# Admin login
-Depends on: none
-Verification: tests
-New tests: yes
-
-## Goal
-Let admins log in with a password.
-## Decisions
-- Use password login, because the existing session store supports it.
-## Contracts
-- T1 owns the login form.
-## Tasks
-### T1: login works
-- Acceptance: login succeeds (tests: T1)
-- Test: \`test -f login.txt\`
-`;
-  assert.deepEqual(parseSpec(sensitive).errors, []);
-  assert.equal((await t.callTool("pb_write_spec", { name: "sensitive", content: sensitive })).error, undefined);
-  assert.equal(risk(sensitive).reason, "security-sensitive (password)");
-
-  const slow = `# Fast list
-Depends on: none
-Verification: tests
-New tests: yes
-
-## Goal
-List orders.
-## Decisions
-- Paginate the list, because unbounded reads risk timeouts.
-## Contracts
-- T1 owns the list.
-## Tasks
-### T1: fast list
-Responds within 200ms.
-- Acceptance: responds fast (tests: T1)
-- Test: \`test -f fast.txt\`
-`;
-  assert.equal((await t.callTool("pb_write_spec", { name: "slow", content: slow })).error, undefined);
-  assert.deepEqual(risk(slow), { review: false }); // no keyword makes this reviewer-worthy
-
-  const api = `# Order lookup
-Depends on: none
-Verification: tests
-New tests: yes
-
-## Goal
-Expose GET /api/orders to the client.
-## Decisions
-- Reuse the existing handler, because it already returns the list.
-## Tasks
-### T1: list orders
-- Acceptance: GET /api/orders returns the list (tests: T1)
-- Test: \`test -f T1.txt\`
-`;
-  assert.equal((await t.callTool("pb_write_spec", { name: "api-missing", content: api })).error, undefined);
-  assert.equal(risk(api).reason, "an external surface");
-
-  const data = `# Stored orders
-Depends on: none
-Verification: tests
-New tests: yes
-
-## Goal
-Store orders in the database.
-## Decisions
-- Use the existing table, because it already has the columns.
-## Contracts
-- The orders table gains a status column; reads and writes use it.
-## Tasks
-### T1: save orders
-- Acceptance: the status is saved (tests: T1)
-- Test: \`test -f T1.txt\`
-`;
-  assert.equal((await t.callTool("pb_write_spec", { name: "data-missing", content: data })).error, undefined);
-  assert.equal(risk(data).reason, "persisted data");
-
-  // The regex shapes the old gates refused: a bare Findings sentence, a bare-colon Decision, and a
-  // count all write. A sensitive Decisions line still selects the review, from wherever it sits.
-  const bareWords = `# Slow page
-Depends on: none
-Verification: tests
-New tests: yes
-
-## Goal
-Speed up the page.
-## Findings
-- The baseline is green.
-## Decisions
-- Scope: the list.
-- Allows 3 retries.
-## Contracts
-- T1 owns the list.
-## Tasks
-### T1: fast page
-- Acceptance: loads fast (tests: T1)
-- Test: \`test -f fast.txt\`
-`;
-  assert.equal((await t.callTool("pb_write_spec", { name: "bare-words", content: bareWords })).error, undefined);
-  const hidden = bareWords.replace("- Scope: the list.", "- Cache session tokens for a minute.");
-  assert.equal((await t.callTool("pb_write_spec", { name: "decision-sensitive", content: hidden })).error, undefined);
-  assert.equal(risk(hidden).reason, "security-sensitive (session)");
-});
-
 test("spec format: a bound names its owner, and the citation grammar has one home", async () => {
   const { specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
   for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
@@ -2507,6 +1931,104 @@ test("map and citation grammar: dots alone name nothing, a walk above the root i
   assert.doesNotMatch((await t.callTool("pb_write_spec", { name: "cite-dots", content: citingSpec("`..:1` and `.:2` name nothing.") })).error ?? "", /not in the project/);
 });
 
+test("spec: semantic shape is the reviewer's, not a write gate", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const write = (name: string, content: string) => t.callTool("pb_write_spec", { name, content });
+  // A security surface, a bare measurement, an external surface with no Contracts, stored data with no
+  // Migration and rollback, and the shapes the old regex gates refused: all of them write.
+  const specs: Array<[string, string]> = [
+    ["sensitive", `# Admin login
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Let admins log in with a password.
+## Decisions
+- Use password login, because the existing session store supports it.
+## Contracts
+- T1 owns the login form.
+## Tasks
+### T1: login works
+- Acceptance: login succeeds
+- Test: \`test -f login.txt\`
+`],
+    ["slow", `# Fast list
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+List orders.
+## Decisions
+- Paginate the list, because unbounded reads risk timeouts.
+## Contracts
+- T1 owns the list.
+## Tasks
+### T1: fast list
+Responds within 200ms.
+- Acceptance: responds fast
+- Test: \`test -f fast.txt\`
+`],
+    ["api-missing", `# Order lookup
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Expose GET /api/orders to the client.
+## Decisions
+- Reuse the existing handler, because it already returns the list.
+## Tasks
+### T1: list orders
+- Acceptance: GET /api/orders returns the list
+- Test: \`test -f T1.txt\`
+`],
+    ["data-missing", `# Stored orders
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Store orders in the database.
+## Decisions
+- Use the existing table, because it already has the columns.
+## Contracts
+- The orders table gains a status column; reads and writes use it.
+## Tasks
+### T1: save orders
+- Acceptance: the status is saved
+- Test: \`test -f T1.txt\`
+`],
+    ["bare-words", `# Slow page
+Depends on: none
+Verification: tests
+New tests: yes
+
+## Goal
+Speed up the page.
+## Findings
+- The baseline is green.
+## Decisions
+- Scope: the list.
+- Allows 3 retries.
+- Cache session tokens for a minute.
+## Contracts
+- T1 owns the list.
+## Tasks
+### T1: fast page
+- Acceptance: loads fast
+- Test: \`test -f fast.txt\`
+`],
+  ];
+  for (const [name, content] of specs) {
+    assert.deepEqual(parseSpec(content).errors, [], name);
+    const r = await write(name, content);
+    assert.equal(r.error, undefined, `${name}: ${r.error ?? ""}`);
+  }
+});
+
 test("spec: a human edit saves on parse alone and the build adds no shape advisory", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -2526,9 +2048,9 @@ test("spec: a human edit saves on parse alone and the build adds no shape adviso
 
 test("spec: senior review carries the human-override note", async () => {
   const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
-  const withNote = reviewerBrief({ living: "", changed: [], stat: "", check: "ok", focus: "", humanOverride: "Hand-edited." });
+  const withNote = reviewerBrief({ changed: [], stat: "", check: "ok", focus: "", humanOverride: "Hand-edited." });
   assert.match(withNote, /## Human override[\s\S]*Hand-edited\./);
-  const without = reviewerBrief({ living: "", changed: [], stat: "", check: "ok", focus: "" });
+  const without = reviewerBrief({ changed: [], stat: "", check: "ok", focus: "" });
   assert.doesNotMatch(without, /Human override/);
 });
 
@@ -2850,7 +2372,7 @@ test("build state summaries drop Tasks, keep binding sections, and neither repea
       { id: "T2", title: "second", status: "doing", attempts: 1 },
     ],
   } as any;
-  const s = buildStateSummary({ p, markdown: buildSpecView(SPEC(), viewBudget(), ""), mechanics: "m", current: "next", reason: "reset" });
+  const s = buildStateSummary({ p, markdown: buildSpecView(SPEC(), viewBudget()), mechanics: "m", current: "next", reason: "reset" });
   assert.match(s, /--- spec ---\n# Order cancellation[\s\S]*## Goal\n\nCancel orders\.[\s\S]*## Decisions[\s\S]*Only PENDING orders/);
   assert.doesNotMatch(s, /## Tasks|### T1: first file/); // the handout carries the current task
   assert.equal(s.split("Only PENDING orders").length - 1, 1); // Decisions already carries it once
@@ -2863,12 +2385,11 @@ test("build state summaries drop Tasks, keep binding sections, and neither repea
 
 test("prompts: task, retry and coherence messages carry the binding context, not the whole spec", async () => {
   const { bindingContext, buildSpecView, bindingBudget, coherePrompt, fixText, taskPrompt, viewBudget } = await import("../extensions/pb/prompts.ts");
-  const spec = SPEC().replace("## Contracts\n", "## Design\n- One aggregate, one file.\n## Migration and rollback\nnone — no stored data.\n## Threats and abuse\n- A forged owner id must not cancel.\n## Contracts\n");
-  const markdown = `${spec}\n${REQUIREMENTS}`;
+  const markdown = SPEC().replace("## Contracts\n", "## Design\n- One aggregate, one file.\n## Migration and rollback\nnone — no stored data.\n## Threats and abuse\n- A forged owner id must not cancel.\n## Contracts\n");
   const tasks = [
     { id: "T1", title: "first file", status: "done", attempts: 1, changed: "did T1", caveat: "keep the hook", rejected: "none", open: "check the empty path" },
   ] as any;
-  const binding = bindingContext("order-cancellation", markdown, tasks, bindingBudget(), "");
+  const binding = bindingContext("order-cancellation", markdown, tasks, bindingBudget());
   assert.match(binding, /^Binding context \(a compact copy of \.pi\/pb\/specs\/order-cancellation\/spec\.md/);
   assert.match(binding, /## Goal\nCancel orders\./);
   assert.match(binding, /## Decisions\n- Only PENDING orders/);
@@ -2876,13 +2397,12 @@ test("prompts: task, retry and coherence messages carry the binding context, not
   assert.match(binding, /## Contracts\n- T1 owns T1\.txt/);
   assert.match(binding, /## Migration and rollback\nnone/);
   assert.match(binding, /## Threats and abuse\n- A forged owner/);
-  assert.match(binding, /## Requirement rules\n- order-cancellation · Cancel a pending order: /);
   assert.doesNotMatch(binding, /## Acceptance criteria/); // the legacy A section contributes nothing
   assert.match(binding, /## Prior tasks\n- T1 · caveat: keep the hook · open: check the empty path/);
   assert.doesNotMatch(binding, /## Tasks|### T1: first file/); // the task is already in the handout
 
-  const view = buildSpecView(markdown, viewBudget(), "");
-  assert.match(view, /^# Order cancellation[\s\S]*## Goal[\s\S]*## Requirement rules/);
+  const view = buildSpecView(markdown, viewBudget());
+  assert.match(view, /^# Order cancellation[\s\S]*## Goal[\s\S]*## Contracts/);
   assert.doesNotMatch(view, /## Tasks|### T1: first file/);
 
   const task = parseSpec(markdown).spec!.tasks[0];
@@ -2893,7 +2413,7 @@ test("prompts: task, retry and coherence messages carry the binding context, not
 });
 
 test("binding: one exported list binds the build and the spec review", async () => {
-  const { BINDING_SECTIONS, specReviewDelta } = await import("../extensions/pb/spec.ts");
+  const { BINDING_SECTIONS } = await import("../extensions/pb/spec.ts");
   const { bindingBudget, bindingContext } = await import("../extensions/pb/prompts.ts");
   assert.deepEqual(
     [...BINDING_SECTIONS],
@@ -2905,36 +2425,17 @@ test("binding: one exported list binds the build and the spec review", async () 
     "## Contracts\n",
     "## Design\n- One aggregate, one file.\n## Migration and rollback\nnone — no stored data.\n## Threats and abuse\n- A forged owner id must not cancel.\n## Contracts\n",
   );
-  const block = bindingContext("order-cancellation", `${spec}\n${REQUIREMENTS}`, [], bindingBudget(), "");
+  const block = bindingContext("order-cancellation", spec, [], bindingBudget());
   for (const section of [...BINDING_SECTIONS]) {
     const heading = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     if (section === "Threats") continue; // the alias: tested on its own spec below
     assert.match(block, new RegExp(`## ${heading}\n[^\n]`), `the block dropped ${section}`);
   }
   // and the alias heading binds like the full one
-  const aliased = bindingContext("order-cancellation", SPEC().replace("## Decisions", "## Threats\n- A forged owner id must not cancel.\n## Decisions"), [], bindingBudget(), "");
+  const aliased = bindingContext("order-cancellation", SPEC().replace("## Decisions", "## Threats\n- A forged owner id must not cancel.\n## Decisions"), [], bindingBudget());
   assert.match(aliased, /## Threats\n- A forged owner/);
-
-  // spec review's unchanged context is that same list minus Design (a delta round reads the whole spec anyway), plus header and requirement sections
-  const before = `${spec}\n${REQUIREMENTS}`;
-  const delta = specReviewDelta(before, before.replace("- Acceptance: T2.txt exists", "- Acceptance: T2.txt exists and is empty"));
-  assert.match(delta.context, /# Order cancellation/); // header
-  assert.doesNotMatch(delta.context, /## Acceptance criteria/); // a legacy A section is no longer binding
-  assert.match(delta.context, /## Requirements: order-cancellation/); // the requirement prefix rule still holds
-  for (const section of BINDING_SECTIONS) {
-    if (section === "Design" || section === "Threats") continue; // Design by the subtraction; Threats is the alias, tested below
-    const heading = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    assert.match(delta.context, new RegExp(`## ${heading}\n`), `the delta context dropped ${section}`);
-  }
-  assert.doesNotMatch(delta.context, /## Design/); // Design is still never sent as delta context
-  const aliasedDelta = specReviewDelta(`# x\nDepends on: none\nVerification: tests\n\n## Goal\ng\n## Threats\n- forged ids\n## Tasks\n### T1: a\n- Test: \`true\`\n`, `# x\nDepends on: none\nVerification: tests\n\n## Goal\ng\n## Threats\n- forged ids\n## Tasks\n### T1: a\n- Test: \`true\`\n- Acceptance: a works (tests: T1)\n`);
-  assert.match(aliasedDelta.context, /## Threats\n- forged ids/); // the alias binds the review too
 });
 
-/**
- * The guide and README state the same binding list for a human reader. A rename or a reorder in the
- * exported list — or in either document — fails this, which is what keeps the two from drifting.
- */
 test("binding: the guide and README list the binding sections in the exported order", async () => {
   const { BINDING_SECTIONS } = await import("../extensions/pb/spec.ts");
   // "Threats" is the short form of "Threats and abuse": one section, two accepted headings, one name in prose
@@ -2985,13 +2486,13 @@ test("binding: budgets come from the context window", async () => {
 test("binding: an oversized block drops whole sections and names them", async () => {
   const { bindingBudget, bindingContext, buildSpecView, viewBudget } = await import("../extensions/pb/prompts.ts");
   const filler = (word: string, n: number) => Array.from({ length: n }, (_, i) => `${word}${i} keeps running with more detail.`).join("\n");
-  const long = "detail ".repeat(80); // 640 chars: over the block's own line cap
+  const long = "detail ".repeat(80); // 640 chars: over a task hook's line cap
   const markdown = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n" })
     .replace("## Contracts\n", `## Design\n${filler("design", 40)}\n## Migration and rollback\n${filler("migration", 40)}\n## Threats and abuse\n${filler("threat", 40)}\n## Contracts\n`)
-    .replace("Refunds.", filler("scope", 40));  const tasks = [{ id: "T1", title: "first file", status: "done", attempts: 1, changed: `did T1`, caveat: long, rejected: "none", open: "none" }] as any;
-  const wide = `${REQUIREMENTS}\n### Requirement: A rule worth its words\nInvariant: ${long}\n#### Scenario: It is checked\n- **GIVEN** a pending order\n- **WHEN** the owner cancels it\n- **THEN** it is CANCELLED\n`;
+    .replace("Refunds.", filler("scope", 40));
+  const tasks = [{ id: "T1", title: "first file", status: "done", attempts: 1, changed: `did T1`, caveat: long, rejected: "none", open: "none" }] as any;
 
-  const block = bindingContext("order-cancellation", `${markdown}\n${wide}`, tasks, BLOCK_BUDGET, "");
+  const block = bindingContext("order-cancellation", markdown, tasks, BLOCK_BUDGET);
   assert.ok(block.length <= BLOCK_BUDGET, `the block ran over its budget: ${block.length}`);
   // the four least-binding sections go whole: not one line of them survives
   for (const gone of ["## Design", "## Migration and rollback", "## Threats and abuse", "## Out of scope"]) assert.ok(!block.includes(gone), `${gone} survived`);
@@ -2999,51 +2500,42 @@ test("binding: an oversized block drops whole sections and names them", async ()
   // and each is named, with the source of truth still a read away
   assert.match(block, /## Cut from this copy[\s\S]*Design[\s\S]*Migration and rollback[\s\S]*Threats and abuse[\s\S]*Out of scope/);
   assert.match(block, /\.pi\/pb\/specs\/order-cancellation\/spec\.md/);
-  // what binds hardest stays, with the requirement rules and the prior-task hooks
+  // what binds hardest stays, with the prior-task hooks
   assert.match(block, /## Goal\nCancel orders\./);
   assert.match(block, /## Contracts\n- T1 owns T1\.txt/);
-  assert.match(block, /## Requirement rules\n- order-cancellation · Cancel a pending order: /);
   assert.doesNotMatch(block, /## Acceptance criteria/);
   assert.match(block, /## Prior tasks\n- T1 · caveat: /);
   assert.doesNotMatch(block, /### T1: first file/); // still no Tasks prose
 
   // a section that binds hardest also goes whole, and is named, when the budget leaves no room for it
-  const goalless = bindingContext("order-cancellation", `${markdown}\n${wide}`, tasks, GOAL_LESS_BUDGET, "");
+  const goalHeavy = markdown.replace("Cancel orders.", `Cancel orders. ${"goal detail ".repeat(100)}`);
+  const goalless = bindingContext("order-cancellation", goalHeavy, tasks, GOAL_LESS_BUDGET);
   assert.ok(!goalless.includes("## Goal") && !goalless.includes("Cancel orders."), "Goal survived to the last cut");
   assert.match(goalless, /## Cut from this copy[\s\S]*Goal/);
 
-  // entries inside the always-emitted lists keep the block's own line caps: 300 for a rule, 240 for a hook
-  const roomy = bindingContext("order-cancellation", `${markdown}\n${wide}`, tasks, 40_000, "");
-  const prefix = "- order-cancellation · A rule worth its words: ";
-  const ruleLine = roomy.split("\n").find((l) => l.startsWith(prefix))!;
-  assert.ok(ruleLine.endsWith("…") && ruleLine.length <= prefix.length + 300, `rule line: ${ruleLine.length}`);
+  // a task hook keeps its own line cap: 240 characters
+  const roomy = bindingContext("order-cancellation", markdown, tasks, 40_000);
   const hook = roomy.split("\n").find((l) => l.startsWith("- T1 · "))!;
   const caveat = hook.replace(/^- T1 · caveat: /, "");
   assert.ok(caveat.endsWith("…") && caveat.length <= 240, `hook line: ${hook.length}`);
 
   // what binds hardest is never shortened: a Decisions and Contracts pair past the caps this replaces arrive whole, in both copies
   const clause = "the rule holds because the database says so. ".repeat(60).trimEnd(); // ~2.6k chars on one line
-  const heavy = `${markdown}\n${wide}`
+  const heavy = markdown
     .replace("- Only PENDING orders can be cancelled, because the state machine only allows that transition.", `- ${clause}`)
     .replace("- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.", `- ${clause}`);
-  for (const [where, copy] of [["handout", bindingContext("order-cancellation", heavy, [], bindingBudget(), "")], ["reset view", buildSpecView(heavy, viewBudget(), "")]] as const) {
+  for (const [where, copy] of [["handout", bindingContext("order-cancellation", heavy, [], bindingBudget())], ["reset view", buildSpecView(heavy, viewBudget())]] as const) {
     assert.equal(copy.split(clause).length - 1, 2, `Decisions and Contracts were shortened in the ${where}`);
     assert.ok(!copy.includes("truncated"), `the ${where} still carries a truncation notice`);
   }
-
-  // the ceiling still holds when the always-emitted parts alone outgrow the budget: 12 criteria at their own line cap
-  const manyRules = Array.from({ length: 12 }, (_, i) => `### Requirement: Rule ${i}\nInvariant: ${"clause ".repeat(60)}`).join("\n");
-  const pathological = bindingContext("order-cancellation", `${markdown}\n${REQUIREMENTS}\n### ADDED\n${manyRules}`, [], BUDGET_MIN, "");
-  assert.ok(pathological.length <= BUDGET_MIN, `a pathological spec outran the smallest budget: ${pathological.length}`);
-  assert.match(pathological, /## Requirement rules[\s\S]*\+\d+ more in the spec/); // the rules cap themselves before the block has to be cut
 });
 
 /** The smallest budget there is, reached when the window leaves no room at all. */
 const BUDGET_MIN = 4_000;
 
-/** Room for Goal, Decisions and Contracts, the requirement rules and the hooks — not for the four above them. */
+/** Room for Goal, Decisions and Contracts and the hooks — not for the four above them. */
 const BLOCK_BUDGET = 2_000;
-/** What is left once the four above have gone: the notice, the rules and Contracts — but no Goal. */
+/** What is left once the four above have gone: the notice and Contracts — but no Goal. */
 const GOAL_LESS_BUDGET = 900;
 
 test("build: verification none runs no checks; no new tests reaches the agent", async () => {
@@ -4491,154 +3983,18 @@ test("archive moves a finished spec out of .pi/pb/, and stats still see it", asy
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2/);
 });
 
-test("archive merges a spec's requirement delta into the living base", async () => {
-  const t = setup({ verify: "true", mapOnArchive: false });
-  await written(t, `${SPEC()}${REQUIREMENTS}`);
-  await t.run("archive", "order-cancellation");
-  const base = t.read("specs/order-cancellation.md");
-  assert.match(base, /^# order-cancellation requirements$/m);
-  assert.match(base, /## Overview\n\nOrders are cancelled by their owner while pending; nothing else changes\.\n\n## Requirements/);
-  assert.match(base, /### Requirement: Cancel a pending order/);
-  assert.match(base, /Invariant: Only the order's owner can cancel it, and only while it is PENDING\./);
-  assert.match(base, /- \*\*WHEN\*\* the owner cancels it/);
-  assert.match(base, /- \*\*THEN\*\* it becomes CANCELLED/);
-  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")));
-  assert.match(t.notes.at(-1)!, /Archived order-cancellation .*Requirement deltas merged: order-cancellation \+1 ~0 -0/);
-});
-
-test("archive refreshes the living Overview when the delta supplies a new one", async () => {
-  const t = setup({ verify: "true", mapOnArchive: false });
-  await written(t, `${SPEC()}${REQUIREMENTS}`);
-  await t.run("archive", "order-cancellation");
-  await written(t, `${SPEC()}## Requirements: order-cancellation
-Overview: Pending orders can be cancelled by their owner; refunds follow automatically.
-### MODIFIED
-### Requirement: Cancel a pending order
-Invariant: Only the order's owner can cancel it, and only while it is PENDING.
-#### Scenario: Owner cancels a pending order
-- **GIVEN** a pending order owned by the caller
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-`);
-  await t.run("archive", "order-cancellation");
-  const base = t.read("specs/order-cancellation.md");
-  assert.match(base, /## Overview\n\nPending orders can be cancelled by their owner; refunds follow automatically\.\n\n## Requirements/);
-  assert.doesNotMatch(base, /nothing else changes/);
-});
-
-test("archive keeps the living base outside the git-ignored pb state", async () => {
-  const t = setup({ verify: "true", mapOnArchive: false });
-  fs.writeFileSync(path.join(t.repo, ".gitignore"), ".pi/\n");
-  await written(t, `${SPEC()}${REQUIREMENTS}`);
-  await t.run("archive", "order-cancellation");
-  assert.ok(fs.existsSync(path.join(t.repo, "specs/order-cancellation.md")));
-  // The pb run state stays ignored; the living base is visible to git and ready to commit.
-  assert.doesNotThrow(() => execSync("git check-ignore -q -- .pi/pb", { cwd: t.repo, stdio: "ignore" }));
-  assert.throws(() => execSync("git check-ignore -q -- specs/order-cancellation.md", { cwd: t.repo, stdio: "ignore" }));
-  assert.match(execSync("git status --porcelain", { cwd: t.repo, encoding: "utf8" }), /^\?\? specs\//m);
-});
-
-test("archive warns when the living base is gitignored", async () => {
-  const t = setup({ verify: "true", mapOnArchive: false });
-  fs.writeFileSync(path.join(t.repo, ".gitignore"), "specs/\n");
-  await written(t, `${SPEC()}${REQUIREMENTS}`);
-  await t.run("archive", "order-cancellation");
-  assert.match(t.notes.at(-1)!, /living requirement base is gitignored \(specs\/order-cancellation\.md\)/);
-});
-
-test("archive: a requirement delta that no longer applies stops before anything moves", async () => {
-  const t = setup({ mapOnArchive: false });
-  await written(t, `${SPEC()}${REQUIREMENTS}`);
-  const file = path.join(t.repo, "specs/order-cancellation.md");
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const base = `# order-cancellation requirements
-
-## Overview
-
-A pending order can be cancelled; nothing else changes.
-
-## Requirements
-
-### Requirement: Cancel a pending order
-A pending order can be cancelled.
-#### Scenario: Owner cancels
-- **GIVEN** a pending order
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-`;
-  fs.writeFileSync(file, base);
-  await t.run("archive", "order-cancellation");
-  assert.match(t.notes.at(-1)!, /Not archived: order-cancellation's requirement delta doesn't apply:[\s\S]*already exists; use MODIFIED/);
-  assert.ok(fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")));
-  assert.equal(fs.readFileSync(file, "utf8"), base);
-  const rejected = await t.callTool("pb_write_spec", { name: "order-cancellation", content: `${SPEC()}${REQUIREMENTS}` });
-  assert.match(rejected.error!, /already exists; use MODIFIED/);
-  const updated = await t.callTool("pb_update_spec", {
-    name: "order-cancellation",
-    section: "Requirements: order-cancellation",
-    content: `### ADDED
-### Requirement: Cancel a pending order
-A pending order can be cancelled.
-#### Scenario: Owner cancels
-- **GIVEN** a pending order
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED`,
-  });
-  assert.match(updated.error!, /already exists; use MODIFIED/);
-});
-
-test("archive: a failed move puts the living requirement base back", async () => {
-  const t = setup({ mapOnArchive: false });
-  const file = path.join(t.repo, "specs/order-cancellation.md");
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const base = `# order-cancellation requirements
-
-## Overview
-
-A pending order can be cancelled; nothing else changes.
-
-## Requirements
-
-### Requirement: Cancel a pending order
-A pending order can be cancelled.
-#### Scenario: Owner cancels
-- **GIVEN** a pending order
-- **WHEN** the owner cancels it
-- **THEN** it becomes CANCELLED
-`;
-  fs.writeFileSync(file, base);
-  const modify = `${SPEC()}
-## Requirements: order-cancellation
-### MODIFIED
-### Requirement: Cancel a pending order
-Only the owner can cancel a pending order.
-#### Scenario: Someone else cannot cancel it
-- **GIVEN** a pending order owned by another user
-- **WHEN** the caller tries to cancel it
-- **THEN** it stays PENDING
-`;
-  await written(t, modify);
-  fs.writeFileSync(path.join(t.repo, ".pi/pb-archive"), "not a directory");
-  await t.run("archive", "order-cancellation");
-  assert.match(t.notes.at(-1)!, /Could not archive order-cancellation:[\s\S]*the living requirement base was restored/);
-  assert.equal(fs.readFileSync(file, "utf8"), base);
-  assert.ok(fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")));
-});
-
 test("report: status and stats --json return pb.report/1, and pb-report does too", async () => {
   const t = setup({ mapOnArchive: false });
-  await written(t, `${SPEC()}${REQUIREMENTS}`);
+  await written(t);
   await t.run("status", "--json");
   const status = JSON.parse(t.posts.at(-1)!);
   assert.equal(status.schema, "pb.report/1");
   assert.equal(status.specs[0].name, "order-cancellation");
   assert.equal(status.specs[0].phase, "written");
-  assert.deepEqual(status.specs[0].requirements, [{ capability: "order-cancellation", added: ["Cancel a pending order"], modified: [], removed: [] }]);
   assert.deepEqual(status.specs[0].acceptance.map((a: { id: string }) => a.id), ["T1.1", "T2.1"]);
   const first = status.specs[0].acceptance[0];
-  assert.deepEqual([first.capability, first.requirement, first.status], [null, null, "not reported"]);
+  assert.deepEqual([first.task, first.status], ["T1", "not reported"]);
   assert.equal(first.text, "T1.txt exists");
-  assert.equal(status.summary.requirements, 0);
 
   await t.run("stats", "--json");
   const stats = JSON.parse(t.posts.at(-1)!);
@@ -4650,18 +4006,6 @@ test("report: status and stats --json return pb.report/1, and pb-report does too
   assert.equal(out.schema, "pb.report/1");
   assert.equal(out.specs[0].stats.tasks, 2);
   assert.deepEqual(out.specs[0].review.findings, []);
-});
-
-test("review: requirement rules bind the reviewer, but only task lines are acceptance ids", async () => {
-  const t = setup({ verify: "true", mapOnArchive: false });
-  await written(t, `${SPEC()}${REQUIREMENTS}`);
-  t.agent.script = diligent;
-  await t.run("build");
-  await t.run("review");
-  const progress = t.progress("order-cancellation");
-  assert.equal(progress.review.verdict, "pass");
-  assert.deepEqual(progress.review.acceptance.map((a: { criterion: string }) => a.criterion), ["T1.1", "T2.1"]);
-  assert.match(briefOf(t), /## Requirements: order-cancellation[\s\S]*Only the order's owner can cancel it/);
 });
 
 test("archive: a name collision never moves the spec into a folder that already exists", async () => {
@@ -5760,32 +5104,6 @@ test("build: a slow spec yields to the pending offer, which picks it up once wri
   await t.run("build", "cancel orders");
   assert.ok(t.posts.some((p) => p.startsWith("No spec ready to build yet."))); // yielded, didn't hang
   assert.equal(t.progress("order-cancellation").phase, "built"); // pending picked it up and built it
-});
-
-test("build: --review survives the pending-build path, where the review mode would skip", async () => {
-  const t = setup({ verify: "true", specWaitSec: 0.2, specReviewer: { mode: "auto" } });
-  process.chdir(t.repo);
-  const { Store } = await import("../extensions/pb/store.ts");
-  new Store(t.repo).markAsked("standards");
-  t.agent.script = async (text, tool) => {
-    if (/pb_write_spec tool/.test(text)) {
-      await new Promise((r) => setTimeout(r, 1000)); // slower than the wait cap, so the pending offer picks it up
-      await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-      return;
-    }
-    return diligent(text, tool);
-  };
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("build", "cancel orders --review");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.ok(t.posts.some((p) => p.startsWith("No spec ready to build yet.")));
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1);
-  assert.ok(review, "the pending build kept the --review flag");
-  assert.equal(review.verdict, "pass");
-  assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
 test("spec: rewriting a finished spec with different tasks warns to write a new spec instead", async () => {
@@ -7164,848 +6482,6 @@ test("spec: a declared doc-only task gets no missing-Test nudge", async () => {
   assert.match((await t.callTool("pb_write_spec", { name: "b", content: vague })).content![0].text, /adds behaviour but has no Test/);
 });
 
-test("spec review: advisory findings are shown and the build proceeds", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const advisory = t.posts.find((p) => /advisory findings/.test(p))!;
-  assert.ok(advisory);
-  assert.match(advisory, /unmeasured window/); // shown before anything builds
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // but the build does not wait on a P2
-  assert.ok(t.notes.some((n) => /advisory finding/.test(n)));
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.verdict, "pass");
-  assert.equal(review.findings, 1);
-});
-
-test("spec review: P0 findings stop the build before T1 with the findings shown", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.match(t.posts.at(-1)!, /changes needed before T1/);
-  assert.match(t.posts.at(-1)!, /unguarded transition/);
-  assert.match(
-    t.posts.at(-1)!,
-    /\*\*New blocking findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   Evidence: spec\.md:63 names no guard, and src\/order\.ts:42 has none\.\n   Fix: guard it/,
-  );
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // never launched
-  assert.equal(t.progress("order-cancellation").phase, "written"); // untouched
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.reported[0].evidence, "spec.md:63 names no guard, and src/order.ts:42 has none.");
-});
-
-test("spec review: Markdown bullet findings block and are not mistaken for a pass", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block-bullets";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.match(t.posts.at(-1)!, /changes needed before T1/);
-  assert.match(t.posts.at(-1)!, /unguarded transition/);
-  assert.doesNotMatch(t.posts.at(-1)!, /pass, no findings/);
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.verdict, "block");
-  assert.equal(review.findings, 1);
-  assert.equal(review.reported[0].priority, "P1");
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // never launched
-});
-
-test("spec review: a block verdict with no parseable finding never reads as a pass", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block-untagged";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.match(t.posts.at(-1)!, /changes needed before T1/);
-  assert.match(t.posts.at(-1)!, /blocked without a parseable finding/);
-  assert.doesNotMatch(t.posts.at(-1)!, /pass, no findings/);
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.verdict, "block");
-  assert.equal(review.findings, 0);
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // never launched
-});
-
-test("spec review: after amendment the build re-reviews and proceeds on the pass", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-  const briefOut = path.join(os.tmpdir(), `pb-spec-followup-${process.pid}.md`);
-  if (fs.existsSync(briefOut)) fs.rmSync(briefOut);
-  process.env.MOCK_SPEC_BRIEF_OUT = briefOut;
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_BRIEF_OUT;
-  }
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // proceeds
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.deepEqual(reviews.map((e) => e.verdict), ["block", "pass"]); // the amendment is reviewed again
-  assert.equal(reviews[1].followUp, true);
-  assert.equal(reviews[0].reported[0].id, "F1"); // stable, harness-assigned id
-  assert.equal(reviews[0].nextId, 2);
-  assert.equal(typeof reviews[0].markdown, "string"); // the reviewed text is stored for the comparison
-  const brief = fs.readFileSync(briefOut, "utf8");
-  assert.match(brief, /# Earlier review/); // the follow-up carries the earlier review
-  assert.match(brief, /delta round: the revision below is what you are reviewing/);
-  assert.match(brief, /## Changed since the earlier review[\s\S]*Rebuttal: the transition is guarded/);
-  assert.match(brief, /## Earlier form of the changed parts[\s\S]*Not doing soft delete/);
-  assert.match(brief, /## Binding context \(unchanged by this revision\)[\s\S]*# Order cancellation/);
-  assert.doesNotMatch(brief, /### T2: second file/); // unchanged tasks are not re-sent
-  assert.match(brief, /F1 \[P0\][\s\S]*unguarded transition/);
-  assert.match(brief, /F1 \[P0\] Decisions — unguarded transition\n   Evidence: spec\.md:63 names no guard/); // the trace follows the finding into the follow-up
-  assert.match(brief, /STILL OPEN:/); // every earlier blocker must be answered
-  assert.equal(reviews[1].resolutions[0].id, "F1");
-  assert.equal(reviews[1].resolutions[0].status, "resolved");
-  assert.equal(reviews[1].reported.length, 0);
-  const passPost = t.posts.find((p) => /pass, no findings/.test(p));
-  assert.ok(passPost);
-  assert.match(passPost, /Earlier findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   RESOLVED: the current spec now covers it/);
-});
-
-test("spec review: a still-open earlier blocker keeps blocking even when the verdict says pass", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-  process.env.MOCK_SPEC_REVIEW = "still-open";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.deepEqual(reviews.map((e) => e.verdict), ["block", "block"]); // the reviewer's pass cannot override an open resolution
-  assert.equal(reviews[1].reported[0].id, "F1");
-  assert.equal(reviews[1].resolutions[0].status, "open");
-  assert.match(t.posts.at(-1)!, /changes needed before T1/);
-  assert.match(t.posts.at(-1)!, /Earlier findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   STILL OPEN: the current spec still permits the failure/);
-  assert.doesNotMatch(t.posts.at(-1)!, /\*\*New blocking findings\*\*/); // the open earlier finding is not repeated as new
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: a missing resolution fails closed as still open", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-  process.env.MOCK_SPEC_REVIEW = "no-resolution";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.deepEqual(reviews.map((e) => e.verdict), ["block", "block"]);
-  assert.equal(reviews[1].resolutions[0].status, "open");
-  assert.equal(reviews[1].resolutions[0].evidence, "No resolution reported.");
-  assert.match(t.posts.at(-1)!, /Earlier findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   STILL OPEN: No resolution reported\./);
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: a resolution contradicted by the same finding under Findings is still open", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-  process.env.MOCK_SPEC_REVIEW = "resolved-and-repeated";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.equal(reviews[1].resolutions[0].status, "open");
-  assert.equal(reviews[1].resolutions[0].evidence, "Re-reported as a new finding; the earlier problem is not gone.");
-  assert.equal(reviews[1].reported.length, 1); // no duplicate under a new id
-  assert.equal(reviews[1].reported[0].id, "F1");
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: a resolved blocker and a new finding get sequential stable ids", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.equal(reviews[1].resolutions[0].status, "resolved");
-  assert.equal(reviews[1].reported[0].id, "F2"); // new finding continues after F1, even though F1 is resolved
-  assert.equal(reviews[1].reported[0].priority, "P2");
-  assert.equal(reviews[1].nextId, 3);
-  assert.equal(reviews[1].verdict, "pass");
-  assert.match(t.posts.find((p) => /advisory findings/.test(p))!, /\*\*Earlier findings\*\*\nF1 \[P0\] Decisions — unguarded transition\n   RESOLVED:[\s\S]*\*\*New advisory findings\*\*\nF2 \[P2\][\s\S]*unmeasured window/);
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // a new advisory is shown, not a gate
-});
-
-test("spec review: carried P2/P3 are not re-listed and do not block or pause", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block-advisory";
-  try {
-    await t.run("build", "order-cancellation"); // blocks on P0, records the P2 alongside
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const first = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.deepEqual(first.reported.map((f: any) => [f.id, f.priority]), [["F1", "P0"], ["F2", "P2"]]);
-  const blockPost = t.posts.find((p) => /changes needed before T1/.test(p))!;
-  assert.match(blockPost, /changes needed before T1 \(1 blocking finding, 1 advisory\)/);
-  assert.match(blockPost, /\*\*New blocking findings\*\*\nF1 \[P0\][\s\S]*\*\*New advisory findings\*\* \(not blocking\)\nF2 \[P2\][\s\S]*unmeasured window/);
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-  await t.run("build", "order-cancellation"); // the changed spec is reviewed again; the advisory is only carried
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // no new advisory: the build proceeds
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.equal(reviews.length, 2);
-  assert.equal(reviews[1].verdict, "pass");
-  assert.equal(reviews[1].findings, 0);
-  assert.equal(reviews[1].reported.length, 0);
-  assert.equal(reviews[1].advisory[0].id, "F2");
-  const passPost = t.posts.find((p) => /pass, no new findings/.test(p));
-  assert.ok(passPost);
-  assert.match(passPost, /1 earlier advisory finding carried \(not re-listed\)/);
-  assert.doesNotMatch(passPost, /unmeasured window/); // not re-listed as a new finding
-});
-
-test("spec review: an unchanged blocked spec re-posts the standings instead of re-running", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1); // no second pass burns
-  assert.equal(t.posts.filter((p) => /changes needed before T1/.test(p)).length, 2); // the standing findings are shown again
-  assert.ok(t.notes.some((n) => /hasn't changed since it was reviewed/.test(n)));
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // still blocked
-});
-
-test("spec review: --force builds a blocked spec as it stands and records the acceptance", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  await t.run("build", "order-cancellation --force");
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // builds
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.deepEqual(reviews.map((e) => e.verdict), ["block", "forced"]);
-  assert.equal(reviews[1].reported.length, 1); // the standing finding is recorded as accepted
-  assert.ok(t.posts.some((p) => /recorded as accepted/.test(p)));
-});
-
-test("spec review: --force on an unreviewed spec skips the gate", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block"; // would block if the review ran
-  try {
-    await t.run("build", "--force");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // built without a review
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.deepEqual(reviews.map((e) => e.verdict), ["forced"]);
-  assert.equal(reviews[0].findings, 0);
-  assert.ok(t.posts.some((p) => /without a review of this text/.test(p)));
-});
-
-test("spec review: auto skips a small, low-risk spec", async () => {
-  const t = setup({ verify: "true", specReviewer: { mode: "auto" } });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block"; // would block if the review ran
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 0);
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x))); // the deterministic write-time checks were the gate
-});
-
-test("spec review: auto reviews a spec with a security surface", async () => {
-  const risky = SPEC().replace(
-    "## Decisions",
-    "## Threats and abuse\nAnyone with the cancel button can reach it; ownership proves the right; prevention is the ownership check.\n## Decisions",
-  );
-  const t = setup({ verify: "true", specReviewer: { mode: "auto" } });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: risky });
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1);
-  assert.ok(review, "the risky spec was reviewed");
-  assert.equal(review.verdict, "pass");
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: mode off skips even a risky spec", async () => {
-  const risky = SPEC().replace("Cancel orders.", "Cancel another tenant's orders.");
-  const t = setup({ verify: "true", specReviewer: { mode: "off" } });
-  process.chdir(t.repo);
-  // The write gate wants Threats for a sensitive spec; this test only exercises the review mode.
-  const md = risky.replace("## Decisions", "## Threats and abuse\nOnly the owning tenant's operator can reach it; ownership proves the right; prevention is the ownership check.\n## Decisions");
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: md });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 0);
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: mode off cannot silently clear an earlier block", async () => {
-  const t = setup({ verify: "true", specReviewer: { mode: "always" } });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const config = JSON.parse(t.read(".pi/pb/config.json"));
-  config.specReviewer.mode = "off";
-  fs.writeFileSync(path.join(t.repo, ".pi/pb/config.json"), JSON.stringify(config));
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-  await t.run("build", "order-cancellation"); // a changed spec with a standing block: the human decides
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1);
-  assert.match(t.posts.find((p) => /Spec review is off/.test(p))!, /F1 \[P0\][\s\S]*unguarded transition/);
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-  await t.run("build", "order-cancellation --review"); // the explicit request gets its round
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.equal(reviews.length, 2);
-  assert.equal(reviews[1].verdict, "pass");
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: --review runs a review the mode would skip", async () => {
-  const t = setup({ verify: "true", specReviewer: { mode: "auto" } });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("build", "order-cancellation --review");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1);
-  assert.ok(review);
-  assert.equal(review.verdict, "pass");
-  assert.match(t.posts.find((p) => /advisory findings/.test(p))!, /unmeasured window/);
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: --review re-runs a recorded pass when asked", async () => {
-  const t = setup({ verify: "true", specReviewer: { mode: "always" } });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  const { Store } = await import("../extensions/pb/store.ts");
-  const store = new Store(t.repo);
-  const md = store.readSpec("order-cancellation")!;
-  store.event("order-cancellation", { type: "spec-review", verdict: "pass", hash: specHash(md), findings: 0, reported: [], advisory: [], markdown: md, nextId: 1, round: 1 });
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("build", "order-cancellation --review");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.equal(reviews.length, 2);
-  assert.equal(reviews[1].verdict, "pass");
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: two blocking rounds stop the loop; --review is the human's next round", async () => {
-  const t = setup({ verify: "true", specReviewer: { mode: "always", maxRounds: 2 } });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 2);
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the checklist also names the owner, so a second guard is unnecessary.", mode: "append" });
-  await t.run("build", "order-cancellation"); // a human decision, not a third automatic review
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 2);
-  assert.match(t.posts.find((p) => /it is your call now/.test(p))!, /F1 \[P0\][\s\S]*unguarded transition/);
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-  await t.run("build", "order-cancellation --review"); // one more round, explicitly requested
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.equal(reviews.length, 3);
-  assert.equal(reviews[2].round, 3);
-  assert.equal(reviews[2].verdict, "pass");
-  assert.ok(t.posts.some((p) => /requested with --review, past the 2-round cap/.test(p)));
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: one format repair rescues an unreadable block", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  const briefOut = path.join(os.tmpdir(), `pb-spec-repair-brief-${process.pid}.md`);
-  const argsOut = path.join(os.tmpdir(), `pb-spec-repair-args-${process.pid}.txt`);
-  if (fs.existsSync(briefOut)) fs.rmSync(briefOut);
-  if (fs.existsSync(argsOut)) fs.rmSync(argsOut);
-  process.env.MOCK_SPEC_REVIEW = "block-untagged";
-  process.env.MOCK_SPEC_REPAIR = "ok";
-  process.env.MOCK_SPEC_REPAIR_BRIEF_OUT = briefOut;
-  process.env.MOCK_SPEC_REPAIR_ARGS_OUT = argsOut;
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SPEC_REPAIR;
-    delete process.env.MOCK_SPEC_REPAIR_BRIEF_OUT;
-    delete process.env.MOCK_SPEC_REPAIR_ARGS_OUT;
-  }
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.verdict, "block");
-  assert.equal(review.repaired, true);
-  assert.equal(review.unparsed, undefined);
-  assert.equal(review.reported[0].priority, "P1");
-  assert.match(t.posts.at(-1)!, /changes needed before T1[\s\S]*unstated empty path/);
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-  const brief = fs.readFileSync(briefOut, "utf8");
-  assert.match(brief, /## The reviewer's answer to reformat[\s\S]*The spec has an unstated empty path/);
-  assert.doesNotMatch(brief, /### T1: first file/); // the formatter is not asked to review the spec
-  const argv = fs.readFileSync(argsOut, "utf8").split("\n");
-  assert.ok(argv.includes("--no-tools")); // nothing to read or write: the reformat is text in, text out
-  assert.equal(argv[argv.indexOf("--thinking") + 1], "off");
-});
-
-test("spec review: a failed repair shows the reviewer's prose instead of re-running", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  const log = path.join(os.tmpdir(), `pb-spec-repair-runs-${process.pid}.log`);
-  if (fs.existsSync(log)) fs.rmSync(log);
-  process.env.MOCK_CONCURRENCY_LOG = log;
-  process.env.MOCK_SPEC_REVIEW = "block-untagged";
-  process.env.MOCK_SPEC_REPAIR = "fail";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SPEC_REPAIR;
-  }
-  try {
-    assert.match(t.posts.at(-1)!, /blocked without a parseable finding[\s\S]*The spec has an unstated empty path/);
-    const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-    assert.equal(review.unparsed, true);
-    assert.match(review.prose, /The spec has an unstated empty path/);
-    assert.equal(fs.readFileSync(log, "utf8").split("\n").filter((l) => l.startsWith("s ")).length, 2); // review + one repair
-    await t.run("build", "order-cancellation"); // unchanged: the prose is shown again, nothing is re-run
-    assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1);
-    assert.match(t.posts.at(-1)!, /blocked without a parseable finding[\s\S]*The spec has an unstated empty path/);
-    assert.equal(fs.readFileSync(log, "utf8").split("\n").filter((l) => l.startsWith("s ")).length, 2);
-  } finally {
-    delete process.env.MOCK_CONCURRENCY_LOG;
-    fs.rmSync(log, { force: true });
-  }
-});
-
-test("spec review: a run that returns no answer fails closed, with its error as the prose", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "crash";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.verdict, "block");
-  assert.equal(review.unparsed, true);
-  assert.match(review.prose, /reviewer exploded/); // the only words the run left behind
-  assert.match(t.posts.at(-1)!, /blocked without a parseable finding[\s\S]*reviewer exploded/);
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-  await t.run("build", "order-cancellation"); // unchanged: the prose is shown again, nothing is spent
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1);
-  assert.match(t.posts.at(-1)!, /blocked without a parseable finding[\s\S]*reviewer exploded/);
-});
-
-test("spec review: mode off cannot silently clear an unreadable block after the spec changes", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block-untagged";
-  process.env.MOCK_SPEC_REPAIR = "fail";
-  try {
-    await t.run("build", "order-cancellation"); // unparsed block, prose shown
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SPEC_REPAIR;
-  }
-  const config = JSON.parse(t.read(".pi/pb/config.json"));
-  config.specReviewer.mode = "off";
-  fs.writeFileSync(path.join(t.repo, ".pi/pb/config.json"), JSON.stringify(config));
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the empty path returns early, because the caller checks it.", mode: "append" });
-  await t.run("build", "order-cancellation");
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1);
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-  assert.match(t.posts.find((p) => /Spec review is off/.test(p))!, /blocking findings|standing/);
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("build", "order-cancellation --review");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: an outside P1 is advisory and does not hold the build", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "outside-advisory";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.verdict, "pass");
-  assert.equal(review.reported[0].outside, true);
-  const post = t.posts.find((p) => /advisory findings/.test(p))!;
-  assert.match(post, /Outside the change/);
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: an outside P0 blocks even when the verdict says pass", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "outside-blocker";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.verdict, "block");
-  assert.equal(review.reported[0].outside, true);
-  assert.match(t.posts.at(-1)!, /changes needed before T1[\s\S]*Outside the change[\s\S]*corrupts the ledger/);
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-// A follow-up spec review scopes by what the revision is responsible for, never by where a
-// problem's text happens to sit. One precedence rule, in the brief and in the follow-up prompt
-// alike. The specs below quote none of the rule's own words, so a match can only come from pb.
-const WINDOW_SPEC = (revision = "") => `# Cancel window
-Depends on: none
-Verification: tests
-New tests: yes
-
-## Goal
-Refuse a cancellation that arrives after the window.
-## Decisions
-- The window is 30 days from delivery.${revision}
-## Context
-src/order.ts holds the model.
-## Contracts
-- cancel(id) returns 410 after the window.
-## Acceptance criteria
-- T1 owns the guard.
-## Tasks
-### T1: guard the window
-Add the guard to src/order.ts.
-- Acceptance: a cancel on day 31 returns 410 (tests: T1)
-- Test: \`node --test test/cancel.test.mts\`
-`;
-const WINDOW_BLOCKER = { id: "F1", priority: "P1" as const, title: "the window has no stated timezone", evidence: "Contracts counts days without saying in what timezone." };
-const WINDOW_ADVISORY = { id: "F2", priority: "P2" as const, title: "the Test: line names no file", fix: "name the test file" };
-
-test("spec review delta rounds: the brief states one precedence rule", () => {
-  const before = WINDOW_SPEC();
-  const after = WINDOW_SPEC(" Support may extend it by 7 days.");
-  const brief = specReviewBrief("cancel-window", after, { prior: [WINDOW_BLOCKER], advisory: [WINDOW_ADVISORY], priorMarkdown: before, round: 2 });
-  // one rule, both halves: what this revision creates or exposes is in scope wherever its text sits...
-  assert.match(brief, /creates or exposes/);
-  // ...and only a problem that predates the revision, in text it left alone, takes the advisory lane
-  assert.match(brief, /predates the revision/);
-  // that lane is the one the harness already parses, with the consequences it already has
-  assert.match(brief, /## Outside the change — existing problems the change did not cause/);
-  assert.match(brief, /Only a P0 here blocks; P1-P3 are advisory/);
-  assert.match(brief, /VERDICT: block \(a new or still-open P0\/P1, or an outside P0,/);
-  // the two sentences that let one round read opposite scoping are gone, in either shape
-  assert.doesNotMatch(brief, /do not re-review unchanged parts/i);
-  assert.doesNotMatch(brief, /Problems that already existed outside the change are still reported/i);
-  assert.doesNotMatch(brief, /this is a delta review: only the changed sections/i);
-  assert.doesNotMatch(brief, /Report only new or changed findings/i);
-  // with no earlier text recorded, the same round still leaves the outside lane open
-  const noEarlierText = specReviewBrief("cancel-window", after, { advisory: [WINDOW_ADVISORY], round: 2 });
-  assert.doesNotMatch(noEarlierText, /Report only new or changed findings/i);
-  assert.match(noEarlierText, /predates it, in text the revision left alone, under Outside the change/);
-  // and the round still converges: the earlier blocker is answered by id, the delta is shown
-  assert.match(brief, /## Earlier P0\/P1 findings/);
-  assert.match(brief, /F1 \[P1\] the window has no stated timezone/);
-  assert.match(brief, /## Changed since the earlier review/);
-});
-
-test("spec review delta rounds: the first round keeps the full attack and takes no scoping rule", () => {
-  const first = specReviewBrief("cancel-window", WINDOW_SPEC());
-  assert.match(first, /Attack its Decisions/);
-  assert.match(first, /Re-test every "Not doing X" rejection/);
-  assert.match(first, /VERDICT: block/);
-  assert.doesNotMatch(first, /creates or exposes|predates the revision|this is a delta review|do not re-review unchanged parts/i);
-  assert.doesNotMatch(first, /^# Earlier review/m);
-  assert.doesNotMatch(first, /## Outside the change/);
-});
-
-test("spec review delta rounds: the reviewer corrects a drifted citation instead of reporting it", () => {
-  // file and symbol right, number off: fix the number inside the finding, never a finding alone
-  assert.match(SPEC_REVIEWER_SYSTEM, /never a finding on its own/);
-  // a citation whose content contradicts the claim stays as strong a finding as it was
-  assert.match(SPEC_REVIEWER_SYSTEM, /contradicted by its citation,? is a finding/);
-});
-
-test("spec review delta rounds: the follow-up prompt states the same boundary, and one system prompt serves both rounds", async () => {
-  const t = setup({ verify: "true", specReviewer: { mode: "always", maxRounds: 2 } });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  const promptLog = path.join(os.tmpdir(), `pb-spec-followup-prompt-${process.pid}.log`);
-  const systemLog = path.join(os.tmpdir(), `pb-spec-system-${process.pid}.log`);
-  for (const f of [promptLog, systemLog]) if (fs.existsSync(f)) fs.rmSync(f);
-  process.env.MOCK_SPEC_REVIEW = "block";
-  process.env.MOCK_SPEC_PROMPT_LOG = promptLog;
-  process.env.MOCK_SPEC_SYSTEM_LOG = systemLog;
-  try {
-    await t.run("build", "order-cancellation"); // round 1 reads the whole spec
-    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the checklist holds the transition, because the state machine enforces it.", mode: "append" });
-    await t.run("build", "order-cancellation"); // round 2 is the delta round
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SPEC_PROMPT_LOG;
-    delete process.env.MOCK_SPEC_SYSTEM_LOG;
-  }
-  const rounds = (file: string) => fs.readFileSync(file, "utf8").split("<<<round>>>").map((s) => s.trim()).filter(Boolean);
-  const [first, followUp] = rounds(promptLog);
-  assert.equal(rounds(promptLog).length, 2);
-  assert.equal(first, "Review the spec in the attached file.");
-  // the last text the follow-up reviewer reads, scoping the same way the brief does
-  assert.match(followUp, /Resolve every earlier P0\/P1 by id first/);
-  assert.match(followUp, /creates or exposes/);
-  assert.match(followUp, /predates the revision/);
-  assert.match(followUp, /Outside the change/);
-  assert.doesNotMatch(followUp, /report only new or changed/i);
-  // one system prompt for every round, so the citation rule binds the first look too
-  const systems = rounds(systemLog);
-  assert.equal(systems.length, 2);
-  for (const sys of systems) assert.match(sys, /never a finding on its own/);
-});
-
-test("spec review delta rounds: an earlier outside advisory rides into the next brief and stays in the record", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  const briefOut = path.join(os.tmpdir(), `pb-spec-carry-${process.pid}.md`);
-  if (fs.existsSync(briefOut)) fs.rmSync(briefOut);
-  process.env.MOCK_SPEC_REVIEW = "block-outside-advisory";
-  process.env.MOCK_SPEC_BRIEF_OUT = briefOut;
-  try {
-    await t.run("build", "order-cancellation"); // an in-scope P0 blocks; the outside P1 is carried
-    assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-    await t.callTool("pb_update_spec", {
-      name: "order-cancellation",
-      section: "Tasks",
-      content: "### T3: third file\nCreate T3.txt.\n- Acceptance: T3.txt exists (tests: T3)\n- Test: `test -f T3.txt`",
-      mode: "append",
-    });
-    delete process.env.MOCK_SPEC_REVIEW; // the revision answers the blocker: the next round passes
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SPEC_BRIEF_OUT;
-  }
-  const brief = fs.readFileSync(briefOut, "utf8");
-  assert.match(brief, /creates or exposes/);
-  assert.match(brief, /predates the revision/);
-  assert.match(brief, /### T3: third file/); // the revision is what it reviews
-  assert.match(brief, /## Earlier advisory findings \(context only\)/);
-  assert.match(brief, /\[P1 · Outside the change\] Context — src\/order\.ts names a transition with no guard/);
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.equal(reviews.length, 2);
-  assert.equal(reviews[1].verdict, "pass"); // the outside P1 never held the build
-  assert.equal(reviews[1].advisory.filter((f: { outside?: boolean }) => f.outside).length, 1);
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-// A follow-up brief shows the advisories carried from earlier rounds, but only as many as keep the
-// revision dominant: the whole list stays in the event and in the human's count.
-const carriedAdvisories = (priority: "P1" | "P2" | "P3", n: number, firstId: number) =>
-  Array.from({ length: n }, (_, i) => ({ id: `F${firstId + i}`, priority, title: `unmeasured window ${firstId + i}` }));
-const advisoryIds = (s: string) => [...s.matchAll(/^F(\d+) \[P[123]\]/gm)].map((m) => Number(m[1]));
-const NOTES = /lower advisories are in the review log/;
-
-test("spec review carry: a flood of P3 and P2 loses P3 first, never a P1", () => {
-  const flood = [...carriedAdvisories("P2", 5, 1), ...carriedAdvisories("P3", 5, 6)]; // F1-F5 P2, F6-F10 P3
-  const brief = specReviewBrief("order-cancellation", WINDOW_SPEC(), { advisory: flood, round: 2 });
-  // eight slots, filled from the top: all five P2 and the three P3 that came first
-  assert.deepEqual(advisoryIds(brief), [1, 2, 3, 4, 5, 6, 7, 8]);
-  assert.match(brief, NOTES);
-  assert.match(brief, /Dropped 2 of 10 for length/);
-  // with P1s in the carry, every slot they need is kept and only P3 goes
-  const mixed = [...carriedAdvisories("P1", 2, 1), ...carriedAdvisories("P2", 5, 3), ...carriedAdvisories("P3", 5, 8)];
-  const mixedBrief = specReviewBrief("order-cancellation", WINDOW_SPEC(), { advisory: mixed, round: 2 });
-  assert.deepEqual(advisoryIds(mixedBrief), [1, 2, 3, 4, 5, 6, 7, 8]); // both P1s, all five P2s, one P3
-  assert.match(mixedBrief, /Dropped 4 of 12 for length/);
-  assert.deepEqual(capCarriedAdvisories(mixed).filter((f) => f.priority === "P1").length, 2);
-  // a carry of nothing but P1 is shown whole: the cap never trades a P1 away
-  assert.equal(capCarriedAdvisories(carriedAdvisories("P1", 10, 1)).length, 10);
-});
-
-test("spec review carry: dropping keeps input order within a priority", () => {
-  const mixed = [...carriedAdvisories("P1", 2, 1), ...carriedAdvisories("P3", 3, 3), ...carriedAdvisories("P2", 5, 6)];
-  assert.deepEqual(
-    capCarriedAdvisories(mixed).map((f) => f.id),
-    ["F1", "F2", "F3", "F6", "F7", "F8", "F9", "F10"], // the last two P3 go; nothing moves
-  );
-  assert.equal(capCarriedAdvisories(mixed).length, 8); // only as many as needed are dropped
-});
-
-test("spec review carry: eight or fewer advisories render in full with no note", () => {
-  const eight = [...carriedAdvisories("P2", 4, 1), ...carriedAdvisories("P3", 4, 5)];
-  const brief = specReviewBrief("order-cancellation", WINDOW_SPEC(), { advisory: eight, round: 2 });
-  assert.deepEqual(advisoryIds(brief), [1, 2, 3, 4, 5, 6, 7, 8]);
-  assert.doesNotMatch(brief, NOTES);
-  assert.deepEqual(capCarriedAdvisories(eight), eight); // the limit itself is untouched, note included
-});
-
-test("spec review carry: the event and the post keep all ten advisories the brief dropped", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  const briefOut = path.join(os.tmpdir(), `pb-spec-carry-flood-${process.pid}.md`);
-  if (fs.existsSync(briefOut)) fs.rmSync(briefOut);
-  process.env.MOCK_SPEC_REVIEW = "advisory-flood"; // one blocker, ten P2/P3
-  process.env.MOCK_SPEC_BRIEF_OUT = briefOut;
-  try {
-    await t.run("build", "order-cancellation"); // the blocker holds T1; the ten are carried
-    assert.ok(!t.instructions.some((x) => /Task T1/.test(x)));
-    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Contracts", content: "- Cancellation writes an audit row before it returns.", mode: "append" });
-    delete process.env.MOCK_SPEC_REVIEW; // the next round answers the blocker and adds nothing
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SPEC_BRIEF_OUT;
-  }
-  const reviews = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review");
-  assert.equal(reviews.length, 2);
-  // the reviewer saw eight and was told where the rest lives
-  assert.equal(advisoryIds(fs.readFileSync(briefOut, "utf8")).length, 8);
-  assert.match(fs.readFileSync(briefOut, "utf8"), /Dropped 2 of 10 for length/);
-  // the round-to-round record and the human's count stay whole
-  assert.equal(reviews[1].advisory.length, 10);
-  assert.match(t.posts.find((p) => /not re-listed/.test(p))!, /10 earlier advisory findings carried/);
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-});
-
-test("spec review: restarting a started build never re-gates, however the spec changed", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("build", "order-cancellation"); // the review passes with an advisory and the build starts
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  await t.run("build", "order-cancellation"); // build as it stands: the recorded pass skips the gate
-  assert.ok(t.instructions.length > 0); // the build is underway
-  // The build's own spec writes change the text; a restart must not re-litigate them.
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Assumption: recorded after the start, because the build had begun.", mode: "append" });
-  const p = JSON.parse(t.read(".pi/pb/specs/order-cancellation/progress.json"));
-  p.session = "another-session.jsonl"; // the build is owned elsewhere; this session restarts it
-  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"), JSON.stringify(p));
-  process.env.MOCK_SPEC_REVIEW = "block"; // a re-gate here would stop the restart
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").length, 1);
-  assert.ok(!t.posts.some((x) => /changes needed before T1/.test(x)));
-  assert.ok(t.instructions.length > 1); // the restart went through
-});
-
 test("build: a spec rewrite that renumbers a task doesn't strand the resume at 'nothing left'", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -8154,79 +6630,6 @@ test("spec review: a spec edited while the review runs is not built on the stale
   assert.ok(t.notes.some((n) => /changed while it was under review/.test(n)));
 });
 
-test("spec review: the run is announced and watched while it works, and its transcript is linked", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await written(t);
-  process.env.MOCK_SPEC_REVIEW = "block";
-  process.env.MOCK_HOLD_MS = "500"; // the reviewer runs long enough to be watched
-  try {
-    const running = t.run("build", "order-cancellation");
-    await until(() => !!t.widgets.get("pb-spec-review"));
-    assert.match(t.widgets.get("pb-spec-review")!.join("\n"), /pb spec-review order-cancellation · \d+s/);
-    await running;
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_HOLD_MS;
-  }
-  assert.equal(t.widgets.get("pb-spec-review"), undefined); // cleared when the verdict lands
-  assert.ok(t.posts.some((p) => /▶ \*\*Spec review\*\* — a fresh reviewer attacks \*\*order-cancellation\*\* before T1/.test(p)));
-  assert.match(t.posts.at(-1)!, /changes needed before T1[\s\S]*The whole run: `pi --session \.pi\/pb\/sessions\/spec-review\/[^`]+\.jsonl`/);
-});
-
-test("spec review: a clean pass is announced with its transcript, and the run is recorded", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await written(t);
-  t.agent.script = diligent;
-  await t.run("build", "order-cancellation");
-  assert.ok(t.posts.some((p) => /\*\*Spec review\*\* — pass, no findings \(the recorded pass covers this text\)\.[\s\S]*The whole run: `pi --session \.pi\/pb\/sessions\/spec-review\//.test(p)));
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.verdict, "pass");
-  assert.equal(review.findings, 0);
-  assert.match(review.session, /spec-review\/.+\.jsonl$/);
-});
-
-test("spec review: specReviewer runs the same pass on the configured model and thinking", async () => {
-  const t = setup({ verify: "true", specReviewer: { model: "p/big", thinking: "high" } });
-  process.chdir(t.repo);
-  await written(t);
-  t.agent.script = diligent;
-  await t.run("build", "order-cancellation");
-  const review = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(review.model, "p/big");
-  assert.equal(review.thinking, "high");
-});
-
-test("spec review: the verdict notifies the desktop, for a human elsewhere", async () => {
-  const { setNotifySink } = await import("../extensions/pb/notify.ts");
-  const sent: string[][] = [];
-  setNotifySink((title, body) => sent.push([title, body]));
-  try {
-    const t = setup({ verify: "true", notify: true });
-    process.chdir(t.repo);
-    await written(t);
-    process.env.MOCK_SPEC_REVIEW = "block";
-    try {
-      await t.run("build", "order-cancellation");
-    } finally {
-      delete process.env.MOCK_SPEC_REVIEW;
-    }
-    assert.deepEqual(sent.at(-1), ["pb: spec review", "changes needed before T1"]);
-    // Amend the spec so the gate runs again: the advisory pass notifies while the build proceeds.
-    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-    process.env.MOCK_SPEC_REVIEW = "advisory";
-    try {
-      await t.run("build", "order-cancellation");
-    } finally {
-      delete process.env.MOCK_SPEC_REVIEW;
-    }
-    assert.deepEqual(sent.at(-1), ["pb: spec review", "1 advisory finding"]);
-  } finally {
-    setNotifySink(undefined);
-  }
-});
-
 test("spec: the pre-approval dry-run is watched like every other check", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
@@ -8243,200 +6646,6 @@ test("spec: the pre-approval dry-run is watched like every other check", async (
   assert.equal(t.widgets.get("pb-dry-run"), undefined); // cleared with the results
 });
 
-test("spec review parser: accepts Markdown bullets, headings and bold tags", async () => {
-  const { parseSpecReview } = await import("../extensions/pb/prompts.ts");
-  const parsed = parseSpecReview(
-    [
-      "## Resolutions",
-      "",
-      "- F1 — RESOLVED: spec.md:63 now enumerates the states",
-      "- **F2 — STILL OPEN:** spec.md:64 still allows the transition",
-      "",
-      "## Findings",
-      "",
-      "- [P1] Decisions — first",
-      "  Evidence: spec.md:12 says nothing about the first path",
-      "  Fix: fix one",
-      "* **[P2]** Contracts — second",
-      "  Fix: fix two",
-      "  Evidence: spec.md:20 names the wrong status",
-      "### [P3] Tasks — third",
-      "1. [P2] Answers — fourth",
-      "",
-      "## Verdict — VERDICT: block",
-    ].join("\n"),
-  );
-  assert.deepEqual(parsed.findings, [
-    { priority: "P1", title: "Decisions — first", evidence: "spec.md:12 says nothing about the first path", fix: "fix one" },
-    { priority: "P2", title: "Contracts — second", fix: "fix two", evidence: "spec.md:20 names the wrong status" },
-    { priority: "P3", title: "Tasks — third" },
-    { priority: "P2", title: "Answers — fourth" },
-  ]);
-  assert.deepEqual(parsed.resolutions, [
-    { id: "F1", status: "resolved", evidence: "spec.md:63 now enumerates the states" },
-    { id: "F2", status: "open", evidence: "spec.md:64 still allows the transition" },
-  ]);
-  assert.equal(parsed.block, true);
-  // The verdict is load-bearing even when the model writes no parseable finding line.
-  assert.deepEqual(parseSpecReview("VERDICT: block"), { findings: [], outside: [], resolutions: [], block: true });
-});
-
-test("spec review parser: evidence is its own line, in either order, and legacy answers still parse", async () => {
-  const { findingLine, parseSpecReview } = await import("../extensions/pb/prompts.ts");
-  const ordered = parseSpecReview(
-    ["[P1] Decisions — the guard is missing", "Evidence: spec.md:63 names no guard; src/order.ts:42 has none.", "Fix: add the guard", "VERDICT: block"].join("\n"),
-  );
-  assert.deepEqual(ordered.findings, [
-    {
-      priority: "P1",
-      title: "Decisions — the guard is missing",
-      evidence: "spec.md:63 names no guard; src/order.ts:42 has none.",
-      fix: "add the guard",
-    },
-  ]);
-  // Either order, and bold or bulleted labels, read the same.
-  const reversed = parseSpecReview(
-    ["- [P2] Contracts — the status is unproven", "  **Fix:** cite the code", "  **Evidence:** spec.md:20 names no status", "VERDICT: pass"].join("\n"),
-  );
-  assert.deepEqual(reversed.findings, [
-    { priority: "P2", title: "Contracts — the status is unproven", fix: "cite the code", evidence: "spec.md:20 names no status" },
-  ]);
-  // An answer from before the Evidence line still parses.
-  assert.deepEqual(parseSpecReview("[P2] Contracts — legacy\nFix: keep it\nVERDICT: pass").findings, [
-    { priority: "P2", title: "Contracts — legacy", fix: "keep it" },
-  ]);
-  assert.match(
-    findingLine(ordered.findings[0], 1),
-    /^1\. \[P1\] Decisions — the guard is missing\n   Evidence: spec\.md:63 names no guard; src\/order\.ts:42 has none\.\n   Fix: add the guard$/,
-  );
-});
-
-test("spec review parser: outside-change findings don't leak into the reviewed scope", async () => {
-  const { parseSpecReview } = await import("../extensions/pb/prompts.ts");
-  const parsed = parseSpecReview(
-    ["## Findings", "[P2] Decisions — in scope", "## Outside the change", "[P1] Context — pre-existing", "[P0] Context — a real blocker", "## Verdict — VERDICT: pass"].join("\n"),
-  );
-  assert.deepEqual(parsed.findings, [{ priority: "P2", title: "Decisions — in scope" }]);
-  assert.deepEqual(parsed.outside, [
-    { priority: "P1", title: "Context — pre-existing" },
-    { priority: "P0", title: "Context — a real blocker" },
-  ]);
-  assert.equal(parsed.block, true); // an outside P0 blocks even when the reviewer says pass
-  assert.equal(parseSpecReview("## Findings\n[P1] Inside — blocking\n## Outside the change\n[P1] Context — advisory\n## Verdict — VERDICT: pass").block, true);
-  assert.equal(parseSpecReview("## Findings\n(none)\n## Outside the change\n[P1] Context — advisory\nVERDICT: pass").block, false); // outside P1 does not
-  // A repeated earlier finding may carry its id; it is still a finding, so the contradiction is seen.
-  assert.deepEqual(parseSpecReview("## Findings\nF1 [P0] Decisions — unguarded\nVERDICT: pass").findings, [
-    { priority: "P0", title: "Decisions — unguarded" },
-  ]);
-});
-
-test("spec review parser: a resolution without evidence is still open", async () => {
-  const { parseSpecReview } = await import("../extensions/pb/prompts.ts");
-  assert.deepEqual(parseSpecReview("- F1 — RESOLVED:\n\nVERDICT: pass").resolutions, [{ id: "F1", status: "open", evidence: "" }]);
-  assert.deepEqual(parseSpecReview("- F1 — STILL OPEN: first\n- F1 — RESOLVED: second").resolutions, [{ id: "F1", status: "open", evidence: "first" }]); // open wins, whatever the order
-});
-
-test("spec review: a finding's rejected alternative survives the parser, capped, in any order", async () => {
-  const { parseSpecReview } = await import("../extensions/pb/prompts.ts");
-  const { FINDING_NOT_CHARS } = await import("../extensions/pb/store.ts");
-  const parsed = parseSpecReview(
-    ["[P1] Contracts — the bound names no owner", "Evidence: spec.md:12 says once per call and cites no code.", "Fix: name src/scan.ts:10 as the owner", "Not: dropping the cadence, because the cost it states is real", "VERDICT: block"].join("\n"),
-  );
-  assert.deepEqual(parsed.findings, [
-    {
-      priority: "P1",
-      title: "Contracts — the bound names no owner",
-      evidence: "spec.md:12 says once per call and cites no code.",
-      fix: "name src/scan.ts:10 as the owner",
-      alternative: "dropping the cadence, because the cost it states is real",
-    },
-  ]);
-  // A reviewer that writes Not: before Fix keeps both: a known label never ends the block.
-  const reordered = parseSpecReview(["- [P2] Tasks — two fixes in one", "  **Not:** the second option, because it doubles the gate", "  **Fix:** keep the one gate", "VERDICT: pass"].join("\n"));
-  assert.deepEqual(reordered.findings, [
-    { priority: "P2", title: "Tasks — two fixes in one", alternative: "the second option, because it doubles the gate", fix: "keep the one gate" },
-  ]);
-  // The rambling case the cap exists for: one field cannot inflate every later brief and the fix seed.
-  const long = parseSpecReview([`[P2] Tasks — a long rejection\nNot: ${"x".repeat(FINDING_NOT_CHARS + 400)}`, "VERDICT: pass"].join("\n"));
-  const kept = long.findings[0].alternative!;
-  assert.ok(kept.startsWith("x".repeat(FINDING_NOT_CHARS)), `the Not: line is stored at the cap, got ${kept.length}`);
-  assert.ok(kept.length < FINDING_NOT_CHARS + 60, `only the truncation notice is added, got ${kept.length}`);
-  assert.match(kept, /\[truncated /); // the cut is disclosed, as every stored cap does
-  // A line that is none of the three labels still ends the block, so a stray paragraph isn't eaten.
-  const ended = parseSpecReview(["[P2] Tasks — stop here", "Fix: keep it", "Not: one alternative", "A loose sentence after the block", "Fix: not this one", "VERDICT: pass"].join("\n"));
-  assert.deepEqual(ended.findings, [{ priority: "P2", title: "Tasks — stop here", fix: "keep it", alternative: "one alternative" }]);
-});
-
-test("spec review: a finding's rejected alternative is shown to the human and labelled for the fix lap", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  // the human post: the reviewer's Not: line reaches the person who decides
-  process.env.MOCK_SPEC_REVIEW = "block-noted";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.match(t.posts.at(-1)!, /Fix: name src\/scan\.ts:10 as the owner\n   Not: dropping the cadence, because the cost it states is real/);
-  assert.ok(!t.posts.at(-1)!.includes("Not: undefined"), t.posts.at(-1)!);
-
-  // a finding that stays open carries its rejected alternative into the next round's post as well
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the cadence is measured, because `npm run bench` says 120ms.", mode: "append" });
-  process.env.MOCK_SPEC_REVIEW = "still-open";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.match(
-    t.posts.at(-1)!,
-    /Earlier findings\*\*\nF1 \[P1\] Contracts — the bound names no owner\n   STILL OPEN: [^\n]*\n   Evidence: [^\n]*\n   Fix: name src\/scan\.ts:10 as the owner\n   Not: dropping the cadence, because the cost it states is real/,
-  );
-
-  // and the fix lap reads it as one rejected alternative, not a second instruction to implement
-  pausedWithFindings(t, "order-cancellation", [
-    { priority: "P1", file: "src/scan.ts", line: 10, title: "the bound names no owner", fix: "name src/scan.ts:10", alternative: "dropping the cadence, because the cost is real" },
-  ]);
-  t.agent.script = async (text, tool) => {
-    if (!text.startsWith("[pb:fix")) return;
-    await tool("pb_fix_done", { fixed: ["the bound names no owner"], skipped: [], tests: "ok" });
-  };
-  await t.run("fix");
-  const seed = t.instructions.find((x) => x.startsWith("[pb:fix"))!;
-  assert.match(seed, /Fix: name src\/scan\.ts:10\n   Not: dropping the cadence, because the cost is real/);
-  assert.match(seed, /already rejected — do not implement it/);
-});
-
-test("spec review: a rejected alternative rides into the next brief, and both shape lines pin its order", async () => {
-  const { specReviewBrief, specRepairBrief, SPEC_REPAIR_SYSTEM, findingLine } = await import("../extensions/pb/prompts.ts");
-  const noted = {
-    priority: "P1" as const,
-    id: "F1",
-    title: "Contracts — the bound names no owner",
-    evidence: "spec.md:12 cites no code",
-    fix: "name src/scan.ts:10",
-    alternative: "dropping the cadence, because the cost is real",
-  };
-  // the carry a delta round reads, and the plain case with no Not: to carry
-  assert.match(specReviewBrief("s", SPEC(), { prior: [noted] }), /Fix: name src\/scan\.ts:10\n   Not: dropping the cadence, because the cost is real/);
-  assert.equal(
-    findingLine({ priority: "P1", title: "Contracts — no owner", evidence: "spec.md:12", fix: "name src/scan.ts:10" }, 1),
-    "1. [P1] Contracts — no owner\n   Evidence: spec.md:12\n   Fix: name src/scan.ts:10",
-  );
-  // both shape lines ask for the three fields in the same order, with those exact labels
-  for (const brief of [specReviewBrief("s", SPEC()), specRepairBrief({ name: "s", answer: "[P1] x — y\nFix: z" })]) {
-    const shape = brief.split("\n").find((l) => l.startsWith("## Findings — "))!;
-    const at = (label: string) => shape.indexOf(label);
-    assert.ok(at("in this order") > 0, `the order is pinned: ${shape}`);
-    assert.ok(!shape.includes("in either order"), shape);
-    assert.ok(at("Evidence:") < at("Fix:"), shape);
-    assert.ok(at("Fix:") < at("Not:"), `the shape asks for Not: too: ${shape}`);
-    assert.ok(/Not: <[^>]+>/.test(shape), `Not: is described, not just named: ${shape}`);
-  }
-  assert.match(SPEC_REPAIR_SYSTEM, /Keep the reviewer's Not: line when the answer states one; never invent or import one\./);
-});
-
 test("review ledger: a rejected alternative is not a lead — no such key reaches the map", async () => {
   const { ledgerFindings } = await import("../extensions/pb/store.ts");
   const stored = ledgerFindings([
@@ -8451,85 +6660,7 @@ test("review ledger: a rejected alternative is not a lead — no such key reache
   assert.ok(!JSON.stringify(stored).includes('"alternative"'), JSON.stringify(stored));
 });
 
-test("spec reviewer: one fix, a cheap measurement and both bound attacks bind every round", async () => {
-  const { SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
-  // one fix, and the rejected alternative goes on Not:, not in the same line as an option
-  assert.match(
-    SPEC_REVIEWER_SYSTEM,
-    /Every finding carries one Fix: the single change you would make, with its reason in the same line\. If you weighed another and rejected it, one Not: line names it and why it loses\. If the choice is yours to make, make it — an either\/or inside Fix: is not a finding\./,
-  );
-  // measure it yourself, cheaply, and put the number on Evidence
-  assert.match(
-    SPEC_REVIEWER_SYSTEM,
-    /A fork that read-only inspection can settle, settle before you write, with one cheap, targeted, read-only command — a single git\/grep\/ls query, or one test-name-pattern run that finishes in seconds — and put the command and its result on the Evidence line\. Never the full suite, never a build or an install, and only a handful of commands per review\. What no cheap command settles, put to the human as a one-line question instead of a fork\./,
-  );
-  // the two attacks this spec exists for
-  assert.match(SPEC_REVIEWER_SYSTEM, /A Contract that bounds how often something runs, contradicted by the call frequency of the code it names, is a P1: the build implements the cadence as written\./);
-  assert.match(SPEC_REVIEWER_SYSTEM, /A bound whose owner is claimed as new but already performs that call in the tree is a finding: the escape hatch is being used to skip naming it\./);
-  // and the one sentence that scopes every rule above to the round
-  assert.match(
-    SPEC_REVIEWER_SYSTEM,
-    /In a follow-up round these rules bite on what the revision creates or exposes, wherever its text sits; a problem that predates the revision, in text the revision left alone, belongs under Outside the change\. The first round has no such section — there, everything is in scope\./,
-  );
-});
-
-test("spec reviewer: one fix reaches both rounds, and the living rule is qualified where it is stated", async () => {
-  const t = setup({ verify: "true", specReviewer: { mode: "always", maxRounds: 2 } });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  const systemLog = path.join(os.tmpdir(), `pb-spec-one-fix-${process.pid}.log`);
-  fs.rmSync(systemLog, { force: true });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  process.env.MOCK_SPEC_SYSTEM_LOG = systemLog;
-  try {
-    await t.run("build", "order-cancellation");
-    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the checklist holds the transition, because the state machine enforces it.", mode: "append" });
-    await t.run("build", "order-cancellation"); // the delta round
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SPEC_SYSTEM_LOG;
-  }
-  const systems = fs.readFileSync(systemLog, "utf8").split("<<<round>>>").map((s) => s.trim()).filter(Boolean);
-  fs.rmSync(systemLog, { force: true });
-  assert.equal(systems.length, 2);
-  for (const sys of systems) {
-    // one prompt for both rounds: the obligation and its scoping are in the text each round reads
-    assert.match(sys, /Every finding carries one Fix/);
-    assert.match(sys, /In a follow-up round these rules bite on what the revision creates or exposes/);
-  }
-
-  const { specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
-  const clause = /in a follow-up round, only where this revision created or exposed it; otherwise it belongs under Outside the change/i;
-  // the two brief copies of the living rule carry the clause on the sentence that states it
-  const brief = specReviewBrief("order-cancellation", SPEC(), { living: { digest: "Orders stand until cancelled.", uncovered: [{ capability: "order-cancellation", path: "specs/order-cancellation.md" }] } });
-  const livingLines = brief.split("\n").filter((l) => /living file but no delta/.test(l));
-  assert.equal(livingLines.length, 2, `both brief copies of the living rule are found:\n${livingLines.join("\n")}`);
-  for (const line of livingLines) assert.match(line, clause, line);
-  // the system prompt states the living rule, and its one scoping sentence is what qualifies it there
-  assert.match(SPEC_REVIEWER_SYSTEM, /The living requirement files under specs\/ are in force[\s\S]*?needs none\./);
-});
-
-test("spec reviewer: one fix scoped to its round — the first round has no Outside lane to be sent to", async () => {
-  const { specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
-  const first = specReviewBrief("order-cancellation", SPEC());
-  const delta = specReviewBrief("order-cancellation", SPEC().replace("Cancel orders.", "Cancel orders, and refund the paid part."), { prior: [WINDOW_BLOCKER], priorMarkdown: SPEC(), round: 2 });
-  // the scoping sentence names its own exception, because the section it points at exists only in a delta round
-  assert.match(SPEC_REVIEWER_SYSTEM, /The first round has no such section — there, everything is in scope\./);
-  assert.ok(!first.includes("## Outside the change"), "the first round's brief must not offer a lane it never parses");
-  assert.match(delta, /## Outside the change — existing problems the change did not cause/);
-});
-
-test("spec reviewer: one fix is a prompt rule — an either/or in Fix: still parses", async () => {
-  const { parseSpecReview } = await import("../extensions/pb/prompts.ts");
-  const hedged = parseSpecReview(["[P1] Contracts — two ways to fix this", "Evidence: spec.md:14 names no owner.", "Fix: either name src/scan.ts:10, or drop the cadence from the Contract", "VERDICT: block"].join("\n"));
-  // a lapse degrades to today's behaviour; it never loses the finding or the review
-  assert.deepEqual(hedged.findings, [
-    { priority: "P1", title: "Contracts — two ways to fix this", evidence: "spec.md:14 names no owner.", fix: "either name src/scan.ts:10, or drop the cadence from the Contract" },
-  ]);
-  assert.equal(hedged.block, true);
-});
-
-test("guide: the spec topic states the bound owner, the single fix per finding and the round's scope", async () => {
+test("guide: the spec topic states the bound owner, the single fix per finding and the one-pass scope", async () => {
   // /pb:help renders a pb:topic region, so guidance written outside one is invisible to its reader
   const doc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "extensions", "pb", "guide.md"), "utf8");
   const topic = doc.slice(doc.indexOf("<!-- pb:topic spec -->"), doc.indexOf("<!-- pb:topic build -->"));
@@ -8541,247 +6672,13 @@ test("guide: the spec topic states the bound owner, the single fix per finding a
     "`new: <path>` when nothing performs it yet",
     "`Assumption: … settles by …` when nothing in the project enforces the cadence",
     "a backticked command is a measurement, not an owner",
-    "its one fix follow on `Evidence:` and `Fix:` lines",
-    "one `Not:` line says what it was and why it loses",
-    "`/pb:fix` labelled as already rejected",
-    "never an either/or handed back to you",
-    "first round has no such section: there, everything is in scope",
+    "the single fix the reviewer would make",
+    "that reason belongs in the same fix line",
+    "not as an either/or handed back to you",
+    "it is the only one: there are no rounds, no carry and no outside lane",
+    "Only a **P0** blocks the build",
+    "A pass covers exactly the text it saw",
   ]) assert.match(topic, says(claim), claim);
-});
-
-test("spec review gate: a pass covers only the text it saw", () => {
-  const pass = { type: "spec-review", verdict: "pass", hash: "h" };
-  assert.deepEqual(specReviewGate([pass], "h"), { action: "skip" });
-  assert.deepEqual(specReviewGate([pass], "h2"), { action: "review", prior: [], advisory: [], nextId: 1, round: 2, blockingRounds: 0 });
-  assert.deepEqual(specReviewGate([], "h"), { action: "review", prior: [], advisory: [], nextId: 1, round: 1, blockingRounds: 0 });
-});
-
-test("spec review gate: a standing block is re-posted, not re-run", () => {
-  const f = { priority: "P1", title: "unguarded transition", fix: "guard it" };
-  const p2 = { priority: "P2", title: "unmeasured window", fix: "measure it" };
-  const block = { type: "spec-review", verdict: "block", hash: "h", reported: [f, p2] };
-  const pass = { type: "spec-review", verdict: "pass", hash: "h" };
-  assert.deepEqual(specReviewGate([block], "h"), { action: "repost", findings: [{ ...f, id: "F1" }], advisory: [{ ...p2, id: "F2" }] }); // only P0/P1 block; P2/P3 carry
-  assert.deepEqual(specReviewGate([block], "h2"), {
-    action: "review",
-    prior: [{ ...f, id: "F1" }],
-    advisory: [{ ...p2, id: "F2" }],
-    nextId: 3,
-    round: 2,
-    blockingRounds: 1,
-  });
-  assert.deepEqual(specReviewGate([pass, block], "h"), { action: "repost", findings: [{ ...f, id: "F1" }], advisory: [{ ...p2, id: "F2" }] }); // the last verdict rules
-  assert.deepEqual(specReviewGate([block, pass], "h"), { action: "skip" });
-  assert.deepEqual(specReviewGate([{ ...block, reported: [] }], "h"), { action: "review", prior: [], advisory: [], nextId: 1, round: 2, blockingRounds: 0 }); // nothing to re-post
-});
-
-test("spec review gate: only in-scope P0/P1 and outside P0 block; carried advisories ride along", () => {
-  const f = { priority: "P1", title: "unguarded transition", fix: "guard it" };
-  const p2 = { priority: "P2", title: "unmeasured window" };
-  const p3 = { priority: "P3", title: "wording" };
-  const outsideP1 = { priority: "P1", title: "pre-existing weakness", outside: true };
-  const outsideP0 = { priority: "P0", title: "pre-existing hazard", outside: true };
-  const block = { type: "spec-review", verdict: "block", hash: "h", reported: [{ ...f, id: "F4" }, { ...p2, id: "F5" }], advisory: [{ ...p3, id: "F6" }], markdown: "old", nextId: 7, round: 3 };
-  assert.deepEqual(specReviewGate([block], "h2"), {
-    action: "review",
-    prior: [{ ...f, id: "F4" }],
-    advisory: [{ ...p2, id: "F5" }, { ...p3, id: "F6" }],
-    markdown: "old",
-    nextId: 7,
-    round: 4,
-    blockingRounds: 1,
-  });
-  // A block verdict with only P2/P3 has nothing blocking to re-post: re-run it instead.
-  const advisoryOnly = { type: "spec-review", verdict: "block", hash: "h", reported: [p2] };
-  assert.deepEqual(specReviewGate([advisoryOnly], "h"), { action: "review", prior: [], advisory: [{ ...p2, id: "F1" }], nextId: 2, round: 2, blockingRounds: 0 });
-  // An outside P1 is advisory: it never becomes a standing blocker on the next round.
-  const outsidePass = { type: "spec-review", verdict: "pass", hash: "h", reported: [outsideP1] };
-  assert.deepEqual(specReviewGate([outsidePass], "h2"), { action: "review", prior: [], advisory: [{ ...outsideP1, id: "F1" }], nextId: 2, round: 2, blockingRounds: 0 });
-  // An outside P0 does: it is re-posted until fixed, and counts toward the cap.
-  const outsideBlock = { type: "spec-review", verdict: "block", hash: "h", reported: [outsideP0] };
-  assert.deepEqual(specReviewGate([outsideBlock], "h"), { action: "repost", findings: [{ ...outsideP0, id: "F1" }], advisory: [] });
-  assert.equal((specReviewGate([{ ...outsideBlock, hash: "h1" }, { ...outsideBlock, hash: "h2" }], "h3", 2) as { action: string }).action, "manual");
-});
-
-test("spec review gate: the round cap turns a changed blocked spec over to the human", () => {
-  const f = { priority: "P0", title: "unguarded transition" };
-  const block = { type: "spec-review", verdict: "block", hash: "h1", reported: [f], markdown: "one", nextId: 2, round: 1 };
-  const second = { type: "spec-review", verdict: "block", hash: "h2", reported: [{ ...f, id: "F1" }], markdown: "two", nextId: 2, round: 2 };
-  assert.equal((specReviewGate([block, second], "h3", 3) as { action: string }).action, "review"); // still under the cap
-  const capped = specReviewGate([block, second], "h3", 2);
-  assert.equal(capped.action, "manual");
-  assert.equal(capped.action === "manual" && capped.reason, "cap");
-  assert.equal(capped.action === "manual" && capped.blockingRounds, 2);
-  // A pass (or a forced acceptance) closes the cycle: the next review starts the count again.
-  const pass = { type: "spec-review", verdict: "pass", hash: "h3", markdown: "three", nextId: 2, round: 3 };
-  assert.deepEqual(specReviewGate([block, second, pass], "h4", 2), { action: "review", prior: [], advisory: [], markdown: "three", nextId: 2, round: 4, blockingRounds: 0 });
-  const forced = { type: "spec-review", verdict: "forced", hash: "h3" };
-  assert.equal((specReviewGate([block, second, forced], "h4", 2) as { action: string }).action, "review");
-});
-
-test("spec review: --force past the cap records the standing findings as accepted", async () => {
-  const t = setup({ verify: "true", specReviewer: { mode: "always", maxRounds: 2 } });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "block";
-  try {
-    await t.run("build", "order-cancellation");
-    await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the transition is guarded by the checklist, because the state machine enforces it.", mode: "append" });
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Rebuttal: the checklist also names the owner, so a second guard is unnecessary.", mode: "append" });
-  await t.run("build", "order-cancellation --force"); // past the cap: build it, recording what was overridden
-  assert.ok(t.instructions.some((x) => /Task T1/.test(x)));
-  const forced = t.events("order-cancellation").filter((e: { type: string }) => e.type === "spec-review").at(-1)!;
-  assert.equal(forced.verdict, "forced");
-  assert.deepEqual(forced.reported.map((f: any) => [f.id, f.priority]), [["F1", "P0"]]);
-  assert.match(t.posts.find((p) => /recorded as accepted/.test(p))!, /1 standing finding/);
-});
-
-test("spec review gate: an unreadable block hands over the prose instead of re-running", () => {
-  const blocked = { type: "spec-review", verdict: "block", hash: "h", findings: 0, unparsed: true, prose: "The spec has an unstated empty path." };
-  const gate = specReviewGate([blocked], "h");
-  assert.equal(gate.action, "manual");
-  assert.equal(gate.action === "manual" && gate.reason, "unparsed");
-  assert.equal(gate.action === "manual" && gate.prose, "The spec has an unstated empty path.");
-  assert.equal(gate.action === "manual" && gate.blockingRounds, 1); // an unreadable block still counts: it cannot be shown harmless
-  const second = { ...blocked, hash: "h2" };
-  const capped = specReviewGate([blocked, second], "h3", 2);
-  assert.equal(capped.action === "manual" && capped.reason, "cap");
-  assert.equal(capped.action === "manual" && capped.prose, "The spec has an unstated empty path."); // the cap still shows the last words
-});
-
-test("spec review gate: a forced event settles nothing and no hash means no coverage", () => {
-  const f = { priority: "P1", title: "unguarded transition", fix: "guard it" };
-  const block = { type: "spec-review", verdict: "block", hash: "h", reported: [f] };
-  const forced = { type: "spec-review", verdict: "forced", hash: "h" };
-  assert.deepEqual(specReviewGate([block, forced], "h"), { action: "repost", findings: [{ ...f, id: "F1" }], advisory: [] });
-  assert.deepEqual(specReviewGate([{ type: "spec-review", verdict: "pass" }], "h"), { action: "review", prior: [], advisory: [], nextId: 1, round: 2, blockingRounds: 0 }); // pre-hash events don't cover
-});
-
-test("spec review risk: only security, data, external surfaces, threats and large specs are auto-reviewed", () => {
-  const riskOf = (md: string) => specReviewRisk(md, parseSpec(md).spec!);
-  assert.deepEqual(riskOf(SPEC()), { review: false });
-  assert.equal(riskOf(SPEC().replace("Cancel orders.", "Cancel another tenant's orders.")).reason, "security-sensitive (tenant)");
-  assert.equal(riskOf(SPEC().replace("Cancel orders.", "Cancel orders and persist the reason in the database.")).reason, "persisted data");
-  assert.equal(riskOf(SPEC().replace("Cancel orders.", "Add a JSON cancel event for clients.")).reason, "an external surface");
-  assert.equal(riskOf(SPEC().replace("## Decisions", "## Threats and abuse\nAnyone with the button can reach it; ownership proves the right; prevention is the ownership check.\n## Decisions")).reason, "threats and abuse");
-  assert.equal(riskOf(SPEC().replace("## Decisions", "## Migration and rollback\nExisting records move to the new shape.\n## Decisions")).reason, "a migration");
-  assert.deepEqual(riskOf(SPEC().replace("## Decisions", "## Migration and rollback\nNone — this change stores nothing.\n## Decisions")), { review: false }); // an explicit none is not a migration
-  // a behavioural spec that names a living capability without a delta gets the review too
-  assert.equal(specReviewRisk(SPEC(), parseSpec(SPEC()).spec!, true).reason, "touches a living capability without a delta");
-  assert.deepEqual(riskOf(SPEC()), { review: false }); // the flag is the caller's reading of the living files, not a guess here
-  const four = SPEC({
-    tasks: [1, 2, 3, 4]
-      .map((n) => `### T${n}: file ${n}\nCreate T${n}.txt.\n- Acceptance: T${n}.txt exists (tests: T${n})\n- Test: \`test -f T${n}.txt\``)
-      .join("\n\n"),
-  });
-  assert.equal(riskOf(four).reason, "4 tasks");
-});
-
-test("spec review config: the defaults are auto and 2, and bad values fall back safely", async () => {
-  const t = setup();
-  const file = path.join(t.repo, ".pi/pb/config.json");
-  const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-  delete raw.specReviewer;
-  fs.writeFileSync(file, JSON.stringify(raw));
-  const { Store } = await import("../extensions/pb/store.ts");
-  const defaults = new Store(t.repo).config().specReviewer;
-  assert.equal(defaults.mode, "auto");
-  assert.equal(defaults.maxRounds, 2);
-
-  raw.specReviewer = { mode: "sometimes", maxRounds: 0 };
-  fs.writeFileSync(file, JSON.stringify(raw));
-  const sanitized = new Store(t.repo).config().specReviewer;
-  assert.equal(sanitized.mode, "auto");
-  assert.equal(sanitized.maxRounds, 1);
-});
-
-test("spec review delta: only changed sections and tasks move, with the binding context", () => {
-  const before = SPEC();
-  const after = before.replace("- Acceptance: T2.txt exists", "- Acceptance: T2.txt exists and is empty");
-  const delta = specReviewDelta(before, after);
-  assert.match(delta.changed, /### T2: second file/);
-  assert.match(delta.changed, /exists and is empty/);
-  assert.doesNotMatch(delta.changed, /### T1: first file/); // unchanged tasks stay out
-  assert.match(delta.earlier, /T2\.txt exists/);
-  assert.match(delta.context, /## Decisions/);
-  assert.match(delta.context, /## Contracts/);
-  assert.match(delta.context, /# Order cancellation/);
-  assert.doesNotMatch(delta.context, /### T2: second file/); // the changed block is not repeated as context
-  const removed = specReviewDelta(before, before.replace(/## Contracts\n[\s\S]*?(?=## Tasks)/, ""));
-  assert.deepEqual(removed.removed, ["## Contracts"]);
-  assert.match(removed.earlier, /T1 owns T1\.txt/);
-});
-
-test("spec review: a follow-up brief carries the delta, ids and resolutions", async () => {
-  const { specReviewBrief } = await import("../extensions/pb/prompts.ts");
-  const md = "# Order cancellation\n\n## Decisions\n- Only PENDING orders can be cancelled.\n";
-  const fresh = specReviewBrief("order-cancellation", md);
-  assert.doesNotMatch(fresh, /Earlier review/);
-  assert.doesNotMatch(fresh, /STILL OPEN/);
-  const followUp = specReviewBrief("order-cancellation", md, {
-    prior: [{ id: "F1", priority: "P0", title: "unguarded transition", evidence: "spec.md:12 has no guard", fix: "guard it" }],
-    priorMarkdown: "# Order cancellation\n\n## Decisions\n- Any order can be cancelled.\n",
-    advisory: [{ id: "F2", priority: "P2", title: "unmeasured window" }],
-    round: 2,
-  });
-  assert.match(followUp, /# Earlier review/);
-  assert.match(followUp, /delta round: the revision below is what you are reviewing/);
-  assert.match(followUp, /## Binding context \(unchanged by this revision\)[\s\S]*# Order cancellation/);
-  assert.match(followUp, /## Changed since the earlier review[\s\S]*Only PENDING orders can be cancelled\./);
-  assert.match(followUp, /## Earlier form of the changed parts[\s\S]*Any order can be cancelled\./);
-  assert.match(followUp, /F1 \[P0\][\s\S]*unguarded transition/);
-  assert.match(followUp, /Evidence: spec\.md:12 has no guard/);
-  assert.match(followUp, /Fix: guard it/);
-  assert.match(followUp, /F2 \[P2\][\s\S]*unmeasured window/);
-  assert.match(followUp, /Do not re-report/); // advisory findings are context, not new findings
-  assert.match(followUp, /RESOLVED:/);
-  assert.match(followUp, /STILL OPEN:/);
-  assert.match(followUp, /judge the problem, not whether your suggested fix was copied/); // each earlier blocker is judged, not assumed
-  assert.match(followUp, /Attack its Decisions/); // the changed parts still get the full attack
-  assert.match(followUp, /## Outside the change/); // pre-existing problems have their own, mostly advisory, lane
-});
-
-test("spec review: the brief attacks decisions and demands an exact verdict", async () => {
-  const { specReviewBrief } = await import("../extensions/pb/prompts.ts");
-  const b = specReviewBrief("order-cancellation", "# Order cancellation\n\n## Decisions\n- Only PENDING orders can be cancelled.\n");
-  assert.match(b, /Attack its Decisions/);
-  assert.match(b, /Not doing/);
-  assert.match(b, /quantitative claim/);
-  assert.match(b, /nothing to do/);
-  assert.match(b, /Goal and Out of scope/);
-  assert.match(b, /Cross-section/);
-  assert.match(b, /instead of a different state|different state|observable behavior/i);
-  assert.match(b, /path:line that does not resolve/);
-  assert.match(b, /Migration and rollback/);
-  assert.match(b, /every Test: command is one this repo can run/);
-  assert.match(b, /P0 —/);
-  assert.match(b, /P1 —/);
-  assert.match(b, /concrete failure/);
-  assert.match(b, /same concrete fix/);
-  assert.match(b, /No findings is fine/);
-  assert.match(b, /self-check/i);
-  assert.match(b, /what goes wrong, for whom, and where/);
-  assert.match(b, /Evidence: <the spec quote, code fact or file:line that shows it>/);
-  assert.match(b, /VERDICT: (block|pass)/);
-});
-
-test("spec review: an empty-path P1 blocks the build before T1", async () => {
-  const t = setup({ verify: "true" });
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  process.env.MOCK_SPEC_REVIEW = "empty";
-  try {
-    await t.run("build", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  assert.match(t.posts.at(-1)!, /changes needed before T1/);
-  assert.match(t.posts.at(-1)!, /stale banner/);
-  assert.ok(!t.instructions.some((x) => /Task T1/.test(x))); // never launched
 });
 
 test("review: the prompts merge same-fix findings and calibrate framing", async () => {
@@ -8844,8 +6741,8 @@ test("review: findings with the same concrete fix merge; distinct ones stay spli
 test("review: the brief carries stale prose references for judgment, absent when clean", async () => {
   const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
   const base = { changed: [], stat: "", check: "", focus: "" };
-  assert.match(reviewerBrief({ ...base, living: "", staleRefs: [{ symbol: "oldHelperName", referrers: ["REF.md:1"] }] }), /Possibly stale prose references[\s\S]*oldHelperName: REF\.md:1/);
-  assert.doesNotMatch(reviewerBrief({ ...base, living: "" }), /Possibly stale prose/);
+  assert.match(reviewerBrief({ ...base, staleRefs: [{ symbol: "oldHelperName", referrers: ["REF.md:1"] }] }), /Possibly stale prose references[\s\S]*oldHelperName: REF\.md:1/);
+  assert.doesNotMatch(reviewerBrief({ ...base }), /Possibly stale prose/);
 });
 
 test("build: a rename that orphans a prose citation is flagged at completion", async () => {
@@ -8926,11 +6823,11 @@ test("spec: every observable contract value cites the code or test that pins it"
   }
   assert.match(specPrompt("", []), /never infer a status or an order from what the design should do/);
   const review = specReviewBrief("s", "# S\n\n## Contracts\n- 200\n");
-  assert.match(review, /open the cited code path or test and check it produces exactly that value/);
-  assert.match(review, /P1 when the build would implement a wrong contract or a test that fails against correct code/);
-  assert.match(SPEC_REVIEWER_SYSTEM, /value inferred from the design, or contradicted by its citation, is a finding/);
+  assert.match(review, /# Spec to review: s[\s\S]*## Contracts\n- 200/);
+  assert.match(review, /one frozen draft[\s\S]*only a P0 blocks/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /every observable contract value is backed by the code path or test it cites/);
   assert.match(SPEC_REVIEWER_SYSTEM, /one sentence a tired human can act on: what goes wrong, for whom, and where/);
-  assert.match(SPEC_REVIEWER_SYSTEM, /supporting trace .* on its Evidence line/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /supporting evidence and the single change/);
 });
 
 test("contract values are computed: the format shows each formula's result for the cases Acceptance pins", async () => {
@@ -8960,7 +6857,6 @@ test("build: a task stays narrow, edits structured files literally, and leaves t
     assert.match(p, /full-suite run/);
   }
   assert.match(specPrompt("", []), /Split work that bundles several independent changes/);
-  assert.match(specReviewBrief("s", "# S\n"), /Task size: each task is one coherent change/);
 });
 
 test("spec: a task naming a full-suite run gets an advisory, not a rejection", async () => {
@@ -9014,10 +6910,8 @@ test("plan ends decided: the exit criteria demand answered attack questions and 
 });
 
 test("spec review defers to points the spec marks decided, absent new evidence", async () => {
-  const { specReviewBrief } = await import("../extensions/pb/prompts.ts");
-  const b = specReviewBrief("s", "# S\n\n## Decisions\n- d\n");
-  assert.match(b, /check for new evidence/);
-  assert.match(b, /comment only/);
+  const { SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  assert.match(SPEC_REVIEWER_SYSTEM, /point the spec marks decided is settled: check for new evidence, and comment only when you find it/);
 });
 
 

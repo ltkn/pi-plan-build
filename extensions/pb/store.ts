@@ -1,8 +1,7 @@
 /**
  * On-disk state: .pi/pb/config.json, one folder per spec under .pi/pb/specs/<name>/
- * (spec.md, approved.md, progress.json, checkpoints.json, events.jsonl), finished specs
- * under .pi/pb-archive/, which ignores itself in git, and the living requirement
- * base under specs/ in the project, which is meant to be committed.
+ * (spec.md, approved.md, progress.json, checkpoints.json, events.jsonl), and finished
+ * specs under .pi/pb-archive/, which ignores itself in git.
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -15,8 +14,6 @@ import { agentDir } from "./standards.ts";
 export const PREFIX = "pb";
 export const PB_DIR = path.join(".pi", "pb");
 export const ARCHIVE_DIR = path.join(".pi", "pb-archive");
-/** The living requirement base: project knowledge, not pb run state, so it is meant to be committed. */
-export const REQUIREMENTS_DIR = "specs";
 
 export type Gate = "tests" | "build" | "none";
 
@@ -58,12 +55,9 @@ export interface Config {
   /**
    * The fresh spec reviewer before T1: model and thinking level (unset model = your session's;
    * unset thinking = Pi's default for that model). Point it at the build model when you want the
-   * plan checked by the model that will implement it. `mode` decides when it runs: "auto" reviews
-   * security-sensitive, persisted-data, external-surface, threat-laden and large specs (the default),
-   * "always" reviews every spec, and "off" skips the automatic pass. `maxRounds` caps automatic
-   * blocking rounds: after that, a human decides instead of the loop reviewing forever.
+   * plan checked by the model that will implement it. Every ready spec gets one pass.
    */
-  specReviewer: { model?: string; thinking?: string; mode: "auto" | "always" | "off"; maxRounds: number };
+  specReviewer: { model?: string; thinking?: string };
   /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
   freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
@@ -106,7 +100,7 @@ export const DEFAULT_CONFIG: Config = {
   testOutputCap: 4000,
   checkpoints: true,
   reviewer: { verify: true, security: "auto" },
-  specReviewer: { mode: "auto", maxRounds: 2 },
+  specReviewer: {},
   freshAbove: 50,
   baseline: true,
   explorer: {},
@@ -124,7 +118,6 @@ function sanitizeConfig(raw: Partial<Config>): Config {
   const specReviewerRaw = typeof raw.specReviewer === "object" && raw.specReviewer !== null ? raw.specReviewer : {};
   const explorerRaw = typeof raw.explorer === "object" && raw.explorer !== null ? raw.explorer : {};
   const security = (reviewerRaw as { security?: unknown }).security;
-  const reviewMode = (specReviewerRaw as { mode?: unknown }).mode;
   return {
     verify: strOrNull((raw as { verify?: unknown }).verify, DEFAULT_CONFIG.verify),
     build: strOrNull((raw as { build?: unknown }).build, DEFAULT_CONFIG.build),
@@ -150,8 +143,6 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     specReviewer: {
       model: typeof (specReviewerRaw as { model?: unknown }).model === "string" ? (specReviewerRaw as { model: string }).model : undefined,
       thinking: typeof (specReviewerRaw as { thinking?: unknown }).thinking === "string" ? (specReviewerRaw as { thinking: string }).thinking : undefined,
-      mode: reviewMode === "auto" || reviewMode === "always" || reviewMode === "off" ? reviewMode : "auto",
-      maxRounds: Math.max(1, Math.floor(num((specReviewerRaw as { maxRounds?: unknown }).maxRounds, DEFAULT_CONFIG.specReviewer.maxRounds))),
     },
     freshAbove: num((raw as { freshAbove?: unknown }).freshAbove, DEFAULT_CONFIG.freshAbove),
     baseline: bool((raw as { baseline?: unknown }).baseline, true),
@@ -221,8 +212,6 @@ export type Phase = "written" | "building" | "paused" | "built" | "reviewed";
 export type Priority = "P0" | "P1" | "P2" | "P3";
 
 export interface Finding {
-  /** stable spec-review id assigned by the harness (F1, F2, …); absent elsewhere */
-  id?: string;
   priority: Priority;
   file?: string;
   line?: number;
@@ -230,20 +219,10 @@ export interface Finding {
   /** the trace that shows the problem: quoted spec text, a code fact, or the file:line that proves it */
   evidence?: string;
   fix?: string;
-  /** the alternative a spec reviewer weighed and rejected, from its `Not:` line; never carried into the ledger or the project map */
+  /** the alternative the reviewer weighed and rejected, from its `Not:` line; never carried into the ledger or the project map */
   alternative?: string;
   /** a pre-existing problem outside the change under review: still reported and pickable, at most P2 in a code review; only an outside P0 blocks a spec review */
   outside?: boolean;
-}
-
-/** A follow-up spec review's verdict on one earlier P0/P1 finding. */
-export interface SpecResolution {
-  id: string;
-  status: "resolved" | "open";
-  evidence: string;
-  /** the earlier finding, carried here so a resolved row still reads on its own */
-  title?: string;
-  priority?: Priority;
 }
 
 /** One acceptance criterion's review result. A criterion left out is never `met`. */
@@ -609,61 +588,6 @@ export class Store {
   }
   writeApprovedSpec(name: string, markdown: string): void {
     writeFileAtomic(path.join(this.specDir(name), "approved.md"), markdown.endsWith("\n") ? markdown : `${markdown}\n`);
-  }
-
-  /* ----------------------------- requirements ----------------------------- */
-
-  /**
-   * The living requirement base: one markdown file per capability in the project's `specs/`,
-   * outside `.pi/`, because it is durable project knowledge rather than run state.
-   */
-  requirementsDir(): string {
-    return path.join(this.cwd, REQUIREMENTS_DIR);
-  }
-
-  /** A capability's living file. The capability must be a valid name, like a spec folder. */
-  requirementPath(capability: string): string {
-    if (!KEBAB_NAME.test(capability)) throw new Error(`"${capability}" is not a valid capability name: use short kebab-case, e.g. order-cancellation`);
-    return path.join(this.requirementsDir(), `${capability}.md`);
-  }
-
-  /** A capability's living file relative to the project root, for reports and messages. */
-  requirementsRel(capability: string): string {
-    return path.relative(this.cwd, this.requirementPath(capability)).split(path.sep).join("/");
-  }
-
-  /** Whether git ignores a project-relative path: living requirements must not be silently local. */
-  isGitIgnored(relPath: string): boolean {
-    try {
-      execFileSync("git", ["check-ignore", "-q", "--", relPath], { cwd: this.cwd, stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  requirementNames(): string[] {
-    const dir = this.requirementsDir();
-    return fs.existsSync(dir)
-      ? fs
-          .readdirSync(dir, { withFileTypes: true })
-          .filter((d) => d.isFile() && d.name.endsWith(".md"))
-          .map((d) => d.name.slice(0, -3))
-          .filter((name) => KEBAB_NAME.test(name))
-          .sort()
-      : [];
-  }
-
-  readRequirementFile(capability: string): string | undefined {
-    try {
-      return fs.readFileSync(this.requirementPath(capability), "utf8");
-    } catch {
-      return undefined;
-    }
-  }
-
-  writeRequirementFile(capability: string, markdown: string): void {
-    writeFileAtomic(this.requirementPath(capability), markdown.endsWith("\n") ? markdown : `${markdown}\n`);
   }
 
   progress(name: string): Progress | undefined {
@@ -1183,18 +1107,13 @@ export class Store {
     fs.rmSync(legacy, { force: true });
   }
   private pendingBuildTTL = 60 * 60_000;
-  setPendingBuild(sessionFile: string | undefined, o: { review?: boolean } = {}): void {
+  setPendingBuild(sessionFile: string | undefined): void {
     this.migratePendingBuilds();
     if (!sessionFile) {
       fs.rmSync(this.pendingBuildsDir(), { recursive: true, force: true });
       return;
     }
-    writeFileAtomic(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: Date.now(), ...(o.review ? { review: true } : {}) }, null, 2)}\n`);
-  }
-  /** Whether the pending build was asked for with --review. */
-  pendingBuildReview(sessionFile: string | undefined): boolean {
-    if (!sessionFile) return false;
-    return readJson<{ review?: unknown }>(this.pendingBuildFile(sessionFile))?.review === true;
+    writeFileAtomic(this.pendingBuildFile(sessionFile), `${JSON.stringify({ session: sessionFile, at: Date.now() }, null, 2)}\n`);
   }
   pendingBuild(sessionFile: string | undefined): boolean {
     if (!sessionFile) return false;

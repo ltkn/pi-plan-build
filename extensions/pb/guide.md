@@ -17,9 +17,9 @@ step Pi shows a short **What now** block; `/pb:help <topic>` posts any section b
 2. **`/pb:build`**: first it asks, while you're here, how to go on once the
    spec is written: build here, build in a fresh session, or show you the spec
    first. Then Pi writes a short **spec** from the discussion (goal, findings,
-   decisions, tasks); a risky spec gets a review of its own before the first
-   task — fresh eyes, read-only — and a P0/P1 stops it for you to amend or
-   rebut; P2/P3 are shown and the build goes on (see `/pb:help spec`). Run
+   decisions, tasks); every spec gets one independent review before the first
+   task — fresh eyes, read-only — and a P0 stops it for you to amend or rebut;
+   P1-P3 are shown and the build goes on (see `/pb:help spec`). Run
    `/pb:build` again to go on after a block. A clean or advisory-only review
    starts by itself, so you can walk away. The
    tasks then run one by one, and the harness runs the full test suite after the
@@ -305,31 +305,6 @@ Then the sections:
 - **Migration and rollback**: only when data, a schema or a stored format
   outlives the change: how existing data moves, how it is rolled back, and what
   old and new code do while both run. "none — why" when nothing persists.
-- **Requirements: <capability>**: only when the change alters what a capability
-  guarantees. One section per capability, opened by `Overview:` — what the
-  capability is and what it refuses to do, in a sentence or two — then
-  `### ADDED`, `### MODIFIED` and `### REMOVED` groups of `### Requirement:`
-  blocks. `/pb:archive` writes the overview into the living file's
-  `## Overview`; a capability that has none must supply one, and a new overview
-  replaces the old. It is plain text and never a review criterion. Each
-  requirement opens with an `Invariant:` line — the rule that must hold for
-  every input; the tasks' acceptance lines are the examples that prove it. A
-  requirement written before invariants falls back to its statement. Older files
-  may still carry `#### Scenario:` blocks: they parse and merge, but they are
-  examples, never acceptance items. ADDED must be new; MODIFIED and REMOVED
-  must exist; MODIFIED replaces the requirement whole, and a rename is REMOVED
-  plus ADDED. The delta is checked when the spec is written, and
-  `/pb:archive` merges it into `specs/<capability>.md` or refuses before moving
-  anything. `specs/` is kept with the project, so the requirement base is
-  committed and reviewed with it.
-  Nobody has to open that file while the feature is being built: every task
-  handout, reset summary and review brief carries the standing invariants of the
-  capabilities the delta names, one line each, as they will read once this delta
-  lands — the delta's own `Overview:` where it states one, and any requirement it
-  modifies or removes left out, because as written it is no longer in force. A
-  base pb can't read is named by file instead of skipped quietly, and the reviewer
-  is told that breaking a standing invariant is a P1 finding, whether the change
-  broke it or made it unreachable.
 - **Open questions**: only while `Status: planning`.
 - **Tasks**: each as `### T1: <outcome>`, what must be true when it's done
   rather than how to build it, with `- Acceptance:` lines and, when it adds
@@ -398,65 +373,36 @@ shown in the session for later. Shown first, you choose: build here, build in a
 fresh session, **edit the spec first** (in an editor; it's saved only when it
 still parses, and the build then gets your version), or not now.
 
-**Before the first task, a risky spec gets a review of its own.** A build runs
-one when the spec touches a security-sensitive surface, carries Threats,
-persists data or carries a migration, changes an external contract, changes the
-requirement base, or has four or more tasks. Small,
-reversible specs skip it and rely on the write-time checks and your read:
-`/pb:build --review` asks for the pass anyway, and
-`"specReviewer": {"mode": "always"}` reviews every spec (`"off"` never
-starts one, though a spec an earlier review blocked still waits for `--review`
-or `--force`).
-The pass is fresh and read-only: it attacks every Decision, re-tests each "Not
-doing X" rejection, flags unmeasured numbers and undefined empty paths, and
-checks the spec against the repo: that its `path:line` citations and test
-commands resolve, that external surfaces have Contracts, and that
-persisted-data changes have a Migration and rollback answer. Every observable
-value in a Contract — a status, error, header, ordering, event or stored value
-— is checked against the code path or test the spec cites for it; a value with
-no citation, or one its citation contradicts, is a finding. A `path:line` whose
-file and symbol are right but whose number has drifted is corrected in place,
-never reported on its own. It runs on your session's model by default; set
-`"specReviewer": {"model": "provider/id"}` (or point it at `buildModel`) when
-you want another model, such as the implementer, to validate the plan.
+**Before the first task, every spec gets one independent review.** The pass is
+fresh and read-only, and it is the only one: there are no rounds, no carry and
+no outside lane. It attacks every Decision, re-tests each "Not doing X"
+rejection, flags unmeasured numbers and undefined empty paths, and checks the
+spec against the repo: that its `path:line` citations and test commands
+resolve, that external surfaces have Contracts, and that persisted-data
+changes have a Migration and rollback answer. Every observable value in a
+Contract — a status, error, header, ordering, event or stored value — is
+checked against the code path or test the spec cites for it; a value with no
+citation, or one its citation contradicts, is a finding. It runs on your
+session's model by default; set `"specReviewer": {"model": "provider/id",
+"thinking": "high"}` (or point it at `buildModel`) when you want another model,
+such as the implementer, to validate the plan.
 
-Only a P0 or P1 stops the build before the first task; P2/P3 are shown and the
-build carries on, with the findings recorded beside the spec. A finding's first
-line is one sentence you can act on — what goes wrong, for whom, and where — and
-its trace and its one fix follow on `Evidence:` and `Fix:` lines: the single
-change the reviewer would make, with its reason. If it weighed another option
-and rejected it, one `Not:` line says what it was and why it loses; that line
-is kept, shown to you, re-read by the next round, and handed to `/pb:fix`
-labelled as already rejected, so a discarded idea is not quietly
-re-implemented. A choice the reviewer can settle by looking, it settles itself
-with one cheap read-only command and puts the command and its number on
-`Evidence:` — never a full test run, and never an either/or handed back to you;
-what no cheap command settles becomes a one-line question. The chat result
-keeps earlier findings (with their resolution status) apart from new blocking
-ones; the full text stays in the recorded review and its linked session. A
-block means amend the spec (or record a rebuttal in Decisions) and run
-`/pb:build` again: the next pass reviews the revision against the full spec and
-the earlier findings, and judges each earlier P0/P1 against the new text first.
-Scoping there is by responsibility, not location, and it is the same rule for
-everything the reviewer checks: whatever the revision creates or exposes is a
-finding wherever its text sits — a Decisions edit that contradicts untouched
-Contracts text blocks, or a living capability the revision newly touches
-without its delta — and only a problem that predates the revision, in text the
-revision left alone, goes under Outside the change, where only a P0 blocks and
-the rest carries with the spec. The first round has no such section: there,
-everything is in scope. That carry is bounded in the reviewer's view only: it
-lists at most eight earlier advisories, never dropping a P1 and losing P3
-before P2, and names how many it left out — the recorded review and the count
-in the post keep all of them. An unchanged blocked spec is re-posted, not
-re-reviewed. After `maxRounds` blocking rounds (2 by default) the loop stops
-and the next
-changed spec waits for you: `/pb:build --review` spends one more round, or
-`/pb:build --force` builds it as it stands and records the standing findings
-as accepted. A block whose answer cannot be parsed is reformatted once; if
-that fails too, the reviewer's own prose is shown and nothing re-runs until
-you amend or ask with `--review`. Only the way into a build is gated: once
-the first task has started, spec edits are the code reviewer's to judge, not
-re-reviewed at plan level.
+Only a **P0** blocks the build: a security or authorization hole, data loss or
+corruption, or a contract contradiction that cannot be built as written. P1-P3
+are advisory: they are shown to you and the build carries on. A finding has a
+priority, a one-sentence title naming what goes wrong and where, and optionally
+its file, line and the single fix the reviewer would make. If it weighed
+another fix and rejected it, that reason belongs in the same fix line, not as
+an either/or handed back to you. A choice the reviewer can settle by looking,
+it settles itself with one cheap read-only command and puts the command and its
+result in the finding — never a full test run. The findings, the pass and the
+full transcript are recorded beside the spec.
+
+A pass covers exactly the text it saw: a later `/pb:build` reuses that verdict
+while the spec is unchanged, re-posting a standing P0 instead of running again.
+Editing the spec makes the next build start review the new text. Once the first
+task has started, spec edits are the code reviewer's to judge, not re-reviewed
+at plan level.
 
 **Read the plan yourself, in this order.** The spec reviewer is a second pair
 of eyes, not a substitute for yours:
@@ -513,10 +459,9 @@ more than half full (`freshAbove`) or when `buildModel` names another model
 model, uncached); `/pb:build --fresh` asks for one directly: a new session
 named "build: <spec>", seeded with the spec, on your model and thinking level.
 
-Before the first task, a risky spec gets its own fresh-eyes review (see
-`/pb:help spec`): P0/P1 findings stop the build there for you to read, P2/P3
-are shown and carried, and `/pb:build --review` asks for a pass that would be
-skipped. `/pb:build --force` builds it as it stands instead. The implementer
+Before the first task, every spec gets one independent fresh-eyes review (see
+`/pb:help spec`): only a P0 stops the build there for you to read; P1-P3 are
+shown as advisory findings and the build carries on. The implementer
 then checks the spec's paths, interfaces and test commands against the repo
 before coding; a spec that cannot be built as written stops instead of being
 worked around.
@@ -564,8 +509,7 @@ rollback, Threats and abuse (`Threats` reads as the same section) and Acceptance
 bind the build: changing one takes a `pb_ask`. How to build it is the build's: a better way found while
 coding is taken, and a change to the Design goes in Decisions. Every task handout,
 check retry, coherence pass and fix lap carries those binding sections, the
-requirement rules and task acceptance lines, the standing guarantees of any capability its
-requirement delta touches, and the finished tasks' caveats, rejections and open
+task acceptance lines, and the finished tasks' caveats, rejections and open
 items as a compact block. It is sized from your model's context window (a tenth of
 it, with a stated minimum, so even a window too small for the reserve gets a real
 limit), and nothing inside a section is shortened: a block that still runs over
@@ -594,7 +538,7 @@ build's state, written by pb, not by a model.
 `checkpointAt` (75% of its window, always before Pi would compact), pb resets it
 right there, between two tasks, where nothing is half-done. The build goes on
 from a summary pb writes itself: the build's rules, every task with its
-report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's binding view — the same binding sections and requirement rules, bounded by your model's window with a stated minimum, naming any section it had to drop (Tasks and the rest stay in the spec) — the standing guarantees of what the spec's requirement delta touches, and the next task. The line it resets under leaves room for that view and the step after it, not for the whole spec, so a long spec doesn't force early resets. No summarizing model call,
+report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's binding view — the same binding sections, bounded by your model's window with a stated minimum, naming any section it had to drop (Tasks and the rest stay in the spec) — and the next task. The line it resets under leaves room for that view and the step after it, not for the whole spec, so a long spec doesn't force early resets. No summarizing model call,
 and nothing of the finished task is needed any more. Should a single task still
 run into Pi's own compaction, pb writes that summary too, adding the files the
 task has changed so far and the files read before, so it carries on instead of
@@ -750,9 +694,7 @@ authorization, default — since a guard can trust a different classifier than
 the router and be skipped.
 
 **Every task acceptance line is a checklist item.** Each task's
-`- Acceptance:` lines become `T1.1`, `T1.2`, … in reading order. Requirement
-invariants are binding rules checked for regressions, and legacy scenarios are
-examples — neither is a checklist id.
+`- Acceptance:` lines become `T1.1`, `T1.2`, … in reading order.
 The reviewer reports each one as **met** with evidence (file:line or test
 name), **not met**, or **not verified** with the reason.
 The checklist follows the spec as written, and every spec review uses the same
@@ -935,11 +877,8 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
   `pb.report/1`; a breaking change gets a new one.
 - **`/pb:archive`**: moves a finished spec to `.pi/pb-archive/` (which git
   ignores), so `/pb:build` and `/pb:status` only show live work, and offers to
-  update the project map (`/pb:help map`). A spec's requirement delta is merged
-  into `specs/` in the same step: a delta that no longer applies stops the
-  archive before anything moves, and if the spec can't be moved the living
-  files are put back. `specs/` is tracked with the project; the archive stays
-  local.
+  update the project map (`/pb:help map`). The approved spec moves with it; the
+  archive stays local, and git keeps the history of the specs that were live.
 <!-- /pb -->
 
 <!-- pb:topic rules -->
@@ -976,7 +915,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 **What now** — the spec is written, nothing is built yet
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
-- Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — risky specs are reviewed first: a P0/P1 stops it before the first task · more: `/pb:help spec`
+- Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — every spec is reviewed first: a P0 stops it before the first task · more: `/pb:help spec`
 <!-- /pb -->
 
 ### Build paused

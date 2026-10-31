@@ -12,8 +12,8 @@ build. Your engineering standards live in AGENTS.md, written once.
 /pb:compact [undo]    pb's compaction: planning, write the spec and reset to it (automatic at checkpointAt);
                       build, compact to the build's state
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
-                      (--fresh: in a new session from the spec; --review: run the spec review even where auto would skip)
-                      before the first task, risky specs get fresh eyes: P0/P1 findings stop the build until amended
+                      (--fresh: in a new session from the spec). Before T1, one fresh reviewer
+                      reads the frozen draft: P0 findings stop the build until amended; P1-P3 are advisory
 /pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default); /pb:review checks the delta after
 /pb:review [focus]    independent review, in fresh sessions you watch (spec pass, then adversarial pass), P0–P3, blocking findings
                       double-checked; follow-ups look only at what changed (--full: everything)
@@ -34,9 +34,9 @@ pi install git:github.com/ltkn/pi-plan-build@v1.37.0   # a tagged release
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
-pb writes its run state under `.pi/`, so add `.pi/` to your `.gitignore`. The
-one exception is the living requirement base: it lives in `specs/` and is meant
-to be committed with the project.
+pb writes its run state under `.pi/`, so add `.pi/` to your `.gitignore`.
+Archived specs under `.pi/pb-archive/` are local history; git is the durable
+record of the specs your project merged.
 
 ## The flow
 
@@ -50,8 +50,8 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
      and the session is reset to it (/pb:compact does it on demand)
 /pb:build
    → asks now, while you're here: build here / in a fresh session / show the spec
-   → Pi writes .pi/pb/specs/order-cancellation/spec.md and fresh eyes attack it
-     before the first task (P0/P1 findings stop the build until amended)
+   → Pi writes .pi/pb/specs/order-cancellation/spec.md and one fresh reviewer
+     reads it before the first task (P0 findings stop the build until amended)
    → one run: T1 → T2 → … (each: its tests seen failing, then passing)
      → coherence (3+ tasks) → full suite → fix → full suite ✓
    ✅ BUILD COMPLETE
@@ -99,21 +99,19 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 - **Undo means undo.** `/pb:undo` restores the files and rewinds the
   conversation to before the task, so a discarded attempt doesn't anchor the
   next one, and the cache stays warm.
-- **Fresh eyes on the plan.** A risky spec (security, persisted data or a
-  migration, an external contract, threats, four or more tasks) is reviewed
-  before T1: its Decisions are attacked, every "Not doing X" re-tested,
-  unmeasured numbers flagged. A P0/P1 stops the build; `maxRounds` caps the
-  loop (`--review` spends one more round, `--force` records the standing
-  findings as accepted). Every acceptance line is proven by its task's `Test:`.
+- **Fresh eyes on the plan.** Every spec gets one independent read before T1:
+  its Decisions are attacked, every "Not doing X" re-tested, unmeasured numbers
+  flagged. Only a P0 (unsafe to build) stops the build; P1-P3 are shown as
+  advisory findings and the build proceeds. There are no review rounds: editing
+  the spec makes the next build start review the new text. Every acceptance
+  line is proven by its task's `Test:`.
 - **Fresh eyes on the build.** A spec pass, then an adversarial pass, each in a
   fresh read-only session you watch. Each task acceptance line is answered one
-  by one; a missing item is unverified, never a pass. Requirement invariants are
-  checked as standing rules, and legacy scenarios are examples, not checklist
-  ids. Blocking findings get a second look,
-  and pb offers another model family. A pre-existing problem is reported as an
-  outside finding (advisory, capped at P2), never left as a prose note. A
-  command the reviewer runs may change files: they're listed, never silently
-  reverted.
+  by one; a missing item is unverified, never a pass. Blocking findings get a
+  second look, and pb offers another model family. A pre-existing problem is
+  reported as an outside finding (advisory, capped at P2), never left as a
+  prose note. A command the reviewer runs may change files: they're listed,
+  never silently reverted.
 - **Memory across features.** Archiving folds what the feature taught about the
   project into a short map in AGENTS.md — its findings, the design it settled
   on, and the review's P0–P2 findings as leads the cartographer rechecks
@@ -121,9 +119,8 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   map doesn't drift. Nothing pb writes there can carry markup that breaks the
   section, and where the section's own markers can't be resolved pb writes
   nothing and says which marker, leaving your text and the undo backup alone.
-  Requirement deltas accumulate in `specs/<capability>.md`, and the invariants
-  already standing there are handed to every build step and review of a feature
-  that touches that capability — as they will read once its delta lands.
+  The spec an archive keeps is the durable record of what the feature settled;
+  earlier versions stay in git.
 - **Your standards, once.** Engineering standards live in AGENTS.md, which Pi
   loads into every session; pb offers once to add its default section for your
   stack.
@@ -154,11 +151,6 @@ New tests: yes                      # or: no — why
 ## Decisions                         # each with its reason, as it stands now; rejected ideas too
 ## Contracts                         # external surfaces and shared seams: signatures, API and errors, data, events
 ## Migration and rollback            # only when data or a stored format outlives the change; else "none — why"
-## Requirements: order-cancellation # only when what a capability guarantees changes; merged on archive
-Overview: Pending orders can be cancelled by their owner; nothing else changes state.
-### ADDED
-### Requirement: Cancelling a pending order
-Invariant: Only the order's owner can cancel it, only while it is PENDING, and the result is CANCELLED.
 ## Design                            # the shape the build settled on, recorded as it went — not by the plan
 ## Open questions                    # only while planning
 ## Tasks
@@ -185,30 +177,13 @@ split. Once the build starts, that
 contract is frozen: the build may change only Design and Decisions, and a hand
 edit to anything else pauses it until `/pb:build` re-approves the revision.
 
-**Requirements accumulate across features.** A change that alters what a
-capability guarantees carries a delta: `## Requirements: <capability>`, then
-`### ADDED`, `### MODIFIED` and `### REMOVED` groups of requirement blocks. The
-delta opens with `Overview:` — what the capability is and what it refuses to
-do, in a sentence or two. `/pb:archive` writes it into the living file's
-`## Overview` before its `## Requirements`; a delta for a capability that has
-none must supply one, and a new overview replaces the old. It is plain text and
-never a review criterion. Each requirement then opens with an `Invariant:`
-line — the rule that must hold for every input; the tasks' acceptance lines are
-the examples that prove it. A requirement written before invariants falls back
-to its statement. Older files may still carry `#### Scenario:` blocks: they
-parse and merge, but they are examples, not acceptance items. ADDED must be
-new; MODIFIED and REMOVED must exist;
-MODIFIED replaces the requirement whole, and a rename is REMOVED plus ADDED.
-`/pb:archive` merges the delta into `specs/<capability>.md` transactionally: a
-delta that no longer applies stops the archive before anything moves, and if the
-spec can't be archived the living files are restored. `pb_write_spec` runs the
-same check, so a delta is never written already broken. Build handouts and
-review briefs carry the standing requirements (name and invariant) of every
-capability a delta touches, so the work acts against the rules already in
-force. A behavioural spec that names a living capability without a delta is
-flagged at write time and, under `auto`, gets the spec review: the reviewer
-judges whether its guarantees stay as written or need a delta. Detection is
-mechanical; a pure refactor carries no obligation.
+**Requirements are the spec's contracts.** A capability's durable rules live
+in the spec that changed them — its Decisions, Contracts and task acceptance —
+and are approved and versioned with that spec. There is no separate requirements
+file, delta grammar or merge step: `/pb:archive` keeps the approved spec as the
+historical record, and git holds the versions before it. When a later feature
+changes a rule, it states the new rule in its own spec; nothing is inherited
+from a second copy that could drift.
 
 `## Out of scope` is optional: a spec is as long as the change needs and no
 longer. Pi points to code instead of copying it, and
@@ -226,9 +201,8 @@ add tests while the existing ones still run.
 
 **Scripts read `pb.report/1`.** `/pb:status --json`, `/pb:stats --json` and
 `pb-report` emit the same document: `schema`, `specs` (phase, verification, the
-latest review's verdict and findings, every acceptance status, requirement
-deltas, and stats with `--stats`), `requirements` (the living base), and
-`summary`. The `schema` value changes only when the contract breaks.
+latest review's verdict and findings, every acceptance status, and stats with
+`--stats`), and `summary`. The `schema` value changes only when the contract breaks.
 
 ## Configuration
 
@@ -251,7 +225,7 @@ deltas, and stats with `--stats`), `requirements` (the living base), and
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
 | `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always`, asked for after the spec pass; `off`) |
-| `specReviewer` | `{"mode": "auto", "maxRounds": 2}` | `{"model": "provider/id", "thinking": "high", "mode": "auto", "maxRounds": 2}` for the fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. `mode`: `auto` reviews risky specs, `always` every spec, `off` none (an earlier blocking review still waits for `--review` or `--force`); `maxRounds` caps automatic blocking rounds. Point it at `buildModel` to have the implementer model validate the plan |
+| `specReviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the one fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. Only a P0 blocks; P1-P3 are advisory. Point it at `buildModel` to have the implementer model validate the plan |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |
@@ -263,7 +237,6 @@ deltas, and stats with `--stats`), `requirements` (the living base), and
 
 | Path | What |
 |---|---|
-| `specs/<capability>.md` | the living requirement base: durable project knowledge, meant to be committed; changed only when a spec with a `## Requirements:` delta is archived |
 | `.pi/pb/specs/<name>/spec.md` | the spec: written by `/pb:build` or `/pb:spec`, decisions added during the build |
 | `.pi/pb/specs/<name>/progress.json` | task states, the session the build runs in, the last review, harness-owned |
 | `.pi/pb/specs/<name>/checkpoints.json`, `events.jsonl` | undo points (files and conversation) and stats |
@@ -274,10 +247,9 @@ deltas, and stats with `--stats`), `requirements` (the living base), and
 | `.pi/pb/specs/<name>/sessions/`, `.pi/pb/sessions/` | saved runs of the verifier, explorer and cartographer, to open with `pi --session <file>`; removed by `/pb:archive` |
 | `.pi/pb-archive/` | archived specs (git-ignored by itself) |
 
-The living requirement base is project knowledge, like `AGENTS.md`, so pb
-writes it outside the git-ignored `.pi/`: it is meant to be committed, reviewed
-and shared. `.pi/pb/` holds only what a build needs while it runs, and
-`.pi/pb-archive/` keeps finished specs' history local.
+`.pi/pb/` holds only what a build needs while it runs, and
+`.pi/pb-archive/` keeps finished specs' history local. Commit the spec while it
+is live if your team reviews it; once archived, git keeps the record.
 
 Snapshots live in git's object store under `refs/pb/checkpoints`; your branch,
 commits and staging area are never touched.

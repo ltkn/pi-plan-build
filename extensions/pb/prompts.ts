@@ -7,9 +7,8 @@
  */
 import { tip } from "./help.ts";
 import { headerBlock, safeBlock, safeLine } from "./markdown.ts";
-import { parseRequirementDeltas, requirementNameKey, type RequirementDelta, type RequirementDocument } from "./requirements.ts";
-import { BINDING_SECTIONS, capCarriedAdvisories, type ParsedSpec, type SpecTask, sectionHeading, sectionOf, specReviewDelta } from "./spec.ts";
-import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, FINDING_NOT_CHARS, PB_DIR, RED_CLAIM_CAP, REQUIREMENTS_DIR, type Progress, type SpecResolution, type TaskProgress, cap } from "./store.ts";
+import { BINDING_SECTIONS, type ParsedSpec, type SpecTask, sectionHeading, sectionOf } from "./spec.ts";
+import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, FINDING_NOT_CHARS, PB_DIR, RED_CLAIM_CAP, type Progress, type TaskProgress, cap } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
 
@@ -152,18 +151,6 @@ Each decision with its reason, as it stands now: no dates, no history, not who d
 No later step sees the whole change at once: tasks are built one by one. So pin here every seam other code, clients or stored data depend on — the public signatures, API requests and responses with their error types, the data model and migrations, events, and which task owns each side of every seam. A single task that changes an external surface needs this section too, and tasks sharing a seam (the same Test: command or a shared file) should pin it. Truly independent internal tasks need none, though a one-line "independent" section is accepted, and a "none — <why>" answer is fine when nothing is shared. Pin exactly these, as they must end up; leave everything behind them to the build. Every external outcome (API returns, message sends, file writes) used in Contracts must enumerate its real states, not a binary that conflates them; if the dependency doesn't report a state, say so and design for the unknown. Every observable value a Contract states — an HTTP status, error type, header, ordering, event name or stored value — cites the code path or test that pins it today (file:line), or is written as an Assumption; a value inferred from the design is built as written. A formula or derived figure — a size, limit, count, threshold, window — shows its computed value for each case Acceptance pins, inputs and result together (a tenth of a 128k window = 12800), because a number the reader must recompute by hand is the one that survives a review round wrong. A bound on how often something runs is a claim about a call site, so name the code that owns it — a path:line, new: <path> when nothing performs it yet, or an Assumption when nothing in the project enforces the cadence.
 ## Migration and rollback
 Only when the change persists or transforms data, a schema or a stored format: how existing data moves to the new shape, how the change is rolled back, and what old and new code do while both run. Say "none — <why>" when nothing outlives the change.
-## Requirements: <capability>
-Only when the change alters what a capability guarantees. Each capability touched gets one section: the delta that /pb:archive merges into ${REQUIREMENTS_DIR}/<capability>.md.
-Overview: <what the capability is and what it refuses to do, in a sentence or two; plain text>
-### ADDED
-### Requirement: <name>
-Invariant: <the rule that must hold for every input, in one falsifiable sentence>
-<optional context: why it exists, or what it refuses to do>
-### MODIFIED
-(same Requirement block; replaces the existing requirement whole)
-### REMOVED
-### Requirement: <the existing requirement's name>
-Overview is required when the capability has no living file yet or that file has no overview, and replaces the old one when given: start from the existing overview and update it when this delta changes what the capability is or refuses to do. It is plain text and never a review criterion. ADDED must not already exist; MODIFIED and REMOVED must exist, or the write is refused. A rename is REMOVED plus ADDED. Every requirement states its rule as an Invariant: that rule binds the build and is checked against the code for every input; the tasks' acceptance lines are the examples that prove it. A requirement written before invariants falls back to its statement. Older files may still carry \`#### Scenario:\` blocks, which parse and merge but are not acceptance items.
 ## Threats and abuse
 Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks should carry this section: say "none — <why>" if the keyword points at nothing. The task acceptance lines then include the abuse cases.
 ## Open questions
@@ -191,7 +178,6 @@ ${SPEC_FORMAT}
 
 - One spec per change you would merge on its own; if the discussion covers several, say so and write one each.
 - Keep each task narrow: one coherent change with a targeted Test:. Split work that bundles several independent changes with a full verification; the harness runs the full suite once, after the last task, so no task needs to.
-- When the change alters what a capability guarantees, read the capability's living file (\`${REQUIREMENTS_DIR}/<capability>.md\`) if it exists, then add one "## Requirements: <capability>" delta: ADDED, MODIFIED or REMOVED must match that base exactly, because /pb:archive merges it and refuses a delta that doesn't apply. Open the delta with an Overview (the capability in a sentence or two, plain text): required for a new capability, otherwise carry the existing one forward and update it if this change moves it. State each requirement's rule as an Invariant (the reviewer checks it against the code for every input, not only the examples); the task acceptance lines are its examples, so a new delta needs no scenarios.
 - Refactoring that the standards call for (outdated code in the way) comes first, as tasks titled "(refactor) …" that keep behaviour; a large one is a spec of its own that this one depends on.
 - Before writing, check the spec for contradictions and against the code; fix them in the spec and tell me briefly what you changed.
 - Every observable value in Contracts (status, error, header, ordering, event, stored value) names the file:line or test that pins it today, or is an Assumption. Open that code before writing the value: never infer a status or an order from what the design should do.
@@ -292,6 +278,12 @@ const clip = (text: string, n: number): string => {
   return flat.length > n ? `${flat.slice(0, Math.max(0, n - 1)).trimEnd()}…` : flat;
 };
 
+/** A finished task's hook line cap: 240 characters. */
+const HOOK_LINE_CAP = 240;
+
+/** A red proof's claim as one line: the stored bound is the display bound, so the reason the model gave survives. */
+const claimLine = (text: string) => clip(safeLine(text), RED_CLAIM_CAP);
+
 /** Keep the first n lines, then one line saying how many were left out. */
 const cappedList = (lines: string[], n: number, overflow: (rest: number) => string): string[] => [...lines.slice(0, n), ...(lines.length > n ? [overflow(lines.length - n)] : [])];
 
@@ -344,62 +336,10 @@ const CUT_ORDER = ["Design", "Migration and rollback", "Threats and abuse", "Thr
 const cutNotice = (name: string | undefined, dropped: readonly string[]) =>
   `## Cut from this copy\nWhole sections dropped for size: ${dropped.join(", ")}. Read them in ${name ? `${P}/specs/${name}/spec.md` : "the spec named above"}.`;
 
-/** One capability's standing guarantees, as the caller read them: its parsed base, or what reading it reported. */
-export interface LivingCapability {
-  capability: string;
-  /** the capability's living file, project-relative: named whenever the list is capped or can't be read */
-  path: string;
-  /** the parsed base; absent together with `errors` when the capability has no living file yet */
-  document?: RequirementDocument;
-  /** what the parser reported about that file, when it reported anything */
-  errors?: string[];
-  /** what this spec's delta does to it */
-  delta: RequirementDelta;
-}
-
-/** How many standing requirements one capability contributes before the list points at the file instead. */
-export const LIVING_CAP = 12;
-
-/** The heading the digest arrives under in every copy: it names what breaking one of these costs. */
-const LIVING_HEADING = "## Living requirements (guarantees this repo holds; breaking one is a P1 finding)";
-
-/** The line caps a handout uses: 300 for a criterion or a standing guarantee, 240 for a finished task's hook. */
-const CRITERION_LINE_CAP = 300;
-const HOOK_LINE_CAP = 240;
-
-/** One digest line: flat, marker-free, and short enough to stay a line. */
-const digestLine = (text: string) => clip(safeLine(text), CRITERION_LINE_CAP);
-/** A red proof's claim as one line: the stored bound is the display bound, so the reason the model gave survives. */
-const claimLine = (text: string) => clip(safeLine(text), RED_CLAIM_CAP);
-
-/**
- * The guarantees that will still stand once this spec's own delta is merged, as one flat line per
- * capability and per requirement: a step can act against them without opening the base files.
- * A requirement this delta rewrites or removes isn't in force as written, so it is skipped through
- * the merge's own name key; the Overview shown is the one the merge will produce (the delta's when
- * it states one). A base that can't be parsed names its file rather than passing on a partial list,
- * and a capability with no living file contributes nothing.
- */
-export function livingDigest(capabilities: readonly LivingCapability[]): string {
-  const blocks = capabilities.flatMap((c) => {
-    if (!c.document && !c.errors?.length) return []; // no living file: nothing stands there yet
-    if (!c.document) return [`### ${safeLine(c.capability)}\n${digestLine(`nothing is listed: ${c.path} could not be read — read it before acting against this capability`)}`];
-    const overview = c.delta.overview ?? c.document.overview;
-    const replaced = new Set(c.delta.groups.filter((g) => g.kind !== "ADDED").flatMap((g) => g.requirements.map((r) => requirementNameKey(r.name))));
-    const standing = c.document.requirements.filter((r) => !replaced.has(requirementNameKey(r.name)));
-    const lines = [`### ${safeLine(c.capability)}`, ...(overview ? [digestLine(`Overview: ${overview}`)] : [])];
-    if (!standing.length) return [`${lines.join("\n")}\n${digestLine(`every requirement here is replaced by this spec — read ${c.path}`)}`];
-    const rendered = standing.map((r) => digestLine(`- ${r.name}${r.invariant ? ` — ${r.invariant}` : ""}`));
-    lines.push(...cappedList(rendered, LIVING_CAP, (rest) => digestLine(`- … +${rest} more in ${c.path}`)));
-    return [lines.join("\n")];
-  });
-  return blocks.length ? [LIVING_HEADING, ...blocks].join("\n") : "";
-}
-
 /**
  * Keep whole binding sections until the copy fits: drop in CUT_ORDER, checking after each, so the
  * copy is bounded by the budget with every cut disclosed. `rest` is what the copy always carries
- * (header, criteria, hooks, living guarantees) and is never cut here.
+ * (header, hooks) and is never cut here.
  */
 function fitSections(markdown: string, maxChars: number, rest: string, name?: string): { kept: { name: string; body: string }[]; dropped: string[] } {
   const sections = BINDING_SECTIONS.map((section) => ({ name: section, body: sectionOf(markdown, section).trim() })).filter((s) => s.body);
@@ -422,25 +362,6 @@ const CAP_NOTICE_RESERVE = 32;
 /** The last bound, for a spec whose always-emitted parts alone outgrow the budget: cut, and say by how much. */
 const withinBudget = (text: string, maxChars: number) => (text.length <= maxChars ? text : cap(text, Math.max(1, maxChars - CAP_NOTICE_RESERVE)));
 
-/**
- * The durable rules this spec's requirement delta adds or changes, as flat binding context. They are
- * not acceptance items: the tasks' acceptance lines are, and each task's Test: command proves them.
- */
-const requirementRuleLines = (markdown: string): string[] => {
-  const rules = parseRequirementDeltas(markdown).deltas.flatMap((delta) =>
-    delta.groups
-      .filter((group) => group.kind !== "REMOVED")
-      .flatMap((group) =>
-        group.requirements.flatMap((requirement) => {
-          const rule = (requirement.invariant || requirement.statement).replace(/\s+/g, " ").trim();
-          return rule ? [`- ${delta.capability} · ${requirement.name}: ${rule}`] : [];
-        }),
-      ),
-  );
-  if (!rules.length) return [];
-  return ["", "## Requirement rules", ...cappedList(rules.map((rule) => clip(rule, CRITERION_LINE_CAP)), BINDING_CRITERIA_CAP, (n) => `- … +${n} more in the spec`)];
-};
-
 /** The finished tasks' non-"none" hooks: what a later task must respect, one line per task. */
 const hookLines = (tasks: TaskProgress[]): string[] => {
   const hooks = tasks
@@ -462,9 +383,9 @@ const hookLines = (tasks: TaskProgress[]): string[] => {
  * fit `maxChars` (bindingBudget) are dropped in a fixed order and named; the spec path is given so
  * anything left out can be read at the source.
  */
-export function bindingContext(name: string, markdown: string, tasks: TaskProgress[], maxChars: number, living: string): string {
+export function bindingContext(name: string, markdown: string, tasks: TaskProgress[], maxChars: number): string {
   const head = `Binding context (a compact copy of ${P}/specs/${name}/spec.md; the spec is the source of truth — read it when a line is cut or a case isn't here):`;
-  const tail = [...requirementRuleLines(markdown), ...(living ? ["", living] : []), ...hookLines(tasks)];
+  const tail = hookLines(tasks);
   const { kept, dropped } = fitSections(markdown, maxChars, head + tail.join("\n"), name);
   const lines = [head, ...(dropped.length ? ["", cutNotice(name, dropped)] : []), ...kept.flatMap((s) => ["", `## ${s.name}`, s.body]), ...tail];
   return withinBudget(lines.join("\n"), maxChars);
@@ -472,14 +393,13 @@ export function bindingContext(name: string, markdown: string, tasks: TaskProgre
 
 /**
  * The build's view of the spec, for a reset or compaction: the parts that bind the work, the
- * requirement rules, and no Tasks — the current handout carries its own task. Deterministic:
- * assembled from the sections, never summarized by a model. Sections that do not fit `maxChars`
- * (viewBudget) go whole and are named. `living` is this spec's livingDigest: like the rules, it is
- * never cut — a guarantee is useless in the one copy that has to survive a reset.
+ * and no Tasks — the current handout carries its own task. Deterministic: assembled from the
+ * sections, never summarized by a model. Sections that do not fit `maxChars` (viewBudget) go whole
+ * and are named.
  */
-export function buildSpecView(markdown: string, maxChars: number, living: string): string {
+export function buildSpecView(markdown: string, maxChars: number): string {
   const header = headerBlock(markdown).trim();
-  const tail = [...requirementRuleLines(markdown), ...(living ? ["", living] : [])];
+  const tail: string[] = [];
   const { kept, dropped } = fitSections(markdown, maxChars, header + tail.join("\n"));
   const parts = [header, ...(dropped.length ? [cutNotice(undefined, dropped)] : []), ...kept.map((s) => `## ${s.name}\n\n${s.body}`), ...tail];
   return withinBudget(parts.filter((p) => p).join("\n\n"), maxChars);
@@ -634,7 +554,6 @@ With a spec:
 - Design: the shape the build settled on, recorded as it went — consistent with the Contracts and Decisions, and the code matches it, or the change is recorded in Decisions.
 - Decisions: respected, including every rejected alternative ("Not doing X"); flag anything the build brought back. Flag an assumption (a Decisions entry starting "Assumption", made while writing the spec or building) that looks wrong or second-best.
 - Refactors and threats: tasks titled "(refactor)" keep behaviour unchanged; the spec's Threats and abuse, if any, has each abuse prevented and tested.
-- Living requirements: the brief's standing guarantees are what this repo already holds for the capabilities the change touches — breaking one of them is a P1 finding even when every acceptance line passes, unless the spec's own delta replaces it.
 - The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 Without a spec: whether the change does what the intent in the brief says.
 
@@ -715,7 +634,7 @@ export const findingDetails = (f: Finding) =>
   `${f.evidence ? `\n   Evidence: ${f.evidence}` : ""}${f.fix ? `\n   Fix: ${f.fix}` : ""}${f.alternative ? `\n   Not: ${f.alternative}` : ""}`;
 
 export const findingLine = (f: Finding, n?: number) =>
-  `${f.id ? `${f.id} ` : n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}${findingDetails(f)}`;
+  `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}${findingDetails(f)}`;
 
 /** A finding or a claim about one, in the one form the fix loop compares: numbering pb added stripped, whitespace flat, case out. */
 const claimKey = (text: string): string => text.replace(/^\s*(?:\d+[.)]|[-*+])\.?\s+/, "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -784,8 +703,6 @@ export interface ReviewBrief {
   baseWarning?: string;
   /** untracked files over the snapshot cap: in no diff, so the reviewer reads them itself */
   largeFiles?: string[];
-  /** the guarantees the touched capabilities already hold (their livingDigest): breaking one is a P1 finding */
-  living: string;
 }
 
 /**
@@ -872,7 +789,6 @@ export function reviewerBrief(o: ReviewBrief): string {
       "",
     );
   }
-  if (o.living) lines.push(o.living, "", "Each line above is a guarantee the code held before this change. Check the diff against them: one that no longer holds is a P1 finding, whether the change broke it or made it unreachable.", "");
   lines.push(
     "## How to see the change",
     "",
@@ -933,305 +849,31 @@ export function reviewerBrief(o: ReviewBrief): string {
   return lines.join("\n");
 }
 
-export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review a feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. You may inspect the repository with read-only shell commands (ls, find, cat, head, tail, git status, git log, git diff, rg). Do not create, modify or delete files, redirect output, install anything, or run commands that write. Your findings must be checkable against the spec and the code it cites. Every observable value in a Contract (status, error, header, ordering, event, stored value) must be backed by the code path or test that pins it; a value inferred from the design, or contradicted by its citation, is a finding; a citation whose file and symbol are right but whose line number has drifted is corrected in silence inside any real finding about that area, never a finding on its own. A Contract that bounds how often something runs, contradicted by the call frequency of the code it names, is a P1: the build implements the cadence as written. A bound whose owner is claimed as new but already performs that call in the tree is a finding: the escape hatch is being used to skip naming it. The living requirement files under specs/ are in force: a behavioural change to a capability that has one but carries no delta for it is a P1 finding, because the guarantee it already holds would silently go stale; a pure refactor, or a change the existing invariant still covers, needs none. Attack the design; do not reward length or polish. A clean pass is a valid result: report nothing rather than invent a finding. When a rule is selected by a classification (a kind, role, mode, type, state, host, tenant), test an input that matches more than one class and say which class must win at each decision — routing, lookup, authorization, default — because two classifiers that disagree are a hole when the disagreement reaches a decision. A finding's first line is one sentence a tired human can act on: what goes wrong, for whom, and where; put the supporting trace (quoted spec text, code fact, file:line) on its Evidence line. Every finding carries one Fix: the single change you would make, with its reason in the same line. If you weighed another and rejected it, one Not: line names it and why it loses. If the choice is yours to make, make it — an either/or inside Fix: is not a finding. A fork that read-only inspection can settle, settle before you write, with one cheap, targeted, read-only command — a single git/grep/ls query, or one test-name-pattern run that finishes in seconds — and put the command and its result on the Evidence line. Never the full suite, never a build or an install, and only a handful of commands per review. What no cheap command settles, put to the human as a one-line question instead of a fork. In a follow-up round these rules bite on what the revision creates or exposes, wherever its text sits; a problem that predates the revision, in text the revision left alone, belongs under Outside the change. The first round has no such section — there, everything is in scope. Be concise: conclusion first. Your answer is all that goes back.`;
+export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review one feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. The spec is a frozen draft: this is the only pass; there are no earlier findings, rounds or outside lane. Inspect the repository with read-only shell commands (ls, find, cat, head, tail, git status, git log, git diff, rg). Do not create, modify or delete files, redirect output, install anything, or run commands that write.
 
-/** The living requirement base as a spec review sees it: what is in force, and what looks touched without a delta. */
-export interface SpecReviewLiving {
-  /** the standing guarantees of capabilities this spec's delta touches, as they will read once it lands */
-  digest?: string;
-  /** capabilities with a living file and no delta in this spec */
-  uncovered?: Array<{ capability: string; path: string }>;
-  /** uncovered capabilities the spec appears to touch: its own name, or a cited living file */
-  named?: Array<{ capability: string; path: string; because: string }>;
+Report every finding with report_findings in one call, an empty list when there are none. A finding has a priority, a title, and optionally file, line and fix. The title is one sentence a tired human can act on: what goes wrong, for whom, and where. The optional file:line and fix are the supporting evidence and the single change you would make. If you weighed another fix and rejected it, say why in the same fix line; do not report an either/or as a finding.
+
+Priority:
+- P0 — unsafe to build: a security or authorization hole, data loss or corruption, or a contract contradiction that cannot be built as written. Only P0 blocks the build.
+- P1 — a real problem likely to make the build wrong or fail, but not unsafe. Advisory to the human; do not inflate a normal-path bug, a missing test or a taste issue to P0.
+- P2 — a real weakness, edge case, ambiguity, missing measurement, documentation or rollback gap. P3 — polish or preference.
+No P0 means pass, however many P1-P3 findings you report.
+
+Check the spec against the code: every path:line resolves; every Test: command can run here; every observable contract value is backed by the code path or test it cites; a contract the tasks do not implement, or a contradiction between Contracts, Decisions, Migration, Threats and tasks, is a finding. Attack the Decisions and each rejected alternative; flag an unmeasured quantitative claim; probe undefined empty paths. A point the spec marks decided is settled: check for new evidence, and comment only when you find it. When a rule is selected by a classification, test an input that matches more than one class and say which class must win. Do not reward length or polish. No findings is a valid result.
+
+A fork read-only inspection can settle, settle before you write, with one cheap targeted read-only command — a single git/grep/ls query, or one test-name-pattern run that finishes in seconds — and put the command and its result in the finding. Never the full suite, never a build or install. What no cheap command settles, report as a finding with the question the human must answer. Be concise: conclusion first.`;
+
+/** One frozen draft, one independent pass: no earlier findings, rounds or outside lane. */
+export function specReviewBrief(name: string, markdown: string): string {
+  return `# Spec to review: ${name}
+
+${markdown}
+
+# Your job
+
+Review this one frozen draft against the repository as it is now. Report findings with report_findings: an empty list is a pass; only a P0 blocks the build, while P1-P3 are advisory to the human. Do not modify the spec or the project.`;
 }
 
-/** The earlier review a follow-up must converge against, plus the advisory findings it has already carried. */
-export interface SpecReviewContext {
-  /** earlier P0/P1 findings still open, with stable harness ids */
-  prior?: Finding[];
-  /** the exact markdown the earlier review saw */
-  priorMarkdown?: string;
-  /** earlier P2/P3 findings: context only, never re-listed as new */
-  advisory?: Finding[];
-  /** 1-based review round */
-  round?: number;
-  /** the repo's living requirements, when it has any */
-  living?: SpecReviewLiving;
-}
-
-/** How many living capabilities a spec-review brief names before it points at `specs/` instead. */
-const LIVING_FILES_CAP = 12;
-
-/** The living-requirement section of a spec review: what stands, and what looks touched without a delta. */
-function specReviewLivingBlock(living: SpecReviewLiving | undefined): string {
-  if (!living || (!living.digest && !living.uncovered?.length && !living.named?.length)) return "";
-  const uncovered = living.uncovered ?? [];
-  const named = living.named ?? [];
-  const lines = [living.digest?.trim() || "", "", "## Living capability check", ""];
-  if (uncovered.length) {
-    const rendered = cappedList(
-      uncovered.map((c) => `${safeLine(c.capability)} (${safeLine(c.path)})`),
-      LIVING_FILES_CAP,
-      (rest) => `… +${rest} more under ${P}/specs/`,
-    );
-    lines.push(`Capabilities with a living file and no delta in this spec: ${rendered.join(", ")}.`, "");
-  }
-  if (named.length) {
-    const rendered = cappedList(
-      named.map((c) => `- ${safeLine(c.capability)} (${safeLine(c.path)}): ${safeLine(c.because)}`),
-      LIVING_FILES_CAP,
-      (rest) => `- … +${rest} more under ${P}/specs/`,
-    );
-    lines.push("These look touched but carry no delta (judge each):", ...rendered, "");
-  }
-  lines.push(
-    "A behavioural change to a capability with a living file but no delta is a P1 finding: the guarantee it already holds would silently go stale. A pure refactor, or a change the existing invariant still covers, needs none — say which and why. In a follow-up round, only where this revision created or exposed it; otherwise it belongs under Outside the change.",
-  );
-  return lines.filter((line, i) => line !== "" || i === 0 || lines[i - 1] !== "").join("\n").replace(/^\n+/, "");
-}
-
-/** What a spec review is asked, and the exact shape its answer must take. */
-export function specReviewBrief(name: string, markdown: string, o: SpecReviewContext = {}): string {
-  const prior = o.prior ?? [];
-  const advisory = o.advisory ?? [];
-  // The reviewer sees a bounded carry; the event and the human's counts keep every one of them.
-  const shownAdvisory = capCarriedAdvisories(advisory);
-  const droppedAdvisory = advisory.length - shownAdvisory.length;
-  const followUp = prior.length > 0 || advisory.length > 0 || o.priorMarkdown !== undefined;
-  const delta = o.priorMarkdown !== undefined ? specReviewDelta(o.priorMarkdown, markdown) : undefined;
-  const deltaReview = !!delta && (!!delta.changed || delta.removed.length > 0);
-  const specPath = `${P}/specs/${name}/spec.md`;
-  const subject = deltaReview
-    ? `The full spec is at \`${specPath}\`; read it whenever a changed part depends on another. This is a delta round: the revision below is what you are reviewing.
-
-Precedence: whatever this revision creates or exposes is in scope wherever its text sits — a new conflict between revised and untouched text is a blocking Finding. Only a problem that predates the revision, in text the revision left alone, goes under \`## Outside the change\`.
-
-## Binding context (unchanged by this revision)
-
-${delta!.context || "(none)"}
-
-## Changed since the earlier review
-
-${delta!.changed}${delta!.removed.length ? `\n\nRemoved since the earlier review: ${delta!.removed.join(", ")}` : ""}`
-    : markdown;
-  const earlier = followUp
-    ? `# Earlier review
-
-This is review round ${o.round ?? 2}. The spec was reviewed before.${deltaReview ? " Compare the changed parts below with their earlier form." : ""} For each earlier P0/P1, judge the problem, not whether your suggested fix was copied: a different fix that removes the failure is RESOLVED.
-
-${
-  deltaReview
-    ? `## Earlier form of the changed parts (for comparison; not the current text)
-
-${delta!.earlier || "(the changed parts are new)"}
-
-`
-    : o.priorMarkdown !== undefined
-      ? "The current text is shown in full; the revision changed no section or task, so judge the earlier findings against it.\n\n"
-      : `The earlier spec text was not recorded. ${
-          prior.length
-            ? "Judge the earlier findings against the current text and say what current-text evidence you relied on."
-            : "Report what this round's revision creates or exposes, and put a problem that predates it, in text the revision left alone, under Outside the change."
-        }\n\n`
-}## Earlier P0/P1 findings
-
-${
-  prior.length
-    ? `Each needs one resolution line in the return format below; do not repeat one under Findings. An omitted one is treated as STILL OPEN.
-
-${prior.map((f) => findingLine(f)).join("\n")}`
-    : "None. Do not write a Resolutions section."
-}
-
-${
-  advisory.length
-    ? `## Earlier advisory findings (context only)
-
-These are already known and carried with the spec. Do not re-report them as new findings. Leave them out unless the change makes one blocking (P0/P1); a fix needs no mention.
-
-${shownAdvisory.map((f) => findingLine(f)).join("\n")}${droppedAdvisory ? `\nDropped ${droppedAdvisory} of ${advisory.length} for length — lower advisories are in the review log.` : ""}
-
-`
-    : ""
-}`
-    : "";
-  const living = specReviewLivingBlock(o.living);
-  return `# Spec under review: ${name}
-
-${subject}
-
-${living ? `${living}\n\n` : ""}${earlier}# Your job
-
-${deltaReview ? `This is a delta review. Check the changed sections and tasks against the binding context, the full spec, and the repo. Whatever this revision creates or exposes is a finding wherever its text sits: a revised part that now contradicts untouched text is a blocking Finding, and you name the current-text evidence for it. Only a problem that predates the revision, in text the revision left alone, goes under "Outside the change": only an outside P0 blocks; outside P1-P3 are advisory, carried with the spec, and not re-reviewed automatically. Do not leave a real problem only in prose, and do not re-report an earlier advisory finding as new.
-
-` : ""}Attack its Decisions: for each decision, say how it could be wrong or abused in production. Re-test every "Not doing X" rejection: what breaks because X was rejected? Flag every quantitative claim (latencies, counts, windows) with no measurement: demand a number or an Assumption. Probe the empty paths: for every behavior the spec describes, ask what it does when there is nothing to do (empty input, all dependencies down, no reportable case) — if the spec is silent, flag it (P1 when a stale artifact would linger for the user, else P2), demanding defined behavior or an Assumption. Check the prose inventory: does every behavior name the docs that must change with it?
-
-Check the spec against itself:
-- Goal and Out of scope: is the outcome testable, and does every task stay inside the goal and outside the exclusions? Flag a task that quietly adds or removes scope.
-- Decisions, Contracts, Migration, Threats and Acceptance: do they agree with each other and with the tasks? A contract the tasks do not implement, an acceptance line that checks a different state, or a threat with no prevention is a finding.
-- Acceptance: can each line be checked by its task's \`Test:\` command exactly as written? A line that needs interpretation ("works correctly", "handles errors") is not testable; name the observable behavior it should assert.
-- Task size: each task is one coherent change with a targeted Test:. A task that bundles several independent changes, or ends with a full-suite run the harness already performs after the last task, is a finding (P2) naming the split.
-- Requirements: does each Invariant hold for every input the code can see, not only for the acceptance examples? A task set that passes while the rule fails for another input, host or state is a finding; the task acceptance lines are the examples, the invariant is the guarantee. Legacy scenario blocks are examples too, never replacements for the rule. A behavioural change to a capability that has a living file but no delta in this spec is a P1 finding (the guarantee it already holds would go stale); a pure refactor, or a change its existing invariant still covers, needs none. In a follow-up round, only where this revision created or exposed it; otherwise it belongs under Outside the change.
-- Cross-section: does any fact change between Findings, Decisions, Contracts and Tasks? Contradictions are findings, not style.
-
-Ground it in the repo: open every path the spec names, and flag a path:line that does not resolve or a named test that no test file contains. For every observable value in Contracts — status, error type, header, ordering, event name or stored value — open the cited code path or test and check it produces exactly that value; a value with no citation, or whose citation produces a different value, is a finding (P1 when the build would implement a wrong contract or a test that fails against correct code, P2 when it is merely unproven). Check that every external surface (API, event, schema, config, public signature, stored shape) has a Contract or an explicit "none — why"; every persisted-data change has a Migration and rollback answer or an explicit "none — why"; every Test: command is one this repo can run; and every Assumption has a settler. For each entry point or abusable rule, check Threats and abuse covers reach, proof, abuse and prevention, or says why none. Check the task order is buildable and each task leaves the code working.
-
-Before blocking on an objection to a point the spec marks decided, check for new evidence (a measurement, a probe result, a code fact): without it, comment only — a re-litigation is not a finding.
-
-## Severity
-
-Severity is the consequence and likelihood of a concrete failure in production, not how much you dislike the design. Name the failure scenario before assigning P0/P1: who or what triggers it, and what goes wrong.
-- P0 — unsafe to build: data loss or corruption, a security or authorization hole, money/quantity/limit bypass, or a failure that silently produces a wrong external outcome.
-- P1 — likely to fail or block the goal: a normal path produces a wrong result, a required state is unhandled, a contract cannot be implemented as written, or the change cannot be verified.
-- P2 — real weakness, not blocking: an edge case, ambiguity, missing measurement, documentation or rollback gap that a reasonable builder could resolve without changing the goal.
-- P3 — polish or preference: wording, naming, structure, or a hypothetical with no concrete failure path.
-
-Merge findings that share the same concrete fix into one finding; do not split one problem across sections. Do not raise taste, and do not repeat an earlier advisory finding as new. No findings is fine: pass cleanly rather than manufacture a P3.
-
-Before you answer, self-check every finding: Does it point to the current spec or a real file? Can I name the concrete failure and who hits it? Is the priority honest under this rubric? Is it already covered by another finding with the same fix? If it does not survive, drop it.
-
-# Return exactly
-
-${
-  prior.length
-    ? `## Resolutions — one line for every earlier P0/P1, exactly:
-- F1 — RESOLVED: <current spec section or file:line, and why the failure is gone>
-- F2 — STILL OPEN: <current spec section or file:line, and the failure that remains>
-RESOLVED means the problem is gone, not that your suggested fix was copied. A RESOLVED line with no evidence counts as STILL OPEN. An omitted earlier P0/P1 is treated as STILL OPEN.
-`
-    : ""
-}## Findings — new or changed only, one per line: [P0|P1|P2|P3] <spec section or file:line> — <one sentence: what goes wrong, for whom, and where>. Next lines, in this order: Evidence: <the spec quote, code fact or file:line that shows it>; Fix: <the one concrete fix you would make, with its reason>; Not: <one alternative you weighed and why it loses> (only when you weighed one). Write (none) when nothing survives.
-${
-  deltaReview
-    ? `## Outside the change — existing problems the change did not cause, same shape, one per line. Only a P0 here blocks; P1-P3 are advisory. Write (none) when none.
-`
-    : ""
-}## Verdict — VERDICT: block (a new or still-open P0/P1${deltaReview ? ", or an outside P0," : ""} is present) or VERDICT: pass`;
-}
-
-/** The one-shot reformat of a block whose answer the parser could not read. It only reshapes words already written. */
-export const SPEC_REPAIR_SYSTEM = `You are a SPEC FORMATTER in a fresh context. A spec reviewer already wrote the answer quoted in the brief, but the harness could not parse it. Reformat that answer only: do not read the spec or the repository, do not review, and do not add, remove, or re-rank a problem. Use the reviewer's own evidence and priorities; where it states a priority, keep it. Put the reviewer's own trace on the Evidence line and never invent one; leave evidence out when the answer states none. Keep the reviewer's placement: a problem it puts outside the change stays under Outside the change. Keep the reviewer's Not: line when the answer states one; never invent or import one. If the answer states no concrete problem, report no finding rather than inventing one. Be concise: the formatted lines are all that goes back.`;
-
-/** Ask for the reviewer's existing answer in the harness's shape, with its earlier-finding answers preserved. */
-export function specRepairBrief(o: { name: string; answer: string; prior?: Finding[] }): string {
-  const prior = o.prior ?? [];
-  return `# Spec under review: ${o.name}
-
-## The reviewer's answer to reformat
-
-<<<ANSWER
-${o.answer}
-ANSWER>>>
-
-${
-  prior.length
-    ? `## Earlier P0/P1 findings the answer may answer
-
-If the answer says one is resolved, give it a RESOLVED line; if it says the problem remains, give STILL OPEN. Do not decide this yourself.
-
-${prior.map((f) => findingLine(f)).join("\n")}
-
-`
-    : ""
-}# Return exactly
-
-## Findings — one per line: [P0|P1|P2|P3] <spec section or file:line> — <one sentence: what goes wrong, for whom, and where>. Next lines, in this order: Evidence: <the trace from the answer>; Fix: <the one concrete fix the answer gives>; Not: <the alternative the answer weighed and why it loses> (only when it states one). Write (none) when the answer states no problem.
-## Outside the change — pre-existing problems the answer places outside the change, same shape. Write (none) when it places none there.
-${
-  prior.length
-    ? `## Resolutions — one line for every earlier P0/P1 the answer addresses, exactly:
-- F1 — RESOLVED: <evidence from the answer>
-- F2 — STILL OPEN: <evidence from the answer>
-`
-    : ""
-}## Verdict — VERDICT: block (an in-scope P0/P1, or any outside P0, is present) or VERDICT: pass`;
-}
-
-export interface SpecReviewResult {
-  findings: Finding[];
-  /** problems the reviewer placed outside the reviewed change */
-  outside: Finding[];
-  /** the follow-up's per-finding answer for each earlier P0/P1 */
-  resolutions: SpecResolution[];
-  /** true when the build must stop: an explicit block verdict, an in-scope P0/P1, or an outside P0. Fail closed on severity. */
-  block: boolean;
-}
-
-/** Parse a spec review's answer: tagged finding lines, follow-up resolutions, outside-change findings, and a verdict trailer. */
-export function parseSpecReview(text: string): SpecReviewResult {
-  const findings: Finding[] = [];
-  const outside: Finding[] = [];
-  const resolutions = new Map<string, SpecResolution>();
-  const lines = text.split("\n");
-  let area: "findings" | "outside" = "findings";
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    // Section headings route findings: the delta's pre-existing problems live under their own heading.
-    const heading = /^#{1,6}\s+(.+?)\s*$/.exec(trimmed)?.[1];
-    if (heading) {
-      if (/^outside\b/i.test(heading)) {
-        area = "outside";
-        continue;
-      }
-      if (/^(?:findings?|resolutions?|verdict)\b/i.test(heading)) {
-        area = "findings";
-        continue;
-      }
-    }
-    // Models routinely bold or bullet the tagged forms. Strip emphasis for the resolution
-    // line, then accept the same list/heading shapes as findings.
-    const flat = trimmed.replace(/\*\*/g, "");
-    const resolution = /^(?:#{1,6}\s*)?(?:(?:[-*+]|\d+[.)])\s+)?(F\d+)(?:\s*\[P[0-3]\])?\s*(?:—|–|-|:)\s*(RESOLVED|STILL OPEN|OPEN)\s*(?::|—|–|-)?\s*(.*)$/i.exec(flat);
-    if (resolution) {
-      const id = resolution[1].toUpperCase();
-      const status = resolution[2].toUpperCase() === "RESOLVED" ? "resolved" : "open";
-      const evidence = resolution[3].trim();
-      // Fail closed: any open answer wins, and a resolution with no evidence is not proof.
-      const next: SpecResolution = { id, status: status === "resolved" && evidence ? "resolved" : "open", evidence };
-      const previous = resolutions.get(id);
-      if (!previous || (previous.status === "resolved" && next.status === "open")) resolutions.set(id, next);
-      else if (previous.status === "open" && !previous.evidence && evidence) resolutions.set(id, { ...previous, evidence });
-      continue;
-    }
-    // A finding written as `- [P1] …` is the same finding, not silence. An earlier id may lead
-    // the line if the reviewer repeats one under Findings instead of resolving it.
-    const m = /^(?:#{1,6}\s*)?(?:(?:[-*+]|\d+[.)])\s+)?(?:F\d+\s+)?(?:\*\*)?\[(P[0-3])\](?:\*\*)?\s+([^\n]+)$/.exec(trimmed);
-    if (!m) continue;
-    // Evidence, Fix and Not follow the finding, in any order; the first line that is none of them ends it.
-    let evidence: string | undefined;
-    let fix: string | undefined;
-    let alternative: string | undefined;
-    for (let j = i + 1; j < lines.length; j++) {
-      const detail = /^(?:[-*+]\s+)?(?:\*\*(Evidence|Fix|Not):\*\*|\*\*(Evidence|Fix|Not)\*\*:|(Evidence|Fix|Not):)\s*(.+)$/i.exec(
-        lines[j].trim(),
-      );
-      if (!detail) break;
-      const label = (detail[1] ?? detail[2] ?? detail[3]).toLowerCase();
-      if (label === "evidence") evidence = detail[4].trim();
-      else if (label === "fix") fix = detail[4].trim();
-      else alternative = storedNot(detail[4]);
-    }
-    const finding: Finding = {
-      priority: m[1] as Finding["priority"],
-      title: m[2].trim(),
-      ...(evidence ? { evidence } : {}),
-      ...(fix ? { fix } : {}),
-      ...(alternative ? { alternative } : {}),
-    };
-    (area === "outside" ? outside : findings).push(finding);
-  }
-  const insideBlock = findings.some((f) => f.priority === "P0" || f.priority === "P1");
-  const outsideBlock = outside.some((f) => f.priority === "P0");
-  const block = /VERDICT:\s*block/i.test(text) || insideBlock || outsideBlock;
-  return { findings, outside, resolutions: [...resolutions.values()], block };
-}
-
-/**
- * What a review session is reset to when Pi compacts it: its role, the brief verbatim (the complete
- * baseline, as the spec is for a build), the findings so far, and the files read, so nothing decided
- * is re-derived and nothing read is re-read blind. A stalled session (repeated compactions with
- * nothing new read) is told to wrap up with what it has instead of starting another reading round.
- */
 export function reviewStateSummary(o: { label: string; role: "review" | "abuse"; brief: string; findings: Finding[]; acceptance?: AcceptanceCheck[]; read?: string[]; wrapUp?: boolean }): string {
   return [
     `[pb review state: ${o.label}] This ${o.role === "review" ? "review" : "abuse-pass"} session was compacted. The brief below is the complete baseline: re-read any files you need from it, and carry on where the findings and acceptance checks leave off.`,

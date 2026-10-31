@@ -1,5 +1,5 @@
 /**
- * The markdown rules shared by specs and living requirement files: a heading inside a fenced
+ * The markdown rules shared by specs and the project map: a heading inside a fenced
  * code block is never structure, and writers and readers use the same section matcher, so a
  * section the reader accepts can't become a second one to the writer.
  *

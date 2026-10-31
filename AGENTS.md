@@ -16,28 +16,26 @@
 ## Project map
 
 ### Security invariants
-- A spec name never becomes a path directly: `specDir` (`extensions/pb/store.ts`) is the only spec-name→path point and `requirementPath` (same file) the only capability-name→path point; both reject anything that is not `KEBAB_NAME` (`extensions/pb/names.ts`) — `.`, `..`, separators throw before any path is built. (security)
+- A spec name never becomes a path directly: `specDir` (`extensions/pb/store.ts`) is the only spec-name→path point; it rejects anything that is not `KEBAB_NAME` (`extensions/pb/names.ts`) — `.`, `..`, separators throw before any path is built. (security)
 - A build tool may only record into the build its own session owns, and only the current step: `specForSession` (realpath-compares the session file) → `buildOfSession` throws unless `phase === "building"`, and `pb_task_done`/`pb_tests_red` refuse `params.task !== p.current` (`extensions/pb/index.ts`). The tool is never the place to relax this. (security)
 - Review sessions are read-only by the `tool_call` guard (`extensions/pb/index.ts`), which blocks `edit`/`write` for any session holding a `reviewSession` record; the guard re-marks a fresh review session fail-closed inside `newSession`'s `withSession`, so stolen or expired handover state cannot yield a writable reviewer. `pb_report_findings` separately refuses any session without that record. (security)
 - Planning mode's project protection is two-layer: the same `tool_call` hook blocks `edit`/`write` at in-project paths for sessions in `planningSessions()`, and `reviewPlanningChanges` catches bash/other writes at the end of planning — paths outside the project are deliberately allowed (scratch). (security)
 - Model-authored text never reaches a markdown container unsanitised: `safeLine`/`safeBlock` (`extensions/pb/markdown.ts`) strip control characters before comment markers and repeat to a fixpoint; every stored ledger field goes through `ledgerField`/`cap`. Pinned by the test "review ledger: an injected marker cannot reach the project map". (security)
 - `Test:` commands run through `runVerify` with `shell: true` on purpose (they are spec-approved shell); `suspiciousCommand` (`extensions/pb/index.ts`) flags shell chaining/network in `specWarnings` and the pre-approval dry-run declines to execute those commands — never move that check out of the flag. (security)
-- A passing spec review covers exactly the text it saw: `specHash` of the markdown, re-read by `specReviewGate`; only an in-scope P0/P1 or an outside P0 blocks (`specReviewBlocks`), and after the configured `maxRounds` blocking rounds the gate returns `manual` for a human. The gate runs only while `phase === "written"` (`startBuild`), so spec edits after T1 started are never re-rereviewed at plan level.
+- A passing spec review covers exactly the text it saw: `ensureSpecReviewed` (`extensions/pb/index.ts`) reuses a `spec-review` event only while `specHash(markdown)` matches, and only a P0 blocks. The pass runs only on the way into a build, so spec edits after T1 started are never re-reviewed at plan level.
 - Handover state is single-use and scoped: `takeCarry` (`extensions/pb/store.ts`) consumes the handover file in the pb state dir, enforces a 60-minute TTL, and returns it only to the child of the recorded parent session; every cancel/throw path calls `clearCarry` (`extensions/pb/store.ts`, `extensions/pb/index.ts`).
-- Requirement deltas merge only at `/pb:archive`, and only after `planArchiveRequirements` preflights every delta (any conflict stops before a file moves); `writeRequirementPlans` returns a rollback that the archive path runs if `archive` (`extensions/pb/store.ts`) then fails (`extensions/pb/requirements.ts`). The write-time rule is the same call — `requirementWriteErrors` — never a second copy of the merge logic.
 - `/pb:undo` restores files, task state and conversation but never moves the branch; the task snapshot in each checkpoint is what drops red proofs with the files.
 
 ### Spec write gates (extensions/pb/spec.ts, extensions/pb/index.ts)
-- The write tools refuse only what the parser can decide: parse errors, required sections, unique task ids, cited `path:line` claims and requirement deltas. Semantic shape — Threats, measurements, evidence, reasons, Contracts, migration answers, proof quality — is the reviewer's and the human's job; `specReviewRisk` (`spec.ts`) uses the high-signal words only to choose whether `auto` starts that review.
-- Task acceptance is the only review checklist: `acceptanceCriteria` (`spec.ts`) yields `T1.1`, `T1.2`, … from each task's `- Acceptance:` lines. A task's `Test:` command is its proof; there is no per-line proof-marker or mapping layer. Requirement deltas are durable rules, rendered as `## Requirement rules` binding context by `requirementRuleLines` (`prompts.ts`), never as acceptance ids.
+- The write tools refuse only what the parser can decide: parse errors, required sections, unique task ids and cited `path:line` claims. Semantic shape — Threats, measurements, evidence, reasons, Contracts, migration answers, proof quality — is the reviewer's and the human's job.
+- Task acceptance is the only review checklist: `acceptanceCriteria` (`spec.ts`) yields `T1.1`, `T1.2`, … from each task's `- Acceptance:` lines. A task's `Test:` command is its proof; there is no per-line proof-marker or mapping layer.
 - A `replace` whose body is blank is refused in `pb_update_spec`: the heading would stand over nothing and silently empty what later readers and the reviewer rely on.
-- The writer-facing format is `SPEC_FORMAT` (`extensions/pb/prompts.ts`); its semantic guidance is advice the reviewer checks, not a rule a write gate enforces. Requirement deltas are the one semantic shape still checked for merge validity (`requirementWriteErrors`, `requirements.ts`).
+- The writer-facing format is `SPEC_FORMAT` (`extensions/pb/prompts.ts`); its guidance is advice the reviewer checks, not a rule a write gate enforces.
 
-### Spec review rounds (extensions/pb/prompts.ts, extensions/pb/spec.ts)
-- One system prompt (`SPEC_REVIEWER_SYSTEM`) is passed to round 1 and every follow-up, so any reviewer rule written there binds all rounds by construction.
-- The delta-round precedence rule exists in three rendered copies that must be changed together: the brief's delta subject, the no-earlier-text branch, the `Your job` delta paragraph (`specReviewBrief`), plus the follow-up user prompt in `runSpecReview` (`extensions/pb/index.ts`) — all carry `creates or exposes` / `predates the revision`. Round-1 brief deliberately carries none of it.
-- The advisory cap is a reviewer-view narrowing only: `capCarriedAdvisories`/`CARRIED_ADVISORY_LIMIT` (`spec.ts`) has exactly one caller, `specReviewBrief`; the gate seed, the event write and both human posts keep full lists, and a P1 advisory is never dropped. Never route the gate or the seed through it. Pinned by "spec review carry: the event and the post keep all ten advisories the brief dropped".
-- Carried outside findings stay advisory through `specReviewBlocks`; the outside lane's parsing lives in `parseSpecReview`, and `## Outside the change` is only offered in delta rounds.
+### The spec review (extensions/pb/prompts.ts, extensions/pb/index.ts)
+- One independent pass on the frozen draft: `SPEC_REVIEWER_SYSTEM` carries every reviewer rule and `specReviewBrief` only the spec text plus "only a P0 blocks". There is no round, carry, delta or outside lane machinery to keep in sync.
+- `runSpecReview` records `{type:"spec-review", verdict: "pass"|"block"|"error", hash: specHash(md)}`: a run that reports no findings call is `error` and never reads as a pass. `ensureSpecReviewed` reuses a pass or block on the same hash, re-posts a standing P0, and otherwise reviews; P1–P3 are posted as advisory and do not hold the build.
+- A spec edited while the review runs is not built: the pass is discarded and the human is asked to rerun `/pb:build`, which reviews the new text.
 
 ### Build, checks and undo (extensions/pb/index.ts, extensions/pb/checkpoint.ts, extensions/pb/verify.ts)
 - A red proof is bound twice — to the exact `Test:` command (`syncTasks` drops `red`/`redClaim`/`redOutput`/`redFiles` when the command text changes) and to the test files' fingerprint (`fingerprintTestFiles`/`changedTestFiles`, re-checked in `pb_task_done` and `pb_tests_red`).
@@ -45,10 +43,9 @@
 - `preGreen` (an earlier task with the same `Test:` command already proven) auto-proceeds a later task and is disclosed to the reviewer as proving nothing of its own; `specWarnings` warns about shared commands up front.
 - Only `runVerify` decides pass/fail; `noopCommand` (an always-passing `Test:`) is warned about because it wedges the red gate.
 
-### Living requirements (extensions/pb/requirements.ts, extensions/pb/store.ts, specs/)
-- The base is `specs/<capability>.md` at the project root — deliberately outside `.pi/` (which this repo gitignores wholesale) because it is durable project knowledge; `Store.isGitIgnored` warns when it is not committable.
-- The one reading of "behavioural change" (`behaviouralChange`, `spec.ts`) decides the living-gap nudge, and `specReviewRisk` forces a spec review for a named capability with no delta. New requirement deltas are invariant-only; legacy `#### Scenario:` blocks still parse and merge but are examples, not criteria.
-- `livingFor` (`extensions/pb/index.ts`) builds the digest once from the spec's own deltas; a requirement the delta rewrites or removes is skipped by the merge's own name key, so nothing that no longer stands is presented as in force.
+### Requirements are the spec's contracts (extensions/pb/spec.ts, extensions/pb/index.ts)
+- There is no requirements file, delta grammar or merge: a capability's durable rules live in the spec that changed them, approved through `approveSpec`'s `contractHash` (`contractText` excludes only Design and Decisions). `/pb:archive` keeps the approved spec; git keeps earlier versions.
+- A changed contract outside the build pauses it (`approvalDrift`); nothing else re-approves a rule, so no second copy can drift from the spec the human read.
 
 ### Fresh sub-agent runs (extensions/pb/runner.ts, extensions/pb/review.ts)
 - Explorer, trier, spec reviewer, dry-run and cartographer get `bash` and are then reverted by `revertFreshRun`; the **code review** deliberately does not revert — it names the paths instead, because a file changed in that window is as likely the human's.
@@ -56,16 +53,14 @@
 
 ### Docs that are runtime input (extensions/pb/guide.md, extensions/pb/help.ts, README.md)
 - `guide.md` is parsed at runtime: ` pb:tip key ` regions are the only source of "What now" text (`tip()` in prompts.ts and index.ts) and `pb:topic` regions are `/pb:help` sections. Using `tip("x")` without the region fails the test "help: every What-now block the code uses exists in the guide".
-- `BINDING_SECTIONS` (`spec.ts`) is the single list rendered into every handout, and the guide and README must state it in the exported order (test "binding: the guide and README list the binding sections in the exported order"); the delta's always-carried context derives from the same list, minus Design.
+- `BINDING_SECTIONS` (`spec.ts`) is the single list rendered into every handout, and the guide and README must state it in the exported order (test "binding: the guide and README list the binding sections in the exported order").
 
 ### Tests and commands (test/, package.json)
-- `npm test` → `node --test test/pb.test.mts` (401 tests, ~180s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
-- The suite drives the real commands/tools against a simulated Pi; `PI_PB_PI_COMMAND` points fresh sub-processes at `test/mock-pi.mjs`, whose `MOCK_SPEC_REVIEW` modes include `block-outside-advisory` (in-scope P0 + outside P1, the only way to carry an outside advisory into a real delta round) and `advisory-flood` (a 10-item carry for the cap). `MOCK_SPEC_BRIEF_OUT` captures the latest brief; `MOCK_SPEC_PROMPT_LOG`/`MOCK_SPEC_SYSTEM_LOG` append one entry per round, split by `<<<round>>>`.
-- `setup()` forces `specReviewer: {mode:"always"}` and `reviewer.idleSec: 0`; `PI_CODING_AGENT_DIR` is redirected to a temp dir so nothing touches the real user agent dir.
+- `npm test` → `node --test test/pb.test.mts` (312 tests, ~150s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
+- The suite drives the real commands/tools against a simulated Pi; `PI_PB_PI_COMMAND` points fresh sub-processes at `test/mock-pi.mjs`, whose `MOCK_SPEC_REVIEW` modes are `block` (a P0), `block-advisory` (P0 + P2), `advisory` (P1 + P2, a pass), `mixed` (P0 + P1) and `crash` (no report). `MOCK_SPEC_BRIEF_OUT` captures the latest brief; `MOCK_SPEC_EDIT` simulates a human editing the spec mid-review.
+- `setup()` sets `reviewer.idleSec: 0` and an empty `specReviewer` (the review always runs); `PI_CODING_AGENT_DIR` is redirected to a temp dir so nothing touches the real user agent dir.
 - `written()` asserts an error-free `pb_write_spec`, so any new write gate must be satisfied by the shared fixtures: `SPEC()` plus the one task-list builder `tasksMarkedBy` behind `TASKS_WITH_OWN_IDS` and `TASKS_WITH_EXEMPTIONS`.
-- A delta round is only reached from a blocked round (`priorMarkdown` carries from a block): `--review` after a recorded pass is a fresh full review, not a delta.
 
 ### Known gaps
-- The living-capability rule is stated in three reviewer-facing places (`SPEC_REVIEWER_SYSTEM`, the `## Living capability check` tail, the `Requirements` bullet in `Your job`) as "a missing delta is a P1 finding", none qualified by the delta precedence rule — a follow-up round can still block on a living gap that predates the revision, the same two-readings shape this feature removed elsewhere.
 - `extensions/pb/guide.md` still cites line numbers from an older tree for the review/scoping text; re-anchor by quoted text before editing.
 <!-- /pb:map -->
