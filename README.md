@@ -88,10 +88,11 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 - **Refactors are welcome, and reviewed.** Refactors the standards call for
   come first as `(refactor)` tasks; changed existing tests are listed and
   judged, not blocked.
-- **Questions without stopping.** A choice that changes behaviour, an API or
-  data becomes a `pb_ask` dialog, and your answer goes into the spec. Away, the
-  build proceeds on its recommendation as an assumption after
-  `askTimeoutSec`; the reviewer checks it.
+- **A build that never stops to ask.** Ambiguity is a reading the build takes
+  and records in the spec's Decisions as an assumption, with what would settle
+  it; the reviewer checks it. Only a Goal or a Contract that cannot be built as
+  written stops the build — with the evidence, for a revised spec and a new
+  approval. No dialog, no timeout, nothing to babysit.
 - **A lean context.** Broad questions go to `pb_explore`, a separate read-only
   context (on a cheaper model if you like). The baseline runs in the harness,
   in its own worktree, and a build resets between tasks to a summary pb writes
@@ -110,8 +111,8 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   by one; a missing item is unverified, never a pass. Blocking findings get a
   second look, and pb offers another model family. A pre-existing problem is
   reported as an outside finding (advisory, capped at P2), never left as a
-  prose note. A command the reviewer runs may change files: they're listed,
-  never silently reverted.
+  prose note. The reviewer has no shell at all: it reads the frozen diff and
+  the tree, so it cannot mutate what it judges.
 - **Memory across features.** Archiving folds what the feature taught about the
   project into a short map in AGENTS.md — its findings, the design it settled
   on, and the review's P0–P2 findings as leads the cartographer rechecks
@@ -218,7 +219,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `maxAttempts` | 3 | failed checks (the final one, or a task's) before the build pauses |
 | `maxConcurrent` | 0 (uncapped) | cap on concurrent fresh runs (explorer, try, spec-review, map, verifier share one engine); extra runs queue FIFO; `~/.pi/agent/pb/config.json` caps every project, and `PI_PB_MAX_CONCURRENT` outranks both |
 | `taskChecks` | `"end"` | `"end"`: the full check after the last task; `"each"`: also a check after every task |
-| `askTimeoutSec` | 300 | how long a dialog waits before going on without you: a `pb_ask` in a build takes the recommendation, a dialog on the way into a build takes pb's choice; 0 = forever |
+| `askTimeoutSec` | 300 | how long a planning or spec-writing dialog waits before the question stays open; a dialog on the way into a build takes pb's choice; 0 = forever |
 | `specWaitSec` | 0 | how long `/pb:build` waits for the spec before yielding to the pending offer; 0 = wait as long as it takes (for slow local models) |
 | `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, and the planning and spec-review guards |

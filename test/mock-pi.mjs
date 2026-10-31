@@ -32,6 +32,7 @@ if (sys.includes("ATTACKER")) {
   // =mixed: a P0 plus a P1; =crash: exits nonzero with no report. MOCK_SPEC_BRIEF_OUT captures
   // the brief; MOCK_SPEC_EDIT simulates a human editing the spec mid-review.
   if (process.env.MOCK_SPEC_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_SPEC_BRIEF_OUT, brief);
+  if (process.env.MOCK_SPEC_ARGS_OUT) fs.writeFileSync(process.env.MOCK_SPEC_ARGS_OUT, argv.join("\n"));
   if (process.env.MOCK_SPEC_EDIT) fs.appendFileSync(process.env.MOCK_SPEC_EDIT, "- Note: edited while the review ran.\n");
   const mode = process.env.MOCK_SPEC_REVIEW;
   if (mode === "crash") {
@@ -56,6 +57,7 @@ if (sys.includes("ATTACKER")) {
   say([call("report_findings", { findings })]);
   say([{ type: "text", text: "Acceptance: all met." }]);
 } else if (sys.includes("VERIFIER")) {
+  if (process.env.MOCK_VERIFIER_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_VERIFIER_BRIEF_OUT, brief);
   if (process.env.MOCK_VERIFY === "crash") {
     console.error("verifier exploded");
     process.exit(1);

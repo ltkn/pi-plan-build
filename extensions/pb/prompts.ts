@@ -251,9 +251,9 @@ function gateLine(spec: ParsedSpec, buildCmd: string | null, each: boolean): str
 
 /** How the build works: the mechanics only (the standards come separately). each: a check after every task. */
 export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each = false, extra = ""): string {
-  return `- Where the spec is unclear or a detail has moved, take the sensible reading, record it with pb_record_decision (assumption: true) as claim + settler + cost. Ask with pb_ask only when a choice changes behaviour, an API or data.
+  return `- This build is autonomous: never ask. Where the spec is unclear or a detail has moved, take the sensible reading and record it with pb_record_decision (assumption: true) as claim + settler + cost.
 - Keep each change to its task. Tests: ${spec.newTests ? `add or extend tests for the behaviour each task introduces${spec.gate === "tests" ? ", seen failing before the code exists" : ""}.` : `add none for this feature (${spec.newTestsReason}).`} Change or remove an existing test only when what it covers changes; never skip or weaken one to get a check through.
-- Goal, Decisions, Contracts, Threats and Acceptance bind you (changing one needs pb_ask); the how is yours: record a shape later tasks need in "## Design" (pb_update_spec); later changes in pb_record_decision.
+- Goal, Decisions, Contracts, Threats and Acceptance bind you; the how is yours: record a shape later tasks need in "## Design" (pb_update_spec); later changes in pb_record_decision. If a Contract or the Goal cannot be built as written, stop with pb_task_done status "blocked" and the evidence: that needs a revised spec and a new approval.
 - Don't commit or discard with git; leave .pi/ alone.
 - Never touch production (data, channels, notifications); a prod read-only query only with why + table + cap ~500 rows.
 - Tests quiet, full log to a temp file outside the project; failures back only.
@@ -266,8 +266,6 @@ export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each =
  */
 export function buildIntro(name: string, spec: ParsedSpec, buildCmd: string | null, each: boolean, standards: string, markdown?: string, extra = ""): string {
   return `[pb:build ${name}] ${markdown ? "Build this feature from the spec below." : `Build the spec you wrote (${P}/specs/${name}/spec.md).`} The planning is done: implement it as written.
-
-Before T1, validate the spec against the repo as it is now: the paths, interfaces, test commands and assumptions it names. If the goal or a Contract cannot be built as written, stop and report it before changing code instead of coding around a wrong spec; a detail that has merely moved is the reading the mechanics below tell you to record as an assumption.
 
 ${buildMechanics(spec, buildCmd, each, extra)}${standardsBlock(standards)}${markdown ? `\n\n--- spec: ${P}/specs/${name}/spec.md ---\n\n${markdown}` : ""}`;
 }
@@ -327,33 +325,48 @@ export const bindingBudget = (window?: number): number => budgetOf(window, 0.1, 
 export const viewBudget = (window?: number): number => budgetOf(window, 0.2, 96_000);
 
 /**
- * The order an oversized copy loses sections, first to go; Decisions and Contracts go last, and only
- * when nothing else is left. Whole sections only, never inside a body: half a rule is worse than none.
+ * The order an oversized copy shortens section bodies, first to go; Decisions and Contracts go last,
+ * because they bind the build most tightly. No section is ever dropped: its heading and the start of
+ * its body stay, and the copy names every section it shortened.
  */
-const CUT_ORDER = ["Design", "Migration and rollback", "Threats and abuse", "Threats", "Out of scope", "Goal", "Decisions", "Contracts"];
+const SHORTEN_ORDER = ["Design", "Migration and rollback", "Threats and abuse", "Threats", "Out of scope", "Goal", "Decisions", "Contracts"];
 
-/** What a copy says about what it left out: every dropped section, by name, and where to read it. */
-const cutNotice = (name: string | undefined, dropped: readonly string[]) =>
-  `## Cut from this copy\nWhole sections dropped for size: ${dropped.join(", ")}. Read them in ${name ? `${P}/specs/${name}/spec.md` : "the spec named above"}.`;
+/** A shortened body keeps at least this much text, so the section still says what it binds. */
+const SHORTEN_MIN_CHARS = 120;
+
+/** A prefix of a body cut on a line boundary, plus an ellipsis: half a line is worse than a clean cut. */
+function shortenedBody(body: string, keep: number): string {
+  if (body.length <= keep) return body;
+  const cut = body.slice(0, Math.max(0, keep));
+  const at = cut.lastIndexOf("\n");
+  return `${(at > 0 ? cut.slice(0, at) : cut).trimEnd()}\n…`;
+}
+
+/** What a copy says about what it shortened: every section, by name, and where to read the rest. */
+const shortenedNotice = (name: string | undefined, shortened: readonly string[]) =>
+  `## Shortened in this copy\nBodies cut for size (each heading and its first lines stay): ${shortened.join(", ")}. Read the rest in ${name ? `${P}/specs/${name}/spec.md` : "the spec named above"}.`;
 
 /**
- * Keep whole binding sections until the copy fits: drop in CUT_ORDER, checking after each, so the
- * copy is bounded by the budget with every cut disclosed. `rest` is what the copy always carries
- * (header, hooks) and is never cut here.
+ * Keep every binding section until the copy fits: shorten bodies in SHORTEN_ORDER, checking after
+ * each, so the copy is bounded by the budget with every cut disclosed. `rest` is what the copy always
+ * carries (header, hooks) and is never cut here.
  */
-function fitSections(markdown: string, maxChars: number, rest: string, name?: string): { kept: { name: string; body: string }[]; dropped: string[] } {
-  const sections = BINDING_SECTIONS.map((section) => ({ name: section, body: sectionOf(markdown, section).trim() })).filter((s) => s.body);
-  const kept = sections.map((s) => s);
-  const dropped: string[] = [];
-  const width = () => rest.length + kept.reduce((n, s) => n + s.body.length + s.name.length + 8, 0) + (dropped.length ? cutNotice(name, dropped).length : 0);
-  for (const cut of CUT_ORDER) {
+function fitSections(markdown: string, maxChars: number, rest: string, name?: string): { kept: { name: string; body: string }[]; shortened: string[] } {
+  const kept = BINDING_SECTIONS.map((section) => ({ name: section, body: sectionOf(markdown, section).trim() })).filter((s) => s.body);
+  const shortened: string[] = [];
+  const width = () => rest.length + kept.reduce((n, s) => n + s.body.length + s.name.length + 8, 0) + (shortened.length ? shortenedNotice(name, shortened).length : 0);
+  for (const target of SHORTEN_ORDER) {
+    const section = kept.find((s) => s.name === target);
+    if (!section) continue;
+    while (width() > maxChars && section.body.length > SHORTEN_MIN_CHARS) {
+      const next = shortenedBody(section.body, Math.max(SHORTEN_MIN_CHARS, Math.floor(section.body.length / 2)));
+      if (next.length >= section.body.length) break; // one long line: the hard cap below is the last resort
+      section.body = next;
+      if (!shortened.includes(section.name)) shortened.push(section.name);
+    }
     if (width() <= maxChars) break;
-    const at = kept.findIndex((s) => s.name === cut);
-    if (at < 0) continue;
-    kept.splice(at, 1);
-    dropped.push(cut);
   }
-  return { kept, dropped };
+  return { kept, shortened };
 }
 
 /** `cap` appends its "…[truncated N chars]" after the slice, so it is asked for a little less: the result then truly fits. */
@@ -379,29 +392,29 @@ const hookLines = (tasks: TaskProgress[]): string[] => {
 
 /**
  * The compact binding context a task, a retry, the coherence pass or a fix lap carries: what the
- * spec binds the change to, without the whole document. Sections stay whole and the ones that do not
- * fit `maxChars` (bindingBudget) are dropped in a fixed order and named; the spec path is given so
- * anything left out can be read at the source.
+ * spec binds the change to, without the whole document. Sections stay, and the ones whose bodies do
+ * not fit `maxChars` (bindingBudget) are shortened in a fixed order and named; the spec path is given
+ * so anything cut can be read at the source.
  */
 export function bindingContext(name: string, markdown: string, tasks: TaskProgress[], maxChars: number): string {
   const head = `Binding context (a compact copy of ${P}/specs/${name}/spec.md; the spec is the source of truth — read it when a line is cut or a case isn't here):`;
   const tail = hookLines(tasks);
-  const { kept, dropped } = fitSections(markdown, maxChars, head + tail.join("\n"), name);
-  const lines = [head, ...(dropped.length ? ["", cutNotice(name, dropped)] : []), ...kept.flatMap((s) => ["", `## ${s.name}`, s.body]), ...tail];
+  const { kept, shortened } = fitSections(markdown, maxChars, head + tail.join("\n"), name);
+  const lines = [head, ...(shortened.length ? ["", shortenedNotice(name, shortened)] : []), ...kept.flatMap((s) => ["", `## ${s.name}`, s.body]), ...tail];
   return withinBudget(lines.join("\n"), maxChars);
 }
 
 /**
  * The build's view of the spec, for a reset or compaction: the parts that bind the work, the
  * and no Tasks — the current handout carries its own task. Deterministic: assembled from the
- * sections, never summarized by a model. Sections that do not fit `maxChars` (viewBudget) go whole
- * and are named.
+ * sections, never summarized by a model. Section bodies that do not fit `maxChars` (viewBudget)
+ * are shortened and named.
  */
 export function buildSpecView(markdown: string, maxChars: number): string {
   const header = headerBlock(markdown).trim();
   const tail: string[] = [];
-  const { kept, dropped } = fitSections(markdown, maxChars, header + tail.join("\n"));
-  const parts = [header, ...(dropped.length ? [cutNotice(undefined, dropped)] : []), ...kept.map((s) => `## ${s.name}\n\n${s.body}`), ...tail];
+  const { kept, shortened } = fitSections(markdown, maxChars, header + tail.join("\n"));
+  const parts = [header, ...(shortened.length ? [shortenedNotice(undefined, shortened)] : []), ...kept.map((s) => `## ${s.name}\n\n${s.body}`), ...tail];
   return withinBudget(parts.filter((p) => p).join("\n\n"), maxChars);
 }
 
@@ -441,7 +454,7 @@ ${task.text}
 
 ${redEvidence ? `${redEvidenceText(redEvidence)}\n\n` : ""}${binding ? `${binding}\n\n` : ""}Keep the change to this task: if it has grown into several changes, finish the smallest coherent part and report the rest as open. Don't run the full suite — the harness runs it after the last task. ${STRUCTURED_EDIT_RULE}
 
-${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red saying which acceptance lines each failing test proves. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}(Comments: describe the code as it is, never its history — no dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""} plus changed/caveat/rejected/open (each required: what changed, what the next task must respect, what was tried and discarded, what is still unchecked — "none" where there is genuinely nothing). If it can't be done properly, status "blocked" with why.`;
+${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red saying which acceptance lines each failing test proves. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}(Comments: describe the code as it is, never its history — no dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""} plus changed/caveat/rejected/open (each required: what changed, what the next task must respect, what was tried and discarded, what is still unchecked — "none" where there is genuinely nothing). If the Goal or a Contract cannot be built as written, status "blocked" with the evidence: the build stops for a revised spec and a new approval.`;
 }
 
 export function continuePrompt(task: SpecTask): string {
@@ -460,7 +473,7 @@ Read the whole change of this feature (\`${diff}\`, plus untracked files from gi
 
 ${binding ? `${binding}\n\n` : ""}${STRUCTURED_EDIT_RULE}
 
-When done, call pb_task_done with task "cohere" plus changed/caveat/rejected/open ("none" where there is genuinely nothing). If it can't be done properly, status "blocked" with why. If there is nothing worth consolidating, say so and finish done anyway.`;
+When done, call pb_task_done with task "cohere" plus changed/caveat/rejected/open ("none" where there is genuinely nothing). If the Goal or a Contract cannot be built as written, status "blocked" with the evidence. If there is nothing worth consolidating, say so and finish done anyway.`;
 }
 
 export function fixText(taskId: string, what: string, output: string, attempt: number, max: number, last: boolean, binding = "", redEvidence?: RedEvidence): string {
@@ -472,7 +485,7 @@ export function fixText(taskId: string, what: string, output: string, attempt: n
 }
 
 export function nudgePrompt(taskId: string): string {
-  return `[pb:build] You stopped without finishing ${taskId === "final" ? "the final check" : taskId}. Carry on and finish with pb_task_done; if it can't be done properly, pb_task_done with status "blocked"; if you need a decision, pb_ask.`;
+  return `[pb:build] You stopped without finishing ${taskId === "final" ? "the final check" : taskId}. Carry on and finish with pb_task_done; if the Goal or a Contract cannot be built as written, pb_task_done with status "blocked" and the evidence; anything unclear is a reading you take and record with pb_record_decision (assumption: true).`;
 }
 
 /**
@@ -542,9 +555,9 @@ export const REVIEWER_SYSTEM = `You are an independent REVIEWER in a fresh sessi
 
 ## Ground rules
 
-Do not modify any file. Use read/grep/find/ls and bash only for inspection (git diff, git status, running a test is fine). Never run git commands that change the working tree or index (checkout, restore, reset, stash, clean, add, commit): the change under review may be uncommitted. Ignore .pi/ except the spec you are given.
+Do not modify any file. You have read/grep/find/ls only: no shell, so no git and no test runs. The harness already ran the check on the current tree; the result is in the brief. The change's diff is in the brief: read it, and read files for the context around it. Ignore .pi/ except the spec you are given.
 
-The harness already ran the check on the current tree; the result is in the brief. Don't re-run the full suite; run a specific test only when you need evidence. Read the diff file by file.
+The brief is a frozen snapshot: judge the change as it was when the review started.
 
 ## What to check
 
@@ -585,7 +598,7 @@ Then reply briefly in markdown: only what is not a finding — context, a judgem
 /** The abuse pass: one fresh call whose only job is to break the change, on sensitive ground by default (reviewer.security "auto"). */
 export const ATTACKER_SYSTEM = `You are an ATTACKER in a fresh session, working for the defenders: find how this change can be abused or broken before someone else does. You did not build it and are not shown how it was built.
 
-Do not modify any file. Use read/grep/find/ls and bash only for inspection; never run git commands that change the working tree or index. Ignore .pi/ except the spec you are given.
+Do not modify any file. You have read/grep/find/ls only: no shell, so no git and no test runs. The change's diff is in the brief; read files for the context around it. Ignore .pi/ except the spec you are given.
 
 For every entry point the change adds or alters (API routes, UI actions, commands, message or event consumers, webhooks, scheduled jobs, file or data imports), and every rule it enforces, ask who can reach it and what they gain by breaking it. Assume the caller controls every input, may hold a stolen session or another user's, can replay, reorder, race and automate requests, and can guess or enumerate identifiers. Look for:
 - Access: authentication and authorization on every path and per object; what the caller must prove for each state change; logic reused from another flow that lost the precondition that made it safe there.
@@ -617,7 +630,7 @@ export const VERIFIER_SYSTEM = `You are a VERIFIER in a fresh context. A reviewe
 
 A finding marked "outside the change" is pre-existing: confirm it when the problem is real and still present, whether or not this change caused it. Never reject a finding for being outside or pre-existing — that is its class, not a reason to dismiss it.
 
-Do not modify any file, and never run git commands that change the working tree or index. Report with the report_verdicts tool: one entry per finding, by its number.`;
+Do not modify any file. You have read/grep/find/ls only: no shell, so no git and no test runs. The change's diff is in the brief; read files for the context around it. Report with the report_verdicts tool: one entry per finding, by its number.`;
 
 /**
  * A reviewer's rejected alternative as it is kept: capped, and one line — it is re-rendered into the
@@ -669,6 +682,12 @@ export function claimedFindings(claims: readonly string[], findings: readonly Fi
   return findings.filter((f) => taken.has(f));
 }
 
+/**
+ * How much of the frozen diff a review brief carries. Most changes fit; past the cap the reviewer
+ * reads the files it needs, since it has no shell to produce a diff itself.
+ */
+export const REVIEW_DIFF_CHARS = 120_000;
+
 export interface ReviewBrief {
   /** the spec, when the change was built from one */
   spec?: { name: string; markdown: string; parsed: ParsedSpec };
@@ -677,6 +696,8 @@ export interface ReviewBrief {
   /** what the change is meant to do, when there is no spec */
   intent?: string;
   base?: string;
+  /** the diff from base (or HEAD) to the tree the review started on, capped for the brief */
+  diff?: string;
   changed: string[];
   stat: string;
   check: string;
@@ -685,7 +706,7 @@ export interface ReviewBrief {
   previous?: { snapshot: string; findings: Finding[]; changed: string[]; acceptance?: AcceptanceCheck[] };
   /** existing tests the build deleted, cut down or skipped */
   testChanges?: string[];
-  /** tasks whose new tests were never seen failing (with why), and whose proof is shared with another task */
+  /** tasks whose new tests were never seen failing (with why), and whose proof was disclosed as unproven */
   redNotes?: string[];
   /** every task whose new tests were seen failing before the change: its claim and the failure head the harness saw */
   redProofs?: RedProof[];
@@ -765,7 +786,7 @@ export function reviewerBrief(o: ReviewBrief): string {
       "",
       ...(o.previous.findings.length ? o.previous.findings.map((f, i) => findingLine(f, i + 1)) : ["(none)"]),
       "",
-      `Changed since the previous review (its tree is commit ${o.previous.snapshot}): git diff ${o.previous.snapshot} -- . ':(exclude).pi'`,
+      `Changed since the previous review (its tree is commit ${o.previous.snapshot}): the files below; the diff below covers the whole change.`,
       "",
       o.previous.changed.join("\n") || "(nothing)",
       "",
@@ -792,8 +813,14 @@ export function reviewerBrief(o: ReviewBrief): string {
   lines.push(
     "## How to see the change",
     "",
-    o.base ? `Base commit: ${o.base}\nRun: git diff ${o.base} -- . ':(exclude).pi'   and read the untracked files listed below.` : "Run: git diff HEAD and git status.",
+    o.base
+      ? `Base commit: ${o.base}. The diff below is from that commit to the tree the review started on. Read files with read/grep/find/ls for anything past the cut, and read the untracked files listed below.`
+      : "The diff below is from HEAD to the tree the review started on. Read files with read/grep/find/ls for anything past the cut, and read the untracked files listed below.",
     ...(o.baseWarning ? ["", `⚠ ${o.baseWarning}`] : []),
+    "",
+    "## The diff",
+    "",
+    o.diff?.trim() ? cap(o.diff.trim(), REVIEW_DIFF_CHARS) : "(no diff captured: the change is in the files listed below; read them.)",
     "",
     "## Changed files",
     "",
@@ -849,7 +876,7 @@ export function reviewerBrief(o: ReviewBrief): string {
   return lines.join("\n");
 }
 
-export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review one feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. The spec is a frozen draft: this is the only pass; there are no earlier findings, rounds or outside lane. Inspect the repository with read-only shell commands (ls, find, cat, head, tail, git status, git log, git diff, rg). Do not create, modify or delete files, redirect output, install anything, or run commands that write.
+export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review one feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. The spec is a frozen draft: this is the only pass; there are no earlier findings, rounds or outside lane. Inspect the repository with read/grep/find/ls only: you have no shell, so you cannot run commands, tests or builds. Do not create, modify or delete files.
 
 Report every finding with report_findings in one call, an empty list when there are none. A finding has a priority, a title, and optionally file, line and fix. The title is one sentence a tired human can act on: what goes wrong, for whom, and where. The optional file:line and fix are the supporting evidence and the single change you would make. If you weighed another fix and rejected it, say why in the same fix line; do not report an either/or as a finding.
 
@@ -859,9 +886,9 @@ Priority:
 - P2 — a real weakness, edge case, ambiguity, missing measurement, documentation or rollback gap. P3 — polish or preference.
 No P0 means pass, however many P1-P3 findings you report.
 
-Check the spec against the code: every path:line resolves; every Test: command can run here; every observable contract value is backed by the code path or test it cites; a contract the tasks do not implement, or a contradiction between Contracts, Decisions, Migration, Threats and tasks, is a finding. Attack the Decisions and each rejected alternative; flag an unmeasured quantitative claim; probe undefined empty paths. A point the spec marks decided is settled: check for new evidence, and comment only when you find it. When a rule is selected by a classification, test an input that matches more than one class and say which class must win. Do not reward length or polish. No findings is a valid result.
+Check the spec against the code: every path:line resolves; every Test: command names a runner and test file the project has; every observable contract value is backed by the code path or test it cites; a contract the tasks do not implement, or a contradiction between Contracts, Decisions, Migration, Threats and tasks, is a finding. Attack the Decisions and each rejected alternative; flag an unmeasured quantitative claim; probe undefined empty paths. A point the spec marks decided is settled: check for new evidence, and comment only when you find it. When a rule is selected by a classification, test an input that matches more than one class and say which class must win. Do not reward length or polish. No findings is a valid result.
 
-A fork read-only inspection can settle, settle before you write, with one cheap targeted read-only command — a single git/grep/ls query, or one test-name-pattern run that finishes in seconds — and put the command and its result in the finding. Never the full suite, never a build or install. What no cheap command settles, report as a finding with the question the human must answer. Be concise: conclusion first.`;
+A fork a read-only inspection can settle, settle before you write, with one cheap targeted read or grep, and put the file:line and result in the finding. Never ask for a test, build or install: you cannot run one. What no read settles, report as a finding with the question the human must answer. Be concise: conclusion first.`;
 
 /** One frozen draft, one independent pass: no earlier findings, rounds or outside lane. */
 export function specReviewBrief(name: string, markdown: string): string {
@@ -893,7 +920,7 @@ export function reviewStateSummary(o: { label: string; role: "review" | "abuse";
   ].join("\n");
 }
 
-export function verifierBrief(findings: Finding[], base: string | undefined, spec?: string): string {
+export function verifierBrief(findings: Finding[], base: string | undefined, spec?: string, diff?: string): string {
   return [
     "# Findings to verify",
     "",
@@ -901,7 +928,9 @@ export function verifierBrief(findings: Finding[], base: string | undefined, spe
     "",
     "# The change",
     "",
-    base ? `git diff ${base} -- . ':(exclude).pi', plus untracked files (git status).` : "git diff HEAD, plus untracked files (git status).",
+    base ? `Base commit: ${base}. The diff below is from that commit to the tree the review started on.` : "The diff below is from HEAD to the tree the review started on.",
+    "",
+    diff?.trim() ? cap(diff.trim(), REVIEW_DIFF_CHARS) : "(no diff captured: read the files named by the findings.)",
     ...(spec ? ["", "# The spec it was built from", "", spec] : []),
   ].join("\n");
 }

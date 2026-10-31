@@ -194,12 +194,8 @@ export interface TaskProgress {
   redOutput?: string;
   /** the Test: command that was seen failing for red, so a rewritten command re-requires proof */
   redCommand?: string;
-  /** content fingerprint of the test files seen failing, so edited/swapped tests re-require proof */
-  redFiles?: Record<string, string>;
-  /** tasks needing red that run the very same Test: command: one run doesn't prove each task's own tests */
-  redShared?: string;
-  /** pre-green: the command already passed, proven by the done earlier task named here — red was impossible */
-  preGreen?: string;
+  /** why no run could show the new tests failing (the command passed before the change): disclosed to the reviewer */
+  redUnproven?: string;
 }
 
 /** How much of a red proof's claim the harness keeps: enough to judge it, short enough for the build state. */
@@ -355,6 +351,8 @@ export interface ReviewRun {
   label: string;
   brief: string;
   base?: string;
+  /** the frozen diff (base to the tree the review started on): the review reads it, having no shell */
+  diff?: string;
   /** why an abuse pass runs, if it does */
   security?: string;
   followUp: boolean;

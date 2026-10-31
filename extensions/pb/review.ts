@@ -9,7 +9,8 @@ import { runFresh } from "./runner.ts";
 import type { AcceptanceCheck, AcceptanceCriterion, AcceptanceStatus, Finding, Priority } from "./store.ts";
 
 export const REVIEW_TOOLS = fileURLToPath(new URL("./review-tools.ts", import.meta.url));
-const INSPECT = ["read", "grep", "find", "ls", "bash"];
+/** What a review pass may do: read the frozen tree and the brief's diff. No shell, so it cannot act on it. */
+const INSPECT = ["read", "grep", "find", "ls"];
 
 export type Verdict = "pass" | "changes_needed" | "unverified" | "none";
 
@@ -136,6 +137,8 @@ export async function verifyFindings(o: {
   cwd: string;
   findings: Finding[];
   base?: string;
+  /** the frozen diff the findings are judged against */
+  diff?: string;
   spec?: string;
   model?: string;
   thinking?: string;
@@ -153,7 +156,7 @@ export async function verifyFindings(o: {
     cwd: o.cwd,
     role: "verifier",
     systemPrompt: VERIFIER_SYSTEM,
-    brief: verifierBrief(toCheck, o.base, o.spec),
+    brief: verifierBrief(toCheck, o.base, o.spec, o.diff),
     prompt: "Verify each finding in the attached file; report with report_verdicts.",
     tools: [...INSPECT, "report_verdicts"],
     extensions: [REVIEW_TOOLS],

@@ -220,24 +220,12 @@ export const needsRed = (spec: ParsedSpec, task: SpecTask | undefined) => !!task
 
 /**
  * The `Test:` commands carried by more than one task that needs red, with their task ids in spec order.
- * A later task's run then shows only that something is missing among them — or, once an earlier one is
- * done and proven, that its own tests are already satisfied (pre-green).
+ * One run then shows only that something is missing among them, not each task's own new tests.
  */
 export function sharedTestCommands(spec: ParsedSpec): Array<{ command: string; ids: string[] }> {
   const byCommand = new Map<string, string[]>();
   for (const t of spec.tasks) if (needsRed(spec, t) && t.test) byCommand.set(t.test, [...(byCommand.get(t.test) ?? []), t.id]);
   return [...byCommand].filter(([, ids]) => ids.length > 1).map(([command, ids]) => ({ command, ids }));
-}
-
-/**
- * The other tasks that need red and run the very same `Test:` command: one run then shows only that
- * something is missing among them, not each task's own tests. Grouped by command, so it survives a
- * spec being rewritten.
- */
-export function redSharing(spec: ParsedSpec): Map<string, string> {
-  return new Map(
-    sharedTestCommands(spec).flatMap(({ ids }) => ids.map((id) => [id, ids.filter((other) => other !== id).join(", ")] as [string, string])),
-  );
 }
 
 /** A step of the build by id: a spec task. */

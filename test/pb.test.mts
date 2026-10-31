@@ -330,7 +330,9 @@ function setup(config: object = {}) {
         const pass = kind && (kind === "adversarial" ? "abuse" : "review");
         if (pass && !reviewer.script) {
           // The stand-in reviewer and abuse pass: report the configured findings, then a short reply.
-          if (reviewer.write && pass === "review") fs.writeFileSync(reviewer.write, "reviewer was here");
+          // A file changing in the review's window: the reviewer has no shell, so this stands in for
+          // the human (or another session) editing while the review runs.
+          if (reviewer.write && pass === "review") fs.writeFileSync(reviewer.write, "edited while the review ran");
           const findings = pass === "review" ? reviewer.review : reviewer.abuse;
           const checklist = pass === "review" ? (reviewChecklists.get(rt.file()) ?? []) : [];
           const acceptance = pass === "review" ? (reviewer.acceptance ?? checklist.map((criterion) => ({ criterion, status: "met", evidence: "checked in src/order.ts:1" }))) : undefined;
@@ -566,6 +568,29 @@ test("plan mode stays with its session, not with the build session", async () =>
   };
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("plan: a turn that changed a project file is named in the chat right away", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks"); // the standards offer
+  t.agent.script = async () => {
+    fs.writeFileSync(path.join(t.repo, "stray.txt"), "written by a shell command");
+  };
+  await t.run("plan", "x");
+  assert.ok(t.posts.some((x) => /^\*\*Changed while planning\*\* — these project files differ from when planning began: stray\.txt/.test(x)));
+  // One note per change set: a second settle with nothing new doesn't repeat it.
+  const notes = () => t.posts.filter((x) => x.startsWith("**Changed while planning**")).length;
+  const before = notes();
+  await t.fire("agent_settled", {});
+  assert.equal(notes(), before);
+  // A further change is named again.
+  t.agent.script = async () => {
+    fs.writeFileSync(path.join(t.repo, "second.txt"), "x");
+  };
+  await t.runtime().pi.sendMessage({ content: "Another turn.", display: false }, { triggerTurn: true });
+  await t.settle();
+  assert.equal(notes(), before + 1);
 });
 
 test("plan: files changed while planning (e.g. through bash) are shown before the build: keep or restore", async () => {
@@ -1130,37 +1155,30 @@ test("red then green: a task's new tests are seen failing first; refactors and n
   assert.doesNotMatch(u.instructions[0], /Skeleton/);
 });
 
-test("red proof is bound to the test files: editing them after red re-requires proof", async () => {
+test("red proof belongs to its command: edited tests do not re-require it, a rewritten command does", async () => {
   const t = setup({ verify: "true" });
   await written(t, SPEC({ tasks: TASKS_WITH_A_REFACTOR }));
   const said: string[] = [];
-  let weakened = false;
   t.agent.script = async (text, tool) => {
     const task = taskOf(text) ?? (text.includes("Continue task T1") ? "T1" : undefined);
-    if (task === "T1" && !weakened) {
+    if (task === "T1" && !said.length) {
       fs.writeFileSync("T1.test.mjs", "assert equal(a, 1)\n");
       said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
-      fs.writeFileSync("T1.test.mjs", "assert true\n"); // weaken after the proof
+      // The tests change after the proof: the proof is still this command's one run, and the reviewer
+      // reads the claim against the tests as they are now. No second red round is demanded.
+      fs.writeFileSync("T1.test.mjs", "assert equal(a, 1) // tightened\n");
       fs.writeFileSync("T1.txt", "x");
-      weakened = true;
       said.push((await tool("pb_task_done", { task, status: "done", changed: "done", caveat: "none", rejected: "none", open: "none" })).content![0].text);
-      const cleared = t.progress("order-cancellation").tasks.find((x: any) => x.id === "T1");
-      assert.equal(cleared.redClaim, undefined); // an invalidated proof takes its claim and output with it
-      assert.equal(cleared.redOutput, undefined);
-      fs.rmSync("T1.txt"); // set aside, as told
-      said.push((await tool("pb_tests_red", { task, tests: "T1.txt exists" })).content![0].text);
-      fs.writeFileSync("T1.txt", "x");
-      return void (await tool("pb_task_done", { task, status: "done", changed: "done", caveat: "none", rejected: "none", open: "none" }));
     }
     return diligent(text, tool);
   };
   await t.run("build");
   assert.match(said[0], /^Seen failing: `test -f T1\.txt`/);
-  assert.match(said[1], /tests changed since they were seen failing[\s\S]*pb_tests_red again/);
-  assert.match(said[2], /^Seen failing: `test -f T1\.txt`/);
+  assert.doesNotMatch(said[1], /tests changed since they were seen failing/);
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "built");
-  assert.equal(p.tasks.find((x: any) => x.id === "T1").redClaim, "T1.txt exists"); // the new proof carries its own claim
+  assert.equal(p.tasks.find((x: any) => x.id === "T1").redClaim, "T1.txt exists");
+  assert.equal(p.tasks.find((x: any) => x.id === "T1").redCommand, "test -f T1.txt");
 });
 
 test("red proof: the claim and failure head render on a retry, or not at all without a proof", async () => {
@@ -1198,6 +1216,23 @@ test("spec review leaves the project untouched: stray writes are put back", asyn
   }
   assert.ok(!fs.existsSync(planted));
   assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("spec review: the reviewer gets read-only tools, never a shell", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const argsOut = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pb-args-")), "args.txt");
+  process.env.MOCK_SPEC_ARGS_OUT = argsOut;
+  t.agent.script = diligent;
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_ARGS_OUT;
+  }
+  const argv = fs.readFileSync(argsOut, "utf8").split("\n");
+  const tools = argv[argv.indexOf("--tools") + 1];
+  assert.equal(tools, "read,grep,find,ls");
+  assert.ok(!argv.includes("bash"));
 });
 
 test("spec review: one pass on the frozen draft, with the whole text in its brief", async () => {
@@ -1529,46 +1564,40 @@ test("red proof: a failed task check hands the capped claim and failure head bac
   assert.match(said[1], /If that failure was not the missing behaviour[\s\S]*pb_tests_red again instead of building on it/);
 });
 
-test("build: one Test: command shared by two tasks proves only that something is missing, and is reported that way", async () => {
-  const t = setup({ verify: "test -f T1.txt && test -f T2.txt" });
-  await written(
-    t,
-    SPEC({
+test("spec: two tasks sharing one Test: command are warned, since one run cannot show each task's tests failing", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const r = await t.callTool("pb_write_spec", {
+    name: "order-cancellation",
+    content: SPEC({
       tasks: `### T1: first file
 Create T1.txt.
-- Acceptance: T1.txt exists (tests: T1)
+- Acceptance: T1.txt exists
 - Test: \`test -f both.txt\`
 
 ### T2: second file
 Create T2.txt.
-- Acceptance: T2.txt exists (tests: T2)
+- Acceptance: T2.txt exists
 - Test: \`test -f both.txt\``,
     }),
-  );
-  t.agent.script = diligent;
-  await t.run("build");
-  const p = t.progress("order-cancellation");
-  assert.equal(p.phase, "built");
-  // Both tasks ran the same command, so each proof shows only that something is missing among them: recorded for the reviewer.
-  assert.deepEqual(p.tasks.map((x: any) => [x.id, !!x.red, x.redShared]), [["T1", true, "T2"], ["T2", true, "T1"]]);
-  assert.match(t.posts.at(-1)!, /New tests never seen failing[\s\S]*- T1: `test -f both\.txt` is also T2's Test: command, so that one run doesn't prove T1's own tests[\s\S]*- T2: `test -f both\.txt` is also T1's Test: command/);
-  await t.run("review");
-  assert.match(t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!, /## New tests never seen failing[\s\S]*- T1: `test -f both\.txt` is also T2's Test: command/);
+  });
+  assert.equal(r.error, undefined);
+  assert.match(r.content![0].text, /\`test -f both\.txt\` is the Test: of T1, T2: one run cannot show each task's own new tests failing — give each task its own command/);
 });
 
-test("build: pre-green — a task whose command an earlier proven task already satisfies auto-proceeds, disclosed", async () => {
+test("build: a command an earlier task already proved records that no run could prove the later task's tests", async () => {
   const t = setup({ verify: "test -f T1.txt && test -f T2.txt" });
   await written(
     t,
     SPEC({
       tasks: `### T1: first file
 Create T1.txt.
-- Acceptance: T1.txt exists (tests: T1)
+- Acceptance: T1.txt exists
 - Test: \`test -f both.txt\`
 
 ### T2: second file
 Create T2.txt.
-- Acceptance: T2.txt exists (tests: T2)
+- Acceptance: T2.txt exists
 - Test: \`test -f both.txt\``,
     }),
   );
@@ -1578,7 +1607,7 @@ Create T2.txt.
     if (task && task !== "final") {
       said.push((await tool("pb_tests_red", { task, tests: `${task}.txt exists` })).content![0].text);
       fs.writeFileSync(`${task}.txt`, "x");
-      if (task === "T1") fs.writeFileSync("both.txt", "x"); // more than its slice: T2's command passes
+      if (task === "T1") fs.writeFileSync("both.txt", "x"); // more than its slice: T2's command now passes
     }
     if (task) return void (await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: "none" }));
   };
@@ -1587,11 +1616,12 @@ Create T2.txt.
   assert.match(said[1], /`test -f both\.txt` already passes: T1 \(done, same Test: command\) proved it[\s\S]*reviewer is told/);
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "built");
-  assert.deepEqual(p.tasks.map((x: any) => [x.id, !!x.red, x.preGreen]), [["T1", true, undefined], ["T2", false, "T1"]]);
+  assert.deepEqual(p.tasks.map((x: any) => [x.id, !!x.red, Boolean(x.redUnproven)]), [["T1", true, false], ["T2", false, true]]);
+  assert.match(p.tasks.find((x: any) => x.id === "T2").redUnproven, /`test -f both\.txt` already passes, because T1 \(done, same Test: command\) proved it/);
   // Named, not blurred: the reviewer knows exactly whose run satisfies T2.
-  assert.match(t.posts.at(-1)!, /New tests never seen failing[\s\S]*- T2: `test -f both\.txt` already satisfied by T1's proven run, so no run proves T2's own tests/);
+  assert.match(t.posts.at(-1)!, /New tests never seen failing[\s\S]*- T2: `test -f both\.txt` already passes, because T1/);
   await t.run("review");
-  assert.match(t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!, /- T2: `test -f both\.txt` already satisfied by T1's proven run/);
+  assert.match(t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!, /- T2: `test -f both\.txt` already passes, because T1/);
 });
 
 const THREE_TASKS = `### T1: first file
@@ -1803,7 +1833,7 @@ test("spec: shared seams without Contracts warn, never reject; shared Test: warn
     name: "c",
     content: SPEC({ tasks: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `true`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `true`" }),
   })).content![0].text;
-  assert.match(shared, /\nNote: `true` is the Test: of T1, T2: the later auto-proceed as pre-green once the earlier proves it/);
+  assert.match(shared, /\nNote: `true` is the Test: of T1, T2: one run cannot show each task's own new tests failing — give each task its own command/);
   assert.doesNotMatch(withContracts, /is the Test: of/); // distinct commands: nothing shared
   // A Tasks edit re-warns on sharing; anything else stays quiet.
   const tasks = (await t.callTool("pb_update_spec", { name: "a", section: "Tasks", content: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `true`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `true`\n\n### T3: c\n- Acceptance: c (tests: T3)\n- Test: `true`" })).content![0].text;
@@ -2127,8 +2157,8 @@ test("build: after the last attempt it pauses; /pb:build resumes with a fresh se
   assert.match(t.instructions.find((i) => /From the human: create the file/.test(i))!, /Task T1 \(attempt 1 of 2\)|Task T1\. Do only/);
 });
 
-test("build: ambiguities become recorded assumptions; questions are asked without pausing", async () => {
-  const t = setup({ verify: "true" });
+test("build: the build never asks; ambiguity is a reading recorded as an assumption", async () => {
+  const t = setup({ verify: "true", askTimeoutSec: 0.001 });
   await written(t);
   let answer: Result | undefined;
   t.agent.script = async (text, tool) => {
@@ -2136,17 +2166,18 @@ test("build: ambiguities become recorded assumptions; questions are asked withou
     if (text.includes("Task T2")) answer = await tool("pb_ask", { question: "Which file name?", options: ["t2.txt", "T2.txt"], recommended: "T2.txt" });
     return diligent(text, tool);
   };
-  t.selects.push("T2.txt (recommended)");
   await t.run("build");
-  assert.equal(answer!.content![0].text, "The human answered: T2.txt (recorded in the spec's Decisions)");
+  assert.equal(t.selects.length, 0); // no dialog was opened, and nothing counted down
+  assert.equal(t.dialogTimeouts.length, 0);
+  assert.match(answer!.content![0].text, /This build is autonomous: don't ask\. Take the sensible reading and record it with pb_record_decision/);
   assert.equal(t.stat.runs, 1); // no pause, no resume
   const spec = t.read(".pi/pb/specs/order-cancellation/spec.md");
   assert.match(spec, /- Assumption \(build, T1\): Follow the layout rules over the mockup/);
-  assert.match(spec, /- Which file name\? → T2\.txt/);
+  assert.doesNotMatch(spec, /Which file name/);
   assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Choices the build made where the spec was unclear[\s\S]*Assumption \(build, T1\): Follow the layout rules/);
 });
 
-test("build: a colon Decisions heading takes decisions, answers and guidance without wrecking the spec", async () => {
+test("build: a colon Decisions heading takes decisions and guidance without wrecking the spec", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   const { Store } = await import("../extensions/pb/store.ts");
@@ -2154,21 +2185,18 @@ test("build: a colon Decisions heading takes decisions, answers and guidance wit
   await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("## Decisions\n", "## Decisions:\n") });
   t.agent.script = async (text, tool) => {
     if (text.includes("Task T1")) await tool("pb_record_decision", { decision: "Follow the layout rules over the mockup: the rules are marked exact.", assumption: true });
-    if (text.includes("Task T2")) await tool("pb_ask", { question: "Which file name?", options: ["t2.txt", "T2.txt"], recommended: "T2.txt" });
     return diligent(text, tool);
   };
-  t.selects.push("T2.txt (recommended)");
   await t.run("build", "order-cancellation use a helper for the email");
   const spec = t.read(".pi/pb/specs/order-cancellation/spec.md");
   assert.equal((spec.match(/^##\s+Decisions\s*:?\s*$/gim) ?? []).length, 1); // no duplicate heading appeared
   assert.match(spec, /- Assumption \(build, T1\): Follow the layout rules/);
-  assert.match(spec, /- Which file name\? → T2\.txt/);
   assert.match(spec, /- use a helper for the email/);
   assert.deepEqual(parseSpec(spec).errors, []);
   assert.match(t.posts.at(-1)!, /Choices the build made where the spec was unclear[\s\S]*Assumption \(build, T1\): Follow the layout rules/);
 });
 
-test("build: an unanswered question goes on with the recommendation after askTimeoutSec, recorded as an assumption", async () => {
+test("build: a question asked during a build never opens a dialog, even when a timeout is configured", async () => {
   const t = setup({ verify: "true", askTimeoutSec: 0.001 });
   await written(t);
   let answer: Result | undefined;
@@ -2176,12 +2204,12 @@ test("build: an unanswered question goes on with the recommendation after askTim
     if (text.includes("Task T2")) answer = await tool("pb_ask", { question: "Which file name?", options: ["t2.txt", "T2.txt"], recommended: "T2.txt" });
     return diligent(text, tool);
   };
-  t.selects.push("<timeout>");
+  t.selects.push("T2.txt (recommended)", "<timeout>");
   await t.run("build");
-  assert.equal(t.dialogTimeouts.at(-1), 1);
-  assert.match(answer!.content![0].text, /No answer within 0 min: go on with your recommendation \(T2\.txt\)/);
-  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /- Assumption \(build, T2, no answer within 0 min\): Which file name\? → T2\.txt/);
-  assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*no answer within 0 min/);
+  assert.equal(t.dialogTimeouts.length, 0); // the refusal never reaches a dialog or its timeout
+  assert.match(answer!.content![0].text, /This build is autonomous/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.doesNotMatch(t.read(".pi/pb/specs/order-cancellation/spec.md"), /Assumption \(build, T2, no answer/);
 });
 
 test("pb_ask runs one at a time: two questions in one message come as two dialogs, not one dismissing the other", async () => {
@@ -2191,25 +2219,18 @@ test("pb_ask runs one at a time: two questions in one message come as two dialog
   assert.match(t.runtime().tools.pb_ask.description, /ask a question that depends on another's answer only after you have that answer/);
 });
 
-test("build: without a UI, a question pauses the build; answering costs the task no attempt", async () => {
+test("build: without a UI a question is refused too; the build carries on and the task keeps its attempt", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.runtime().hasUI = false;
-  let asked = false;
+  let answer: Result | undefined;
   t.agent.script = async (text, tool) => {
-    if (text.includes("Task T2") && !asked) {
-      asked = true;
-      const r = await tool("pb_ask", { question: "Which file name?" });
-      assert.equal(r.terminate, true);
-      return;
-    }
-    if (text.includes("Continue task T2")) return diligent("Task T2", tool);
+    if (text.includes("Task T2") && !answer) answer = await tool("pb_ask", { question: "Which file name?" });
     return diligent(text, tool);
   };
   await t.run("build");
-  assert.match(t.posts.at(-1)!, /Build paused\*\* — T2 question: Which file name\?/);
-  await t.run("build", "call it T2.txt");
-  assert.ok(t.instructions.some((i) => /^\[pb:build\] Continue task T2: second file\. Finish it with pb_task_done\.\n\nTouched so far[\s\S]*- T1: T1\.txt[\s\S]*\n\nFrom the human: call it T2\.txt$/.test(i)));
+  assert.match(answer!.content![0].text, /This build is autonomous: don't ask/);
+  assert.ok(!t.posts.some((x) => /Build paused/.test(x)));
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "built");
   assert.equal(p.tasks.find((x: any) => x.id === "T2").attempts, 1);
@@ -2483,43 +2504,44 @@ test("binding: budgets come from the context window", async () => {
   assert.ok(viewBudget(256_000) < 256_000 * 4 && bindingBudget(128_000) < viewBudget(128_000));
 });
 
-test("binding: an oversized block drops whole sections and names them", async () => {
+test("binding: an oversized block shortens section bodies and names them, never dropping a section", async () => {
   const { bindingBudget, bindingContext, buildSpecView, viewBudget } = await import("../extensions/pb/prompts.ts");
   const filler = (word: string, n: number) => Array.from({ length: n }, (_, i) => `${word}${i} keeps running with more detail.`).join("\n");
   const long = "detail ".repeat(80); // 640 chars: over a task hook's line cap
-  const markdown = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists (tests: T1)\n" })
+  const markdown = SPEC({ tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n" })
     .replace("## Contracts\n", `## Design\n${filler("design", 40)}\n## Migration and rollback\n${filler("migration", 40)}\n## Threats and abuse\n${filler("threat", 40)}\n## Contracts\n`)
     .replace("Refunds.", filler("scope", 40));
   const tasks = [{ id: "T1", title: "first file", status: "done", attempts: 1, changed: `did T1`, caveat: long, rejected: "none", open: "none" }] as any;
+  const sectionNames = ["Design", "Migration and rollback", "Threats and abuse", "Out of scope", "Goal", "Decisions", "Contracts"];
 
   const block = bindingContext("order-cancellation", markdown, tasks, BLOCK_BUDGET);
   assert.ok(block.length <= BLOCK_BUDGET, `the block ran over its budget: ${block.length}`);
-  // the four least-binding sections go whole: not one line of them survives
-  for (const gone of ["## Design", "## Migration and rollback", "## Threats and abuse", "## Out of scope"]) assert.ok(!block.includes(gone), `${gone} survived`);
-  for (const word of ["design0", "migration0", "threat0", "scope0"]) assert.ok(!block.includes(word), `${word} survived the cut`);
-  // and each is named, with the source of truth still a read away
-  assert.match(block, /## Cut from this copy[\s\S]*Design[\s\S]*Migration and rollback[\s\S]*Threats and abuse[\s\S]*Out of scope/);
+  // Every binding section keeps its heading and the start of its body: no section is dropped whole.
+  for (const name of sectionNames) assert.ok(block.includes(`## ${name}\n`), `${name} was dropped whole`);
+  for (const word of ["design0", "migration0", "threat0", "scope0"]) assert.ok(block.includes(word), `${word}: a shortened body lost its first line`);
+  // The sections it shortened are named, in the order they were cut, with the source of truth a read away.
+  assert.match(block, /## Shortened in this copy\nBodies cut for size \(each heading and its first lines stay\): Design, Migration and rollback, Threats and abuse, Out of scope/);
   assert.match(block, /\.pi\/pb\/specs\/order-cancellation\/spec\.md/);
-  // what binds hardest stays, with the prior-task hooks
-  assert.match(block, /## Goal\nCancel orders\./);
-  assert.match(block, /## Contracts\n- T1 owns T1\.txt/);
+  assert.doesNotMatch(block, /design39/); // the tail of a shortened body is gone, not kept behind a cut marker
   assert.doesNotMatch(block, /## Acceptance criteria/);
   assert.match(block, /## Prior tasks\n- T1 · caveat: /);
   assert.doesNotMatch(block, /### T1: first file/); // still no Tasks prose
 
-  // a section that binds hardest also goes whole, and is named, when the budget leaves no room for it
+  // A section that binds hardest is shortened only after the others, and is named too.
   const goalHeavy = markdown.replace("Cancel orders.", `Cancel orders. ${"goal detail ".repeat(100)}`);
-  const goalless = bindingContext("order-cancellation", goalHeavy, tasks, GOAL_LESS_BUDGET);
-  assert.ok(!goalless.includes("## Goal") && !goalless.includes("Cancel orders."), "Goal survived to the last cut");
-  assert.match(goalless, /## Cut from this copy[\s\S]*Goal/);
+  const tight = bindingContext("order-cancellation", goalHeavy, tasks, GOAL_LESS_BUDGET);
+  assert.match(tight, /## Goal\nCancel orders\./); // its heading and first line stay
+  assert.match(tight, /## Shortened in this copy[\s\S]*Goal/);
+  assert.ok(tight.length <= GOAL_LESS_BUDGET, `the tight block ran over its budget: ${tight.length}`);
 
-  // a task hook keeps its own line cap: 240 characters
+  // A task hook keeps its own line cap: 240 characters.
   const roomy = bindingContext("order-cancellation", markdown, tasks, 40_000);
   const hook = roomy.split("\n").find((l) => l.startsWith("- T1 · "))!;
   const caveat = hook.replace(/^- T1 · caveat: /, "");
   assert.ok(caveat.endsWith("…") && caveat.length <= 240, `hook line: ${hook.length}`);
+  assert.doesNotMatch(roomy, /## Shortened in this copy/); // roomy: nothing was cut
 
-  // what binds hardest is never shortened: a Decisions and Contracts pair past the caps this replaces arrive whole, in both copies
+  // With room, a Decisions and Contracts pair past any line cap arrives whole, in both copies.
   const clause = "the rule holds because the database says so. ".repeat(60).trimEnd(); // ~2.6k chars on one line
   const heavy = markdown
     .replace("- Only PENDING orders can be cancelled, because the state machine only allows that transition.", `- ${clause}`)
@@ -2528,6 +2550,11 @@ test("binding: an oversized block drops whole sections and names them", async ()
     assert.equal(copy.split(clause).length - 1, 2, `Decisions and Contracts were shortened in the ${where}`);
     assert.ok(!copy.includes("truncated"), `the ${where} still carries a truncation notice`);
   }
+
+  // The ceiling holds even when the always-emitted parts alone outgrow the smallest budget.
+  const pathological = bindingContext("order-cancellation", markdown.replace("Cancel orders.", `Cancel orders. ${long}`), tasks, BUDGET_MIN);
+  assert.ok(pathological.length <= BUDGET_MIN, `a pathological spec outran the smallest budget: ${pathological.length}`);
+  assert.match(pathological, /## Shortened in this copy/);
 });
 
 /** The smallest budget there is, reached when the window leaves no room at all. */
@@ -2603,7 +2630,7 @@ test("build: a compaction in the middle of a task: pb's summary carries the rule
       assert.equal(r.compaction.firstKeptEntryId, "e9");
       assert.match(
         r.compaction.summary,
-        /^\[pb build state: order-cancellation\] This conversation was compacted in the middle of T2\. Carry on[\s\S]*How this build works:\n- Where the spec is unclear[\s\S]*Finish each task with pb_task_done[\s\S]*- T1 first file: done — did T1[\s\S]*- T2 second file: doing \(current\)[\s\S]*Files T2 has changed so far:\n- T2\.txt[\s\S]*Files read before this point \(read again what you need\):\n- src\/order\.ts\n[\s\S]*We discussed audit\.[\s\S]*--- spec ---\n# Order cancellation[\s\S]*--- current ---\n\[pb:build\] Task T2\. Do only this task/,
+        /^\[pb build state: order-cancellation\] This conversation was compacted in the middle of T2\. Carry on[\s\S]*How this build works:\n- This build is autonomous[^\n]*Where the spec is unclear[\s\S]*Finish each task with pb_task_done[\s\S]*- T1 first file: done — did T1[\s\S]*- T2 second file: doing \(current\)[\s\S]*Files T2 has changed so far:\n- T2\.txt[\s\S]*Files read before this point \(read again what you need\):\n- src\/order\.ts\n[\s\S]*We discussed audit\.[\s\S]*--- spec ---\n# Order cancellation[\s\S]*--- current ---\n\[pb:build\] Task T2\. Do only this task/,
       );
       // A planning checkpoint as the previous summary isn't repeated: the spec is there already.
       const [again] = (await t.fire("session_before_compact", { preparation: { ...prep, previousSummary: "[pb plan checkpoint] … the whole spec …" }, reason: "threshold" })) as any[];
@@ -3271,6 +3298,10 @@ test("review: a fresh review session with the spec first and the diff; you're br
   const brief = briefOf(t);
   assert.match(brief, /^\[pb:review\] You are an independent REVIEWER in a fresh session[\s\S]*read-only: don't edit or write files[\s\S]*--- brief ---\n\n# The spec[\s\S]*Not doing soft delete[\s\S]*## Changed files\n\n(T1\.txt\n)?[\s\S]*T2\.txt/);
   assert.match(brief, /## The check the harness ran\n\n`true` → PASS/);
+  // The reviewer has no shell: the change travels in the brief as a frozen diff, untracked files included.
+  assert.match(brief, /## The diff\n\n[\s\S]*\+x/);
+  assert.doesNotMatch(brief, /Run: git diff/);
+  assert.match(brief, /The diff below is from that commit to the tree the review started on\. Read files with read\/grep\/find\/ls/);
   assert.ok([...t.names.values()].includes("review: order-cancellation · spec") && [...t.names.values()].includes("review: order-cancellation · adversarial"));
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // back where you were
   assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session build-session-\d+`/);
@@ -3295,7 +3326,7 @@ test("review: the review session is read-only for its model; /pb:review done end
   let blocked: string | undefined;
   t.agent.script = async (text, tool) => {
     if (text.startsWith("[pb:review]")) {
-      assert.deepEqual(t.runtime().pi.getActiveTools(), ["read", "grep", "find", "ls", "bash", "pb_report_findings"]);
+      assert.deepEqual(t.runtime().pi.getActiveTools(), ["read", "grep", "find", "ls", "pb_report_findings"]);
       blocked = (await tool("write", { path: "x.ts", content: "x" })).error;
       await tool("pb_report_findings", { findings: CHANGES, acceptance: acceptanceOf(text) });
       await t.runtime().cmds["pb:review"].handler("done", t.runtime().ctx);
@@ -3347,9 +3378,10 @@ test("review: every pass session is gated (reporting tool present, editing block
   await t.run("review");
   // Spec pass and adversarial pass alike: without the reporting tool a pass degrades to
   // unparseable prose and its findings are lost.
+  // No shell either: the reviewer reads the frozen diff and the tree, so it cannot act on what it judges.
   assert.deepEqual(gated, [
-    ["read", "grep", "find", "ls", "bash", "pb_report_findings"],
-    ["read", "grep", "find", "ls", "bash", "pb_report_findings"],
+    ["read", "grep", "find", "ls", "pb_report_findings"],
+    ["read", "grep", "find", "ls", "pb_report_findings"],
   ]);
   assert.ok(blocked.every((b) => /This is a review session: read-only/.test(b ?? "")));
 });
@@ -3586,6 +3618,25 @@ test("review: findings carry priorities; P0/P1 are double-checked; only line-lea
   assert.match(t.posts.at(-1)!, /⚠ UNVERIFIED · P0 0 · P1 0 · P2 1 · P3 0/);
 });
 
+test("review: the second look reads the same frozen diff, with no shell to re-derive it", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = CHANGES; // a P1: the verifier is asked
+  const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pb-verify-")), "brief.md");
+  process.env.MOCK_VERIFIER_BRIEF_OUT = out;
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_VERIFIER_BRIEF_OUT;
+  }
+  const brief = fs.readFileSync(out, "utf8");
+  assert.match(brief, /^# Findings to verify[\s\S]*# The change\n\n(Base commit: [0-9a-f]+\. )?The diff below is from (that commit|HEAD) to the tree the review started on\./);
+  assert.match(brief, /\n\+x/); // an untracked file's content is in the diff, not behind a git command
+  assert.doesNotMatch(brief, /git diff/);
+});
+
 test("review: a pre-existing problem gets its own outside class instead of a prose note", async () => {
   const t = setup({ verify: "true", reviewer: { security: "off" } });
   await written(t);
@@ -3801,17 +3852,15 @@ test("review: works without a spec, on the uncommitted change and its intent", a
   assert.match(briefOf(t), /Intent: src\/README warm the greeting/); // the whole line went through as intent
 });
 
-test("review: files changed while the review ran are reported, not reverted", async () => {
+test("review: a file edited while the review ran is reported, never reverted", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  t.reviewer.write = path.join(t.repo, "T1.txt");
+  t.reviewer.write = path.join(t.repo, "T1.txt"); // the human's (or another session's) edit, in the review's window
   await t.run("review");
-  // The same window holds the reviewer's stray write and any edit you made meanwhile (another
-  // session, an editor): pb can't tell them apart, so it never puts either back silently.
-  assert.equal(t.read("T1.txt"), "reviewer was here");
-  assert.match(t.posts.at(-1)!, /⚠ Files changed while the review ran \(left as they are — they may be yours, not the reviewer's\): T1\.txt/);
+  assert.equal(t.read("T1.txt"), "edited while the review ran");
+  assert.match(t.posts.at(-1)!, /⚠ Files changed while the review ran \(left as they are — the reviewer can't write, so these are yours or another session's\): T1\.txt/);
 });
 
 test("review: a base commit that no longer resolves is said, not diffed as nothing", async () => {
@@ -3905,13 +3954,13 @@ test("stats: proof and confirmed counts render for the retirement bar", async ()
       session: "s1",
       tasks: [
         { id: "T1", title: "a", status: "done", attempts: 1, red: "failing" },
-        { id: "T2", title: "b", status: "done", attempts: 1, preGreen: "T1" },
+        { id: "T2", title: "b", status: "done", attempts: 1, redUnproven: "`x` already passes, because T1 proved it" },
         { id: "T3", title: "c", status: "done", attempts: 1 },
       ],
       updatedAt: "2026-10-01 10:07:00",
     },
   } as any);
-  assert.match(card, /Proof +1 proven · 1 sent back · 1 pre-green/);
+  assert.match(card, /Proof +1 proven · 1 sent back · 1 no run could prove/);
   assert.match(card, /Review.*P0\/P1 confirmed \(latest\): 3/);
   assert.match(card, /Explorer +1 calls · in 3\.0k · out 400 @ 3\.4k tok\/s · \$0\.02/);
 });
@@ -4071,14 +4120,15 @@ test("an unfinished build (e.g. after a crash) can be restarted in a new session
 test("prompts: short mechanics plus your standards; a minimal spec is enough", async () => {
   const { buildMechanics } = await import("../extensions/pb/prompts.ts");
   const mech = buildMechanics(parseSpec(SPEC()).spec!, null, true);
-  assert.ok(mech.length < 1150, `build mechanics grew to ${mech.length} chars`); // keep them short
-  assert.match(mech, /take the sensible reading, record it with pb_record_decision \(assumption: true\)[\s\S]*Ask with pb_ask only/);
+  assert.ok(mech.length < 1300, `build mechanics grew to ${mech.length} chars`); // keep them short
+  assert.match(mech, /This build is autonomous: never ask\.[\s\S]*take the sensible reading and record it with pb_record_decision \(assumption: true\)/);
+  assert.doesNotMatch(mech, /pb_ask/);
   assert.match(mech, /leave \.pi\/ alone/);
   assert.match(mech, /Goal, Decisions, Contracts, Threats and Acceptance bind you/);
   assert.match(mech, /Tests quiet, full log to a temp file/);
   assert.match(mech, /Finish each task with pb_task_done \(changed\/caveat\/rejected\/open\): it runs the task's Test: command \(a compile when there is none\)/);
   assert.match(mech, /Change or remove an existing test only when what it covers changes; never skip or weaken one/);
-  assert.ok(buildMechanics(parseSpec(SPEC()).spec!, null).length < 1150);
+  assert.ok(buildMechanics(parseSpec(SPEC()).spec!, null).length < 1300);
 
   const t = setup({ taskChecks: "each", verify: "true" });
   await written(t);
@@ -5442,7 +5492,7 @@ test("spec writing leaves undecided questions open; the checkpoint asks nothing;
   t.selects.push("Build here as soon as the spec is written (keeps our discussion; the cache stays warm)", "<timeout>");
   await t.run("build");
   assert.equal(t.dialogTimeouts.at(-1), 1); // the question counted down, though no build was running yet
-  assert.match(answer!.content![0].text, /No answer in time: leave this undecided — record it under Open questions and do not take a reading or write it as an Assumption\. Planning stays incomplete until it is answered\./);
+  assert.match(answer!.content![0].text, /No answer in time: it stays open — do not take a reading or write it as an Assumption\. Record it under Open questions; planning stays incomplete until it is answered\./);
   assert.match(t.posts.find((p) => p.startsWith("**Spec written"))!, /Settled without asking you \(the review checks them\):\n- Assumption: cancelling twice is a no-op/);
   assert.equal(t.progress("order-cancellation").phase, "built");
 
@@ -5987,7 +6037,7 @@ test("pb_ask counts down while planning too: unanswered, the question stays open
   t.selects.push("<timeout>");
   const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
   assert.equal(t.dialogTimeouts.at(-1), 1);
-  assert.match(r.content![0].text, /No answer in time: leave this undecided — record it under Open questions and do not take a reading or write it as an Assumption\. Planning stays incomplete until it is answered\./);
+  assert.match(r.content![0].text, /No answer in time: it stays open — do not take a reading or write it as an Assumption\. Record it under Open questions; planning stays incomplete until it is answered\./);
   assert.doesNotMatch(r.content![0].text, /recorded as an assumption/);
   // The dialog is gone, the question isn't: it stays in the chat with its options, lettered for a short answer — and nothing was decided.
   assert.equal(t.posts.at(-1), "**Unanswered question** (no answer within 1 min; nothing was decided — the question stays open):\n\nMail or event?\n\nA. mail\nB. event (recommended)\n\nTo answer, type it here any time (a letter is enough): if Pi is working, it reads it after its current step.");
@@ -6011,7 +6061,7 @@ test("pb_ask: a dialog closed before its time is kept in the chat too; an answer
   assert.equal(t.posts.length, posted);
   t.selects.push("<timeout>");
   const r = await t.callTool("pb_ask", { question: "Which name?", options: ["a", "b"] });
-  assert.match(r.content![0].text, /^The human dismissed the question: leave this undecided — record it under Open questions and do not take a reading or write it as an Assumption\. Planning stays incomplete until it is answered\.[\s\S]*The question stays in the chat/);
+  assert.match(r.content![0].text, /^The human dismissed the question: it stays open — do not take a reading or write it as an Assumption\.[\s\S]*The question stays in the chat/);
   assert.match(t.posts.at(-1)!, /^\*\*Unanswered question\*\* \(the dialog was closed; nothing was decided — the question stays open\):\n\nWhich name\?\n\nA\. a\nB\. b\n/);
 });
 
@@ -6036,7 +6086,7 @@ test("pb_ask: terminal activity restarts the countdown — idle time, not wall t
   assert.equal(settled, false); // 2.5s elapsed but 1s idle: an absolute timeout would have fired
   const r = await p;
   assert.equal(settled, true);
-  assert.match(r.content![0].text, /No answer in time: leave this undecided/);
+  assert.match(r.content![0].text, /No answer in time: it stays open/);
   assert.ok(t.posts.some((x) => x.startsWith("**Unanswered question**")));
 });
 
@@ -6048,7 +6098,7 @@ test("pb_ask: silence still times out the dialog", async () => {
   (t.runtime().ctx as any).mode = "tui";
   t.selects.push("<hang>");
   const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
-  assert.match(r.content![0].text, /No answer in time: leave this undecided/);
+  assert.match(r.content![0].text, /No answer in time: it stays open/);
   assert.ok(t.posts.some((x) => x.startsWith("**Unanswered question**")));
 });
 

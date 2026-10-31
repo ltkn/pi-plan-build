@@ -44,7 +44,7 @@ export interface ReportStats {
   pauses: Record<string, number>;
   undo: number;
   reviews: string[];
-  proof: { proven: number; sentBack: number; preGreen: number };
+  proof: { proven: number; sentBack: number; unproven: number };
   confirmed: { p0: number; p1: number };
   tokens: {
     buildIn: number;

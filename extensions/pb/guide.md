@@ -187,8 +187,9 @@ the build and tests, curl an API, and write and run one-off scripts or programs
 (Python, Java, …) in a temporary directory. Editing or writing any file inside
 the project is blocked in this session until you build here (`/pb:build` lifts
 it). Commands can still write files, so pb snapshots the project when planning
-starts; if anything changed by the time you build (or run `/pb:plan off`), it
-lists the files and asks whether to keep or restore them.
+starts. A turn that changes a project file is named in the chat right away, and
+when you build (or run `/pb:plan off`) pb lists everything that changed and asks
+whether to keep or restore it.
 
 **Questions.** Pi asks what only you can decide; a choice between options comes
 as a dialog (`pb_ask`) with its recommendation marked. If you're away, it counts
@@ -292,8 +293,9 @@ Then the sections:
   one by one. So pin here every seam the tasks share: public signatures, API
   requests and responses with their error types, the data model and migrations,
   events, and which task owns each side. They're pinned as they must end up;
-  everything behind them is left to the build, which asks before changing one,
-  and the reviewer checks each. A single task that changes an external surface
+  everything behind them is left to the build, and a Contract that cannot be
+  built as written stops it for a revised spec, never a dialog. The reviewer
+  checks each. A single task that changes an external surface
   should have Contracts too; only truly independent internal tasks can omit it.
   A bullet that bounds how often something runs should name the code whose call
   it bounds — a `path:line`, or `new: <path>` when nothing performs it yet, or an
@@ -393,9 +395,10 @@ are advisory: they are shown to you and the build carries on. A finding has a
 priority, a one-sentence title naming what goes wrong and where, and optionally
 its file, line and the single fix the reviewer would make. If it weighed
 another fix and rejected it, that reason belongs in the same fix line, not as
-an either/or handed back to you. A choice the reviewer can settle by looking,
-it settles itself with one cheap read-only command and puts the command and its
-result in the finding — never a full test run. The findings, the pass and the
+an either/or handed back to you. The reviewer has no shell at all: it reads the
+frozen diff and the repository with read-only file tools, so it cannot act on
+what it judges. A choice a read can settle, it settles itself and cites the
+file:line and what it found. The findings, the pass, the diff it saw and the
 full transcript are recorded beside the spec.
 
 A pass covers exactly the text it saw: a later `/pb:build` reuses that verdict
@@ -461,10 +464,10 @@ named "build: <spec>", seeded with the spec, on your model and thinking level.
 
 Before the first task, every spec gets one independent fresh-eyes review (see
 `/pb:help spec`): only a P0 stops the build there for you to read; P1-P3 are
-shown as advisory findings and the build carries on. The implementer
-then checks the spec's paths, interfaces and test commands against the repo
-before coding; a spec that cannot be built as written stops instead of being
-worked around.
+shown as advisory findings and the build carries on. Once T1 starts the build
+asks nothing: an unclear detail is a reading it records as an assumption, and
+only a Goal or a Contract that cannot be built as written stops it, for a
+revised spec and a new approval.
 
 1. **The tasks.** Each task is built the same way: tests first, then the
    behaviour, then `pb_task_done` — reporting what changed plus the caveats,
@@ -506,25 +509,24 @@ final gate additionally runs `lint` and `extraChecks` when configured.
 
 The spec's Goal, Out of scope, Decisions, Design, Contracts, Migration and
 rollback, Threats and abuse (`Threats` reads as the same section) and Acceptance
-bind the build: changing one takes a `pb_ask`. How to build it is the build's: a better way found while
-coding is taken, and a change to the Design goes in Decisions. Every task handout,
+bind the build. How to build it is the build's: a better way found while coding
+is taken, and a change to the Design goes in Decisions. Every task handout,
 check retry, coherence pass and fix lap carries those binding sections, the
 task acceptance lines, and the finished tasks' caveats, rejections and open
 items as a compact block. It is sized from your model's context window (a tenth of
 it, with a stated minimum, so even a window too small for the reserve gets a real
-limit), and nothing inside a section is shortened: a block that still runs over
-drops whole sections in a fixed order (Decisions and Contracts last), says which it
-dropped, and names the spec file to read.
-Where
-the spec is ambiguous, contradicts itself or doesn't match the code, Pi takes
-the sensible reading, records it in the spec's Decisions as an **assumption**,
-and carries on. The build summary lists these choices and the reviewer checks
-them, so you look once, at the end. When a choice would change behaviour, an
-API or data, Pi asks you in a dialog (`pb_ask`) and carries on with your
-answer, which goes into the spec; answering early often saves later questions.
-If you're away, the dialog counts down `askTimeoutSec` of idle time (5 minutes; any key restarts it) and the
-build goes on with Pi's recommendation, recorded as an assumption. It leaves
-`.pi/` alone.
+limit). Past that, section bodies are shortened in a fixed order (Decisions and
+Contracts last), each cut section is named, and the spec file stays one read
+away — no section is dropped whole.
+
+**The build never stops to ask.** Where the spec is ambiguous, contradicts
+itself or doesn't match the code, Pi takes the sensible reading, records it in
+the spec's Decisions as an **assumption** with what would settle it, and carries
+on. The build summary lists these choices and the reviewer checks them, so you
+look once, at the end. Only a Goal or a Contract that cannot be built as written
+stops it: Pi reports what the repo contradicts, with the evidence, and the build
+pauses for a revised spec — `/pb:build` approves the revision and carries on.
+It leaves `.pi/` alone.
 
 A progress line above the editor shows the tasks while it runs. If Pi stops
 mid-task without finishing it, pb reminds it once; if it stops again, the build
@@ -585,18 +587,16 @@ back, and `/pb:undo` takes the proof back with the files.
 
 Two tasks that carry the very same `Test:` command share one run, so that run
 shows only that something is missing among them. Once an earlier task is done
-and proven, a later task with the same command is **pre-green**: its tests are
-already satisfied, red is impossible, and the harness says so instead of
-wedging — confirm the acceptance holds on top of the earlier change and finish;
-the run is recorded and handed to the reviewer as proving nothing of the
-task's own. And a task with no `Test:` command, a refactor, or a spec with
-`New tests: no` or `Verification: build` has no red proof by construction.
-Rewriting a task's `Test:` command drops its proof: the new command must be
-seen failing again — as must edited, swapped or weakened test files, which the
-proof is fingerprinted against. `pb_tests_red` also records what the tests are
-claimed to prove and a capped head of the failure it saw; the review brief shows
-both for every proven task, and a failed check retry shows them again so the
-model does not build on a typo or an unrelated broken test. Each case is listed at the end of the build and handed to the reviewer as
+and proven, a later task with the same command cannot fail again: the harness
+says so instead of wedging, records that no run could prove the later task's own
+tests, and hands that disclosure to the reviewer — confirm the acceptance holds
+on top of the earlier change and finish. A task with no `Test:` command, a
+refactor, or a spec with `New tests: no` or `Verification: build` has no red
+proof by construction. Rewriting a task's `Test:` command drops its proof: the
+new command must be seen failing again. `pb_tests_red` also records what the
+tests are claimed to prove and a capped head of the failure it saw; the review
+brief shows both for every proven task, and a failed check retry shows them
+again so the model does not build on a typo or an unrelated broken test. Each case is listed at the end of the build and handed to the reviewer as
 partly proven or unproven — give a task its own targeted command where you
 can, and when tasks share one, make it fail at each task's turn (a conjunction
 over per-task artifacts, so each task still has something to prove). A task's
@@ -635,8 +635,10 @@ then:
 - **A task's tests pass before it starts, under its own command**: an earlier
   task implemented more than its slice, and no earlier task proved this
   command — red is impossible and the harness can't tell implemented from
-  untested. Don't hollow out the earlier task to force a failure: report
-  blocked, give the task its own `Test:` line (`/pb:spec`), and resume.
+  untested. Don't hollow out the earlier task to force a failure: give the
+  task its own `Test:` line (`/pb:spec`), then `/pb:build` re-approves the
+  revision and resumes. (When an earlier task *did* prove the same command,
+  the harness records that no run could prove this one and lets it finish.)
 - **Compacted in circles**: if Pi compacts the same task over and over with
   nothing new read, changed, or shrunk, the build pauses instead of looping.
   Usually one giant tool output refilling the context (a verbose `Test:`
@@ -747,10 +749,10 @@ change you made with Pi without the rest of the flow.
 
 **Inside the review.** The spec pass, and the adversarial pass when one is due, each run
 in a real Pi session you're in: you watch everything natively, and you can
-interrupt it or ask it something ("why is 3 a P1?"). Its model is read-only: it
-can't edit or write files; anything a command it runs changes while the review
-runs is listed in the result, not reverted behind your back (it may be your own
-concurrent edit). A pass
+interrupt it or ask it something ("why is 3 a P1?"). Its model is read-only:
+read/grep/find/ls and the reporting tool, no shell, so neither it nor a command
+of its own can change the tree it judges; the change arrives as a frozen diff
+from the build's base commit to the tree the review started on. A pass
 ends when it has reported its findings and stops, or at `/pb:review done`. When
 the spec pass is done and an adversarial pass is due, pb asks whether to run it now
 (unanswered, after `askTimeoutSec`, it runs; skipped, the result says so), and
@@ -771,8 +773,8 @@ shown above the editor; its whole run, like the explorer's and the project
 map's, is saved to open with `pi --session <file>`. `/pb:archive` removes those
 saved runs.
 
-The reviewer can't change your files: pb snapshots the tree before it starts
-and puts back anything it touched. By default it runs on your session's model,
+The reviewer can't change your files: no shell, no edit and no write, and the
+diff it judges is the one frozen when the review started. By default it runs on your session's model,
 likely the one that built the change and shares its blind spots; the first
 review in a project offers to pick another (`"reviewer": {"model": "provider/id"}`
 in the config). A different model family is the cheapest way to get genuinely
@@ -866,7 +868,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
   document for scripts.
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and
   failed, pauses, the review verdicts with the latest review's confirmed P0/P1,
-  red proofs (proven, sent back, pre-green), tokens in and out per role (with
+  red proofs (proven, sent back, no run could prove), tokens in and out per role (with
   output rate where pure run time is known: explorer calls), peak context, cost
   and time, and how often the session was compacted, reset, reminded or asked
   you something. Build and review show no rate: their wall time includes your
@@ -924,6 +926,14 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - Continue: answer or discuss here, then `/pb:build` to carry on. Example: `/pb:build keep going with the current approach` (your hint is recorded in the spec).
 - Code went wrong? Throw the attempt away with `/pb:undo`, then `/pb:build` tries again.
 - Spec went wrong? Rewrite it with `/pb:spec {spec}` · more: `/pb:help stuck`
+<!-- /pb -->
+
+### Build stopped: a contract cannot be built
+<!-- pb:tip build.contract -->
+**What now** — the build stopped: the Goal or a Contract cannot be built as written
+- Read the reason above: it names what the code or the repo contradicts, with the evidence.
+- Fix the spec, then `/pb:build {spec}` — the revision is approved and the build carries on. Finished tasks stay done.
+- Spec went wrong? Rewrite it with `/pb:spec {spec}` first · more: `/pb:help spec`
 <!-- /pb -->
 
 ### Build paused: a task keeps failing

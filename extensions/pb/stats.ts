@@ -96,7 +96,7 @@ export interface Summary {
   undo: number;
   reviews: string[];
   /** Red-proof signal: tasks proven, tasks sent back at least once (excluding pre-green), pre-green tasks. */
-  proof: { proven: number; sentBack: number; preGreen: number };
+  proof: { proven: number; sentBack: number; unproven: number };
   /** Confirmed P0/P1 of the latest review (post double-check). */
   confirmed: { p0: number; p1: number };
   build: { prompt: number; cached: number; output: number; cost: number; peak: number; window?: number; turns: number };
@@ -153,10 +153,10 @@ export function summarize(s: SpecStats): Summary {
   const count = (type: string) => e.filter((x) => x.type === type).length;
   const start = e.find((x) => x.type === "build-start");
   const end = [...e].reverse().find((x) => x.type === "built") ?? e.at(-1);
-  // Red sent-backs: a `red` event with ok:false means the tests passed without the change.
-  // Pre-green tasks share that event shape, so they count as pre-green, not sent back.
+  // Red sent-backs: a `red` event with ok:false means the tests passed without the change. A task
+  // whose command an earlier one already proved carries that as disclosed-unproven, not sent back.
   const sentBackIds = new Set(e.filter((x) => x.type === "red" && x.ok === false).map((x) => String(x.task)));
-  const preGreenIds = new Set(tasks.filter((t) => t.preGreen).map((t) => t.id));
+  const unprovenIds = new Set(tasks.filter((t) => t.redUnproven).map((t) => t.id));
   const lastReview = [...e].reverse().find((x) => x.type === "review");
   const pp = Array.isArray(lastReview?.p) ? (lastReview.p as unknown[]) : [];
   return {
@@ -172,8 +172,8 @@ export function summarize(s: SpecStats): Summary {
     reviews: reviews.map((r) => String(r.verdict)),
     proof: {
       proven: tasks.filter((t) => !!t.red).length,
-      sentBack: [...sentBackIds].filter((id) => !preGreenIds.has(id)).length,
-      preGreen: preGreenIds.size,
+      sentBack: [...sentBackIds].filter((id) => !unprovenIds.has(id)).length,
+      unproven: unprovenIds.size,
     },
     confirmed: { p0: num(pp[0]), p1: num(pp[1]) },
     build,
@@ -197,7 +197,7 @@ export function renderCard(s: SpecStats): string {
     `Checks    ${x.checks} run, ${x.failed} failed`,
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,
     `Review    ${x.reviews.length ? `${x.reviews.join(" → ")} · P0/P1 confirmed (latest): ${x.confirmed.p0 + x.confirmed.p1}` : "not run"}`,
-    ...(hasRed ? [`Proof     ${x.proof.proven} proven · ${x.proof.sentBack} sent back · ${x.proof.preGreen} pre-green`] : []),
+    ...(hasRed ? [`Proof     ${x.proof.proven} proven · ${x.proof.sentBack} sent back · ${x.proof.unproven} no run could prove`] : []),
     `Build     ${b.turns} turns · in ${human(b.prompt)} (${pct(b.cached, b.prompt)} cached) · out ${human(b.output)} · $${b.cost.toFixed(2)}${x.ms ? ` · ${dur(x.ms)}` : ""}`,
     `Context   peak ${human(b.peak)}${b.window ? ` (${pct(b.peak, b.window)} of ${human(b.window)})` : ""}`,
     `Reviewer  in ${human(x.review.prompt)} · out ${human(x.review.output)} · $${x.review.cost.toFixed(2)}`,
