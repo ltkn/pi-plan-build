@@ -450,7 +450,7 @@ ${PRE_EXISTING_RULE}
 
 ## Report
 
-Report the findings with the pb_report_findings tool: one call with all of them (an empty list when there are none), each with its priority.
+Report the findings with the pb_report_findings tool: one call with all of them (an empty list when there are none), each with its priority, made as soon as you have them and before your reply: pb reads the call, never your prose.
 Report acceptance in the same call: one entry for every id in the brief's checklist, with status met, not met, or not verified and evidence. Met and not met need evidence; not met also needs a P1 finding. An id you leave out is not verified, not passed: never write "all met" in prose instead of reporting the list.
 Then reply briefly in markdown: only what is not a finding — context, a judgement call, a question. Don't repeat the findings or the acceptance checklist, and never leave a real problem here: a problem is a finding, with a priority and, when pre-existing, \`outside\`.`;
 
@@ -472,7 +472,7 @@ For every entry point the change adds or alters (API routes, UI actions, command
 - Configuration: security-relevant defaults, migrations and permissions (grants, roles, public access).
 - The spec's Threats and abuse, if any: each abuse really prevented, and tested.
 
-Report only problems someone could actually use or hit, with report_findings: in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. Merge findings with the same concrete fix into one at the highest priority, its title naming each symptom. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. ${PRE_EXISTING_RULE} No findings is a fine result. Then reply with one line that adds no problem: a real problem belongs in the tool report, never only in that line.`;
+Report only problems someone could actually use or hit, with report_findings, in one call made as soon as you have them and before your reply (pb reads the call, never your prose): in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. Merge findings with the same concrete fix into one at the highest priority, its title naming each symptom. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. ${PRE_EXISTING_RULE} No findings is a fine result. Then reply with one line that adds no problem: a real problem belongs in the tool report, never only in that line.`;
 
 /** The first message of a review session: its role, the brief, and how the session works. */
 export function reviewSessionPrompt(brief: string, extra = ""): string {
@@ -704,7 +704,7 @@ export function reviewerBrief(o: ReviewBrief): string {
 
 export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review one feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. The spec is a frozen draft: this is the only pass; there are no earlier findings, rounds or outside lane. Inspect the repository with read/grep/find/ls only: you have no shell, so you cannot run commands, tests or builds. Do not create, modify or delete files.
 
-Report every finding with report_findings in one call, an empty list when there are none. A finding has a priority, a title, and optionally file, line and fix. The title is one sentence a tired human can act on: what goes wrong, for whom, and where. The optional file:line and fix are the supporting evidence and the single change you would make. If you weighed another fix and rejected it, say why in the same fix line; do not report an either/or as a finding.
+Report every finding with report_findings in one call, an empty list when there are none, and make that call as soon as you have them, before writing your reply: pb reads the call, never your prose, so a reply is not a report. The title is one sentence a tired human can act on: what goes wrong, for whom, and where. The optional file:line and fix are the supporting evidence and the single change you would make. If you weighed another fix and rejected it, say why in the same fix line; do not report an either/or as a finding.
 
 Priority:
 - P0 — unsafe to build: a security or authorization hole, data loss or corruption, or a contract contradiction that cannot be built as written. Only P0 blocks the build.

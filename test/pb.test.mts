@@ -1220,8 +1220,9 @@ test("spec review: the reviewer gets read-only tools, never a shell", async () =
     delete process.env.MOCK_SPEC_ARGS_OUT;
   }
   const argv = fs.readFileSync(argsOut, "utf8").split("\n");
-  const tools = argv[argv.indexOf("--tools") + 1];
-  assert.equal(tools, "read,grep,find,ls");
+  // --tools is the whole selection, extension tools included: the reporting tool must be named here,
+  // or the reviewer runs its whole pass with no way to report and every pass fails closed.
+  assert.equal(argv[argv.indexOf("--tools") + 1], "read,grep,find,ls,report_findings");
   assert.ok(!argv.includes("bash"));
 });
 
@@ -1308,6 +1309,14 @@ test("spec review: an unchanged spec re-posts the block without a second run; an
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
+test("every reviewer reports through its tool before writing its reply", async () => {
+  const { REVIEWER_SYSTEM, ATTACKER_SYSTEM, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  // A pass that explores for minutes and then answers in prose has done the work and reported nothing:
+  // each prompt has to put the tool call ahead of the reply, in the name the role actually has.
+  assert.match(REVIEWER_SYSTEM, /pb_report_findings[^.]*made as soon as you have them and before your reply/);
+  assert.match(ATTACKER_SYSTEM, /report_findings, in one call made as soon as you have them and before your reply/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /report_findings in one call[^.]*as soon as you have them, before writing your reply/);});
+
 test("spec review: a run that reports no findings fails closed", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -1318,10 +1327,22 @@ test("spec review: a run that reports no findings fails closed", async () => {
     delete process.env.MOCK_SPEC_REVIEW;
   }
   assert.equal(t.progress("order-cancellation").phase, "written");
-  assert.match(t.posts.at(-1)!, /reviewer returned no findings; no review of this text was recorded/);
+  assert.match(t.posts.at(-1)!, /reviewer returned no findings[^\n]*no review of this text was recorded[\s\S]*What it wrote instead:\n\nreviewer exploded[\s\S]*"specReviewer": \{"model": "provider\/id"\}/);
   assert.ok(!t.instructions.some((i) => /Task T1/.test(i)));
   const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
   assert.equal(event.verdict, "error");
+
+  // A reviewer that did the work and wrote it as prose: its words reach the human, not just the error.
+  const u = setup({ verify: "true" });
+  await written(u);
+  process.env.MOCK_SPEC_REVIEW = "prose";
+  try {
+    await u.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(u.progress("order-cancellation").phase, "written");
+  assert.match(u.posts.at(-1)!, /What it wrote instead:[\s\S]*the reuse predicate can never match[\s\S]*pi --session/);
 });
 
 test("spec review: the configured model and thinking run the pass and are recorded", async () => {
@@ -3237,14 +3258,22 @@ test("review: the adversarial pass runs in the background and its findings are m
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
+  const argsOut = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pb-args-")), "args.txt");
   process.env.MOCK_ABUSE_FINDINGS = JSON.stringify([{ priority: "P2", file: "src/order.ts", line: 3, title: "a forged owner cancels" }]);
+  process.env.MOCK_ABUSE_ARGS_OUT = argsOut;
   try {
     await t.run("review");
   } finally {
     delete process.env.MOCK_ABUSE_FINDINGS;
+    delete process.env.MOCK_ABUSE_ARGS_OUT;
   }
   assert.ok(!t.selectTitles.some((x) => /adversarial pass/.test(x)), "the pass is not asked for: it just runs");
   assert.ok(![...t.names.values()].some((n) => n.endsWith("· adversarial"))); // no session of its own
+  // Read-only like the reviewer, and named its reporting tool: --tools is the whole selection,
+  // extension tools included, so an unnamed tool is never declared to the model.
+  const argv = fs.readFileSync(argsOut, "utf8").split("\n");
+  assert.equal(argv[argv.indexOf("--tools") + 1], "read,grep,find,ls,report_findings");
+  assert.ok(!argv.includes("bash"));
   assert.match(t.posts.at(-1)!, /with an adversarial pass[\s\S]*Adversarial: a forged owner cancels/);
 });
 

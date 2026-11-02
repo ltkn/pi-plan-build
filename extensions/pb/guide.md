@@ -407,6 +407,12 @@ Editing the spec makes the next build start review the new text. Once the first
 task has started, spec edits are the code reviewer's to judge, not re-reviewed
 at plan level.
 
+**If the reviewer answers in prose instead of its report tool**, nothing can be
+recorded, and the build does not start on a review that didn't happen. pb shows
+what it wrote instead and the run's session, so you can read the review anyway;
+`/pb:build` tries again, or `"specReviewer": {"model": "provider/id"}` in
+`.pi/pb/config.json` points the pass at a model that reports.
+
 **Read the plan yourself, in this order.** The spec reviewer is a second pair
 of eyes, not a substitute for yours:
 

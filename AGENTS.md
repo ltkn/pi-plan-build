@@ -54,6 +54,7 @@
 - Explorer, trier and cartographer get `bash` and are reverted by `revertFreshRun`; the spec reviewer and dry-run keep their revert as a belt (they have no shell any more); the **code review** names paths that changed while it ran instead of reverting, because a file changed in that window is as likely the human's.
 - The reviewer is the one watched session; the adversarial pass is a `runFresh` background process on the same frozen brief, named in the result, and its tokens are recorded as `review-usage` so `/pb:stats` counts what the review cost.
 - All fresh runs funnel through `runFresh`, whose FIFO slot cap is `config.maxConcurrent` (the project's `config.json`, else the user-level pb config merged in by `Store.config` under Pi's agent dir) overridable by `PI_PB_MAX_CONCURRENT`; new roles must pass the cap through or they bypass it.
+- A fresh role names its reporting tool in `tools:` (`--tools` replaces the whole selection, **extension tools included**, so an unnamed `report_findings` / `report_verdicts` / `report_map` is never declared and the run can never report). `test/mock-pi.mjs` refuses calls to tools `--tools` does not name, because the mock otherwise cannot see this class at all. (security)
 
 ### Docs that are runtime input (extensions/pb/guide.md, extensions/pb/help.ts, README.md)
 - `guide.md` is parsed at runtime: ` pb:tip key ` regions are the only source of "What now" text (`tip()` in prompts.ts and index.ts) and `pb:topic` regions are `/pb:help` sections. Using `tip("x")` without the region fails the test "help: every What-now block the code uses exists in the guide".
@@ -61,8 +62,8 @@
 
 ### Tests and commands (test/, package.json)
 - `npm test` → `node --test test/pb.test.mts` (311 tests, ~150s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
-- The suite drives the real commands/tools against a simulated Pi; `PI_PB_PI_COMMAND` points fresh sub-processes at `test/mock-pi.mjs`, whose `MOCK_SPEC_REVIEW` modes are `block` (a P0), `block-advisory` (P0 + P2), `advisory` (P1 + P2, a pass), `mixed` (P0 + P1) and `crash` (no report). `MOCK_SPEC_BRIEF_OUT` captures the latest brief; `MOCK_SPEC_EDIT` simulates a human editing the spec mid-review.
-- `setup()` sets `reviewer.idleSec: 0` and an empty `specReviewer` (the review always runs); `PI_CODING_AGENT_DIR` is redirected to a temp dir so nothing touches the real user agent dir. `MOCK_SPEC_ARGS_OUT` captures the spec reviewer's argv (its `--tools` allowlist); `MOCK_VERIFIER_BRIEF_OUT` captures the verifier's brief.
+- The suite drives the real commands/tools against a simulated Pi; `PI_PB_PI_COMMAND` points fresh sub-processes at `test/mock-pi.mjs`, whose `MOCK_SPEC_REVIEW` modes are `block` (a P0), `block-advisory` (P0 + P2), `advisory` (P1 + P2, a pass), `mixed` (P0 + P1), `prose` (a report written as prose, no tool call) and `crash` (no report). `MOCK_SPEC_BRIEF_OUT` captures the latest brief; `MOCK_SPEC_EDIT` simulates a human editing the spec mid-review; `MOCK_ABUSE_ARGS_OUT` / `MOCK_SPEC_ARGS_OUT` capture a fresh run's argv (its `--tools` allowlist), and the mock refuses a report through a tool `--tools` does not name.
+- `setup()` sets `reviewer.idleSec: 0` and an empty `specReviewer` (the review always runs); `PI_CODING_AGENT_DIR` is redirected to a temp dir so nothing touches the real user agent dir. `MOCK_VERIFIER_BRIEF_OUT` captures the verifier's brief.
 - `written()` asserts an error-free `pb_write_spec`, so any new write gate must be satisfied by the shared fixtures: `SPEC()` plus the one task-list builder `tasksMarkedBy` behind `TASKS_WITH_OWN_IDS` and `TASKS_WITH_EXEMPTIONS`.
 
 ### Known gaps

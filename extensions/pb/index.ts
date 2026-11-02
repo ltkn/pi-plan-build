@@ -2515,7 +2515,7 @@ export default function pb(pi: ExtensionAPI) {
    * the hash of exactly the text it saw; only a P0 blocks, and a later start reuses that verdict
    * until the spec text changes.
    */
-  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string): Promise<{ findings: Finding[]; block: boolean; session?: string }> => {
+  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string): Promise<{ findings: Finding[]; block: boolean; session?: string; prose?: string }> => {
     const cfg = store.config();
     const reviewModel = cfg.specReviewer.model ?? sessionModel(ctx);
     const cwd = ctx.cwd;
@@ -2534,7 +2534,9 @@ export default function pb(pi: ExtensionAPI) {
         systemPrompt: SPEC_REVIEWER_SYSTEM,
         brief: specReviewBrief(name, md),
         prompt: "Review the spec in the attached file.",
-        tools: ["read", "grep", "find", "ls"],
+        // `--tools` is the whole selection, extension tools included: without report_findings named
+        // here the reviewer has no way to report and every pass fails closed.
+        tools: ["read", "grep", "find", "ls", "report_findings"],
         extensions: [REVIEW_TOOLS],
         model: reviewModel,
         thinking: cfg.specReviewer.thinking,
@@ -2565,8 +2567,11 @@ export default function pb(pi: ExtensionAPI) {
     });
     const session = res.sessionFile;
     if (raw === undefined) {
-      store.event(name, { type: "spec-review", verdict: "error", hash: specHash(md), findings: 0, reported: [], model: reviewModel, thinking: cfg.specReviewer.thinking, session, prose: cap(res.text || res.error || "the reviewer returned no findings", 12000) });
-      return { findings: [], block: true, session };
+      const prose = cap(res.text || res.error || "the reviewer returned no findings", 12000);
+      store.event(name, { type: "spec-review", verdict: "error", hash: specHash(md), findings: 0, reported: [], model: reviewModel, thinking: cfg.specReviewer.thinking, session, prose });
+      // The reviewer's own words are the only thing the human can act on: a pass that wrote its whole
+      // report as prose did the work, and losing it would leave a dead end with nothing to read.
+      return { findings: [], block: true, session, ...(prose.trim() ? { prose: cap(prose.trim(), 2000) } : {}) };
     }
     const block = findings.some((f) => f.priority === "P0");
     store.event(name, { type: "spec-review", verdict: block ? "block" : "pass", hash: specHash(md), findings: findings.length, reported: findings, model: reviewModel, thinking: cfg.specReviewer.thinking, session });
@@ -2598,8 +2603,13 @@ export default function pb(pi: ExtensionAPI) {
     }
     const sessionNote = review.session ? `The whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
     if (review.block && !review.findings.length) {
-      post(["**Spec review** — the reviewer returned no findings; no review of this text was recorded. Run the build again.", sessionNote].filter(Boolean).join("\n\n"));
-      ctx.ui.notify("Spec review did not report; nothing was recorded. Run the build again.", "warning");
+      post([
+        "**Spec review** — the reviewer returned no findings through its report tool, so no review of this text was recorded.",
+        ...(review.prose ? [`What it wrote instead:\n\n${review.prose}`] : []),
+        `Run /${cmd("build")} again to try once more; if this model keeps answering in prose, point the reviewer at one that reports — \`"specReviewer": {"model": "provider/id"}\` in ${store.rel("config.json")}.`,
+        sessionNote,
+      ].filter(Boolean).join("\n\n"));
+      ctx.ui.notify("Spec review did not report; nothing was recorded. Run the build again, or point specReviewer.model at a model that reports.", "warning");
       return false;
     }
     if (review.findings.length) {
@@ -3200,7 +3210,7 @@ export default function pb(pi: ExtensionAPI) {
         systemPrompt: ATTACKER_SYSTEM + extraBlock(store.extra("adversarial")),
         brief: run.brief,
         prompt: "Attack the change in the attached brief: find how it can be abused or broken. Report every finding with report_findings (one call), then stop.",
-        tools: ["read", "grep", "find", "ls"],
+        tools: ["read", "grep", "find", "ls", "report_findings"],
         extensions: [REVIEW_TOOLS],
         model: run.model,
         thinking: run.thinking,
