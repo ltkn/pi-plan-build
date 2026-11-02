@@ -24,7 +24,14 @@ const say = (content) => {
 const call = (name, args) => ({ type: "toolCall", id: `call-${name}`, name, arguments: args });
 
 if (sys.includes("ATTACKER")) {
-  say([call("report_findings", { findings: [] })]);
+  if (process.env.MOCK_ABUSE === "crash") {
+    console.error("abuse pass exploded");
+    process.exit(1);
+  }
+  if (process.env.MOCK_ABUSE_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_ABUSE_BRIEF_OUT, brief);
+  if (process.env.MOCK_SYSTEM_OUT) fs.writeFileSync(process.env.MOCK_SYSTEM_OUT, sys);
+  const findings = process.env.MOCK_ABUSE_FINDINGS ? JSON.parse(process.env.MOCK_ABUSE_FINDINGS) : [];
+  say([call("report_findings", { findings })]);
   say([{ type: "text", text: "Done." }]);
 } else if (sys.includes("SPEC REVIEWER")) {
   // One structured pass: the reviewer reports findings with report_findings; only P0 blocks.

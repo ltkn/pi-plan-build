@@ -4,7 +4,7 @@
  *
  *   /pb:plan <what you want> plan together; the project's files stay untouched (/pb:plan <spec>: continue one)
   *   /pb:approach [idea]    in planning: hear how Pi would approach it (chat only: no writes, no dialogs)
- *   /pb:compact [undo]     planning: write the plan to its spec and reset to it; build: compact to the build's state
+ *   /pb:compact            planning: write the plan to its spec and reset to it; build: compact to the build's state
  *   /pb:spec [which]       write or revise the spec(s) from the discussion
  *   /pb:build [name]       build a spec here (--fresh: in a new session); resumes after a pause
  *   /pb:review [focus]     fresh, independent review against the spec, or of any uncommitted change
@@ -49,12 +49,13 @@ import {
   extraBlock,
   findingDetails,
   findingLine,
-  claimedFindings,
   finishSpecPrompt,
   fixText,
+  isNone,
   nudgePrompt,
   planPrompt,
   PI_RESERVE_TOKENS,
+  ATTACKER_SYSTEM,
   reviewSessionPrompt,
   REVIEW_DIFF_CHARS,
   reviewerBrief,
@@ -705,7 +706,6 @@ export default function pb(pi: ExtensionAPI) {
         tasks: syncTasks(spec, prev?.tasks),
         writtenIn: ctx.sessionManager.getSessionFile(),
         edited: false,
-        compacted: false,
         updatedAt: now(),
       });
       store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, status: spec.status, tokens: tokensOf(params.content) });
@@ -1217,10 +1217,10 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_fix_done",
     label: "Fixes done",
     description:
-      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Then stop: the home session runs /pb:review next to check the delta. " + reportRegister,
+      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Name each by the number it was shown as in the brief. Then stop: the home session runs /pb:review next to check the delta. " + reportRegister,
     parameters: Type.Object({
-      fixed: Type.Array(Type.String(), { description: "the findings this lap fixed: each one's title, or the line it was shown as in the brief" }),
-      skipped: Type.Array(Type.String(), { description: "findings that need a design decision (spec revision), not an edit: each one's title, or the line it was shown as" }),
+      fixed: Type.Array(Type.Number(), { description: "the numbers of the findings this lap fixed, as shown in the brief (e.g. 1, 3)" }),
+      skipped: Type.Array(Type.Number(), { description: "the numbers of findings that need a design decision (spec revision), not an edit, as shown in the brief" }),
       tests: Type.String({ description: "test commands run and what each showed" }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -1228,9 +1228,23 @@ export default function pb(pi: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionFile();
       const rec = store.fixSession(session);
       if (!session || !rec) throw new Error("This is not a pb fixes session. Fix review findings only inside the session /pb:fix opened — carry on there, or run /pb:fix for a new one.");
-      store.event(rec.spec, { type: "fix", fixed: params.fixed, skipped: params.skipped, tests: params.tests });
+      const picked = (numbers: number[]): Finding[] => {
+        const out: Finding[] = [];
+        for (const n of numbers) {
+          const f = Number.isInteger(n) && n >= 1 && n <= rec.findings.length ? rec.findings[n - 1] : undefined;
+          if (!f) throw new Error(`${n} is not one of the findings shown for this lap: the brief numbers them 1–${rec.findings.length}. Report the number it was shown as.`);
+          if (!out.includes(f)) out.push(f);
+        }
+        return out;
+      };
+      const fixed = picked(params.fixed);
+      const skipped = picked(params.skipped);
+      const both = fixed.filter((f) => skipped.includes(f));
+      if (both.length) throw new Error(`A finding cannot be both fixed and skipped: ${both.map((f) => f.title).join("; ")}. Pick one.`);
+      if (!fixed.length && !skipped.length) throw new Error("Report at least one finding by its number in fixed or skipped, with the test results.");
+      store.event(rec.spec, { type: "fix", fixed: fixed.map((f) => f.title), skipped: skipped.map((f) => f.title), tests: params.tests });
       store.clearFixSession(session);
-      return reply(`Recorded fix report for \`${rec.spec}\`: fixed ${params.fixed.length}, skipped ${params.skipped.length}. Reply briefly, then stop: run /pb:review back home to check the delta.`);
+      return reply(`Recorded fix report for \`${rec.spec}\`: fixed ${fixed.length}, skipped ${skipped.length}. Reply briefly, then stop: run /pb:review back home to check the delta.`);
     },
   });
 
@@ -1366,8 +1380,11 @@ export default function pb(pi: ExtensionAPI) {
       ctx.ui.notify(`Restored ${r.restored.length} file(s).`, "info");
       const skipped = files.filter((f) => !r.restored.includes(f));
       if (skipped.length) ctx.ui.notify(`Left alone because they changed again since: ${skipped.slice(0, 5).join(", ")}${skipped.length > 5 ? ", …" : ""}`, "warning");
-    } else if (choice !== KEEP) return false;
-    else if (!ctx.hasUI) ctx.ui.notify(`Kept files changed while planning: ${list}`, "warning");
+    } else if (choice !== KEEP) {
+      // Cancel (or a dismissed dialog) leaves planning as it was: say so, or the command looks dead.
+      ctx.ui.notify("Planning is still on: the files changed while planning were neither kept nor restored. Run /" + cmd("plan") + " off again and choose Keep or Restore.", "info");
+      return false;
+    } else if (!ctx.hasUI) ctx.ui.notify(`Kept files changed while planning: ${list}`, "warning");
     store.setPlanning(session, store.planningSessions().includes(session), (choice === RESTORE ? undefined : cur.commit) ?? snap);
     return true;
   };
@@ -1456,10 +1473,10 @@ export default function pb(pi: ExtensionAPI) {
         // Same staleness check as /pb:plan: the map may have rotted since the old session.
         warnStaleMap(c);
         const p = ns.progress(name);
-        if (p) ns.saveProgress({ ...p, writtenIn: session, compacted: false });
+        if (p) ns.saveProgress({ ...p, writtenIn: session });
         else {
           const parsed = parseSpec(md).spec;
-          if (parsed && session) ns.saveProgress({ spec: name, phase: "written", writtenIn: session, tasks: syncTasks(parsed, []), edited: false, compacted: false, updatedAt: now() });
+          if (parsed && session) ns.saveProgress({ spec: name, phase: "written", writtenIn: session, tasks: syncTasks(parsed, []), edited: false, updatedAt: now() });
         }
         // A fresh session gets a fresh baseline, not the previous session's result.
         const { cfg, testCmd } = commands(c.cwd, ns);
@@ -2043,13 +2060,13 @@ export default function pb(pi: ExtensionAPI) {
 
   pi.registerCommand(cmd("compact"), {
     description:
-      "pb's compaction. Planning: write the plan to its spec, then reset the session to it (e.g. before quitting); /pb:compact undo brings the whole discussion back. Build: compact to the build's state, no summarizing model call",
+      "pb's compaction. Planning: write the plan to its spec, then reset the session to it (e.g. before quitting). Build: compact to the build's state, no summarizing model call",
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
       const build = specOfSession(ctx).progress;
-      if (session && build && unfinishedPhase(build.phase) && args.trim() !== "undo") {
+      if (session && build && unfinishedPhase(build.phase)) {
         // A build: Pi compacts, with the summary pb writes from the build's state (session_before_compact).
         return ctx.compact({
           onComplete: () => ctx.ui.notify("Compacted to the build's state: tasks, the current task and what it changed, the spec.", "info"),
@@ -2058,20 +2075,7 @@ export default function pb(pi: ExtensionAPI) {
       }
       if (!session || !store.planningSessions().includes(session))
         return ctx.ui.notify(`/${cmd("compact")} is for planning and build sessions; elsewhere, Pi's /compact.`, "warning");
-      if (args.trim() !== "undo") return instruct(`▶ /${cmd("compact")} — writing the plan to its spec, then resetting to it`, requestCheckpoint(ctx, store, session));
-
-      const from = store.planning(session)?.checkpointFrom;
-      const nav = (ctx as Partial<ExtensionCommandContext>).navigateTree;
-      if (!from || !nav || !tree(ctx).getEntry?.(from)) return ctx.ui.notify("Nothing to undo: no planning reset in this session.", "info");
-      const branch = tree(ctx).getBranch?.() ?? [];
-      const reset = branch.map((e) => e.type).lastIndexOf("compaction");
-      const since = reset < 0 ? 0 : branch.slice(reset + 1).filter((e) => e.type === "message").length;
-      if (since && ctx.hasUI && !(await ctx.ui.confirm("Undo the reset?", `The ${since} message(s) since it stay on the other branch (reachable with /tree).`))) return;
-      const r = await nav(from, { summarize: false, label: "pb: compact undone" });
-      if (r.cancelled) return;
-      store.setCheckpointFrom(session, undefined);
-      checkpointQuiet.set(session, ctx.getContextUsage()?.tokens ?? Number.MAX_SAFE_INTEGER);
-      post(`**↺ Reset undone**: the whole discussion is back in the context. The spec keeps what was written to it; \`/${cmd("compact")}\` writes and resets again when you want.`);
+      return instruct(`▶ /${cmd("compact")} — writing the plan to its spec, then resetting to it`, requestCheckpoint(ctx, store, session));
     },
   });
 
@@ -2092,19 +2096,14 @@ export default function pb(pi: ExtensionAPI) {
         return { entries: [{ type: "custom_message" as const, customType: "pb", content: "pb: the plan wasn't written to a spec, so the conversation goes on as it is (Pi compacts it when it's full).", display: true }] };
       }
       const specs = planned.map((n) => ({ name: n, markdown: store.readSpec(n) ?? "" }));
-      store.setCheckpointFrom(session, pending.from);
-      for (const n of planned) {
-        const q = store.progress(n)!;
-        store.saveProgress({ ...q, compacted: false });
-        store.event(n, { type: "checkpoint", tokensBefore: usage?.tokens, percent: pending.percent });
-      }
+      for (const n of planned) store.event(n, { type: "checkpoint", tokensBefore: usage?.tokens, percent: pending.percent });
       return {
         entries: [
           { type: "compaction" as const, summary: checkpointSummary(specs, pending.last, store.planning(session)?.request), firstKeptEntryId: null, details: { pb: "checkpoint", specs: planned } },
           {
             type: "custom_message" as const,
             customType: "pb",
-            content: `**Plan checkpointed** to ${planned.map((n) => store.rel("specs", n, "spec.md")).join(", ")}: the conversation was reset to it (it was ${pending.percent}% full). Carry on; \`/${cmd("build")}\` when ready · \`/${cmd("compact")} undo\` brings the whole discussion back.`,
+            content: `**Plan checkpointed** to ${planned.map((n) => store.rel("specs", n, "spec.md")).join(", ")}: the conversation was reset to it (it was ${pending.percent}% full). Carry on; \`/${cmd("build")}\` when ready.`,
             display: true,
           },
         ],
@@ -2274,15 +2273,9 @@ export default function pb(pi: ExtensionAPI) {
           },
         };
       }
-      for (const n of planned) {
-        const q = store.progress(n)!;
-        store.saveProgress({ ...q, compacted: true });
-      }
       return;
     }
     store.event(name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, task: p.current });
-    // No compacted flag for builds: the summary below names the spec, so the session keeps what binds
-    // it. The flag is only for planning sessions whose compaction drops the spec.
     // What the current task has done so far, from git: the files it changed since its undo point.
     const cp = store.checkpoints(name).find((c) => c.id === p.current);
     const now_ = cp ? snapshot(ctx.cwd, `pb: compaction during ${p.current}`) : undefined;
@@ -3119,15 +3112,15 @@ export default function pb(pi: ExtensionAPI) {
   const P_ORDER = ["P0", "P1", "P2", "P3"] as const;
 
   /**
-   * One review pass in its own, real Pi session ("review: <spec> · spec" or "· adversarial"): you're moved into it
-   * and watch it natively; its model is read-only and reports with pb_report_findings. It ends when the model
+   * The reviewer's pass in its own, real Pi session ("review: <spec> · spec"): you're moved into it and
+   * watch it natively; its model is read-only and reports with pb_report_findings. It ends when the model
    * has reported and stopped, or at /pb:review done. Returns what it found, and whether you left meanwhile.
    */
   const drivePass = async (
     c: Pick<ExtensionContext, "isIdle" | "sessionManager">,
     send: ReplacedSessionContext["sendMessage"],
     store: Store,
-    o: { role: "review" | "abuse"; label: string; brief: string; resume?: boolean },
+    o: { label: string; brief: string; resume?: boolean },
   ) => {
     const idleMs = (store.config().reviewer.idleSec ?? 20) * 1000;
     const session = c.sessionManager.getSessionFile() ?? "";
@@ -3136,15 +3129,15 @@ export default function pb(pi: ExtensionAPI) {
         {
           customType: "pb",
           content: o.resume
-            ? `▶ Continuing the ${o.role === "review" ? "review" : "adversarial pass"} of **${o.label}** where it was interrupted.`
-            : `▶ ${o.role === "review" ? "Review" : "Adversarial pass"} of **${o.label}**, in a fresh session. The model can't change files; you can watch, interrupt and ask it anything. It ends when it has reported its findings and stops (\`/${cmd("review")} done\` ends it now); then pb takes you back.`,
+            ? `▶ Continuing the review of **${o.label}** where it was interrupted.`
+            : `▶ Review of **${o.label}**, in a fresh session. The model can't change files; you can watch, interrupt and ask it anything. It ends when it has reported its findings and stops (\`/${cmd("review")} done\` ends it now); then pb takes you back.`,
           display: true,
         },
         { triggerTurn: false },
       );
       const first = o.resume
         ? "[pb] You were interrupted. Carry on where you were, then report all your findings with pb_report_findings (including any you reported before) and stop."
-        : reviewSessionPrompt(o.role, o.brief, store.extra(o.role === "review" ? "review" : "adversarial"));
+        : reviewSessionPrompt(o.brief, store.extra("review"));
       void send({ customType: "pb-instruction", content: first, display: false }, { triggerTurn: true });
       let idle = 0;
       let nudged = false;
@@ -3188,8 +3181,72 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   /**
-   * The rest of a review from its saved state: the next pass in a new session, or the finish. When you leave
-   * mid-pass, the state is kept (with the interrupted pass) so /pb:review can continue it instead of starting over.
+   * The adversarial pass: a fresh background process, like the verifier. It attacks the change in the same
+   * frozen brief the reviewer read and reports with the fresh-process tool; nobody needs to watch it, and
+   * its saved session is named in the result.
+   */
+  const runAbusePass = async (ctx: ExtensionContext, store: Store, run: ReviewRun): Promise<ReviewRun["passes"][number]> => {
+    const cfg = store.config();
+    const started = Date.now();
+    let lastStep: string | undefined;
+    const paint = () => safely(() => ctx.ui.setWidget("pb-review", [`pb review ${run.label} — adversarial pass · ${Math.round((Date.now() - started) / 1000)}s`, ...(lastStep ? [`  ↳ ${lastStep}`] : [])]));
+    paint();
+    const beat = watchable(ctx) ? setInterval(paint, 1000) : undefined;
+    let res: Awaited<ReturnType<typeof runFresh>>;
+    try {
+      res = await runFresh({
+        cwd: run.cwd,
+        role: "abuse",
+        systemPrompt: ATTACKER_SYSTEM + extraBlock(store.extra("adversarial")),
+        brief: run.brief,
+        prompt: "Attack the change in the attached brief: find how it can be abused or broken. Report every finding with report_findings (one call), then stop.",
+        tools: ["read", "grep", "find", "ls"],
+        extensions: [REVIEW_TOOLS],
+        model: run.model,
+        thinking: run.thinking,
+        maxConcurrent: cfg.maxConcurrent,
+        sessionDir: run.name ? store.specSessionsDir(run.name, "abuse") : store.sessionsDir("abuse"),
+        onActivity: (line) => {
+          lastStep = line;
+          paint();
+        },
+      });
+    } finally {
+      if (beat !== undefined) clearInterval(beat);
+      safely(() => ctx.ui.setWidget("pb-review", undefined));
+    }
+    const call = res.toolCalls.filter((c) => c.name === "report_findings").at(-1);
+    const raw = call && Array.isArray(call.arguments.findings) ? call.arguments.findings : undefined;
+    const findings: Finding[] = (raw ?? []).flatMap((item) => {
+      const f = item as { priority?: unknown; title?: unknown; file?: unknown; line?: unknown; fix?: unknown; outside?: unknown };
+      if (typeof f.title !== "string" || !f.title.trim() || (f.priority !== "P0" && f.priority !== "P1" && f.priority !== "P2" && f.priority !== "P3")) return [];
+      return [{
+        priority: f.priority,
+        title: f.title.trim(),
+        ...(typeof f.file === "string" && f.file.trim() ? { file: f.file.trim() } : {}),
+        ...(typeof f.line === "number" && Number.isFinite(f.line) ? { line: f.line } : {}),
+        ...(typeof f.fix === "string" && f.fix.trim() ? { fix: f.fix.trim() } : {}),
+        ...(f.outside === true ? { outside: true } : {}),
+      }];
+    });
+    // Its tokens are part of what the review cost: record them like the watched reviewer's own turns.
+    if (run.name && res.tokens.input + res.tokens.output + res.tokens.cacheRead + res.tokens.cacheWrite > 0)
+      store.event(run.name, {
+        type: "review-usage",
+        role: "abuse",
+        input: res.tokens.input,
+        output: res.tokens.output,
+        cacheRead: res.tokens.cacheRead,
+        cacheWrite: res.tokens.cacheWrite,
+        cost: res.cost,
+      });
+    return { role: "abuse", findings, acceptance: [], prose: res.text, session: res.sessionFile ?? "", left: false, unparsed: unparsedReport(findings, res.text), ...(res.error ? { error: res.error } : {}) };
+  };
+
+  /**
+   * The rest of a review from its saved state: the reviewer in a new session, then the adversarial pass in
+   * the background, then the finish. When you leave the reviewer mid-pass, the state is kept (with the
+   * interrupted pass) so /pb:review can continue it instead of starting over.
    */
   const reviewNext = async (from: ExtensionCommandContext, store: Store, run: ReviewRun, left = false): Promise<void> => {
     if (left) {
@@ -3198,35 +3255,31 @@ export default function pb(pi: ExtensionAPI) {
       writeReview(store, run, true);
       return;
     }
-    let todo: "review" | "abuse" | undefined = !run.passes.length ? "review" : run.security && run.passes.length === 1 ? "abuse" : undefined;
-    if (todo === "abuse") {
-      // The adversarial pass is optional: asked when the review is done; unanswered, it runs.
-      const RUN = "Run the adversarial pass";
-      const choice = await choose(from, store, "The review is done. Run the adversarial pass now (someone trying to break the change)?", [RUN, "Skip it"], RUN);
-      if (choice !== RUN) {
-        run.security = undefined;
-        run.abuseSkipped = true;
-        todo = undefined;
+    const ran = (role: "review" | "abuse") => run.passes.some((p) => p.role === role);
+    if (ran("review")) {
+      if (run.security && !ran("abuse")) {
+        store.saveReviewRun(run);
+        run.passes.push(await runAbusePass(from, store, run));
+        return reviewNext(from, store, run);
       }
+      return reviewFinish(from, store, run);
     }
-    if (!todo) return reviewFinish(from, store, run);
     store.saveReviewRun(run);
     // The carry's parent is the session calling newSession (not the review's home): takeCarry only
     // hands it to that session's child, so an unrelated new session can't steal it.
     const caller = (from as ExtensionContext).sessionManager?.getSessionFile() ?? run.home ?? undefined;
-    store.setCarry({ model: run.model, thinking: run.thinking, spec: run.name ?? "", review: { role: todo, spec: run.name }, parent: caller });
+    store.setCarry({ model: run.model, thinking: run.thinking, spec: run.name ?? "", review: { role: "review", spec: run.name }, parent: caller });
     const result = await from.newSession({
       parentSession: run.home,
       setup: async (sm) => {
-        // Both passes are part of one review: named together, so they sort together in /resume.
-        sm.appendSessionInfo(`review: ${run.label} · ${todo === "abuse" ? "adversarial" : run.name ? "spec" : "intent"}`);
+        sm.appendSessionInfo(`review: ${run.label} · ${run.name ? "spec" : "intent"}`);
       },
       withSession: async (c) => {
         // Fail closed: even if the carry was stolen or expired, this session is a review session.
         const reviewSession = (c as ExtensionContext).sessionManager.getSessionFile();
-        if (reviewSession) store.saveReviewSession(reviewSession, { role: todo, spec: run.name, run: run.id });
-        const r = await drivePass(c, c.sendMessage, store, { role: todo, label: run.label, brief: run.brief });
-        run.passes.push({ role: todo, ...r });
+        if (reviewSession) store.saveReviewSession(reviewSession, { role: "review", spec: run.name, run: run.id });
+        const r = await drivePass(c, c.sendMessage, store, { label: run.label, brief: run.brief });
+        run.passes.push({ role: "review", ...r });
         await reviewNext(c, store, run, r.left);
       },
     });
@@ -3235,12 +3288,14 @@ export default function pb(pi: ExtensionAPI) {
 
   /** Continue an interrupted pass in its own session (`c` is that session), then the rest of the review. */
   const reviewContinue = async (c: ExtensionCommandContext, send: ReplacedSessionContext["sendMessage"], store: Store, run: ReviewRun, cut: NonNullable<ReviewRun["interrupted"]>) => {
-    const role = cut.role;
     run.passes = run.passes.filter((x) => x.session !== cut.session);
     run.interrupted = undefined;
     store.saveReviewRun(run);
-    const r = await drivePass(c, send, store, { role, label: run.label, brief: run.brief, resume: true });
-    run.passes.push({ role, ...r });
+    // Only the reviewer runs in a session to continue; an older run's interrupted adversarial pass
+    // now runs in the background like every other.
+    if (cut.role !== "review") return reviewNext(c, store, run);
+    const r = await drivePass(c, send, store, { label: run.label, brief: run.brief, resume: true });
+    run.passes.push({ role: "review", ...r });
     await reviewNext(c, store, run, r.left);
   };
 
@@ -3253,8 +3308,9 @@ export default function pb(pi: ExtensionAPI) {
     const inChange = findings.filter((f) => !f.outside);
     const outside = findings.filter((f) => f.outside);
     const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
-    const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left);
+    const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left && !x.error);
     const unparsed = run.passes.filter((x) => x.unparsed && !x.left).map((x) => (x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"));
+    const failed = run.passes.filter((x) => x.error).map((x) => x.error!.split("\n")[0]);
     // A pass that answered in prose only lost whatever it reported: with nothing parseable
     // there is no verdict to give — a clean one would wave through the very review this is for.
     const lost = unparsed.length > 0 && !findings.length;
@@ -3264,7 +3320,9 @@ export default function pb(pi: ExtensionAPI) {
     );
     const verdict = !run.passes.length || lost ? "none" : verdictOf(findings, coverage);
     const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
-    const sessions = run.passes.map((x) => `${x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"} \`pi --session ${sessionIdOf(x.session)}\``);
+    const sessions = run.passes
+      .filter((x) => x.session)
+      .map((x) => `${x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"} \`pi --session ${sessionIdOf(x.session)}\``);
     const notVerified = coverage.notVerified.length + coverage.missing.length;
     const acceptanceLine = (l: (typeof coverage.lines)[number]) => {
       const mark = l.status === "met" ? "✓ met" : l.status === "not met" ? "✗ not met" : l.status === "not reported" ? "? not verified (not reported)" : "? not verified";
@@ -3278,9 +3336,9 @@ export default function pb(pi: ExtensionAPI) {
     }));
     const tipKey = verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
     const text = [
-      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${lost ? "⚠ NO VERDICT — a pass reported in prose only" : verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : verdict === "unverified" ? "⚠ UNVERIFIED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : run.abuseSkipped ? " · adversarial pass skipped" : ""}`,
+      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${lost ? "⚠ NO VERDICT — a pass reported in prose only" : verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : verdict === "unverified" ? "⚠ UNVERIFIED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : ""}`,
       ...(o.partial
-        ? ["", `⚠ You left the review before it finished: the ${finished("review") ? "adversarial pass" : "review"} didn't finish; this is what had been reported. \`/${cmd("review")}\` continues it.`]
+        ? ["", `⚠ You left the review before it finished: this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),
       ...(unparsed.length
         ? [
@@ -3312,6 +3370,7 @@ export default function pb(pi: ExtensionAPI) {
       ...(o.changedDuring.length ? ["", `⚠ Files changed while the review ran (left as they are — the reviewer can't write, so these are yours or another session's): ${o.changedDuring.join(", ")}`] : []),
       ...(run.largeFiles?.length ? ["", `⚠ Untracked files over 20 MB are in no snapshot or diff (read them yourself): ${run.largeFiles.join(", ")}`] : []),
       ...(o.thrash ? ["", "⚠ A review pass compacted repeatedly without new reads and wrapped up early: treat its findings as a partial pass."] : []),
+      ...(failed.length ? ["", `⚠ The adversarial pass failed (${failed.join("; ")}): its findings are missing, so this result is incomplete. Run \`/${cmd("review")}\` again.`] : []),
       ...(o.verificationFailed ? ["", `⚠ The second look at the blocking findings couldn't run (${o.verificationFailed}): they are reported unconfirmed.`] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
       ...(run.name && !o.partial ? ["", commitBlock(commitMessage(new Store(run.cwd).readSpec(run.name) ?? ""))] : []),
@@ -3403,7 +3462,7 @@ export default function pb(pi: ExtensionAPI) {
 
   pi.registerCommand(cmd("review"), {
     description:
-      "Independent review in fresh sessions you watch: a spec pass by a reviewer who never saw the build, then an adversarial pass, against the spec or any uncommitted change's intent; pb brings you back with the result. Follow-ups look only at what changed (--full: everything). /pb:review done ends a review session now",
+      "Independent review: a spec pass by a reviewer who never saw the build, in a fresh session you watch, then an adversarial pass in the background, against the spec or any uncommitted change's intent; pb brings you back with the result. Follow-ups look only at what changed (--full: everything). /pb:review done ends a review session now",
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
@@ -3425,7 +3484,14 @@ export default function pb(pi: ExtensionAPI) {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       // An interrupted review: continue it rather than start over.
       if (saved?.interrupted) {
-        const CONTINUE = `Continue the interrupted review of ${saved.label} (the ${saved.interrupted.role === "review" ? "spec pass" : "adversarial pass"} didn't finish)`;
+        // An older run's adversarial pass ran in a watched session; it runs in the background now, so
+        // the review simply carries on from here instead of reopening that session.
+        if (saved.interrupted.role !== "review") {
+          const run = { ...saved, interrupted: undefined };
+          store.saveReviewRun(run);
+          return reviewNext(ctx, store, run);
+        }
+        const CONTINUE = `Continue the interrupted review of ${saved.label} (the spec pass didn't finish)`;
         const SHOW = "Show what it had reported";
         const NEW = "Start a new review";
         const choice = ctx.hasUI ? await ctx.ui.select("A review was interrupted", [CONTINUE, SHOW, NEW]) : CONTINUE;
@@ -3626,6 +3692,7 @@ export default function pb(pi: ExtensionAPI) {
         previous,
         testChanges: p?.testChanges,
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
+        openNotes: loaded && p ? p.tasks.flatMap((t) => (t.open && !isNone(t.open) ? [`${t.id}: ${t.open}`] : [])) : undefined,
         fixReports,
         designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
         acceptanceDrift: loaded && name ? acceptanceDrift(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
@@ -3683,7 +3750,7 @@ export default function pb(pi: ExtensionAPI) {
       `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; a finding's Not: line is an alternative the reviewer already rejected — do not implement it; keep the suite green; run each affected task's Test: line (full suite once at the end); new tests must be seen failing first. ${STRUCTURED_EDIT_RULE} ` +
       `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
       `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +
-      `When done, call pb_fix_done with fixed (each finding's title or the line it was shown as, not your own summary of it), skipped, and test results; then stop.`;
+      `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), and test results; then stop.`;
     let live: ExtensionCommandContext | undefined;
     const since = now();
     const result = await ctx.newSession({
@@ -3718,8 +3785,8 @@ export default function pb(pi: ExtensionAPI) {
   /**
    * Unattended fix loop: lap until every finding is fixed or skipped-as-spec-revision, up to FIX_LAPS, then
    * come home with the outcome. The human runs /pb:review next: a lap's report says what it claims to have
-   * done, so the summary hands the checking over instead of doing it, and counts a finding as done only when
-   * the lap's report could be attached to it.
+   * done, so the summary hands the checking over instead of doing it. The report names findings by the
+   * numbers the brief shows, so no prose has to be matched back to one.
    */
   const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[]): Promise<void> => {
     const home = ctx.sessionManager.getSessionFile() ?? undefined;
@@ -3729,24 +3796,18 @@ export default function pb(pi: ExtensionAPI) {
     const skipped: string[] = [];
     let laps = 0;
     let silent = false;
-    let unmatched = false;
     while (remaining.length && laps < FIX_LAPS) {
       laps++;
       const out = await runFixLap(live, store, spec, remaining);
       if (!out) return; // its session never opened (cancelled): user is present, nothing to say
       live = out.live;
-      if (!out.report) {
+      const report = out.report;
+      if (!report) {
         silent = true;
         break;
       }
-      const skip = claimedFindings(out.report.skipped, remaining);
-      const done = claimedFindings(out.report.fixed, remaining.filter((f) => !skip.includes(f)));
-      // A report pb cannot attach to a finding would earn the same seed again: the lap answered, so stop and
-      // show the mismatch instead of paying for a lap that can change nothing.
-      if (!done.length && !skip.length) {
-        unmatched = true;
-        break;
-      }
+      const skip = remaining.filter((f) => report.skipped.includes(f.title));
+      const done = remaining.filter((f) => !skip.includes(f) && report.fixed.includes(f.title));
       fixed.push(...done.map((f) => f.title));
       skipped.push(...skip.map((f) => f.title));
       const resolved = new Set([...done, ...skip].map((f) => f.title));
@@ -3755,13 +3816,11 @@ export default function pb(pi: ExtensionAPI) {
     const open = remaining.map((f) => f.title);
     const skippedNote = skipped.length ? `; skipped as needing spec revision: ${skipped.join(", ")}` : "";
     const checking = " Run /pb:review to check the delta: what a lap reports is its own claim, not a check.";
-    const summary = !open.length && !silent && !unmatched
+    const summary = !open.length && !silent
       ? `Fixes for \`${spec}\` complete in ${laps} lap(s): fixed ${fixed.join(", ") || "none"}${skippedNote}.${checking}`
       : silent
         ? `Fix lap for \`${spec}\` went silent (no report after ${FIX_NUDGES} nudges). Fixed so far: ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.${checking}`
-        : unmatched
-          ? `Fixes for \`${spec}\` stopped after ${laps} lap(s): the lap named none of the findings pb handed it, so pb cannot tell what it fixed and counts nothing as done. Still open: ${open.join(", ")}${skippedNote}.${checking}`
-          : `Fixes for \`${spec}\` stopped after ${laps} laps: fixed ${fixed.join(", ") || "none"}; still open: ${open.join(", ")}${skippedNote}.${checking}`;
+        : `Fixes for \`${spec}\` stopped after ${laps} laps: fixed ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.${checking}`;
     try {
       if (!home) throw new Error("no home session");
       await live.switchSession(home, {

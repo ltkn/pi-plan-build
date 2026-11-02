@@ -9,13 +9,13 @@ build. Your engineering standards live in AGENTS.md, written once.
 /pb:plan <what>       plan together; project files untouched; the test baseline runs in the background
 /pb:plan <spec>       continue planning a spec in a fresh session, from the spec
 /pb:approach [idea]   in planning: hear how Pi would approach it (chat only: no writes, no dialogs)
-/pb:compact [undo]    pb's compaction: planning, write the spec and reset to it (automatic at checkpointAt);
+/pb:compact           pb's compaction: planning, write the spec and reset to it (automatic at checkpointAt);
                       build, compact to the build's state
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
                       (--fresh: in a new session from the spec). Before T1, one fresh reviewer
                       reads the frozen draft: P0 findings stop the build until amended; P1-P3 are advisory
 /pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default); /pb:review checks the delta after
-/pb:review [focus]    independent review, in fresh sessions you watch (spec pass, then adversarial pass), P0–P3, blocking findings
+/pb:review [focus]    independent review: a spec pass in a fresh session you watch, then an adversarial pass in the background, P0–P3, blocking findings
                       double-checked; follow-ups look only at what changed (--full: everything)
                       no spec? reviews the uncommitted change against its intent
 /pb:deps [which]      check dependencies and propose upgrades, as a change of their own
@@ -106,9 +106,10 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   advisory findings and the build proceeds. There are no review rounds: editing
   the spec makes the next build start review the new text. Every acceptance
   line is proven by its task's `Test:`.
-- **Fresh eyes on the build.** A spec pass, then an adversarial pass, each in a
-  fresh read-only session you watch. Each task acceptance line is answered one
-  by one; a missing item is unverified, never a pass. Blocking findings get a
+- **Fresh eyes on the build.** A spec pass in a fresh read-only session you
+  watch, then an adversarial pass in the background with the same frozen brief.
+  Each task acceptance line is answered one by one; a missing item is unverified,
+  never a pass. Blocking findings get a
   second look, and pb offers another model family. A pre-existing problem is
   reported as an outside finding (advisory, capped at P2), never left as a
   prose note. The reviewer has no shell at all: it reads the frozen diff and
@@ -225,7 +226,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, and the planning and spec-review guards |
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
-| `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always`, asked for after the spec pass; `off`) |
+| `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always` on every review; `off`) |
 | `specReviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the one fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. Only a P0 blocks; P1-P3 are advisory. Point it at `buildModel` to have the implementer model validate the plan |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |

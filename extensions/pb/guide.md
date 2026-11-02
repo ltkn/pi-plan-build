@@ -231,9 +231,9 @@ on from the plan as it stands, with room to spare. Later checkpoints update only
 the sections that changed.
 
 **On demand**: `/pb:compact` writes and resets now, e.g. before you quit.
-**Changed your mind?** `/pb:compact undo` brings the whole discussion back
-(the reset only changed what the model sees; the session file keeps
-everything). The spec keeps what the checkpoint wrote.
+The reset only changes what the model sees; the session file keeps everything,
+so the discussion before it is still on the branch (`/tree`). The spec keeps
+what the checkpoint wrote.
 
 **Walking away.** Every dialog on the way into a build counts down
 (`askTimeoutSec`, 5 minutes) and then goes on with pb's choice: build (here, if
@@ -710,8 +710,8 @@ ignored. The next `/pb:review` is a **follow-up**: it checks the previous findin
 looks only at what changed since (`--full` reviews everything again). If
 nothing changed, it says so and costs nothing.
 
-**The adversarial pass, when the change looks sensitive.** A second fresh session, "review:
-<spec> · adversarial", has a single job: break the change. For every entry point it adds or alters and
+**The adversarial pass, when the change looks sensitive.** A background pass (its own fresh
+process, not a session you watch) has a single job: break the change. For every entry point it adds or alters and
 every rule it enforces, it looks for:
 
 - **access**: another user's data, a stolen session, what each state change
@@ -743,19 +743,18 @@ on every review; `off` never.
 uncommitted change against that intent and your standards: useful for any
 change you made with Pi without the rest of the flow.
 
-**Inside the review.** The spec pass, and the adversarial pass when one is due, each run
-in a real Pi session you're in: you watch everything natively, and you can
-interrupt it or ask it something ("why is 3 a P1?"). Its model is read-only:
-read/grep/find/ls and the reporting tool, no shell, so neither it nor a command
-of its own can change the tree it judges; the change arrives as a frozen diff
-from the build's base commit to the tree the review started on. A pass
-ends when it has reported its findings and stops, or at `/pb:review done`. When
-the spec pass is done and an adversarial pass is due, pb asks whether to run it now
-(unanswered, after `askTimeoutSec`, it runs; skipped, the result says so), and
-finally takes you back to your session with the result. Asking questions is
-fine; arguing it out of a finding makes it less independent. Both sessions stay
-in `/resume`, named "review: <spec> · spec" and "· adversarial" (without a spec,
-"· intent"), and the result names them too.
+**Inside the review.** The spec pass runs in a real Pi session you're in: you
+watch everything natively, and you can interrupt it or ask it something ("why is
+3 a P1?"). Its model is read-only: read/grep/find/ls and the reporting tool, no
+shell, so neither it nor a command of its own can change the tree it judges; the
+change arrives as a frozen diff from the build's base commit to the tree the
+review started on. The pass ends when it has reported its findings and stops, or
+at `/pb:review done`. When it is done and an adversarial pass is due, that pass
+runs in the background on the same frozen brief, and pb takes you back to your
+session with the merged result once it finishes. Asking the reviewer questions
+is fine; arguing it out of a finding makes it less independent. The review
+session stays in `/resume`, named "review: <spec> · spec" (without a spec,
+"· intent"), and the result names it and the adversarial pass's saved session.
 
 **If you leave** (say `/resume` elsewhere) before it's done, the pass you left
 stops, and pb keeps where the review stood. The next `/pb:review` offers to

@@ -270,7 +270,7 @@ export function buildIntro(name: string, spec: ParsedSpec, buildCmd: string | nu
 ${buildMechanics(spec, buildCmd, each, extra)}${standardsBlock(standards)}`;
 }
 
-const isNone = (v: string | undefined) => !v || /^(none|n\/a|-|nothing)\.?$/i.test(v.trim());
+export const isNone = (v: string | undefined) => !v || /^(none|n\/a|-|nothing)\.?$/i.test(v.trim());
 const clip = (text: string, n: number): string => {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > n ? `${flat.slice(0, Math.max(0, n - 1)).trimEnd()}…` : flat;
@@ -472,11 +472,11 @@ For every entry point the change adds or alters (API routes, UI actions, command
 - Configuration: security-relevant defaults, migrations and permissions (grants, roles, public access).
 - The spec's Threats and abuse, if any: each abuse really prevented, and tested.
 
-Report only problems someone could actually use or hit, with pb_report_findings: in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. Merge findings with the same concrete fix into one at the highest priority, its title naming each symptom. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. ${PRE_EXISTING_RULE} No findings is a fine result. Then reply with one line that adds no problem: a real problem belongs in the tool report, never only in that line.`;
+Report only problems someone could actually use or hit, with report_findings: in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. Merge findings with the same concrete fix into one at the highest priority, its title naming each symptom. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. ${PRE_EXISTING_RULE} No findings is a fine result. Then reply with one line that adds no problem: a real problem belongs in the tool report, never only in that line.`;
 
 /** The first message of a review session: its role, the brief, and how the session works. */
-export function reviewSessionPrompt(role: "review" | "abuse", brief: string, extra = ""): string {
-  return `[pb:${role}] ${role === "review" ? REVIEWER_SYSTEM : ATTACKER_SYSTEM}${extraBlock(extra)}
+export function reviewSessionPrompt(brief: string, extra = ""): string {
+  return `[pb:review] ${REVIEWER_SYSTEM}${extraBlock(extra)}
 
 This session is read-only: don't edit or write files. The human can watch it and may ask you something; answer, and report again with pb_report_findings if your findings change.
 
@@ -508,39 +508,6 @@ export const findingDetails = (f: Finding) =>
 export const findingLine = (f: Finding, n?: number) =>
   `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}${findingDetails(f)}`;
 
-/** A finding or a claim about one, in the one form the fix loop compares: numbering pb added stripped, whitespace flat, case out. */
-const claimKey = (text: string): string => text.replace(/^\s*(?:\d+[.)]|[-*+])\.?\s+/, "").replace(/\s+/g, " ").trim().toLowerCase();
-
-/** Below this a fragment is too generic to match on, so only an exact claim counts. */
-const CLAIM_MIN_CHARS = 20;
-
-/** Whether one claim describes one finding: its title, a piece of it, or that with numbering or prose around it. */
-const claimsFinding = (claim: string, title: string, shown: string): boolean =>
-  claim === title ||
-  claim === shown ||
-  (Math.min(claim.length, title.length) >= CLAIM_MIN_CHARS && (claim.includes(title) || title.includes(claim))) ||
-  (Math.min(claim.length, shown.length) >= CLAIM_MIN_CHARS && shown.includes(claim));
-
-/**
- * Which findings a fix lap's report names, in the order they were given to the lap. A lap answers with what
- * it was shown: the title alone, the whole line (`1. [P1] src/a.ts:12 — title`), or one of those with a
- * number, a prefix or prose around it — so a claim matches an exact shape, carries the title, or is a piece
- * of the title or of the line at least CLAIM_MIN_CHARS long. One claim claims one finding (exact first,
- * longest claim first), and a claim that matches nothing claims nothing: a finding nobody claimed stays
- * open rather than going quietly fixed.
- */
-export function claimedFindings(claims: readonly string[], findings: readonly Finding[]): Finding[] {
-  const keys = [...new Set(claims.map(claimKey).filter(Boolean))].sort((a, b) => b.length - a.length);
-  const shapes = findings.map((f) => ({ finding: f, title: claimKey(f.title), shown: claimKey(findingLine(f)) }));
-  const taken = new Set<Finding>();
-  for (const key of keys) {
-    const open = shapes.filter((s) => !taken.has(s.finding));
-    const hit = open.find((s) => key === s.title || key === s.shown) ?? open.find((s) => claimsFinding(key, s.title, s.shown));
-    if (hit) taken.add(hit.finding);
-  }
-  return findings.filter((f) => taken.has(f));
-}
-
 /**
  * How much of the frozen diff a review brief carries. Most changes fit; past the cap the reviewer
  * reads the files it needs, since it has no shell to produce a diff itself.
@@ -567,6 +534,8 @@ export interface ReviewBrief {
   testChanges?: string[];
   /** tasks whose new tests were never seen failing, with why: the review judges each */
   redNotes?: string[];
+  /** what the build itself reported as still unchecked, one line per task: claims to verify, not evidence */
+  openNotes?: string[];
   /** what the fix laps reported (fixed/skipped titles plus their test results): judge the evidence, not the claim */
   fixReports?: Array<{ fixed: string[]; skipped: string[]; tests: string }>;
   /** where the spec's Design comes from: how hard to look for drift between Design, Decisions and code */
@@ -667,7 +636,7 @@ export function reviewerBrief(o: ReviewBrief): string {
     lines.push(
       "## Acceptance checklist",
       "",
-      "Report every id below in pb_report_findings's `acceptance` array, with status met, not met, or not verified and evidence. An id left out counts as not verified: a criterion not checked is never met.",
+      "Report every id below in the `acceptance` array of your report, with status met, not met, or not verified and evidence. An id left out counts as not verified: a criterion not checked is never met.",
       "",
       ...o.acceptance.map((c) => `- ${c.id}${c.task ? ` (${c.task})` : ""}: ${c.text}`),
       "",
@@ -696,6 +665,15 @@ export function reviewerBrief(o: ReviewBrief): string {
     ...(o.testChanges?.length ? ["", "## Existing tests the build changed", "", "Deleted, cut down or skipped; judge whether each was justified:", ...o.testChanges.map((c) => `- ${c}`)] : []),
     ...(o.redNotes?.length
       ? ["", "## New tests never seen failing", "", "Judge each: does its acceptance still have a test that checks it?", ...o.redNotes.map((n) => `- ${n}`)]
+      : []),
+    ...(o.openNotes?.length
+      ? [
+          "",
+          "## What the build says it left unchecked",
+          "",
+          "The build's own open items, one per task. They are claims to verify, not evidence: check each against the code and report what is still open.",
+          ...o.openNotes.map((n) => `- ${n}`),
+        ]
       : []),
     ...(o.fixReports?.length
       ? [

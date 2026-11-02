@@ -59,13 +59,12 @@ function setup(config: object = {}) {
   const resets: { summary: string; firstKeptEntryId: string | null }[] = [];
   const blocked: string[] = [];
   const agent: { script?: Script } = {};
-  /** What the stand-in reviewer and abuse pass report (in their review sessions). */
-  const reviewer: { review: object[]; abuse: object[]; prose: string; acceptance?: object[]; silent?: boolean; write?: string; script?: boolean } = {
+  /** What the stand-in reviewer reports (in its review session). */
+  const reviewer: { review: object[]; prose: string; acceptance?: object[]; silent?: boolean; write?: string; script?: boolean } = {
     review: [
       { priority: "P3", file: "src/order.ts", line: 12, title: "consider a guard clause", fix: "return early" },
       { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
     ],
-    abuse: [],
     prose: "Acceptance: all met.",
   };
   const names = new Map<string, string>();
@@ -326,18 +325,16 @@ function setup(config: object = {}) {
         // As in Pi: the assistant message (with its tool calls) first, then the tool results.
         append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } });
         // In a review session, every message goes to the stand-in reviewer (its first one, and pb's reminder).
-        const kind = names.get(rt.file())?.match(/^review: .* · (spec|intent|adversarial)$/)?.[1];
-        const pass = kind && (kind === "adversarial" ? "abuse" : "review");
-        if (pass && !reviewer.script) {
-          // The stand-in reviewer and abuse pass: report the configured findings, then a short reply.
-          // A file changing in the review's window: the reviewer has no shell, so this stands in for
-          // the human (or another session) editing while the review runs.
-          if (reviewer.write && pass === "review") fs.writeFileSync(reviewer.write, "edited while the review ran");
-          const findings = pass === "review" ? reviewer.review : reviewer.abuse;
-          const checklist = pass === "review" ? (reviewChecklists.get(rt.file()) ?? []) : [];
-          const acceptance = pass === "review" ? (reviewer.acceptance ?? checklist.map((criterion) => ({ criterion, status: "met", evidence: "checked in src/order.ts:1" }))) : undefined;
-          if (!reviewer.silent) await callTool("pb_report_findings", { findings, ...(acceptance ? { acceptance } : {}) });
-          append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: pass === "review" ? reviewer.prose : "Done." }] } });
+        const inReview = !!names.get(rt.file())?.match(/^review: .* · (spec|intent)$/);
+        if (inReview && !reviewer.script) {
+          // The stand-in reviewer: report the configured findings, then a short reply. A file changing
+          // in the review's window: the reviewer has no shell, so this stands in for the human (or
+          // another session) editing while the review runs.
+          if (reviewer.write) fs.writeFileSync(reviewer.write, "edited while the review ran");
+          const checklist = reviewChecklists.get(rt.file()) ?? [];
+          const acceptance = reviewer.acceptance ?? checklist.map((criterion) => ({ criterion, status: "met", evidence: "checked in src/order.ts:1" }));
+          if (!reviewer.silent) await callTool("pb_report_findings", { findings: reviewer.review, acceptance });
+          append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: reviewer.prose }] } });
         } else await agent.script?.(input, callTool);
         const usage = { input: 1000, output: 100, cacheRead: 9000, cacheWrite: 0, cost: { total: 0.001 } };
         await fire("message_end", { message: { role: "assistant", usage } });
@@ -534,6 +531,21 @@ test("plan: investigation is free, project files are protected until /pb:plan of
   assert.match(t.notes.at(-1)!, /Describe what you want, in your own words/);
   await t.run("spec");
   assert.match(t.instructions.at(-1)!, /with the pb_write_spec tool[\s\S]*Not doing X, because[\s\S]*as tasks titled "\(refactor\) …" that keep behaviour/);
+});
+
+test("plan: a cancelled /pb:plan off says planning is still on, and the writes stay blocked", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.run("plan", "let admins cancel pending orders");
+  fs.writeFileSync(path.join(t.repo, "notes.txt"), "x"); // a project file changed while planning
+  t.selects.push("Cancel");
+  await t.run("plan", "off");
+  assert.match(t.notes.at(-1)!, /Planning is still on: the files changed while planning were neither kept nor restored/);
+  assert.match((await t.callTool("write", { path: "src/Order.java", content: "y" })).error!, /Planning mode/);
+  t.selects.push("Keep them");
+  await t.run("plan", "off");
+  assert.match(t.notes.at(-1)!, /Planning mode off/);
+  assert.equal((await t.callTool("write", { path: "src/Order.java", content: "y" })).error, undefined);
 });
 
 test("plan: the marker keeps the full request verbatim, and the record keeps it for the checkpoint", async () => {
@@ -1491,6 +1503,23 @@ Create T2.txt.
   assert.match(brief, /## New tests never seen failing[\s\S]*Judge each: does its acceptance still have a test that checks it\?/);
   assert.match(brief, /- T2: no Test: command, so nothing proves its new tests fail without the change/);
   assert.doesNotMatch(brief, /- T1: no Test: command/); // its own test proved it, so it isn't listed
+});
+
+test("review brief: what the build left unchecked reaches the reviewer as a claim to verify", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text);
+    if (!task || task === "final") return;
+    await tool("pb_tests_red", { task });
+    fs.writeFileSync(`${task}.txt`, "x");
+    await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: task === "T1" ? "the empty path is untested" : "none" });
+  };
+  await t.run("build");
+  await t.run("review");
+  const brief = briefOf(t);
+  assert.match(brief, /## What the build says it left unchecked\n\nThe build's own open items[\s\S]*claims to verify, not evidence[\s\S]*- T1: the empty path is untested/);
+  assert.doesNotMatch(brief, /- T2: none/);
 });
 
 test("red proof: a task seen failing stores its command, and a proven task is not listed as unproven", async () => {
@@ -2687,7 +2716,7 @@ test("fix: an unfinished lap starts the next one automatically", async () => {
   t.agent.script = async (text, tool) => {
     if (text.startsWith("[pb:fix")) {
       laps++;
-      await tool("pb_fix_done", { fixed: laps === 1 ? ["first"] : ["second"], skipped: [], tests: "ok" });
+      await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" }); // each lap numbers what it is shown from 1
     }
   };
   await t.run("fix");
@@ -2705,63 +2734,28 @@ const pausedWithFindings = (t: ReturnType<typeof setup>, name: string, findings:
   );
 };
 
-test("fix: a lap that answers with the finding line it was shown closes the loop", async () => {
-  const t = setup();
-  process.chdir(t.repo);
-  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
-  pausedWithFindings(t, "order-cancellation", [{ priority: "P1", file: "src/order.ts", line: 30, title: "markers in a fenced example above the map win", fix: "count fences from line 0" }]);
-  let laps = 0;
-  t.agent.script = async (text, tool) => {
-    if (!text.startsWith("[pb:fix")) return;
-    laps++;
-    // a lap answers with the line it was shown: the model echoes the finding, it does not repeat its title
-    const shown = /\n(\d+\. \[P1\][^\n]*)/.exec(text)![1];
-    await tool("pb_fix_done", { fixed: [shown], skipped: [], tests: "ok" });
-  };
-  await t.run("fix");
-  assert.equal(laps, 1, `the report was not attached to the finding, so pb ran ${laps} laps for it`);
-  const post = t.posts.at(-1)!;
-  assert.match(post, /complete in 1 lap/);
-  assert.equal(post.split("markers in a fenced example").length - 1, 1, `the same finding is listed once per lap: ${post}`);
-  assert.match(post, /\/pb:review/);
-});
 
-test("fix: a report pb cannot attach to a finding stops the loop and says so", async () => {
+test("fix: a report names findings by the number in the brief; a number outside it is refused", async () => {
   const t = setup();
   process.chdir(t.repo);
   await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
   pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 12, title: "name the constant the reviewer named" }]);
-  let laps = 0;
+  const said: string[] = [];
   t.agent.script = async (text, tool) => {
     if (!text.startsWith("[pb:fix")) return;
-    laps++;
-    await tool("pb_fix_done", { fixed: ["something about a caching layer entirely"], skipped: [], tests: "ok" });
+    said.push((await tool("pb_fix_done", { fixed: [2], skipped: [], tests: "ok" })).error ?? "recorded");
+    said.push((await tool("pb_fix_done", { fixed: [], skipped: [], tests: "ok" })).error ?? "recorded");
+    said.push((await tool("pb_fix_done", { fixed: [1], skipped: [1], tests: "ok" })).error ?? "recorded");
+    await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
   };
   await t.run("fix");
-  assert.equal(laps, 1, "an unattachable report must not buy the same seed again");
-  const post = t.posts.at(-1)!;
-  assert.match(post, /named none of the findings/);
-  assert.match(post, /name the constant the reviewer named/); // the finding is still open, not quietly done
-  assert.match(post, /\/pb:review/);
+  assert.match(said[0]!, /2 is not one of the findings shown for this lap/);
+  assert.match(said[1]!, /Report at least one finding by its number/);
+  assert.match(said[2]!, /cannot be both fixed and skipped/);
+  assert.match(t.posts.at(-1)!, /Fixes for `order-cancellation` complete in 1 lap/);
 });
 
-test("fix: a report names the finding it was shown, in any of the shapes it was shown it", async () => {
-  const { claimedFindings } = await import("../extensions/pb/prompts.ts");
-  const a = { priority: "P1" as const, file: "src/order.ts", line: 30, title: "markers in a fenced example above the map win", fix: "count fences from line 0" };
-  const b = { priority: "P2" as const, file: "src/cache.ts", title: "short" };
-  const findings = [a, b];
-  const claim = (f: { priority: string; file: string; line?: number; title: string }, n?: number) => `${n !== undefined ? `${n}. ` : ""}[${f.priority}] ${f.file}${f.line ? `:${f.line}` : ""} — ${f.title}`;
-  assert.deepEqual(claimedFindings([a.title], findings), [a]); // the title alone
-  assert.deepEqual(claimedFindings([claim(a)], findings), [a]); // the line as shown, unnumbered
-  assert.deepEqual(claimedFindings(["1. " + claim(a, 1)], findings), [a]); // numbered, as the seed shows it
-  assert.deepEqual(claimedFindings([`Fixed 1: ${claim(a, 1)}, in map.ts`], findings), [a]); // with prose around it
-  assert.deepEqual(claimedFindings(["markers in a fenced example above the map"], findings), [a]); // a substantial fragment
-  assert.deepEqual(claimedFindings([claim(a), claim(b, 2)], findings), [a, b]); // both, in the order the findings were given
-  assert.deepEqual(claimedFindings([claim(a), claim(a)], findings), [a]); // the same finding claimed twice stays one
-  assert.deepEqual(claimedFindings(["unrelated work on the cache eviction order"], findings), []); // nothing it was shown
-  assert.deepEqual(claimedFindings(["short", a.title], findings), [a, b]); // a short title still matches exactly
-  assert.deepEqual(claimedFindings(["art"], findings), []); // too short a fragment to guess from
-});
+
 
 test("fix: a lap that never reports stops the loop and escalates as silent", async () => {
   const t = setup();
@@ -2802,7 +2796,7 @@ test("fix: skipped findings never start a lap and reach the escalation", async (
     }),
   );
   t.agent.script = async (text, tool) => {
-    if (text.startsWith("[pb:fix")) await tool("pb_fix_done", { fixed: ["first"], skipped: ["second"], tests: "ok" });
+    if (text.startsWith("[pb:fix")) await tool("pb_fix_done", { fixed: [1], skipped: [2], tests: "ok" });
   };
   await t.run("fix");
   assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 1);
@@ -2862,7 +2856,7 @@ test("fix: a lap opens a fenced session seeded with the findings", async () => {
 test("fix: the report lands only in its own session, once", async () => {
   const t = setup();
   process.chdir(t.repo);
-  const r = await t.callTool("pb_fix_done", { fixed: ["x"], skipped: [], tests: "none" });
+  const r = await t.callTool("pb_fix_done", { fixed: [1], skipped: [], tests: "none" });
   assert.match(r.error!, /not a pb fixes session/);
   await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
   const session = t.runtime().ctx.sessionManager.getSessionFile();
@@ -2878,7 +2872,7 @@ test("fix: the report lands only in its own session, once", async () => {
     }),
   );
   t.agent.script = async (text, tool) => {
-    if (text.startsWith("[pb:fix")) await tool("pb_fix_done", { fixed: ["name the constant"], skipped: [], tests: "`true` passes" });
+    if (text.startsWith("[pb:fix")) await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "`true` passes" });
   };
   await t.run("fix");
   assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "fix").length, 1); // the lap's single report landed, once
@@ -3009,7 +3003,7 @@ test("review: security auto skips the adversarial pass on calm ground", async ()
   await t.run("build");
   await t.run("review");
   assert.match(t.posts.at(-1)!, /✅ PASS/);
-  assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
+  assert.doesNotMatch(t.posts.at(-1)!, /adversarial/);
 });
 
 test("review: security off never runs the adversarial pass", async () => {
@@ -3019,7 +3013,7 @@ test("review: security off never runs the adversarial pass", async () => {
   await t.run("build");
   await t.run("review");
   assert.match(t.posts.at(-1)!, /✅ PASS/);
-  assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
+  assert.doesNotMatch(t.posts.at(-1)!, /adversarial/);
 });
 
 test("review: by default the adversarial pass runs only on sensitive ground", async () => {
@@ -3029,7 +3023,6 @@ test("review: by default the adversarial pass runs only on sensitive ground", as
   await t.run("build");
   await t.run("review");
   assert.match(t.posts.at(-1)!, /✅ PASS/);
-  assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
   assert.doesNotMatch(t.posts.at(-1)!, /adversarial/);
 });
 
@@ -3112,9 +3105,10 @@ test("review: a fresh review session with the spec first and the diff; you're br
   assert.match(brief, /## The diff\n\n[\s\S]*\+x/);
   assert.doesNotMatch(brief, /Run: git diff/);
   assert.match(brief, /The diff below is from that commit to the tree the review started on\. Read files with read\/grep\/find\/ls/);
-  assert.ok([...t.names.values()].includes("review: order-cancellation · spec") && [...t.names.values()].includes("review: order-cancellation · adversarial"));
+  assert.ok([...t.names.values()].includes("review: order-cancellation · spec"));
+  assert.ok(![...t.names.values()].some((n) => n.endsWith("· adversarial"))); // the abuse pass is a background process
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // back where you were
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session build-session-\d+`/);
+  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session [^`]+`/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
   assert.equal(t.progress("order-cancellation").reviewUnshown, undefined);
   assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /Review of order-cancellation\*\* — ✅ PASS/); // kept with the spec
@@ -3126,7 +3120,7 @@ test("review: a fresh review session with the spec first and the diff; you're br
   assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED/);
 });
 
-test("review: the review session is read-only for its model; /pb:review done ends a pass; a pass you leave can be continued", async () => {
+test("review: the review session is read-only; a pass you leave can be continued", async () => {
   const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);
   t.agent.script = diligent;
@@ -3138,62 +3132,59 @@ test("review: the review session is read-only for its model; /pb:review done end
     if (text.startsWith("[pb:review]")) {
       assert.deepEqual(t.runtime().pi.getActiveTools(), ["read", "grep", "find", "ls", "pb_report_findings"]);
       blocked = (await tool("write", { path: "x.ts", content: "x" })).error;
-      await tool("pb_report_findings", { findings: CHANGES, acceptance: acceptanceOf(text) });
-      await t.runtime().cmds["pb:review"].handler("done", t.runtime().ctx);
-    }
-    if (text.startsWith("[pb:abuse]")) {
       // You go elsewhere mid-pass (like /resume): the review can't take you back; its result waits in review.md.
       await t.runtime().ctx.switchSession(home);
       return;
     }
-    return diligent(text, tool);
   };
   await t.run("review");
   assert.match(blocked!, /This is a review session: read-only/);
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // you went home by yourself
   const md = t.read(".pi/pb/specs/order-cancellation/review.md");
-  assert.match(md, /✗ CHANGES NEEDED[\s\S]*You left the review before it finished: the adversarial pass didn't finish[\s\S]*`\/pb:review` continues it/);
+  assert.match(md, /⚠ UNVERIFIED[\s\S]*You left the review before it finished: this is what had been reported[\s\S]*`\/pb:review` continues it/);
 
-  // /pb:review offers to continue: back into the abuse session, which carries on where it was.
+  // /pb:review offers to continue: back into the review session, which carries on where it was; the
+  // adversarial pass then runs in the background and its findings are merged.
+  process.env.MOCK_ABUSE_FINDINGS = JSON.stringify([{ priority: "P2", file: "src/order.ts", line: 3, title: "cap the page size" }]);
   t.reviewer.script = false;
-  t.reviewer.abuse = [{ priority: "P2", file: "src/order.ts", line: 3, title: "cap the page size" }];
-  await t.run("review");
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_ABUSE_FINDINGS;
+  }
   assert.match(t.selectTitles.at(-1)!, /A review was interrupted/);
   assert.ok(t.instructions.some((i) => i.startsWith("[pb] You were interrupted. Carry on where you were")));
   assert.ok(!t.notes.some((n) => /This review was interrupted/.test(n))); // pb was continuing it: no hint needed
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // and back home at the end
-  assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 2 · P3 0 · with an adversarial pass[\s\S]*Adversarial: cap the page size/);
+  assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 2 · P3 1 · with an adversarial pass[\s\S]*Adversarial: cap the page size/);
   assert.equal(JSON.parse(t.read(".pi/pb/config.json")).maxAttempts, 2);
   const runs = path.join(t.repo, ".pi/pb/review-runs");
   assert.deepEqual(fs.existsSync(runs) ? fs.readdirSync(runs) : [], []); // finished: nothing left to continue
 });
 
-test("review: every pass session is gated (reporting tool present, editing blocked)", async () => {
+
+test("review: the review session is gated (reporting tool present, editing blocked)", async () => {
   const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
   const gated: string[][] = [];
   const blocked: (string | undefined)[] = [];
-  t.reviewer.script = true; // drive each pass session by hand
+  t.reviewer.script = true; // drive the review session by hand
   t.agent.script = async (text, tool) => {
-    if (text.startsWith("[pb:review]") || text.startsWith("[pb:abuse]")) {
+    if (text.startsWith("[pb:review]")) {
       gated.push(t.runtime().pi.getActiveTools());
       blocked.push((await tool("write", { path: "x.ts", content: "x" })).error);
-      await tool("pb_report_findings", { findings: [], ...(text.startsWith("[pb:review]") ? { acceptance: acceptanceOf(text) } : {}) });
+      await tool("pb_report_findings", { findings: [], acceptance: acceptanceOf(text) });
       return;
     }
     return diligent(text, tool);
   };
   await t.run("review");
-  // Spec pass and adversarial pass alike: without the reporting tool a pass degrades to
-  // unparseable prose and its findings are lost.
+  // Without the reporting tool a pass degrades to unparseable prose and its findings are lost.
   // No shell either: the reviewer reads the frozen diff and the tree, so it cannot act on what it judges.
-  assert.deepEqual(gated, [
-    ["read", "grep", "find", "ls", "pb_report_findings"],
-    ["read", "grep", "find", "ls", "pb_report_findings"],
-  ]);
-  assert.ok(blocked.every((b) => /This is a review session: read-only/.test(b ?? "")));
+  assert.deepEqual(gated, [["read", "grep", "find", "ls", "pb_report_findings"]]);
+  assert.match(blocked[0]!, /This is a review session: read-only/);
 });
 
 test("review: reopening an interrupted review session, /pb:review continue picks it up there", async () => {
@@ -3221,26 +3212,42 @@ test("review: reopening an interrupted review session, /pb:review continue picks
   assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*with an adversarial pass/);
 });
 
-test("review: the adversarial pass is asked for when the review is done; skipped, the result says so; unanswered, it runs", async () => {
+test("review: an adversarial pass that fails is named, and the result is not recorded as complete", async () => {
   const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  t.selects.push("Keep p/m", "Skip it"); // the one-time reviewer-model offer comes first
-  await t.run("review");
-  assert.ok(t.selectTitles.includes("The review is done. Run the adversarial pass now (someone trying to break the change)?"));
-  assert.ok(![...t.names.values()].includes("review: order-cancellation · adversarial"));
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS · P0 0 · P1 0 · P2 1 · P3 1 · adversarial pass skipped/);
+  process.env.MOCK_ABUSE = "crash";
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_ABUSE;
+  }
+  assert.match(t.posts.at(-1)!, /⚠ The adversarial pass failed \(abuse pass exploded\): its findings are missing, so this result is incomplete\. Run `\/pb:review` again\./);
+  assert.doesNotMatch(t.posts.at(-1)!, /with an adversarial pass/);
+  assert.ok(!t.progress("order-cancellation").review); // incomplete: nothing recorded as reviewed
 
-  const u = setup({ verify: "true", askTimeoutSec: 0.001, reviewer: { security: "always" } });
-  await written(u);
-  u.agent.script = diligent;
-  await u.run("build");
-  u.selects.push("<timeout>"); // nobody there: it runs
-  await u.run("review");
-  assert.ok([...u.names.values()].includes("review: order-cancellation · adversarial"));
-  assert.match(u.posts.at(-1)!, /with an adversarial pass/);
+  await t.run("review"); // the next one completes
+  assert.match(t.posts.at(-1)!, /✅ PASS · [\s\S]*with an adversarial pass/);
+  assert.ok(t.progress("order-cancellation").review);
 });
+
+test("review: the adversarial pass runs in the background and its findings are merged", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  process.env.MOCK_ABUSE_FINDINGS = JSON.stringify([{ priority: "P2", file: "src/order.ts", line: 3, title: "a forged owner cancels" }]);
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_ABUSE_FINDINGS;
+  }
+  assert.ok(!t.selectTitles.some((x) => /adversarial pass/.test(x)), "the pass is not asked for: it just runs");
+  assert.ok(![...t.names.values()].some((n) => n.endsWith("· adversarial"))); // no session of its own
+  assert.match(t.posts.at(-1)!, /with an adversarial pass[\s\S]*Adversarial: a forged owner cancels/);
+});
+
 
 test("review: compaction resets to role, brief, findings and files read; stalls wrap up", async () => {
   const t = setup();
@@ -3736,7 +3743,7 @@ test("stats: tasks, first try, checks, pauses, review, and the build session's t
   assert.match(card, /Review +pass/);
   assert.match(card, /in [\d.]+k \(90% cached\)/);
   assert.match(card, /Context +peak 10\.0k \(10% of 100\.0k\)/);
-  assert.match(card, /Reviewer +in 20\.0k · out 200/); // the review and abuse sessions' own turns
+  assert.match(card, /Reviewer +in 16\.0k · out 900/); // the reviewer's turn (10k/100) and the abuse pass's two (3k/400 each)
 
   await t.run("stats", "all");
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2 +50%/);
@@ -4253,7 +4260,7 @@ test("checkpoint: sessions that aren't planning are left to Pi; checkpointAt 0 t
   assert.ok(!t.instructions.some((i) => i.startsWith("[pb:compact]")));
 });
 
-test("compaction: a planning session's summary is its spec; elsewhere a compacted session gets the spec sent along at build", async () => {
+test("compaction: a planning session's summary is its spec; a build names the spec file, so its summary is Pi's", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   t.selects.push("No thanks");
@@ -4267,7 +4274,7 @@ test("compaction: a planning session's summary is its spec; elsewhere a compacte
   await written(u); // written in a session that isn't planning
   const [none] = (await u.fire("session_before_compact", { preparation: { firstKeptEntryId: "e3", tokensBefore: 90000 }, reason: "threshold" })) as any[];
   assert.equal(none, undefined); // Pi summarizes
-  assert.equal(u.progress("order-cancellation").compacted, true);
+
   u.agent.script = diligent;
   await u.run("build");
   assert.match(u.instructions[0], /Build \.pi\/pb\/specs\/order-cancellation\/spec\.md\./);
@@ -4554,8 +4561,8 @@ test("planning sessions are per-session files: interleaved writes don't clobber"
   s.setPlanning("/s/a.jsonl", false);
   assert.deepEqual(s.planningSessions(), ["/s/b.jsonl"]);
   assert.equal(s.planning("/s/b.jsonl")?.snapshot, "snap-b");
-  s.setCheckpointFrom("/s/b.jsonl", "e1");
-  assert.equal(s.planning("/s/b.jsonl")?.checkpointFrom, "e1");
+  s.setPlanning("/s/b.jsonl", true, undefined, "cancel orders");
+  assert.equal(s.planning("/s/b.jsonl")?.request, "cancel orders");
   assert.equal(s.planning("/s/b.jsonl")?.snapshot, "snap-b"); // merge preserved
 });
 
@@ -5144,7 +5151,7 @@ test("/pb:spec <name> revises the spec from the file, not from memory", async ()
   assert.match(t.instructions.at(-1)!, /Existing: order-cancellation \(reusing a name rewrites it; read its spec\.md first/);
 });
 
-test("/pb:compact writes and resets on demand (e.g. before quitting); undo brings the whole discussion back", async () => {
+test("/pb:compact writes and resets on demand (e.g. before quitting)", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   t.selects.push("No thanks");
@@ -5159,18 +5166,6 @@ test("/pb:compact writes and resets on demand (e.g. before quitting); undo bring
   assert.equal(t.resets.length, 1);
   assert.match(t.context(), /^\[pb plan checkpoint\][\s\S]*Only PENDING orders[\s\S]*Human: refunds are out of scope/);
   assert.doesNotMatch(t.context(), /\[pb:plan\] cancel orders/);
-
-  t.runtime().usage = 73; // the whole discussion, back
-  await t.run("compact", "undo");
-  assert.match(t.posts.at(-1)!, /Reset undone\*\*: the whole discussion is back/);
-  assert.match(t.context(), /\[pb:plan\] cancel orders[\s\S]*refunds are out of scope/);
-  assert.doesNotMatch(t.context(), /\[pb plan checkpoint\]/);
-  t.runtime().usage = 76; // past the threshold, but just undone: no new checkpoint before it grows another 5%
-  t.runtime().pi.sendUserMessage("go on");
-  await t.settle();
-  assert.equal(t.resets.length, 1);
-  await t.run("compact", "undo");
-  assert.match(t.notes.at(-1)!, /Nothing to undo: no planning reset in this session/);
 
   const u = setup();
   process.chdir(u.repo);
@@ -5818,9 +5813,16 @@ test("extra instructions: added to each role's prompt, global ones first, pb's o
     t.agent.script = diligent;
     await t.run("build");
     assert.match(t.instructions.find((i) => /\[pb:build order-cancellation\]/.test(i))!, /Finish each task with pb_task_done[^\n]*\n\nAlso, from your pb config:\nGlobal: keep functions short\./);
-    await t.run("review");
+    const abuseSystem = path.join(os.tmpdir(), `pb-abuse-system-${process.pid}.md`);
+    process.env.MOCK_SYSTEM_OUT = abuseSystem;
+    try {
+      await t.run("review");
+    } finally {
+      delete process.env.MOCK_SYSTEM_OUT;
+    }
     assert.match(briefOf(t), /You are an independent REVIEWER[\s\S]*Also, from your pb config:\nCheck the i18n keys\./);
-    assert.ok(t.instructions.some((i) => /You are an ATTACKER[\s\S]*Also, from your pb config:\nTry the admin API\./.test(i)));
+    assert.match(fs.readFileSync(abuseSystem, "utf8"), /You are an ATTACKER[\s\S]*Also, from your pb config:\nTry the admin API\./);
+    fs.rmSync(abuseSystem);
   } finally {
     fs.rmSync(global, { force: true });
   }
@@ -5970,7 +5972,7 @@ test("fresh calls are saved as sessions to open afterwards, and stream their tex
   t.agent.script = diligent;
   await t.run("build");
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session build-session-\d+`/);
+  assert.match(t.posts.at(-1)!, /The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session [^`]+`/);
   const e = await t.callTool("pb_explore", { question: "where?" });
   assert.match((e as any).details.session, /^\.pi\/pb\/sessions\/explorer\/.+\.jsonl$/);
 
