@@ -219,6 +219,21 @@ export function redExemption(spec: ParsedSpec, task: SpecTask | undefined): stri
 export const needsRed = (spec: ParsedSpec, task: SpecTask | undefined) => !!task && !redExemption(spec, task);
 
 /**
+ * The done task before `task` whose run proved the same Test: command, if any: once that change is in
+ * place the command cannot fail again, so the exemption is derived from the task list, never stored.
+ */
+export function earlierProof<T extends { id: string; status: string; redCommand?: string }>(spec: ParsedSpec, tasks: readonly T[], task: SpecTask | undefined): T | undefined {
+  if (!task?.test) return undefined;
+  const at = spec.tasks.findIndex((t) => t.id === task.id);
+  if (at < 0) return undefined;
+  return spec.tasks
+    .slice(0, at)
+    .filter((t) => t.test === task.test)
+    .map((t) => tasks.find((x) => x.id === t.id))
+    .find((x) => x?.status === "done" && x.redCommand !== undefined);
+}
+
+/**
  * The `Test:` commands carried by more than one task that needs red, with their task ids in spec order.
  * One run then shows only that something is missing among them, not each task's own new tests.
  */

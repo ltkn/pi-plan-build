@@ -96,7 +96,7 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 - **A lean context.** Broad questions go to `pb_explore`, a separate read-only
   context (on a cheaper model if you like). The baseline runs in the harness,
   in its own worktree, and a build resets between tasks to a summary pb writes
-  from its own state, sized from your model's window.
+  from its own state, naming the spec rather than copying it.
 - **Undo means undo.** `/pb:undo` restores the files and rewinds the
   conversation to before the task, so a discarded attempt doesn't anchor the
   next one, and the cache stays warm.

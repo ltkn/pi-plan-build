@@ -139,7 +139,8 @@ export async function verifyFindings(o: {
   base?: string;
   /** the frozen diff the findings are judged against */
   diff?: string;
-  spec?: string;
+  /** the spec's path: the verifier reads it at the source, like the reviewer */
+  specPath?: string;
   model?: string;
   thinking?: string;
   /** Cap on concurrent fresh runs (pb config's maxConcurrent; PI_PB_MAX_CONCURRENT outranks it). */
@@ -156,7 +157,7 @@ export async function verifyFindings(o: {
     cwd: o.cwd,
     role: "verifier",
     systemPrompt: VERIFIER_SYSTEM,
-    brief: verifierBrief(toCheck, o.base, o.spec, o.diff),
+    brief: verifierBrief(toCheck, o.base, o.specPath, o.diff),
     prompt: "Verify each finding in the attached file; report with report_verdicts.",
     tools: [...INSPECT, "report_verdicts"],
     extensions: [REVIEW_TOOLS],

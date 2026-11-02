@@ -6,6 +6,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { type ParsedSpec, earlierProof, needsRed, parseSpec } from "./spec.ts";
 import { type Progress, type Store, readEvents as readJsonl, COHERE_TASK_ID } from "./store.ts";
 import { human, outRate } from "./format.ts";
 
@@ -18,6 +19,8 @@ export interface SpecStats {
   /** pb_explore calls made in the sessions that wrote or built the spec */
   explore: Ev[];
   progress?: Progress;
+  /** the spec, parsed: the proof signal tells a task that needs no run from one that could not be proven */
+  spec?: ParsedSpec;
 }
 
 const readEvents = (dir: string) => readJsonl(path.join(dir, "events.jsonl")) as Ev[];
@@ -62,12 +65,20 @@ export function loadStats(store: Store): SpecStats[] {
     .map((dir) => {
       const progress = readProgress(dir);
       const sessions = [progress?.writtenIn, progress?.session].filter((x): x is string => !!x);
+      const markdown = (() => {
+        try {
+          return fs.readFileSync(path.join(dir, "spec.md"), "utf8");
+        } catch {
+          return undefined;
+        }
+      })();
       return {
         name: progress?.spec ?? path.basename(dir).replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/, ""),
         phase: progress?.phase ?? "written",
         events: readEvents(dir),
         explore: explore.filter((x) => typeof x.session === "string" && sessions.some((s) => sameSession(s, x.session as string))),
         progress,
+        spec: markdown ? parseSpec(markdown).spec : undefined,
       };
     })
     .filter((s) => s.events.length || s.progress);
@@ -154,9 +165,16 @@ export function summarize(s: SpecStats): Summary {
   const start = e.find((x) => x.type === "build-start");
   const end = [...e].reverse().find((x) => x.type === "built") ?? e.at(-1);
   // Red sent-backs: a `red` event with ok:false means the tests passed without the change. A task
-  // whose command an earlier one already proved carries that as disclosed-unproven, not sent back.
+  // whose command an earlier one already proved cannot fail again: unproven, not sent back.
   const sentBackIds = new Set(e.filter((x) => x.type === "red" && x.ok === false).map((x) => String(x.task)));
-  const unprovenIds = new Set(tasks.filter((t) => t.redUnproven).map((t) => t.id));
+  const unprovenIds = new Set(
+    tasks
+      .filter((t) => {
+        const task = s.spec?.tasks.find((x) => x.id === t.id);
+        return !t.redCommand && !!s.spec && needsRed(s.spec, task) && !!earlierProof(s.spec, tasks, task);
+      })
+      .map((t) => t.id),
+  );
   const lastReview = [...e].reverse().find((x) => x.type === "review");
   const pp = Array.isArray(lastReview?.p) ? (lastReview.p as unknown[]) : [];
   return {
@@ -171,7 +189,7 @@ export function summarize(s: SpecStats): Summary {
     undo: e.filter((x) => x.type === "undo").length,
     reviews: reviews.map((r) => String(r.verdict)),
     proof: {
-      proven: tasks.filter((t) => !!t.red).length,
+      proven: tasks.filter((t) => !!t.redCommand).length,
       sentBack: [...sentBackIds].filter((id) => !unprovenIds.has(id)).length,
       unproven: unprovenIds.size,
     },

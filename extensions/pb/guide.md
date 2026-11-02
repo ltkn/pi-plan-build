@@ -472,7 +472,7 @@ revised spec and a new approval.
 1. **The tasks.** Each task is built the same way: tests first, then the
    behaviour, then `pb_task_done` — reporting what changed plus the caveats,
    rejections and open items later tasks can catch on — which hands out the
-   next one, naming the files finished tasks touched. The whole
+   next one, naming the spec to read. The whole
    build is one uninterrupted run, so the prompt cache stays warm. How the shape
    is arrived at is the build's: the compiler and the tests give the feedback,
    task by task, where each step is checked by something real. The first task
@@ -511,13 +511,10 @@ The spec's Goal, Out of scope, Decisions, Design, Contracts, Migration and
 rollback, Threats and abuse (`Threats` reads as the same section) and Acceptance
 bind the build. How to build it is the build's: a better way found while coding
 is taken, and a change to the Design goes in Decisions. Every task handout,
-check retry, coherence pass and fix lap carries those binding sections, the
-task acceptance lines, and the finished tasks' caveats, rejections and open
-items as a compact block. It is sized from your model's context window (a tenth of
-it, with a stated minimum, so even a window too small for the reserve gets a real
-limit). Past that, section bodies are shortened in a fixed order (Decisions and
-Contracts last), each cut section is named, and the spec file stays one read
-away — no section is dropped whole.
+check retry, coherence pass and fix lap names the spec file and those sections,
+plus the finished tasks' caveats, rejections and open items. The spec is never
+pasted: it would be shortened, stale or too big for the model reading it, so
+the model reads the one file that is the source of truth.
 
 **The build never stops to ask.** Where the spec is ambiguous, contradicts
 itself or doesn't match the code, Pi takes the sensible reading, records it in
@@ -540,7 +537,7 @@ build's state, written by pb, not by a model.
 `checkpointAt` (75% of its window, always before Pi would compact), pb resets it
 right there, between two tasks, where nothing is half-done. The build goes on
 from a summary pb writes itself: the build's rules, every task with its
-report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's binding view — the same binding sections, bounded by your model's window with a stated minimum, naming any section it had to drop (Tasks and the rest stay in the spec) — and the next task. The line it resets under leaves room for that view and the step after it, not for the whole spec, so a long spec doesn't force early resets. No summarizing model call,
+report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's path with the sections that bind the build, and the next task. No summarizing model call,
 and nothing of the finished task is needed any more. Should a single task still
 run into Pi's own compaction, pb writes that summary too, adding the files the
 task has changed so far and the files read before, so it carries on instead of
@@ -582,21 +579,20 @@ is missing. Pi writes the tests for the task's Acceptance lines, calls
 `pb_tests_red`, and the harness runs the command and requires the failure —
 stubs of new signatures are fine, so the tests compile and fail on their
 assertion rather than on a missing symbol. `pb_task_done` takes the task only
-after that; the refusal costs no attempt. Tests that pass too early are sent
-back, and `/pb:undo` takes the proof back with the files.
+after that; the refusal costs no attempt. A run that passes is sent back and
+clears any earlier proof: the tests changed, or the command no longer runs them.
+Calling `pb_tests_red` again is allowed, and only the latest failed run counts.
+`/pb:undo` takes the proof back with the files.
 
 Two tasks that carry the very same `Test:` command share one run, so that run
 shows only that something is missing among them. Once an earlier task is done
 and proven, a later task with the same command cannot fail again: the harness
-says so instead of wedging, records that no run could prove the later task's own
-tests, and hands that disclosure to the reviewer — confirm the acceptance holds
-on top of the earlier change and finish. A task with no `Test:` command, a
-refactor, or a spec with `New tests: no` or `Verification: build` has no red
-proof by construction. Rewriting a task's `Test:` command drops its proof: the
-new command must be seen failing again. `pb_tests_red` also records what the
-tests are claimed to prove and a capped head of the failure it saw; the review
-brief shows both for every proven task, and a failed check retry shows them
-again so the model does not build on a typo or an unrelated broken test. Each case is listed at the end of the build and handed to the reviewer as
+says so instead of wedging, and hands that disclosure to the reviewer — confirm
+the acceptance holds on top of the earlier change and finish. A task with no
+`Test:` command, a refactor, or a spec with `New tests: no` or
+`Verification: build` has no red proof by construction. Rewriting a task's
+`Test:` command drops its proof: the new command must be seen failing again.
+Each case is listed at the end of the build and handed to the reviewer as
 partly proven or unproven — give a task its own targeted command where you
 can, and when tasks share one, make it fail at each task's turn (a conjunction
 over per-task artifacts, so each task still has something to prove). A task's

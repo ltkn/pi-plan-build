@@ -34,10 +34,7 @@ import {
   approachPrompt,
   buildIntro,
   buildMechanics,
-  buildSpecView,
   buildStateSummary,
-  bindingBudget,
-  bindingContext,
   checkpointPrompt,
   checkpointSummary,
   coherePrompt,
@@ -58,30 +55,27 @@ import {
   nudgePrompt,
   planPrompt,
   PI_RESERVE_TOKENS,
-  RESET_WORKING_TOKENS,
   reviewSessionPrompt,
   REVIEW_DIFF_CHARS,
   reviewerBrief,
   reportRegister,
   specPrompt,
   specReviewBrief,
-  type RedEvidence,
-  type RedProof,
+  specReference,
   SPEC_REVIEWER_SYSTEM,
   STRUCTURED_EDIT_RULE,
   taskPrompt,
-  viewBudget,
 } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findingsOf, ignoredPathsFor, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { buildReport } from "./report.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, RED_CLAIM_CAP, RED_OUTPUT_CAP, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -125,11 +119,10 @@ const COHERE_MIN_TASKS = 3;
 const LONG_SPEC_TOKENS = 12000;
 
 /**
- * The token line a session resets under: Pi's own compaction reserve, plus room for the summary the
- * reset writes and the step that follows it. `writtenTokens` is that summary's own size — reserving for
- * a whole spec a reset no longer contains buys earlier resets, and more of them.
+ * The token line a session resets under: Pi's own compaction reserve, plus the summary the reset
+ * writes. `writtenTokens` is that summary's own size — 0 when it carries no spec.
  */
-const resetLimit = (window: number, writtenTokens: number) => window - PI_RESERVE_TOKENS - Math.max(RESET_WORKING_TOKENS, 2 * writtenTokens);
+const resetLimit = (window: number, writtenTokens = 0) => window - PI_RESERVE_TOKENS - 2 * writtenTokens;
 
 /** What the model is told about a spec's size after writing it. */
 const sizeNote = (tokens: number) =>
@@ -399,16 +392,9 @@ export default function pb(pi: ExtensionAPI) {
     const byId = new Map(old.map((o) => [o.id, o]));
     return spec.tasks.map((t) => {
       const prev = byId.get(t.id);
-      // A red proof belongs to the exact Test: command it ran. A rewritten command re-requires proof;
-      // legacy proofs without a recorded command can't be verified, so they don't carry over.
-      const redKept = prev?.red && prev?.redCommand !== undefined ? prev.redCommand === t.test : undefined;
-      const red = redKept ? prev!.red : undefined;
-      const redCommand = redKept ? prev!.redCommand : undefined;
-      const redClaim = redKept ? prev!.redClaim : undefined;
-      const redOutput = redKept ? prev!.redOutput : undefined;
-      // The same command bound the unproven disclosure: a rewrite needs a fresh run either way.
-      const redUnproven = prev?.redUnproven && prev.redCommand !== undefined && prev.redCommand === t.test ? prev.redUnproven : undefined;
-      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, changed: prev?.changed, caveat: prev?.caveat, rejected: prev?.rejected, open: prev?.open, red, redClaim, redOutput, redCommand, redUnproven };
+      // A proof belongs to the exact Test: command: a rewritten command re-requires it.
+      const redCommand = prev?.redCommand !== undefined && prev.redCommand === t.test ? prev.redCommand : undefined;
+      return { id: t.id, title: t.title, status: prev?.status ?? "todo", attempts: prev?.attempts ?? 0, summary: prev?.summary, changed: prev?.changed, caveat: prev?.caveat, rejected: prev?.rejected, open: prev?.open, redCommand };
     });
   };
 
@@ -428,33 +414,9 @@ export default function pb(pi: ExtensionAPI) {
   };
 
   /**
-   * Files finished tasks changed, from their checkpoints: what the current task inherits and
-   * must not redo. Harness-computed from snapshots (never the model's claim), so a task that
-   * changed nothing outside its slice shows up here. Empty outside git or without checkpoints.
-   */
-  const touchedSuffix = (ctx: ExtensionContext, store: Store, p: Progress, currentId: string): string => {
-    if (!store.config().checkpoints) return "";
-    let cps: ReturnType<Store["checkpoints"]> = [];
-    try {
-      cps = store.checkpoints(p.spec);
-    } catch {
-      return "";
-    }
-    const lines: string[] = [];
-    for (const t of p.tasks) {
-      if (t.id === currentId || t.status !== "done") continue;
-      const files = cps.find((c) => c.id === t.id)?.files ?? [];
-      if (!files.length) continue;
-      lines.push(`- ${t.id}: ${files.slice(0, 12).join(", ")}${files.length > 12 ? `, +${files.length - 12} more` : ""}`);
-    }
-    return lines.length ? `\n\nTouched so far, by finished tasks (re-read what you need; don't redo it, and flag a file outside the task's slice):\n${lines.join("\n")}` : "";
-  };
-
-  /**
    * Per-task changed files for the final surfaces (the completion summary and the final-failure
-   * brief): what each task changed, from its checkpoint. Same data as touchedSuffix, but every
-   * task including the last — the final check has no next task whose prompt would carry it.
-   * Empty outside git or without checkpoints.
+   * brief): what each task changed, from its checkpoint, not the model's report. Empty outside git
+   * or without checkpoints.
    */
   const changedFilesSection = (store: Store, p: Progress): string => {
     if (!store.config().checkpoints) return "";
@@ -474,56 +436,26 @@ export default function pb(pi: ExtensionAPI) {
     return lines.length ? `\nChanged files, by task (from checkpoints, not the model's report):\n${lines.join("\n")}` : "";
   };
 
-  /**
-   * The compact spec context a step carries, from markdown already in hand: the one shape every handout
-   * uses (this window's block budget), so the four that load the spec
-   * themselves for another reason can't drift from the one that doesn't. `resetView` is its sibling for
-   * a reset, where the whole view goes instead of the block.
-   */
-  const bindingBlock = (ctx: ExtensionContext, store: Store, name: string, markdown: string, tasks: TaskProgress[]): string =>
-    bindingContext(name, markdown, tasks, bindingBudget(ctx.getContextUsage()?.contextWindow));
-
-  /** The compact spec context a task, retry, coherence pass or fix lap carries. Empty when the spec is gone. */
-  const bindingFor = (ctx: ExtensionContext, store: Store, p: Progress): string => {
-    // The live file carries the build's own Design and Decisions, which the snapshot predates;
-    // a drifted contract is never handed out in its place.
-    const markdown = approvalDrift(store, p) ? store.readApprovedSpec(p.spec) : (store.readSpec(p.spec) ?? store.readApprovedSpec(p.spec));
-    return markdown ? bindingBlock(ctx, store, p.spec, markdown, p.tasks) : "";
-  };
-
-  /** What the agent is told for a step of the build: a spec task. withBinding: false when the summary already carries the spec view. */
-  const stepPrompt = (ctx: ExtensionContext, store: Store, spec: ParsedSpec, p: Progress, task: SpecTask, attempts: number, withBinding = true) => {
+  /** What the agent is told for a step: the task, the check it will run, and the spec to read. */
+  const stepPrompt = (ctx: ExtensionContext, store: Store, spec: ParsedSpec, p: Progress, task: SpecTask, attempts: number) => {
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     const tp = p.tasks.find((t) => t.id === task.id);
     const red = needsRed(spec, task);
-    const binding = withBinding ? bindingFor(ctx, store, p) : "";
-    const proof = red ? redEvidenceOf(p, task.id) : undefined;
-    return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.red, binding, proof) + touchedSuffix(ctx, store, p, task.id);
+    return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specReference(p.spec));
   };
 
   /**
-   * The tasks whose new tests carry no proof, for the reviewer and the build's end: each with why it has
-   * none, or the disclosed reason a run could not show them failing.
+   * The tasks whose new tests carry no proof, with why — for the reviewer and the build's end. A task
+   * whose command an earlier finished task already proved cannot fail again; that is derived, not stored.
    */
   const redNotes = (spec: ParsedSpec, p: Progress): string[] =>
     spec.tasks.flatMap((t) => {
       const tp = p.tasks.find((x) => x.id === t.id);
-      if (tp?.red) return [];
-      if (tp?.redUnproven) return [`${t.id}: ${tp.redUnproven}`];
+      if (tp?.redCommand) return [];
+      const earlier = earlierProof(spec, p.tasks, t);
+      if (earlier) return [`${t.id}: \`${t.test}\` was already proved by ${earlier.id}, so no run can fail it now`];
       return [`${t.id}: ${redExemption(spec, t) ?? "its new tests were never seen failing"}`];
     });
-
-  /** Every task with a red proof, its claim and the failure head: what the reviewer judges against the missing behaviour. */
-  const redProofsOf = (p: Progress): RedProof[] =>
-    p.tasks
-      .filter((t) => !!t.red)
-      .map((t) => ({ id: t.id, command: t.redCommand, claim: t.redClaim, output: t.redOutput ?? t.red ?? "" }));
-
-  /** A task's red proof, for a retry handout: the claim and the failure it must not repeat. */
-  const redEvidenceOf = (p: Progress, taskId: string): RedEvidence | undefined => {
-    const tp = p.tasks.find((t) => t.id === taskId);
-    return tp?.red ? { claim: tp.redClaim, output: tp.redOutput ?? tp.red } : undefined;
-  };
 
   const mark = (t: TaskProgress) => (t.status === "done" ? "✓" : t.status === "doing" ? "▸" : t.status === "blocked" ? "✗" : "·");
   const taskLine = (t: TaskProgress) => `${mark(t)} ${t.id} ${t.title}${t.attempts > 1 ? ` (${t.attempts} attempts)` : ""}`;
@@ -1225,8 +1157,9 @@ export default function pb(pi: ExtensionAPI) {
         return stop("The spec no longer parses: the build is paused. Stop here.");
       }
       const task = loaded.spec.tasks.find((t) => t.id === p.current);
-      if (tp && needsRed(loaded.spec, task) && !tp.red && !tp.redUnproven) {
-        // Not an attempt: nothing was checked yet.
+      if (tp && task && needsRed(loaded.spec, task) && !tp.redCommand && !earlierProof(loaded.spec, p.tasks, task)) {
+        // Nothing is checked here, so this is not an attempt: the refusal is the rescue for a model
+        // that implemented before writing the failing test. A run that passes costs the attempt.
         store.saveProgress(p);
         return reply(`${p.current}'s new tests were never seen failing, so nothing shows they test the change. Call pb_tests_red: if you already made the change, set it aside first (the tests must fail without it), then put it back.`);
       }
@@ -1238,10 +1171,9 @@ export default function pb(pi: ExtensionAPI) {
     name: "pb_tests_red",
     label: "Tests fail first",
     description:
-      "In a pb build, for a task with a Test: line: after writing its tests and before the change, the harness runs the task's test command and requires it to FAIL, proving the tests check the behaviour that is missing. pb_task_done for that task needs it.",
+      "In a pb build, for a task with a Test: line: after writing its tests and before the change, the harness runs the task's test command and requires it to FAIL, proving the tests check the behaviour that is missing. pb_task_done for that task needs it. Call it again after changing the tests: only the latest failed run counts.",
     parameters: Type.Object({
       task: Type.String({ description: 'the task id, e.g. "T2"' }),
-      tests: Type.String({ description: "the tests you wrote and the failure each should show" }),
     }),
     executionMode: "sequential",
     async execute(_id, params, signal, _onUpdate, ctx) {
@@ -1253,39 +1185,30 @@ export default function pb(pi: ExtensionAPI) {
       const task = spec?.tasks.find((t) => t.id === p.current);
       const tp = p.tasks.find((t) => t.id === p.current);
       if (!spec || !task?.test || !tp || !needsRed(spec, task)) return reply(`${params.task} doesn't need this: finish it with pb_task_done.`);
-      if (tp.red) return reply(`Already seen failing (${tp.red}). Make the change, then pb_task_done.`);
-      if (tp.redUnproven) return reply(`No run can prove ${params.task}'s own tests: ${tp.redUnproven}. Confirm its acceptance holds on what is already there, say so in your changed, then pb_task_done.`);
+      const earlier = earlierProof(spec, p.tasks, task);
+      if (earlier)
+        return reply(
+          `\`${task.test}\` cannot fail again: ${earlier.id} (done) proved this command and its change satisfies it. Finish ${params.task} with pb_task_done — this run proves nothing of its own tests, and the reviewer is told.`,
+        );
       const cfg = store.config();
-      showProgress(ctx, p, `${p.current}: its tests must fail first: ${task.test}`);
       const testCmd = task.test;
-      let r: Awaited<ReturnType<typeof runVerify>>;
-      r = await withChecking(() => runVerify(testCmd, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
-      store.event(p.spec, { type: "red", task: p.current, ok: r.ok === false, command: task.test });
+      showProgress(ctx, p, `${p.current}: its tests must fail first: ${testCmd}`);
+      const r = await withChecking(() => runVerify(testCmd, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
+      store.event(p.spec, { type: "red", task: p.current, ok: r.ok === false, command: testCmd });
       if (r.ok !== false) {
-        // A command an earlier done task already proved cannot fail again: its implementation is in place.
-        // Red is impossible here, which is disclosed to the reviewer instead of wedging the build.
-        const earlier = spec.tasks
-          .slice(0, spec.tasks.findIndex((t) => t.id === p.current))
-          .find((t) => t.test === task.test && p.tasks.some((x) => x.id === t.id && x.status === "done" && x.red));
-        if (!earlier) {
-          return reply(
-            `\`${task.test}\` passes without the change, so these tests don't check it (or that command doesn't run them). Make them fail for the behaviour that is missing, then pb_tests_red again.\n\n${r.summary}`,
-          );
-        }
-        tp.redUnproven = `\`${task.test}\` already passes, because ${earlier.id} (done, same Test: command) proved it and its change satisfies it`;
+        // A green run cannot stand on an earlier failure: the tests changed, or the command no longer
+        // runs them. Clear the proof; the task cannot finish until a run fails, and the way out is the
+        // human's: a command that cannot fail needs a revised Test: line.
+        tp.redCommand = undefined;
         store.saveProgress(p);
         return reply(
-          `\`${task.test}\` already passes: ${earlier.id} (done, same Test: command) proved it and its change satisfies it — red is impossible for ${p.current} now. Confirm ${p.current}'s acceptance holds on top of ${earlier.id}'s change (read the code and tests; don't rerun the command), say so in your changed, then pb_task_done. This run proves nothing of ${p.current}'s own tests; the reviewer is told.`,
+          `\`${testCmd}\` passes without the change, so these tests don't check it (or that command doesn't run them). If you already made the change, set it aside first (the tests must fail without it), then put it back; otherwise make them fail for the behaviour that is missing. If the behaviour already exists and the command cannot fail, stop with pb_task_done status "blocked" and say the Test: command needs revising.\n\n${r.summary}`,
         );
       }
-      tp.red = r.summary.split("\n")[0];
-      tp.redClaim = cap(params.tests.trim(), RED_CLAIM_CAP);
-      tp.redOutput = cap(r.summary.trim(), RED_OUTPUT_CAP);
-      tp.redCommand = task.test;
-      tp.redUnproven = undefined;
+      tp.redCommand = testCmd;
       store.saveProgress(p);
       return reply(
-        `Seen failing: \`${task.test}\`\n\n${r.summary}\n\nCheck that each fails for the reason you expect (the missing behaviour, not a typo or an unrelated error). If you edit the tests after this, call pb_tests_red again so the new content is seen failing. Then make the change and finish with pb_task_done.`,
+        `Seen failing: \`${testCmd}\`\n\n${r.summary}\n\nCheck that each fails for the reason you expect (the missing behaviour, not a typo or an unrelated error). If you edit the tests after this, call pb_tests_red again: only the latest failed run counts. Then make the change and finish with pb_task_done.`,
       );
     },
   });
@@ -1798,9 +1721,6 @@ export default function pb(pi: ExtensionAPI) {
   /** The build's state as a summary, for a reset at a task boundary or a compaction in the middle of a task. */
   const stateSummary = (ctx: ExtensionContext, store: Store, p: Progress, reason: "reset" | "compaction", extra: { changed?: string[]; read?: string[]; previous?: string } = {}) => {
     const loaded = loadBuildSpec(store, p);
-    // The view keeps the build's own Design and Decisions (outside the contract); a drifted
-    // live contract is never shown in their place.
-    const view = (approvalDrift(store, p) ? undefined : store.readSpec(p.spec)) ?? loaded?.md;
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     const each = cfg.taskChecks === "each";
     const tp = p.tasks.find((t) => t.id === p.current);
@@ -1812,26 +1732,17 @@ export default function pb(pi: ExtensionAPI) {
         : p.current === COHERE_TASK_ID
           ? coherePrompt(p.baseCommit, tp?.attempts ?? 1, cfg.maxAttempts)
           : task && loaded
-            ? stepPrompt(ctx, store, loaded.spec, p, task, tp?.attempts ?? 1, false)
+            ? stepPrompt(ctx, store, loaded.spec, p, task, tp?.attempts ?? 1)
             : `Carry on with ${p.current ?? "the build"}; finish it with pb_task_done.`;
-    // The spec view carries the binding sections; the current step keeps its instructions only,
-    // so a reset doesn't repeat the same context twice.
-    return buildStateSummary({ p, markdown: loaded ? resetView(ctx, store, view ?? loaded.md) : undefined, mechanics: loaded ? buildMechanics(loaded.spec, buildCmd, each, store.extra("build")) : "", current, reason, ...extra });
+    return buildStateSummary({ p, markdown: loaded?.md, mechanics: loaded ? buildMechanics(loaded.spec, buildCmd, each, store.extra("build")) : "", current, reason, ...extra });
   };
 
-  /**
-   * The spec copy a reset hands over: the binding view within this window's budget, with the standing
-   * guarantees. The reset threshold is sized from this text, so the two have one definition of it.
-   */
-  const resetView = (ctx: ExtensionContext, store: Store, markdown: string): string =>
-    buildSpecView(markdown, viewBudget(ctx.getContextUsage()?.contextWindow));
-
   /** When a build session should be reset at a task boundary: past checkpointAt, always before Pi would compact. */
-  const pastCheckpoint = (ctx: ExtensionContext, store: Store, viewTokens: number) => {
+  const pastCheckpoint = (ctx: ExtensionContext, store: Store) => {
     const cfg = store.config();
     const usage = ctx.getContextUsage();
     if (!cfg.checkpointAt || !usage || usage.tokens == null) return undefined;
-    const limit = Math.min((usage.contextWindow * cfg.checkpointAt) / 100, resetLimit(usage.contextWindow, viewTokens));
+    const limit = Math.min((usage.contextWindow * cfg.checkpointAt) / 100, resetLimit(usage.contextWindow));
     return usage.tokens >= limit ? Math.round((100 * usage.tokens) / usage.contextWindow) : undefined;
   };
 
@@ -1889,16 +1800,15 @@ export default function pb(pi: ExtensionAPI) {
     // failure brief carries it: per-task changed files, harness-computed from checkpoints.
     const finalFiles = p.current === "final" ? changedFilesSection(store, p) : "";
     const withFiles = (t: string) => (finalFiles ? `${t}\n${finalFiles}` : t);
-    const redProof = p.current && p.current !== "final" ? redEvidenceOf(p, p.current) : undefined;
     if (attempts >= cfg.maxAttempts) {
       if (tp) tp.status = "doing";
       pauseBuild(ctx, store, p, `${p.current} still fails after ${attempts} attempts.`, "build.paused-attempts", "attempts", { task: p.current ?? "" });
-      return stop(withFiles(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true, bindingFor(ctx, store, p), redProof)));
+      return stop(withFiles(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true, specReference(p.spec))));
     }
     if (tp) tp.attempts += 1;
     store.saveProgress(p);
     showProgress(ctx, p);
-    return reply(withFiles(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false, bindingFor(ctx, store, p), redProof)));
+    return reply(withFiles(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false, specReference(p.spec))));
   };
 
   const checkAndAdvance = async (
@@ -2012,7 +1922,7 @@ export default function pb(pi: ExtensionAPI) {
     // Every spec task done: on builds big enough to drift, one coherence pass before the final check.
     if (!final && p.current !== COHERE_TASK_ID && !p.tasks.some((t) => t.id === COHERE_TASK_ID) && needsCohere(spec)) {
       beginCohereEntry(ctx, store, p);
-      return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingFor(ctx, store, p))}`);
+      return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(p.spec))}`);
     }
     // Every task done: one full check, unless the last task's check was that already.
     // With extra final gates (lint, project checks) the final step still runs even then.
@@ -2264,7 +2174,7 @@ export default function pb(pi: ExtensionAPI) {
 
     if (!wasBoundary || p.phase !== "building" || !p.current) return;
     const loaded = loadSpec(store, name);
-    const percent = pastCheckpoint(ctx, store, loaded ? tokensOf(resetView(ctx, store, loaded.md)) : 0);
+    const percent = pastCheckpoint(ctx, store);
     if (percent === undefined) return;
     const cp = cps.find((c) => c.id === p.current);
     if (cp) {
@@ -2371,9 +2281,8 @@ export default function pb(pi: ExtensionAPI) {
       return;
     }
     store.event(name, { type: "compact", reason: ev.reason, tokensBefore: ev.preparation.tokensBefore, task: p.current });
-    // No compacted flag for builds: the summaries below carry the spec's binding view, so the session
-    // still holds what binds it (knowsSpec stays true) and continuePrompt correctly omits resending it. The
-    // flag is only for planning sessions whose compaction drops the spec.
+    // No compacted flag for builds: the summary below names the spec, so the session keeps what binds
+    // it. The flag is only for planning sessions whose compaction drops the spec.
     // What the current task has done so far, from git: the files it changed since its undo point.
     const cp = store.checkpoints(name).find((c) => c.id === p.current);
     const now_ = cp ? snapshot(ctx.cwd, `pb: compaction during ${p.current}`) : undefined;
@@ -2536,16 +2445,15 @@ export default function pb(pi: ExtensionAPI) {
     saveStartCheckpoint(ctx, store, name, p, cfg.checkpoints, restart);
     store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false, taskTexts: spec.tasks.map((t) => t.text) });
     if (reapproved) post(`**Spec re-approved** — ${name}'s contract changed since its build was approved; the build now runs against the revised spec. Tasks already done stay done.`);
-    const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
     const cohereFirst = first === COHERE_TASK_ID;
     if (cohereFirst) beginCohereEntry(ctx, store, p);
     const task = cohereFirst ? null : beginTask(ctx, store, p, first, { intro: true });
     if (!task && !cohereFirst) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} no longer parses. Fix it (or /${cmd("spec")} ${name}), then /${cmd("build")}.`, "error");
     const marker = cohereFirst ? COHERE_MARKER : task!.marker;
-    const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingBlock(ctx, store, name, md, p.tasks)) : task!.prompt;
+    const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(name)) : task!.prompt;
     instruct(
-      `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}${knowsSpec ? "" : " (the spec comes along: this session didn't write it, or it was edited since)"}.\n${marker}`,
-      `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : md, store.extra("build"))}\n\n${prompt}`,
+      `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}.\n${marker}`,
+      `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), store.extra("build"))}\n\n${prompt}`,
     );
   };
 
@@ -2557,7 +2465,7 @@ export default function pb(pi: ExtensionAPI) {
     const carried = { model: buildModel ? cfg.buildModel : sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined };
     store.setCarry({ ...carried, spec: name, parent: session ?? undefined });
     // A new session loads AGENTS.md itself: the standards needn't come along.
-    const intro = buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", "", md, store.extra("build"));
+    const intro = buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", "", store.extra("build"));
     const result = await cctx.newSession({
       parentSession: session,
       setup: async (sm) => {
@@ -2586,7 +2494,7 @@ export default function pb(pi: ExtensionAPI) {
           );
           return;
         }
-        const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingBlock(c, store, name, md, p.tasks)) : task!.prompt;
+        const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(name)) : task!.prompt;
         await c.sendMessage(
           {
             customType: "pb",
@@ -3115,13 +3023,13 @@ export default function pb(pi: ExtensionAPI) {
           store.saveProgress(p);
           showProgress(ctx, p);
           const finalFiles = changedFilesSection(store, p);
-          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false, bindingFor(ctx, store, p)) + (finalFiles ? `\n${finalFiles}` : "") + from);
+          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false, specReference(p.spec)) + (finalFiles ? `\n${finalFiles}` : "") + from);
         }
         if (p.current === COHERE_TASK_ID) {
           const cc = p.tasks.find((t) => t.id === COHERE_TASK_ID);
           if (!cc) {
             beginCohereEntry(ctx, store, p);
-            return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingFor(ctx, store, p))}${from}`);
+            return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(p.spec))}${from}`);
           }
           resetExhausted(cc, cfg.maxAttempts);
           const attempt = cc.attempts + 1;
@@ -3130,7 +3038,7 @@ export default function pb(pi: ExtensionAPI) {
           p.pause = undefined;
           store.saveProgress(p);
           showProgress(ctx, p);
-          return instruct("▶ coherence pass", `${coherePrompt(p.baseCommit, attempt, cfg.maxAttempts, bindingFor(ctx, store, p))}${from}`);
+          return instruct("▶ coherence pass", `${coherePrompt(p.baseCommit, attempt, cfg.maxAttempts, specReference(p.spec))}${from}`);
         }
         // p.current can name a task the list no longer has: a spec rewrite or human edit renamed
         // it. Only a live, undone task keeps its claim; anything else resumes at the next todo,
@@ -3142,7 +3050,7 @@ export default function pb(pi: ExtensionAPI) {
         // Undone past the coherence pass (or a restart that dropped it): all spec tasks done, pass pending.
         if ((!cur || !tp) && needsCohere(loaded.spec) && !p.tasks.some((t) => t.id === COHERE_TASK_ID)) {
           beginCohereEntry(ctx, store, p);
-          return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, bindingBlock(ctx, store, p.spec, loaded.md, p.tasks))}${from}`);
+          return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(p.spec))}${from}`);
         }
         if (!cur || !tp) return ctx.ui.notify("Nothing left to build here.", "info");
         // Your answer to a task that kept failing buys it a fresh set of attempts; other pauses cost none.
@@ -3152,12 +3060,11 @@ export default function pb(pi: ExtensionAPI) {
         p.needsIntro = undefined;
         const t = beginTask(ctx, store, p, cur, { countAttempt: again, intro });
         if (!t) return ctx.ui.notify(`${store.rel("specs", p.spec, "spec.md")} doesn't parse. Fix it (or /${cmd("spec")} ${p.spec}), then /${cmd("build")}.`, "error");
-        const knowsSpec = !!session && p.writtenIn === session && !p.edited && !p.compacted;
         const body = intro
-          ? `${buildIntro(p.spec, loaded.spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), knowsSpec ? undefined : loaded.md, store.extra("build"))}\n\n${t.prompt}`
+          ? `${buildIntro(p.spec, loaded.spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), store.extra("build"))}\n\n${t.prompt}`
           : again
             ? t.prompt
-            : continuePrompt(t.task) + touchedSuffix(ctx, store, p, cur);
+            : continuePrompt(t.task);
         return instruct(t.marker, body + from);
       }
 
@@ -3437,7 +3344,7 @@ export default function pb(pi: ExtensionAPI) {
             findings: all,
             base: run.base,
             diff: run.diff,
-            spec: run.name ? store.readSpec(run.name) : undefined,
+            specPath: run.name ? store.rel("specs", run.name, "spec.md") : undefined,
             model: run.model,
             thinking: run.thinking,
             maxConcurrent: cfg.maxConcurrent,
@@ -3707,7 +3614,7 @@ export default function pb(pi: ExtensionAPI) {
       const security = mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changed, diff: reviewDiff });
       const acceptance = loaded && name ? acceptanceCriteria(loaded.md, loaded.spec) : undefined;
       const brief = reviewerBrief({
-        spec: loaded && name ? { name, markdown: loaded.md, parsed: loaded.spec } : undefined,
+        spec: loaded && name ? { name, parsed: loaded.spec } : undefined,
         acceptance,
         intent,
         base,
@@ -3719,7 +3626,6 @@ export default function pb(pi: ExtensionAPI) {
         previous,
         testChanges: p?.testChanges,
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
-        redProofs: p ? redProofsOf(p) : undefined,
         fixReports,
         designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
         acceptanceDrift: loaded && name ? acceptanceDrift(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
@@ -3770,10 +3676,10 @@ export default function pb(pi: ExtensionAPI) {
   ): Promise<{ live: ExtensionCommandContext; report?: { fixed: string[]; skipped: string[]; tests: string } } | undefined> => {
     const findings = remaining.map((f, i) => findingLine(f, i + 1)).join("\n");
     const loaded = loadSpec(store, spec);
-    const binding = loaded ? bindingBlock(ctx, store, spec, loaded.md, store.progress(spec)?.tasks ?? []) : "";
+    const reference = loaded ? specReference(spec) : "";
     const seed =
       `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings}\n\n` +
-      `${binding ? `${binding}\n\n` : ""}` +
+      `${reference ? `${reference}\n\n` : ""}` +
       `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; a finding's Not: line is an alternative the reviewer already rejected — do not implement it; keep the suite green; run each affected task's Test: line (full suite once at the end); new tests must be seen failing first. ${STRUCTURED_EDIT_RULE} ` +
       `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
       `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +

@@ -186,22 +186,9 @@ export interface TaskProgress {
   rejected?: string;
   /** what is still unchecked (done only; required, "none" when nothing) */
   open?: string;
-  /** the task's new tests, seen failing before the change (pb_tests_red): its first line */
-  red?: string;
-  /** what the model said the tests prove and which failure each should show (pb_tests_red), capped */
-  redClaim?: string;
-  /** the head of the failure output seen at red, capped: the reviewer judges whether it matches the claim */
-  redOutput?: string;
-  /** the Test: command that was seen failing for red, so a rewritten command re-requires proof */
+  /** the Test: command seen failing for this task before the change, so a rewritten command re-requires proof */
   redCommand?: string;
-  /** why no run could show the new tests failing (the command passed before the change): disclosed to the reviewer */
-  redUnproven?: string;
 }
-
-/** How much of a red proof's claim the harness keeps: enough to judge it, short enough for the build state. */
-export const RED_CLAIM_CAP = 1000;
-/** How much of the failing output a red proof keeps: the reviewer sees the head, the transcript keeps the rest. */
-export const RED_OUTPUT_CAP = 1200;
 
 export type Phase = "written" | "building" | "paused" | "built" | "reviewed";
 
