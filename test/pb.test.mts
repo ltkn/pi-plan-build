@@ -1256,7 +1256,7 @@ test("spec review: a P0 stops the build before T1 and is recorded against the sp
     delete process.env.MOCK_SPEC_REVIEW;
   }
   assert.equal(t.progress("order-cancellation").phase, "written");
-  assert.match(t.posts.join("\n"), /\*\*Spec review\*\* — P0 blocks T1:[\s\S]*\*\*P0\*\*[\s\S]*unguarded transition/);
+  assert.match(t.posts.join("\n"), /\*\*Spec review\*\* — ❌ FAIL[^\n]*P0 blocks T1:[\s\S]*\*\*P0\*\*[\s\S]*unguarded transition/);
   assert.ok(!t.instructions.some((i) => /Task T1/.test(i)));
   const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
   const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
@@ -1276,10 +1276,13 @@ test("spec review: P1 and P2 are advisory and the build proceeds", async () => {
     delete process.env.MOCK_SPEC_REVIEW;
   }
   assert.equal(t.progress("order-cancellation").phase, "built");
-  assert.match(t.posts.join("\n"), /\*\*Spec review\*\* — pass; advisory findings[\s\S]*\[P1\][\s\S]*\[P2\]/);
+  assert.match(t.posts.join("\n"), /\*\*Spec review\*\* — ✅ PASS[^\n]*advisory findings[\s\S]*\[P1\][\s\S]*\[P2\]/);
   const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
   assert.equal(event.verdict, "pass");
+  assert.equal(typeof event.ms, "number");
+  assert.ok(event.ms >= 0);
   assert.deepEqual(event.reported.map((f: any) => f.priority), ["P1", "P2"]);
+  assert.match(t.posts.find((p) => p.startsWith("**✅ BUILD COMPLETE"))!, /⏱ Build time: (?:<1s|\d+s)/);
 });
 
 test("spec review: an unchanged spec re-posts the block without a second run; an edit reviews again", async () => {
@@ -2099,8 +2102,8 @@ test("spec: showing it runs each red-eligible Test: once, for approval — small
   new Store(t.repo).setPendingBuild(t.runtime().ctx.sessionManager.getSessionFile());
   t.selects.push("Not now");
   await t.fire("agent_settled", {});
-  const shown = t.posts.find((p) => p.startsWith("**Spec written")!)!;
-  assert.match(shown, /- T1: first file · `test -f T1\.txt`[\s\S]*Test commands, run once before you approve:\n- ✗ `test -f T1\.txt` fails \(expected: nothing built yet/);
+  const shown = t.posts.find((p) => p.startsWith("**✅ Spec written")!)!;
+  assert.match(shown, /- T1: first file · `test -f T1\.txt`[\s\S]*Test commands, run once before you approve \(took [^)]+\):\n- ✗ `test -f T1\.txt` fails \(expected: nothing built yet/);
   assert.match(shown, /- ✗ `test -f T2\.txt` fails \(expected/);
 
   const u = setup({ verify: "true" }); // docs-only: nothing red-eligible, nothing run
@@ -2108,7 +2111,7 @@ test("spec: showing it runs each red-eligible Test: once, for approval — small
   new Store(u.repo).setPendingBuild(u.runtime().ctx.sessionManager.getSessionFile());
   u.selects.push("Not now");
   await u.fire("agent_settled", {});
-  assert.doesNotMatch(u.posts.find((p) => p.startsWith("**Spec written")!)!, /Test commands, run once/);
+  assert.doesNotMatch(u.posts.find((p) => p.startsWith("**✅ Spec written")!)!, /Test commands, run once/);
 });
 
 test("build: a failing check goes back to the agent, and passes on the next attempt", async () => {
@@ -2144,6 +2147,7 @@ test("build: after the last attempt it pauses; /pb:build resumes with a fresh se
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "paused");
   assert.match(t.posts.at(-1)!, /Build paused\*\* — T1 still fails after 2 attempts/);
+  assert.match(t.posts.at(-1)!, /⏱ Build so far: (?:<1s|\d+s)/);
   assert.match(t.results.at(-1)!, /That was the last attempt: the build is paused\. Stop here/);
   give = true;
   await t.run("build", "create the file in the repo root");
@@ -2773,7 +2777,7 @@ test("fix: a report names findings by the number in the brief; a number outside 
   assert.match(said[0]!, /2 is not one of the findings shown for this lap/);
   assert.match(said[1]!, /Report at least one finding by its number/);
   assert.match(said[2]!, /cannot be both fixed and skipped/);
-  assert.match(t.posts.at(-1)!, /Fixes for `order-cancellation` complete in 1 lap/);
+  assert.match(t.posts.at(-1)!, /✅ Fixes for `order-cancellation` complete in 1 lap\(s\) · (?:<1s|\d+s):/);
 });
 
 
@@ -2797,7 +2801,7 @@ test("fix: a lap that never reports stops the loop and escalates as silent", asy
   t.agent.script = async () => {}; // the lap never reports, nudges unanswered
   await t.run("fix");
   assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 1); // never retried into a second silent session
-  assert.match(t.posts.at(-1)!, /silent/);
+  assert.match(t.posts.at(-1)!, /❌ Fix lap for `order-cancellation` went silent \(no report after 2 nudges\) · (?:<1s|\d+s)\./);
 });
 
 test("fix: skipped findings never start a lap and reach the escalation", async () => {
@@ -3108,7 +3112,7 @@ test("review: when the second look can't run, the findings are reported unconfir
   } finally {
     delete process.env.MOCK_VERIFY;
   }
-  assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED/); // the P1 stands: failure to verify never dismisses
+  assert.match(t.posts.at(-1)!, /❌ CHANGES NEEDED/); // the P1 stands: failure to verify never dismisses
   assert.match(t.posts.at(-1)!, /The second look at the blocking findings couldn't run \(verifier exploded\): they are reported unconfirmed\./);
 });
 
@@ -3138,7 +3142,7 @@ test("review: a fresh review session with the spec first and the diff; you're br
   assert.match(t.notes.at(-1)!, /Nothing changed since the last review \(pass\)/);
   t.reviewer.review = CHANGES;
   await t.run("review", "--full");
-  assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED/);
+  assert.match(t.posts.at(-1)!, /❌ CHANGES NEEDED/);
 });
 
 test("review: the review session is read-only; a pass you leave can be continued", async () => {
@@ -3452,7 +3456,10 @@ test("review: findings carry priorities; P0/P1 are double-checked; only line-lea
   await t.run("build");
   t.reviewer.review = CHANGES;
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /✗ CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 0/);
+  assert.match(t.posts.at(-1)!, /❌ CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 0(?: · with an adversarial pass)? · (?:<1s|\d+s)\n/);
+  const review = t.events("order-cancellation").filter((e: any) => e.type === "review").at(-1);
+  assert.equal(typeof review.ms, "number");
+  assert.ok(review.ms > 0);
   process.env.MOCK_VERIFY = "reject"; // the verifier finds the P1 isn't real
   await t.run("review", "--full");
   delete process.env.MOCK_VERIFY;
@@ -3750,6 +3757,57 @@ test("review: a follow-up isn't 'nothing changed' when only a huge untracked fil
   assert.match(t.posts.at(-1)!, /⚠ Untracked files over 20 MB/);
 });
 
+test("format: durations are human-readable and build time counts only the running segments", async () => {
+  const { duration } = await import("../extensions/pb/format.ts");
+  assert.equal(duration(0), "0s");
+  assert.equal(duration(500), "<1s");
+  assert.equal(duration(12_000), "12s");
+  assert.equal(duration(184_000), "3m 4s");
+  assert.equal(duration(3_600_000), "1h");
+  assert.equal(duration(90_000_000), "1d 1h");
+  const { buildTimeLabel, buildTiming } = await import("../extensions/pb/stats.ts");
+  const paused = [
+    { type: "build-start", at: "2026-10-01 10:00:00" },
+    { type: "pause", at: "2026-10-01 10:10:00" },
+    { type: "build-start", at: "2026-10-01 10:40:00" },
+    { type: "built", at: "2026-10-01 10:55:00" },
+  ];
+  assert.deepEqual(buildTiming(paused), { activeMs: 25 * 60_000, wallMs: 55 * 60_000 });
+  assert.equal(buildTimeLabel({ activeMs: 25 * 60_000, wallMs: 55 * 60_000 }), "25m (55m elapsed)");
+  assert.equal(buildTimeLabel({ activeMs: 90_000, wallMs: 90_000 }), "1m 30s");
+});
+
+test("stats: the Time line carries each phase that recorded a time, and old events still show the build's", async () => {
+  const { renderCard } = await import("../extensions/pb/stats.ts");
+  const spec = (events: unknown[]) =>
+    ({
+      name: "demo",
+      phase: "reviewed",
+      events,
+      explore: [],
+      progress: { spec: "demo", phase: "reviewed", session: "s", tasks: [], updatedAt: "2026-10-01 10:08:00" },
+    }) as any;
+  const full = renderCard(
+    spec([
+      { type: "spec", at: "2026-10-01 09:57:00", ms: 120_000 },
+      { type: "spec-review", at: "2026-10-01 09:58:00", ms: 42_000 },
+      { type: "build-start", at: "2026-10-01 10:00:00" },
+      { type: "built", at: "2026-10-01 10:07:00" },
+      { type: "review", verdict: "pass", p: [0, 0, 0, 0], ms: 90_000, at: "2026-10-01 10:08:00" },
+    ]),
+  );
+  assert.match(full, /Time +spec 2m · spec review 42s · build 7m · review 1m 30s/);
+  const old = renderCard(
+    spec([
+      { type: "build-start", at: "2026-10-01 10:00:00" },
+      { type: "built", at: "2026-10-01 10:07:00" },
+    ]),
+  );
+  assert.match(old, /Time +build 7m/);
+  assert.doesNotMatch(old, /spec review|review 1m/);
+  assert.doesNotMatch(renderCard(spec([])), /\nTime /);
+});
+
 test("stats: tasks, first try, checks, pauses, review, and the build session's tokens and cache", async () => {
   const t = setup({ taskChecks: "each",  verify: "true", reviewer: { security: "always" } });
   await written(t);
@@ -3773,6 +3831,7 @@ test("stats: tasks, first try, checks, pauses, review, and the build session's t
   assert.match(card, /in [\d.]+k \(90% cached\)/);
   assert.match(card, /Context +peak 10\.0k \(10% of 100\.0k\)/);
   assert.match(card, /Reviewer +in 16\.0k · out 900/); // the reviewer's turn (10k/100) and the abuse pass's two (3k/400 each)
+  assert.match(card, /Time +[^\n]*build [^·\n]+ · review (?:<1s|\d+s)/);
 
   await t.run("stats", "all");
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2 +50%/);
@@ -4050,7 +4109,7 @@ test("build without a spec: it asks first, then writes the spec and builds it wi
   await t.run("build");
   assert.equal(t.selectTitles.at(-1), "Pi writes the spec first. Then?"); // asked before the spec, while you're here
   assert.match(t.instructions.find((i) => /pb_write_spec tool/.test(i))!, /After writing it, stop: the build starts by itself/);
-  assert.ok(t.posts.some((x) => /\*\*Spec written: order-cancellation\*\*[\s\S]*- T1: first file · `test -f T1\.txt`/.test(x)));
+  assert.ok(t.posts.some((x) => /\*\*✅ Spec written: order-cancellation\*\*[\s\S]*- T1: first file · `test -f T1\.txt`/.test(x)));
   assert.deepEqual(t.views.map((v) => [v.customType, v.data.name]), [["pb-spec", "order-cancellation"]]); // the whole spec, shown, not sent to the model
   assert.equal(t.progress("order-cancellation").phase, "built"); // built here, with no dialog after the spec
   assert.match(t.progress("order-cancellation").session, /planning-session\.jsonl$/);
@@ -5170,6 +5229,26 @@ test("/pb:plan <spec> first asks about files the old planning session changed, a
   await until(() => t.posts.filter((p) => p.startsWith("**Baseline**")).length === 2); // a fresh one for the new session
 });
 
+test("/pb:spec times the step to the ready write, and the spec header shows it", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  t.agent.script = async (text, tool) => {
+    if (!/pb_write_spec tool/.test(text)) return;
+    await new Promise((r) => setTimeout(r, 1100)); // a step long enough to read back as a second
+    await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  };
+  await t.run("spec", "order-cancellation");
+  const event = t.events("order-cancellation").filter((e: any) => e.type === "spec").at(-1);
+  assert.equal(typeof event.ms, "number");
+  assert.ok(event.ms >= 1000, `elapsed ${event.ms}ms`);
+
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).setPendingBuild(t.runtime().ctx.sessionManager.getSessionFile());
+  t.selects.push("Not now");
+  await t.fire("agent_settled", {});
+  assert.match(t.posts.find((p) => p.startsWith("**✅ Spec written"))!, / · (?:<1s|\d+s)$/m);
+});
+
 test("/pb:spec <name> revises the spec from the file, not from memory", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -5327,7 +5406,7 @@ test("spec writing leaves undecided questions open; the checkpoint asks nothing;
   await t.run("build");
   assert.equal(t.dialogTimeouts.at(-1), 1); // the question counted down, though no build was running yet
   assert.match(answer!.content![0].text, /No answer in time: it stays open — do not take a reading or write it as an Assumption\. Record it under Open questions; planning stays incomplete until it is answered\./);
-  assert.match(t.posts.find((p) => p.startsWith("**Spec written"))!, /Settled without asking you \(the review checks them\):\n- Assumption: cancelling twice is a no-op/);
+  assert.match(t.posts.find((p) => p.startsWith("**✅ Spec written"))!, /Settled without asking you \(the review checks them\):\n- Assumption: cancelling twice is a no-op/);
   assert.equal(t.progress("order-cancellation").phase, "built");
 
   // During a checkpoint, a question is turned away.

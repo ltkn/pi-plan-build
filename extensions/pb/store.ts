@@ -349,9 +349,11 @@ export interface ReviewRun {
   largeFiles?: string[];
   model?: string;
   thinking?: string;
+  /** active time of the review: the reviewer pass plus the adversarial and verifier passes */
+  ms?: number;
   /** the spec's task acceptance checklist for this review: T1.1, T2.1, ... */
   acceptance?: AcceptanceCriterion[];
-  passes: { role: "review" | "abuse"; findings: Finding[]; acceptance?: AcceptanceCheck[]; prose: string; session: string; left: boolean; unparsed: boolean; error?: string }[];
+  passes: { role: "review" | "abuse"; findings: Finding[]; acceptance?: AcceptanceCheck[]; prose: string; session: string; left: boolean; unparsed: boolean; error?: string; ms?: number }[];
   /** the pass you left before it finished */
   interrupted?: { role: "review" | "abuse"; session: string };
 }

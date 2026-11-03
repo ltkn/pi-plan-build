@@ -51,15 +51,17 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
 /pb:build
    → asks now, while you're here: build here / in a fresh session / show the spec
    → Pi writes .pi/pb/specs/order-cancellation/spec.md and one fresh reviewer
-     reads it before the first task (P0 findings stop the build until amended)
+     reads it before the first task (P0 findings stop the build until amended;
+     the result is marked ✅ PASS or ❌ FAIL with the review's time)
    → one run: T1 → T2 → … (each: its tests seen failing, then passing)
      → coherence (3+ tasks) → full suite → fix → full suite ✓
-   ✅ BUILD COMPLETE
+   ✅ BUILD COMPLETE · ⏱ active build time (elapsed in parentheses when pauses count)
 /pb:review
    → a spec pass in a fresh session: every acceptance criterion met with
      evidence, not met, or not verified (silence is not a pass), plus decisions,
      tests, comments and your standards; then an adversarial pass that tries to
      break the change; P0/P1 findings double-checked
+   → ✅ PASS / ❌ CHANGES NEEDED / ⚠ UNVERIFIED, with the review's active time
    → fix them right there (/pb:fix), then /pb:review again (only what changed)
 ```
 
@@ -100,6 +102,13 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 - **Undo means undo.** `/pb:undo` restores the files and rewinds the
   conversation to before the task, so a discarded attempt doesn't anchor the
   next one, and the cache stays warm.
+- **The human view says what happened.** Each phase ends with a plain marker —
+  `✅ PASS`, `❌ FAIL`, `❌ CHANGES NEEDED`, `⚠ UNVERIFIED`, `✅`/`❌` for a fix
+  lap — and a time where the harness measured one. Times are active time:
+  pauses are left out, and the elapsed wall time follows in parentheses when a
+  pause made them differ. `/pb:stats` keeps the same numbers after the message
+  scrolls away. A spec written by an older pb has no recorded phase times; those
+  parts of the line simply don't appear.
 - **Fresh eyes on the plan.** Every spec gets one independent read before T1:
   its Decisions are attacked, every "Not doing X" re-tested, unmeasured numbers
   flagged. Only a P0 (unsafe to build) stops the build; P1-P3 are shown as

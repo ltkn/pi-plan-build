@@ -149,9 +149,9 @@ export async function verifyFindings(o: {
   sessionDir?: string;
   onActivity?: (line: string) => void;
   onText?: (text: string) => void;
-}): Promise<{ findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; aborted: boolean; error?: string; sessionFile?: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: number }> {
+}): Promise<{ findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; aborted: boolean; error?: string; sessionFile?: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: number; ms: number }> {
   const toCheck = o.findings.filter(blocking);
-  const none = { findings: o.findings, dismissed: [], aborted: false, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 };
+  const none = { findings: o.findings, dismissed: [], aborted: false, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0 };
   if (!toCheck.length) return none;
   const v = await runFresh({
     cwd: o.cwd,
@@ -171,7 +171,7 @@ export async function verifyFindings(o: {
   });
   const t = v.tokens;
   const usage = { tokens: { input: t.input, output: t.output, cacheRead: t.cacheRead, cacheWrite: t.cacheWrite }, cost: v.cost, sessionFile: v.sessionFile };
-  if (v.aborted) return { ...none, ...usage, aborted: true };
+  if (v.aborted) return { ...none, ...usage, aborted: true, ms: v.ms };
   const verdicts = v.toolCalls.filter((c) => c.name === "report_verdicts").flatMap((c) => (Array.isArray(c.arguments.verdicts) ? (c.arguments.verdicts as { finding: number; verdict: string; evidence: string }[]) : []));
   // Last verdict wins per finding; out-of-range numbers are ignored (model miscounted, harness keeps all).
   const byIndex = new Map<number, { verdict: string; evidence: string }>();
@@ -184,7 +184,7 @@ export async function verifyFindings(o: {
   for (const [n, v] of byIndex) if (v.verdict === "rejected") rejected.set(toCheck[n - 1], v.evidence);
   // A failed run with no usable verdicts must not look like agreement: report it, keep everything.
   const error = byIndex.size === 0 && v.error ? v.error : undefined;
-  return { ...usage, aborted: false, error, findings: o.findings.filter((f) => !rejected.has(f)), dismissed: [...rejected].map(([finding, evidence]) => ({ finding, evidence })) };
+  return { ...usage, aborted: false, error, findings: o.findings.filter((f) => !rejected.has(f)), dismissed: [...rejected].map(([finding, evidence]) => ({ finding, evidence })), ms: v.ms };
 }
 
 /**

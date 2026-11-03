@@ -4,7 +4,7 @@
  */
 import { type ExtensionAPI, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
-import { human, outRate } from "./format.ts";
+import { duration, human, outRate } from "./format.ts";
 import { MAP_TOKENS } from "./map.ts";
 
 export function registerRenderers(pi: ExtensionAPI) {
@@ -89,7 +89,6 @@ export const LIVE_STEPS = 8;
 export const LIVE_WRITING_LINES = 4;
 /** Minimum ms between live repaints: calmer screen, same data. Terminal states always flush immediately. */
 export const LIVE_FLUSH_MS = 250;
-const secs = (ms: number) => `${Math.round(ms / 1000)}s`;
 const MAX_ANSWER_LINES = 200;
 const MAX_FILES = 50;
 
@@ -104,7 +103,7 @@ export function exploreLines(o: { details?: ExploreDetails; answer: string; part
     return [
       ...d.steps.slice(-LIVE_STEPS).map((s) => ({ text: `↳ ${s}`, kind: "step" as const })),
       ...(d.writing ?? []).slice(-LIVE_WRITING_LINES).map((l) => ({ text: `│ ${l}`, kind: "writing" as const })),
-      { text: `${d.count} step${d.count === 1 ? "" : "s"} · ${secs((o.now ?? Date.now()) - d.started)}`, kind: "count" as const },
+      { text: `${d.count} step${d.count === 1 ? "" : "s"} · ${duration((o.now ?? Date.now()) - d.started)}`, kind: "count" as const },
     ];
   }
   const usage =
@@ -113,7 +112,7 @@ export function exploreLines(o: { details?: ExploreDetails; answer: string; part
       : d?.tokens
         ? `${human(d.tokens)} tokens`
         : "";
-  const head = d ? `${verb} in ${secs(d.ms ?? 0)} · ${d.files.length} file${d.files.length === 1 ? "" : "s"} read${usage ? ` · ${usage}` : ""}` : verb;
+  const head = d ? `${verb} in ${duration(d.ms ?? 0)} · ${d.files.length} file${d.files.length === 1 ? "" : "s"} read${usage ? ` · ${usage}` : ""}` : verb;
   const first = o.answer.split("\n").find((l) => l.trim()) ?? "";
   if (!o.expanded) return [{ text: head, kind: "done" }, ...(first ? [{ text: short(first.trim(), 120), kind: "answer" as const }] : [])];
   const answerLines = o.answer.split("\n");

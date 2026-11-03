@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type ParsedSpec, earlierProof, needsRed, parseSpec } from "./spec.ts";
 import { type Progress, type Store, readEvents as readJsonl, COHERE_TASK_ID } from "./store.ts";
-import { human, outRate } from "./format.ts";
+import { duration, human, outRate } from "./format.ts";
 
 type Ev = { type: string; at: string; [k: string]: unknown };
 
@@ -85,15 +85,48 @@ export function loadStats(store: Store): SpecStats[] {
 }
 
 const pct = (a: number, b: number) => (b ? `${Math.round((100 * a) / b)}%` : "–");
-const dur = (ms: number) => {
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
-};
 const num = (v: unknown) => (typeof v === "number" ? v : 0);
 /** Store.now() emits UTC without Z ("2026-… 12:00:00"): parse as UTC, not local, so durations survive TZ/DST. */
 const ts = (at: string) => Date.parse(`${at.replace(" ", "T")}Z`);
+
+export interface BuildTiming {
+  /** The parts where the build was running: build-start → pause/built, summed. */
+  activeMs: number;
+  /** The first build-start → built (or the last event): pauses included. */
+  wallMs: number;
+}
+
+/** Build time from its own events; a pause closes a running segment, a resume opens a new one. */
+export function buildTiming(events: Record<string, unknown>[]): BuildTiming {
+  const start = events.find((x) => x.type === "build-start");
+  const end = [...events].reverse().find((x) => x.type === "built") ?? events.at(-1);
+  const at = (e: Record<string, unknown>) => (typeof e.at === "string" ? ts(e.at) : Number.NaN);
+  // Events carry whole seconds: a segment that starts and ends inside one second is under a
+  // second, not zero — a zero would read as "no time recorded" and hide it.
+  const span = (from: number, to: number) => Math.max(1, to - from);
+  const wallMs = start && end ? span(at(start), at(end)) : 0;
+  let activeMs = 0;
+  let running: number | undefined;
+  for (const e of events) {
+    const time = at(e);
+    if (!Number.isFinite(time)) continue;
+    if (e.type === "build-start") {
+      if (running !== undefined) activeMs += span(running, time);
+      running = time;
+    } else if (e.type === "pause" || e.type === "built") {
+      if (running !== undefined) {
+        activeMs += span(running, time);
+        running = undefined;
+      }
+    }
+  }
+  if (running !== undefined && end) activeMs += span(running, at(end));
+  return { activeMs, wallMs };
+}
+
+/** One form for build time everywhere: active, with elapsed in parentheses only when a pause made them differ. */
+export const buildTimeLabel = (t: BuildTiming): string =>
+  t.activeMs > 0 && t.activeMs !== t.wallMs ? `${duration(t.activeMs)} (${duration(t.wallMs)} elapsed)` : duration(t.activeMs || t.wallMs);
 
 export interface Summary {
   tasks: number;
@@ -114,7 +147,16 @@ export interface Summary {
   review: { prompt: number; output: number; cost: number };
   explorer: { calls: number; prompt: number; output: number; cost: number; ms: number };
   context: { compactions: number; resets: number; nudges: number; asks: number };
+  /** wall-clock from the first build-start to built, pauses included */
   ms: number;
+  /** the same span with pauses removed */
+  activeMs: number;
+  /** the latest ready spec write's elapsed step */
+  specMs?: number;
+  /** the latest spec review's duration */
+  specReviewMs?: number;
+  /** the latest code review's duration */
+  reviewMs?: number;
 }
 
 export function summarize(s: SpecStats): Summary {
@@ -162,8 +204,11 @@ export function summarize(s: SpecStats): Summary {
     explorer.ms += num(x.ms);
   }
   const count = (type: string) => e.filter((x) => x.type === type).length;
-  const start = e.find((x) => x.type === "build-start");
-  const end = [...e].reverse().find((x) => x.type === "built") ?? e.at(-1);
+  const timing = buildTiming(e);
+  const lastMs = (type: string): number | undefined => {
+    const ms = [...e].reverse().find((x) => x.type === type && typeof x.ms === "number")?.ms;
+    return typeof ms === "number" ? ms : undefined;
+  };
   // Red sent-backs: a `red` event with ok:false means the tests passed without the change. A task
   // whose command an earlier one already proved cannot fail again: unproven, not sent back.
   const sentBackIds = new Set(e.filter((x) => x.type === "red" && x.ok === false).map((x) => String(x.task)));
@@ -198,7 +243,11 @@ export function summarize(s: SpecStats): Summary {
     review,
     explorer,
     context: { compactions: count("compact"), resets: count("reset"), nudges: count("nudge"), asks: count("ask") },
-    ms: start && end ? Math.max(0, ts(end.at) - ts(start.at)) : 0,
+    ms: timing.wallMs,
+    activeMs: timing.activeMs,
+    specMs: lastMs("spec"),
+    specReviewMs: lastMs("spec-review"),
+    reviewMs: typeof lastReview?.ms === "number" ? lastReview.ms : undefined,
   };
 }
 
@@ -207,6 +256,12 @@ export function renderCard(s: SpecStats): string {
   const pauses = Object.entries(x.pauses).map(([k, v]) => `${k} ${v}`).join(" · ");
   const b = x.build;
   const hasRed = s.events.some((e) => e.type === "red");
+  const phases = [
+    x.specMs !== undefined ? `spec ${duration(x.specMs)}` : "",
+    x.specReviewMs !== undefined ? `spec review ${duration(x.specReviewMs)}` : "",
+    x.activeMs || x.ms ? `build ${buildTimeLabel({ activeMs: x.activeMs, wallMs: x.ms })}` : "",
+    x.reviewMs !== undefined ? `review ${duration(x.reviewMs)}` : "",
+  ].filter(Boolean);
   return [
     "```",
     `pb stats — ${s.name} (${s.phase})`,
@@ -216,7 +271,8 @@ export function renderCard(s: SpecStats): string {
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,
     `Review    ${x.reviews.length ? `${x.reviews.join(" → ")} · P0/P1 confirmed (latest): ${x.confirmed.p0 + x.confirmed.p1}` : "not run"}`,
     ...(hasRed ? [`Proof     ${x.proof.proven} proven · ${x.proof.sentBack} sent back · ${x.proof.unproven} no run could prove`] : []),
-    `Build     ${b.turns} turns · in ${human(b.prompt)} (${pct(b.cached, b.prompt)} cached) · out ${human(b.output)} · $${b.cost.toFixed(2)}${x.ms ? ` · ${dur(x.ms)}` : ""}`,
+    `Build     ${b.turns} turns · in ${human(b.prompt)} (${pct(b.cached, b.prompt)} cached) · out ${human(b.output)} · $${b.cost.toFixed(2)}`,
+    ...(phases.length ? [`Time      ${phases.join(" · ")}`] : []),
     `Context   peak ${human(b.peak)}${b.window ? ` (${pct(b.peak, b.window)} of ${human(b.window)})` : ""}`,
     `Reviewer  in ${human(x.review.prompt)} · out ${human(x.review.output)} · $${x.review.cost.toFixed(2)}`,
     `Explorer  ${x.explorer.calls ? `${x.explorer.calls} calls · in ${human(x.explorer.prompt)} · out ${human(x.explorer.output)}${x.explorer.ms > 0 ? ` @ ${outRate(x.explorer.prompt + x.explorer.output, x.explorer.ms)} tok/s` : ""} · $${x.explorer.cost.toFixed(2)}` : "not used"}`,
@@ -233,7 +289,7 @@ export function renderAll(list: SpecStats[]): string {
   const lp = (v: string, n: number) => v.padStart(n);
   const rows = list.map((s) => {
     const x = summarize(s);
-    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 10)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost + x.explorer.cost).toFixed(2)}`, 9)}${lp(x.ms ? dur(x.ms) : "–", 9)}`;
+    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 10)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost + x.explorer.cost).toFixed(2)}`, 9)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
   });
   return ["```", `${pad("spec", 26)}${lp("tasks", 7)}${lp("1st try", 9)}${lp("failed", 8)}${lp("pauses", 8)}  ${pad("review", 10)}${lp("tokens", 9)}${lp("cache", 7)}${lp("cost", 9)}${lp("time", 9)}`, ...rows, "```"].join("\n");
 }

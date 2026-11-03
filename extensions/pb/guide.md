@@ -5,6 +5,14 @@ write it down as a **spec**, **build** it task by task behind checks the harness
 runs, and have it **reviewed** by someone who never saw the build. After every
 step Pi shows a short **What now** block; `/pb:help <topic>` posts any section below.
 
+Every phase ends with a plain marker — `✅ PASS`, `❌ FAIL`, `❌ CHANGES NEEDED`,
+`⚠ UNVERIFIED`, `✅`/`❌` for a fix lap — and, where the harness measured it, a
+time. The time is **active time**: pauses you took are left out, and when they
+make a difference the elapsed wall time follows in parentheses
+(`25m (55m elapsed)`). A spec written by an older pb has no recorded spec,
+review or fix times; its `Time` line shows only what its events already carry
+(the build's own start and end).
+
 <!-- pb:topic flow -->
 ## The normal path
 
@@ -375,6 +383,9 @@ shown in the session for later. Shown first, you choose: build here, build in a
 fresh session, **edit the spec first** (in an editor; it's saved only when it
 still parses, and the build then gets your version), or not now.
 
+The header reads `✅ Spec written` and, when the step recorded it, how long it
+took from `/pb:build` or `/pb:spec` to the first ready write.
+
 **Before the first task, every spec gets one independent review.** The pass is
 fresh and read-only, and it is the only one: there are no rounds, no carry and
 no outside lane. It attacks every Decision, re-tests each "Not doing X"
@@ -412,6 +423,10 @@ recorded, and the build does not start on a review that didn't happen. pb shows
 what it wrote instead and the run's session, so you can read the review anyway;
 `/pb:build` tries again, or `"specReviewer": {"model": "provider/id"}` in
 `.pi/pb/config.json` points the pass at a model that reports.
+
+The result heading is `✅ PASS` or `❌ FAIL`, followed by the review's time; a
+pass that reported nothing through its tool is `❌ FAIL` too, because no review
+of that text was recorded.
 
 **Read the plan yourself, in this order.** The spec reviewer is a second pair
 of eyes, not a substitute for yours:
@@ -505,6 +520,10 @@ revised spec and a new approval.
    compile for `Verification: build`) **inside that same call**. A failure
    comes straight back to fix, up to `maxAttempts`, then the build pauses for
    you. The agent's word never ends a build: the check does.
+
+   The completion summary carries the build's **active time** — the time it was
+   actually running, with your pauses left out; when they differ, the elapsed
+   time follows in parentheses. A pause shows the build time so far.
 
 **A check after every task** (`"taskChecks": "each"`): the harness also runs each
 task's `Test:` command (a compile when it has none) when the task is done. It
@@ -708,6 +727,10 @@ any unverified item ends **UNVERIFIED**, not pass, and leaves the phase where
 it was. A not-met item is blocking and comes with a P1 finding. P2/P3 findings
 stay advisory.
 
+The result heading reads `✅ PASS`, `❌ CHANGES NEEDED` or `⚠ UNVERIFIED`, and
+ends with the review's active time: the watched reviewer, the adversarial pass
+and the verification pass together.
+
 The findings land in the session you ran it from; run it **in the build
 session** and fix them right there: that session knows the code it just wrote.
 Or fix them in a fresh fenced session: `/pb:fix [ids]` takes P0–P2 finding
@@ -870,10 +893,14 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and
   failed, pauses, the review verdicts with the latest review's confirmed P0/P1,
   red proofs (proven, sent back, no run could prove), tokens in and out per role (with
-  output rate where pure run time is known: explorer calls), peak context, cost
-  and time, and how often the session was compacted, reset, reminded or asked
-  you something. Build and review show no rate: their wall time includes your
-  pauses. `/pb:stats all` compares every spec, archived ones included.
+  output rate where pure run time is known: explorer calls), peak context, cost,
+  and a `Time` line: the spec-writing step, the spec review, the build and the
+  latest review. Build time is active time, with the elapsed time in parentheses
+  when pauses made them differ; the review time covers its reviewer, adversarial
+  and verification passes. The card also reports how often the session was
+  compacted, reset, reminded or asked you something. Only explorer calls show an
+  output rate: they are a single measured run, while build and review time
+  covers many turns. `/pb:stats all` compares every spec, archived ones included.
   `/pb:stats --json` prints the same report with each spec's stats.
 - **`pb-report`**: the report without Pi, for scripts and dashboards:
   `pb-report [--cwd dir] [--stats] [--review]`. The `schema` field is

@@ -72,10 +72,11 @@ import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, reg
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
+import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { buildReport } from "./report.ts";
 import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
-import { loadStats, renderAll, renderCard } from "./stats.ts";
+import { buildTimeLabel, buildTiming, loadStats, renderAll, renderCard } from "./stats.ts";
 import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
 
@@ -318,6 +319,18 @@ export default function pb(pi: ExtensionAPI) {
 
   /** Extra final-gate commands after the suite/compile: lint, then the project's own checks. */
   const finalExtras = (lintCmd: string | null, extraCmds: string[]): string[] => [...(lintCmd ? [lintCmd] : []), ...extraCmds];
+
+  /** " · 2m 3s" when a phase recorded its time, nothing when it didn't (older events carry none). */
+  const timeSuffix = (ms?: number) => (ms !== undefined ? ` · ${duration(ms)}` : "");
+
+  /** The latest time one of the spec's events recorded, if any. */
+  const recordedMs = (store: Store, name: string, type: string): number | undefined => {
+    const ms = [...readEvents(path.join(store.specDir(name), "events.jsonl"))].reverse().find((e) => e.type === type && typeof e.ms === "number")?.ms;
+    return typeof ms === "number" ? ms : undefined;
+  };
+
+  /** When the current spec-writing step began, per session: the first ready write reports it. */
+  const specStarted = new Map<string, number>();
 
   const loadSpec = (store: Store, name: string): { md: string; spec: ParsedSpec } | undefined => {
     const md = store.readSpec(name);
@@ -681,6 +694,7 @@ export default function pb(pi: ExtensionAPI) {
       if (!KEBAB_NAME.test(params.name)) throw new Error(`"${params.name}" is not a valid name: use short kebab-case, e.g. order-cancellation`);
       if (params.name === "off") throw new Error(`"off" is reserved (/${cmd("plan")} off ends planning): pick another spec name.`);
       const store = new Store(ctx.cwd);
+      const session = ctx.sessionManager.getSessionFile();
       const building = liveBuildOfSession(ctx, store);
       if (building)
         throw new Error(
@@ -699,17 +713,20 @@ export default function pb(pi: ExtensionAPI) {
       const rw = rewriteWarning(params.name, prev, spec);
       if (rw) warnings.push(rw);
       const notes = warnings.map((w) => `\nNote: ${w}.`);
+      const started = session ? specStarted.get(session) : undefined;
+      const specMs = spec.status === "ready" && started !== undefined ? Math.max(0, Date.now() - started) : undefined;
       store.writeSpec(params.name, params.content);
+      if (specMs !== undefined && session) specStarted.delete(session);
       store.saveProgress({
         ...(prev ?? { spec: params.name, phase: "written" }),
         spec: params.name,
         tasks: syncTasks(spec, prev?.tasks),
-        writtenIn: ctx.sessionManager.getSessionFile(),
+        writtenIn: session,
         edited: false,
         updatedAt: now(),
       });
-      store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, status: spec.status, tokens: tokensOf(params.content) });
-      return reply(`Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${what}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}; ${sizeNote(tokensOf(params.content))}.${notes.join("")}`);
+      store.event(params.name, { type: "spec", tasks: spec.tasks.length, gate: spec.gate, newTests: spec.newTests, status: spec.status, tokens: tokensOf(params.content), ...(specMs !== undefined ? { ms: specMs } : {}) });
+      return reply(`✅ Wrote ${store.rel("specs", params.name, "spec.md")}: "${spec.title}", ${what}${spec.dependsOn ? `, depends on ${spec.dependsOn}` : ""}; ${sizeNote(tokensOf(params.content))}${timeSuffix(specMs)}.${notes.join("")}`);
     },
   });
 
@@ -727,6 +744,7 @@ export default function pb(pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const store = new Store(ctx.cwd);
+      const session = ctx.sessionManager.getSessionFile();
       const mine = store.specForSession(ctx.sessionManager.getSessionFile());
       const live = mine ? store.progress(mine) : undefined;
       const building = live?.phase === "building" ? live : undefined;
@@ -767,8 +785,11 @@ export default function pb(pi: ExtensionAPI) {
       const isTasks = sectionName === "tasks";
       const rw = isTasks ? rewriteWarning(name, prev, spec) : undefined;
       const notes = (isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])] : []).map((w) => `\nNote: ${w}.`);
+      const started = session ? specStarted.get(session) : undefined;
+      const specMs = !building && spec.status === "ready" && started !== undefined ? Math.max(0, Date.now() - started) : undefined;
       // Answer built from pre-write values above; what follows is the file and its two ledger records.
       store.writeSpec(name, md);
+      if (specMs !== undefined && session) specStarted.delete(session);
       // A live build's task list is its approved one: a Design or Decisions edit never resyncs it
       // from the live file, and the build that owns the spec keeps its writtenIn.
       const buildingNow = !!building;
@@ -776,11 +797,11 @@ export default function pb(pi: ExtensionAPI) {
         ...(prev ?? { spec: name, phase: "written" }),
         spec: name,
         tasks: buildingNow ? (prev?.tasks ?? []) : syncTasks(spec, prev?.tasks),
-        writtenIn: buildingNow ? prev?.writtenIn : ctx.sessionManager.getSessionFile(),
+        writtenIn: buildingNow ? prev?.writtenIn : session,
         updatedAt: now(),
       });
-      store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md) });
-      return reply(`Updated ${store.rel("specs", name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}; ${sizeNote(tokensOf(md))}.${notes.join("")}`);
+      store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md), ...(specMs !== undefined ? { ms: specMs } : {}) });
+      return reply(`✅ Updated ${store.rel("specs", name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}; ${sizeNote(tokensOf(md))}${timeSuffix(specMs)}.${notes.join("")}`);
     },
   });
 
@@ -1636,6 +1657,8 @@ export default function pb(pi: ExtensionAPI) {
       const store = new Store(ctx.cwd);
       const which = args.trim();
       const md = which && KEBAB_NAME.test(which) ? store.readSpec(which) : undefined;
+      const session = ctx.sessionManager.getSessionFile();
+      if (session) specStarted.set(session, Date.now());
       instruct(`▶ /${cmd("spec")}${which ? ` — ${which}` : ""}`, specPrompt(which, store.specNames(), md ? { name: which, markdown: md } : undefined, store.extra("spec")));
     },
   });
@@ -1768,8 +1791,10 @@ export default function pb(pi: ExtensionAPI) {
     p.pause = reason;
     store.saveProgress(p);
     store.event(p.spec, { type: "pause", why, task: p.current });
+    const timing = buildTiming(readEvents(path.join(store.specDir(p.spec), "events.jsonl")));
+    const took = timing.activeMs || timing.wallMs ? `⏱ Build so far: ${buildTimeLabel(timing)}\n\n` : "";
     showProgress(ctx, p);
-    say(`**⏸ Build paused** — ${reason}\n\nTo continue, run \`/${cmd("build")}\` (plain chat like "resume" won't re-attach the harness).\n\n${tip(tipKey, { spec: p.spec, ...vars })}`);
+    say(`**⏸ Build paused** — ${reason}\n\n${took}To continue, run \`/${cmd("build")}\` (plain chat like "resume" won't re-attach the harness).\n\n${tip(tipKey, { spec: p.spec, ...vars })}`);
   };
 
   /**
@@ -1965,6 +1990,7 @@ export default function pb(pi: ExtensionAPI) {
     const rest = p.writtenIn ? store.specsOfPlanning(p.writtenIn) : [];
     const stale = staleProseRefs(ctx.cwd, p.baseCommit);
     const changedFiles = changedFilesSection(store, p);
+    const timing = buildTiming(readEvents(path.join(store.specDir(p.spec), "events.jsonl")));
     post(
       [
         `**✅ BUILD COMPLETE — ${p.spec}**${notices}`,
@@ -1973,6 +1999,7 @@ export default function pb(pi: ExtensionAPI) {
         ...p.tasks.map(taskLine),
         "```",
         `Check: ${p.lastVerify?.summary.split("\n")[0] ?? `none (verification ${spec.gate})`}`,
+        ...(timing.activeMs || timing.wallMs ? [`⏱ Build time: ${buildTimeLabel(timing)}`] : []),
         p.assumptions?.length ? `\nChoices the build made where the spec was unclear (in the spec's Decisions; the review checks them):\n${p.assumptions.map((a) => `- ${a}`).join("\n")}` : "",
         p.unattended?.length ? `\nDecided without you (no answer in time):\n${p.unattended.map((c) => `- ${c}`).join("\n")}` : "",
         p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
@@ -2515,7 +2542,7 @@ export default function pb(pi: ExtensionAPI) {
    * the hash of exactly the text it saw; only a P0 blocks, and a later start reuses that verdict
    * until the spec text changes.
    */
-  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string): Promise<{ findings: Finding[]; block: boolean; session?: string; prose?: string }> => {
+  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string): Promise<{ findings: Finding[]; block: boolean; session?: string; prose?: string; ms: number }> => {
     const cfg = store.config();
     const reviewModel = cfg.specReviewer.model ?? sessionModel(ctx);
     const cwd = ctx.cwd;
@@ -2568,14 +2595,14 @@ export default function pb(pi: ExtensionAPI) {
     const session = res.sessionFile;
     if (raw === undefined) {
       const prose = cap(res.text || res.error || "the reviewer returned no findings", 12000);
-      store.event(name, { type: "spec-review", verdict: "error", hash: specHash(md), findings: 0, reported: [], model: reviewModel, thinking: cfg.specReviewer.thinking, session, prose });
+      store.event(name, { type: "spec-review", verdict: "error", hash: specHash(md), findings: 0, reported: [], model: reviewModel, thinking: cfg.specReviewer.thinking, session, prose, ms: res.ms });
       // The reviewer's own words are the only thing the human can act on: a pass that wrote its whole
       // report as prose did the work, and losing it would leave a dead end with nothing to read.
-      return { findings: [], block: true, session, ...(prose.trim() ? { prose: cap(prose.trim(), 2000) } : {}) };
+      return { findings: [], block: true, session, ms: res.ms, ...(prose.trim() ? { prose: cap(prose.trim(), 2000) } : {}) };
     }
     const block = findings.some((f) => f.priority === "P0");
-    store.event(name, { type: "spec-review", verdict: block ? "block" : "pass", hash: specHash(md), findings: findings.length, reported: findings, model: reviewModel, thinking: cfg.specReviewer.thinking, session });
-    return { findings, block, session };
+    store.event(name, { type: "spec-review", verdict: block ? "block" : "pass", hash: specHash(md), findings: findings.length, reported: findings, model: reviewModel, thinking: cfg.specReviewer.thinking, session, ms: res.ms });
+    return { findings, block, session, ms: res.ms };
   };
 
   /**
@@ -2590,8 +2617,9 @@ export default function pb(pi: ExtensionAPI) {
     const line = (f: Finding, i: number) => findingLine(f, i + 1);
     if (last?.verdict === "block") {
       const findings = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
-      post(`**Spec review** — P0 blocks T1 (the spec is unchanged since that review):\n${findings.map(line).join("\n") || "The reviewer's answer could not be read as findings."}`);
-      ctx.ui.notify("Spec review blocks T1 on a P0: fix the spec — the changed contract is reviewed again — or stop here.", "warning");
+      const took = timeSuffix(typeof last.ms === "number" ? last.ms : undefined);
+      post(`**Spec review** — ❌ FAIL${took} · P0 blocks T1 (the spec is unchanged since that review):\n${findings.map(line).join("\n") || "The reviewer's answer could not be read as findings."}`);
+      ctx.ui.notify("❌ Spec review blocks T1 on a P0: fix the spec — the changed contract is reviewed again — or stop here.", "warning");
       return false;
     }
     if (last?.verdict === "pass") return true;
@@ -2604,29 +2632,29 @@ export default function pb(pi: ExtensionAPI) {
     const sessionNote = review.session ? `The whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
     if (review.block && !review.findings.length) {
       post([
-        "**Spec review** — the reviewer returned no findings through its report tool, so no review of this text was recorded.",
+        `**Spec review** — ❌ FAIL${timeSuffix(review.ms)} · the reviewer returned no findings through its report tool, so no review of this text was recorded.`,
         ...(review.prose ? [`What it wrote instead:\n\n${review.prose}`] : []),
         `Run /${cmd("build")} again to try once more; if this model keeps answering in prose, point the reviewer at one that reports — \`"specReviewer": {"model": "provider/id"}\` in ${store.rel("config.json")}.`,
         sessionNote,
       ].filter(Boolean).join("\n\n"));
-      ctx.ui.notify("Spec review did not report; nothing was recorded. Run the build again, or point specReviewer.model at a model that reports.", "warning");
+      ctx.ui.notify("❌ Spec review did not report; nothing was recorded. Run the build again, or point specReviewer.model at a model that reports.", "warning");
       return false;
     }
     if (review.findings.length) {
       const p0 = review.findings.filter((f) => f.priority === "P0");
       const rest = review.findings.filter((f) => f.priority !== "P0");
-      const sections = [review.block ? "**Spec review** — P0 blocks T1:" : "**Spec review** — pass; advisory findings (P1-P3, not blocking):"];
+      const sections = [review.block ? `**Spec review** — ❌ FAIL${timeSuffix(review.ms)} · P0 blocks T1:` : `**Spec review** — ✅ PASS${timeSuffix(review.ms)} · advisory findings (P1-P3, not blocking):`];
       if (p0.length) sections.push(`**P0**\n${p0.map(line).join("\n")}`);
       if (rest.length) sections.push(`**Advisory**\n${rest.map(line).join("\n")}`);
       post([...sections, sessionNote].filter(Boolean).join("\n\n"));
     } else {
-      post(["**Spec review** — pass, no findings (the recorded pass covers this text).", sessionNote].filter(Boolean).join("\n\n"));
+      post([`**Spec review** — ✅ PASS${timeSuffix(review.ms)} · no findings (the recorded pass covers this text).`, sessionNote].filter(Boolean).join("\n\n"));
     }
     if (review.block) {
-      ctx.ui.notify("Spec review blocks T1 on a P0: fix the spec — the changed contract is reviewed again — or stop here.", "warning");
+      ctx.ui.notify("❌ Spec review blocks T1 on a P0: fix the spec — the changed contract is reviewed again — or stop here.", "warning");
       return false;
     }
-    if (review.findings.length) ctx.ui.notify(`Spec review passed with ${review.findings.length} advisory finding${review.findings.length === 1 ? "" : "s"} (shown above); building now.`, "info");
+    if (review.findings.length) ctx.ui.notify(`✅ Spec review passed with ${review.findings.length} advisory finding${review.findings.length === 1 ? "" : "s"} (shown above); building now.`, "info");
     return true;
   };
 
@@ -2707,6 +2735,7 @@ export default function pb(pi: ExtensionAPI) {
     const cfg = store.config();
     const commands = [...new Set(loaded.spec.tasks.filter((t) => needsRed(loaded.spec, t) && t.test).map((t) => t.test!))];
     if (!commands.length) return [];
+    const started = Date.now();
     // The dry-run executes real Test: commands in the working copy: their artifacts (coverage,
     // caches) must not show up afterwards as planning changes, so put back whatever they wrote.
     const dryBefore = snapshot(cwd, "pb: before dry-run");
@@ -2742,7 +2771,7 @@ export default function pb(pi: ExtensionAPI) {
         pass: (c) => `⚠ \`${c}\` passes before the build: the behaviour may already exist (re-slice?) or the tests don't cover it yet (carry on — the build still requires red)`,
         unknown: (c, l) => `? \`${c}\` couldn't run here (${l}) — unknown, not a verdict`,
       };
-      return ["", `Test commands, run once before you approve:`, ...results.map((r) => `- ${describe[r.result](r.command, r.line)}`)];
+      return ["", `Test commands, run once before you approve (took ${duration(Date.now() - started)}):`, ...results.map((r) => `- ${describe[r.result](r.command, r.line)}`)];
     } finally {
       if (beat !== undefined) clearInterval(beat);
       safely(() => ctx.ui.setWidget("pb-dry-run", undefined));
@@ -2753,9 +2782,10 @@ export default function pb(pi: ExtensionAPI) {
   const showSpec = (store: Store, name: string, names: string[] = [name], extra: string[] = []) => {
     const loaded = loadSpec(store, name);
     if (!loaded) return;
+    const specMs = recordedMs(store, name, "spec");
     post(
       [
-        `**Spec written: ${name}** (${store.rel("specs", name, "spec.md")})${names.length > 1 ? ` · also: ${names.filter((n) => n !== name).join(", ")}` : ""}`,
+        `**✅ Spec written: ${name}** (${store.rel("specs", name, "spec.md")})${names.length > 1 ? ` · also: ${names.filter((n) => n !== name).join(", ")}` : ""}${timeSuffix(specMs)}`,
         "",
         ...loaded.spec.tasks.map((t) => `- ${t.id}: ${t.title}${t.test ? ` · \`${t.test}\`` : ""}`),
         "",
@@ -2831,12 +2861,14 @@ export default function pb(pi: ExtensionAPI) {
     const choice = await choose(ctx, store, "Pi writes the spec first. Then?", options, options[0], notes);
     if (!choice) return;
     if (choice === SHOW) {
+      if (session) specStarted.set(session, Date.now());
       store.setPendingBuild(session);
       return instruct(marker, `${prompt}\n\nAfter writing it, stop: the harness shows it to me and asks whether to build.`);
     }
 
     const since = now();
     if (session) specWriting.add(session);
+    if (session) specStarted.set(session, Date.now());
     instruct(marker, `${prompt}\n\nAfter writing it, stop: the build starts by itself.`);
     // Wait for the spec here, in the command: the run starts right after this handler hands it over.
     // Capped: on timeout the pending offer below picks the spec up once it is written.
@@ -3132,6 +3164,7 @@ export default function pb(pi: ExtensionAPI) {
     store: Store,
     o: { label: string; brief: string; resume?: boolean },
   ) => {
+    const started = Date.now();
     const idleMs = (store.config().reviewer.idleSec ?? 20) * 1000;
     const session = c.sessionManager.getSessionFile() ?? "";
     try {
@@ -3182,11 +3215,11 @@ export default function pb(pi: ExtensionAPI) {
       const state = store.reviewSession(session);
       if (state?.done) store.saveReviewSession(session, { ...state, done: undefined });
       const findings = state?.findings ?? fromProse(text);
-      return { findings, acceptance: state?.acceptance ?? [], prose: text, unparsed: unparsedReport(state?.findings, text), left: false, session };
+      return { findings, acceptance: state?.acceptance ?? [], prose: text, unparsed: unparsedReport(state?.findings, text), left: false, session, ms: Date.now() - started };
     } catch {
       // You switched to another session: this one can't be driven any more.
       const state = store.reviewSession(session);
-      return { findings: state?.findings ?? [], acceptance: state?.acceptance ?? [], prose: "", left: true, session, unparsed: false };
+      return { findings: state?.findings ?? [], acceptance: state?.acceptance ?? [], prose: "", left: true, session, unparsed: false, ms: Date.now() - started };
     }
   };
 
@@ -3250,7 +3283,13 @@ export default function pb(pi: ExtensionAPI) {
         cacheWrite: res.tokens.cacheWrite,
         cost: res.cost,
       });
-    return { role: "abuse", findings, acceptance: [], prose: res.text, session: res.sessionFile ?? "", left: false, unparsed: unparsedReport(findings, res.text), ...(res.error ? { error: res.error } : {}) };
+    return { role: "abuse", findings, acceptance: [], prose: res.text, session: res.sessionFile ?? "", left: false, unparsed: unparsedReport(findings, res.text), ms: res.ms, ...(res.error ? { error: res.error } : {}) };
+  };
+
+  /** A finished pass joins the run, and its time adds to the review's total. */
+  const addPass = (run: ReviewRun, pass: ReviewRun["passes"][number]) => {
+    run.passes.push(pass);
+    run.ms = (run.ms ?? 0) + (pass.ms ?? 0);
   };
 
   /**
@@ -3269,7 +3308,7 @@ export default function pb(pi: ExtensionAPI) {
     if (ran("review")) {
       if (run.security && !ran("abuse")) {
         store.saveReviewRun(run);
-        run.passes.push(await runAbusePass(from, store, run));
+        addPass(run, await runAbusePass(from, store, run));
         return reviewNext(from, store, run);
       }
       return reviewFinish(from, store, run);
@@ -3289,7 +3328,7 @@ export default function pb(pi: ExtensionAPI) {
         const reviewSession = (c as ExtensionContext).sessionManager.getSessionFile();
         if (reviewSession) store.saveReviewSession(reviewSession, { role: "review", spec: run.name, run: run.id });
         const r = await drivePass(c, c.sendMessage, store, { label: run.label, brief: run.brief });
-        run.passes.push({ role: "review", ...r });
+        addPass(run, { role: "review", ...r });
         await reviewNext(c, store, run, r.left);
       },
     });
@@ -3305,7 +3344,7 @@ export default function pb(pi: ExtensionAPI) {
     // now runs in the background like every other.
     if (cut.role !== "review") return reviewNext(c, store, run);
     const r = await drivePass(c, send, store, { label: run.label, brief: run.brief, resume: true });
-    run.passes.push({ role: "review", ...r });
+    addPass(run, { role: "review", ...r });
     await reviewNext(c, store, run, r.left);
   };
 
@@ -3346,7 +3385,7 @@ export default function pb(pi: ExtensionAPI) {
     }));
     const tipKey = verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
     const text = [
-      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${lost ? "⚠ NO VERDICT — a pass reported in prose only" : verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "✗ CHANGES NEEDED" : verdict === "unverified" ? "⚠ UNVERIFIED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : ""}`,
+      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${lost ? "⚠ NO VERDICT — a pass reported in prose only" : verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "❌ CHANGES NEEDED" : verdict === "unverified" ? "⚠ UNVERIFIED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : ""}${timeSuffix(run.ms)}`,
       ...(o.partial
         ? ["", `⚠ You left the review before it finished: this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),
@@ -3407,7 +3446,7 @@ export default function pb(pi: ExtensionAPI) {
     const all = mergeFindings(allFindings(run));
     const checked =
       cfg.reviewer.verify === false
-        ? { findings: all, dismissed: [], error: undefined as string | undefined, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 }
+        ? { findings: all, dismissed: [], error: undefined as string | undefined, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0 }
         : await verifyFindings({
             cwd: run.cwd,
             findings: all,
@@ -3423,6 +3462,7 @@ export default function pb(pi: ExtensionAPI) {
             onActivity: (a) => widget([`pb review ${run.label} — verifying P0/P1 findings`, `  ↳ ${a}`]),
           });
     widget(undefined);
+    run.ms = (run.ms ?? 0) + checked.ms;
     const after = run.before ? snapshot(run.cwd, `pb: after review ${run.label}`) : undefined;
     // The reviewer has no shell and cannot edit or write, so anything that changed while it ran is
     // someone else's (another session, an editor). Name the paths; never revert another writer's work.
@@ -3435,7 +3475,7 @@ export default function pb(pi: ExtensionAPI) {
     const m = reviewMessage(run, { findings: checked.findings, dismissed: checked.dismissed, changedDuring, partial: false, verificationFailed: checked.error?.split("\n")[0], thrash });
     const p = run.name ? store.progress(run.name) : undefined;
     if (run.name && p) {
-      store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ...checked.tokens, cost: checked.cost });
+      store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ms: run.ms, ...checked.tokens, cost: checked.cost });
       // A lead for later features: completed findings survive the review's own files and the archive.
       const ledger = ledgerFindings(checked.findings);
       if (ledger.length) store.event(run.name, { type: "review-findings", review: run.id, findings: ledger });
@@ -3750,7 +3790,8 @@ export default function pb(pi: ExtensionAPI) {
     store: Store,
     spec: string,
     remaining: Finding[],
-  ): Promise<{ live: ExtensionCommandContext; report?: { fixed: string[]; skipped: string[]; tests: string } } | undefined> => {
+  ): Promise<{ live: ExtensionCommandContext; report?: { fixed: string[]; skipped: string[]; tests: string }; ms: number } | undefined> => {
+    const started = Date.now();
     const findings = remaining.map((f, i) => findingLine(f, i + 1)).join("\n");
     const loaded = loadSpec(store, spec);
     const reference = loaded ? specReference(spec) : "";
@@ -3788,8 +3829,8 @@ export default function pb(pi: ExtensionAPI) {
       (e) => (e as { type?: unknown }).type === "fix" && typeof (e as { at?: unknown }).at === "string" && ((e as { at: string }).at ?? "") >= since,
     );
     const last = reports.at(-1) as { fixed?: unknown; skipped?: unknown; tests?: unknown } | undefined;
-    if (!last || !Array.isArray(last.fixed)) return { live };
-    return { live, report: { fixed: last.fixed.filter((x): x is string => typeof x === "string"), skipped: Array.isArray(last.skipped) ? last.skipped.filter((x): x is string => typeof x === "string") : [], tests: typeof last.tests === "string" ? last.tests : "" } };
+    if (!last || !Array.isArray(last.fixed)) return { live, ms: Date.now() - started };
+    return { live, ms: Date.now() - started, report: { fixed: last.fixed.filter((x): x is string => typeof x === "string"), skipped: Array.isArray(last.skipped) ? last.skipped.filter((x): x is string => typeof x === "string") : [], tests: typeof last.tests === "string" ? last.tests : "" } };
   };
 
   /**
@@ -3805,12 +3846,14 @@ export default function pb(pi: ExtensionAPI) {
     const fixed: string[] = [];
     const skipped: string[] = [];
     let laps = 0;
+    let ms = 0;
     let silent = false;
     while (remaining.length && laps < FIX_LAPS) {
       laps++;
       const out = await runFixLap(live, store, spec, remaining);
       if (!out) return; // its session never opened (cancelled): user is present, nothing to say
       live = out.live;
+      ms += out.ms;
       const report = out.report;
       if (!report) {
         silent = true;
@@ -3827,10 +3870,10 @@ export default function pb(pi: ExtensionAPI) {
     const skippedNote = skipped.length ? `; skipped as needing spec revision: ${skipped.join(", ")}` : "";
     const checking = " Run /pb:review to check the delta: what a lap reports is its own claim, not a check.";
     const summary = !open.length && !silent
-      ? `Fixes for \`${spec}\` complete in ${laps} lap(s): fixed ${fixed.join(", ") || "none"}${skippedNote}.${checking}`
+      ? `✅ Fixes for \`${spec}\` complete in ${laps} lap(s)${timeSuffix(ms)}: fixed ${fixed.join(", ") || "none"}${skippedNote}.${checking}`
       : silent
-        ? `Fix lap for \`${spec}\` went silent (no report after ${FIX_NUDGES} nudges). Fixed so far: ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.${checking}`
-        : `Fixes for \`${spec}\` stopped after ${laps} laps: fixed ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.${checking}`;
+        ? `❌ Fix lap for \`${spec}\` went silent (no report after ${FIX_NUDGES} nudges)${timeSuffix(ms)}. Fixed so far: ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.${checking}`
+        : `❌ Fixes for \`${spec}\` stopped after ${laps} laps${timeSuffix(ms)}: fixed ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.${checking}`;
     try {
       if (!home) throw new Error("no home session");
       await live.switchSession(home, {
@@ -3840,7 +3883,7 @@ export default function pb(pi: ExtensionAPI) {
       });
     } catch {
       // Home is gone: the summary still lands in the spec's events for the next session to find.
-      store.event(spec, { type: "fix-summary", summary });
+      store.event(spec, { type: "fix-summary", summary, ms });
     }
   };
 
