@@ -1,0 +1,88 @@
+/** The small commands: /pb:stats, /pb:standards, /pb:status, /pb:help. */
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as path from "node:path";
+import { HELP_PATH, tip, topic, topics } from "./help.ts";
+import { buildReport } from "./report.ts";
+import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
+import { buildTimeLabel, buildTiming, loadStats, renderAll, renderCard } from "./stats.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { cmd, loadSpec, post, sessionIdOf, specCompletions, specOfSession, stackLabel, taskLine } from "./kit.ts";
+
+export function registerMisc(pi: ExtensionAPI) {
+  pi.registerCommand(cmd("stats"), {
+    description: "How a build went: tasks, first-try rate, checks, pauses, tokens and cache. A spec name, or all; --json for pb.report/1",
+    getArgumentCompletions: specCompletions,
+    handler: async (args, ctx) => {
+      const store = new Store(ctx.cwd);
+      const arg = args.trim();
+      if (arg.split(/\s+/).includes("--json")) return post(JSON.stringify(buildReport(store, { stats: true, review: true }), null, 2));
+      const all = loadStats(store);
+      if (arg === "all") return post(renderAll(all));
+      const name = arg || specOfSession(ctx).name || (all.length === 1 ? all[0].name : undefined);
+      const one = all.find((s) => s.name === name);
+      if (!one) return all.length ? post(renderAll(all)) : ctx.ui.notify("No stats yet: they are collected while building.", "info");
+      post(renderCard(one));
+    },
+  });
+
+  /* ------------------------------ project map ----------------------------- */
+
+  /**
+   * What to tell the human when AGENTS.md's map section can't be located: the file, the marker, the
+   * line — and that pb wrote nothing, since the alternative to refusing is deleting what pb can't read.
+   */
+
+  pi.registerCommand(cmd("standards"), {
+    description: `Write the current engineering standards into this project's AGENTS.md: created if missing, pb's section replaced, the rest untouched. Optional: which stack (java, vue, plain, or a template of yours in ${templatesDir()}); default: detected`,
+    getArgumentCompletions: (prefix: string) => stackNames().filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
+    handler: async (args, ctx) => {
+      const arg = args.trim().toLowerCase();
+      const names = stackNames();
+      if (arg && !names.includes(arg)) return ctx.ui.notify(`/${cmd("standards")} takes ${names.join(", ")} (default: detected from the project). Your own go in ${templatesDir()}.`, "warning");
+      const stack = arg ? (arg === "plain" ? undefined : arg) : projectStack(ctx.cwd);
+      const file = path.join(ctx.cwd, "AGENTS.md");
+      const result = writeStandards(file, stack);
+      new Store(ctx.cwd).markAsked("standards");
+      if (result === "broken") return ctx.ui.notify(`${file} has "<!-- pb:standards -->" without its "<!-- /pb:standards -->": add the end marker where pb's section ends, then run /${cmd("standards")} again.`, "error");
+      const what = { created: "Created", added: "Added pb's standards to", replaced: "Replaced pb's standards in", unchanged: "pb's standards are already current in" }[result];
+      const shared = findStandards(path.dirname(ctx.cwd));
+      ctx.ui.notify(
+        `${what} ${file} (${stackLabel(stack)})${result === "created" ? ", with pb's standards" : ""}.${result === "replaced" || result === "added" ? " The rest of the file is untouched." : ""}${result === "unchanged" ? "" : " Sessions already running keep the ones they loaded until restarted."}${shared ? ` ${shared.file} also has a pb section: Pi loads both.` : ""}`,
+        "info",
+      );
+    },
+  });
+
+  pi.registerCommand(cmd("status"), {
+    description: "Every spec and where it stands; --json for pb.report/1",
+    handler: async (args, ctx) => {
+      const store = new Store(ctx.cwd);
+      if (args.trim().split(/\s+/).includes("--json")) return post(JSON.stringify(buildReport(store, { review: true }), null, 2));
+      const names = store.specNames();
+      if (!names.length) return ctx.ui.notify(`No specs yet. Start with /${cmd("plan")} <feature>.`, "info");
+      const here = store.specForSession(ctx.sessionManager.getSessionFile());
+      const lines = names.flatMap((n) => {
+        const p = store.progress(n);
+        const s = loadSpec(store, n)?.spec;
+        const where = p?.session && n !== here ? ` · session: pi --session ${sessionIdOf(p.session)}` : "";
+        const head = `${n === here ? "▸ " : ""}${n} — ${p?.phase ?? "written"}${where}${s ? ` · verification ${s.gate}${s.newTests ? "" : " · no new tests"}${s.dependsOn ? ` · depends on ${s.dependsOn}` : ""}` : " · ⚠ doesn't parse"}${p?.pause ? ` · paused: ${p.pause}` : ""}`;
+        return [head, ...(p && p.phase !== "written" ? p.tasks.map((t) => `    ${taskLine(t)}`) : [])];
+      });
+      ctx.ui.notify([...lines, `help: /${cmd("help")}`].join("\n"), "info");
+    },
+  });
+
+  /* --------------------------------- help -------------------------------- */
+
+  pi.registerCommand(cmd("help"), {
+    description: "What to do next and how to handle edge cases. /pb:help <topic> shows one section",
+    handler: async (args, ctx) => {
+      const name = args.trim().toLowerCase();
+      const body = name ? topic(name) : undefined;
+      if (body) return post(`${body}\n\n(Full guide: ${HELP_PATH})`);
+      const list = topics().map((t) => `- \`/${cmd("help")} ${t.name}\` — ${t.title}`);
+      if (!list.length) return ctx.ui.notify(`Help file not found: ${HELP_PATH}`, "warning");
+      post([name ? `No help topic "${name}".` : "**pb help** — pick a topic:", "", ...list, "", `Full guide: ${HELP_PATH}`].join("\n"));
+    },
+  });
+}

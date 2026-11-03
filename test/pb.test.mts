@@ -1854,10 +1854,10 @@ test("spec format: a bound names its owner, and the citation grammar has one hom
   }
   const here = path.dirname(new URL(import.meta.url).pathname);
   const specSrc = fs.readFileSync(path.join(here, "..", "extensions", "pb", "spec.ts"), "utf8");
-  const indexSrc = fs.readFileSync(path.join(here, "..", "extensions", "pb", "index.ts"), "utf8");
+  const indexSrc = fs.readFileSync(path.join(here, "..", "extensions", "pb", "kit.ts"), "utf8");
   for (const name of ["specPathRefs", "ROOT_FILE_REF"]) {
     assert.equal((specSrc.match(new RegExp(`const ${name}`, "g")) ?? []).length, 1, `spec.ts declares ${name} once`);
-    assert.ok(!new RegExp(`const ${name}`).test(indexSrc), `index.ts still declares ${name}`);
+    assert.ok(!new RegExp(`const ${name}`).test(indexSrc), `kit.ts still declares ${name}`);
   }
   assert.match(indexSrc, /specPathRefs[^;\n]*from "\.\/spec\.ts"/);
 });
@@ -4016,9 +4016,9 @@ test("archive: a name collision never moves the spec into a folder that already 
 test("help: every What-now block the code uses exists in the guide, and /pb:help lists the topics", async () => {
   const { tip } = await import("../extensions/pb/help.ts");
   const dir = path.join(path.dirname(new URL(import.meta.url).pathname), "../extensions/pb");
-  const src = ["index.ts", "prompts.ts"].map((f) => fs.readFileSync(path.join(dir, f), "utf8")).join("\n");
+  const src = fs.readdirSync(dir).filter((f) => f.endsWith(".ts")).map((f) => fs.readFileSync(path.join(dir, f), "utf8")).join("\n");
   const keys = new Set([...src.matchAll(/tip\(\s*"([\w.-]+)"/g)].map((m) => m[1]));
-  for (const k of ["build.paused", "build.paused-attempts", "review.pass", "review.changes", "review.unverified", "review.other"]) keys.add(k);
+  for (const k of ["build.paused", "build.paused-attempts", "review.pass", "review.changes", "review.unverified", "review.other", "review.mid-build"]) keys.add(k);
   for (const k of keys) assert.ok(tip(k).startsWith("**What now**"), `missing tip ${k}`);
   const t = setup();
   process.chdir(t.repo);

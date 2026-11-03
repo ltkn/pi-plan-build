@@ -1,0 +1,234 @@
+/** The fixes: /pb:fix, pb_fix_done, and the fix-lap loop. */
+import * as path from "node:path";
+import { StringEnum, Type } from "@earendil-works/pi-ai";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext
+ } from "@earendil-works/pi-coding-agent";
+import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
+import { duration } from "./format.ts";
+import { KEBAB_NAME } from "./names.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { cmd, commands, evidenceLine, loadSpec, nextLine, phaseHeader, reply, specOfSession, stop } from "./kit.ts";
+
+export function registerFix(pi: ExtensionAPI) {
+  pi.registerTool({
+    name: "pb_fix_done",
+    label: "Fixes done",
+    description:
+      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Name each by the number it was shown as in the brief. Then stop: the home session runs /pb:review next to check the delta. " + reportRegister,
+    parameters: Type.Object({
+      fixed: Type.Array(Type.Number(), { description: "the numbers of the findings this lap fixed, as shown in the brief (e.g. 1, 3)" }),
+      skipped: Type.Array(Type.Number(), { description: "the numbers of findings that need a design decision (spec revision), not an edit, as shown in the brief" }),
+      tests: Type.String({ description: "test commands run and what each showed" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const store = new Store(ctx.cwd);
+      const session = ctx.sessionManager.getSessionFile();
+      const rec = store.fixSession(session);
+      if (!session || !rec) throw new Error("This is not a pb fixes session. Fix review findings only inside the session /pb:fix opened — carry on there, or run /pb:fix for a new one.");
+      const picked = (numbers: number[]): Finding[] => {
+        const out: Finding[] = [];
+        for (const n of numbers) {
+          const f = Number.isInteger(n) && n >= 1 && n <= rec.findings.length ? rec.findings[n - 1] : undefined;
+          if (!f) throw new Error(`${n} is not one of the findings shown for this lap: the brief numbers them 1–${rec.findings.length}. Report the number it was shown as.`);
+          if (!out.includes(f)) out.push(f);
+        }
+        return out;
+      };
+      const fixed = picked(params.fixed);
+      const skipped = picked(params.skipped);
+      const both = fixed.filter((f) => skipped.includes(f));
+      if (both.length) throw new Error(`A finding cannot be both fixed and skipped: ${both.map((f) => f.title).join("; ")}. Pick one.`);
+      if (!fixed.length && !skipped.length) throw new Error("Report at least one finding by its number in fixed or skipped, with the test results.");
+      store.event(rec.spec, { type: "fix", fixed: fixed.map((f) => f.title), skipped: skipped.map((f) => f.title), tests: params.tests });
+      store.clearFixSession(session);
+      return reply(`Recorded fix report for \`${rec.spec}\`: fixed ${fixed.length}, skipped ${skipped.length}. Reply briefly, then stop: run /pb:review back home to check the delta.`);
+    },
+  });
+
+  /* --------------------------------- plan -------------------------------- */
+  /** Run the test suite in the background; its result is posted into the session when it's done. Returns whether it started (a second plan in the same session shares the one in flight). */
+
+  const FIX_LAPS = 3;
+  /** Finish-nudges before a silent lap stops the loop (never retried: a second silent session doubles nothing). */
+
+  const FIX_NUDGES = 2;
+
+  /**
+   * One fixes lap: open a fenced session seeded with the remaining findings and wait for its
+   * pb_fix_done report. Returns the live lap session for chaining (like reviewNext: a session
+   * that opened a new one is stale afterwards) plus the report — or no report when the lap
+   * went silent (nudges unanswered) or its session never opened.
+   */
+
+  const runFixLap = async (
+    ctx: ExtensionCommandContext,
+    store: Store,
+    spec: string,
+    remaining: Finding[],
+  ): Promise<{ live: ExtensionCommandContext; report?: { fixed: string[]; skipped: string[]; tests: string }; ms: number } | undefined> => {
+    const started = Date.now();
+    const findings = remaining.map((f, i) => findingLine(f, i + 1)).join("\n");
+    const loaded = loadSpec(store, spec);
+    const reference = loaded ? specReference(spec) : "";
+    const seed =
+      `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings}\n\n` +
+      `${reference ? `${reference}\n\n` : ""}` +
+      `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; a finding's Not: line is an alternative the reviewer already rejected — do not implement it; keep the suite green; run each affected task's Test: line (full suite once at the end); new tests must be seen failing first. ${STRUCTURED_EDIT_RULE} ` +
+      `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
+      `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +
+      `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), and test results; then stop.`;
+    let live: ExtensionCommandContext | undefined;
+    const since = now();
+    const result = await ctx.newSession({
+      parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
+      setup: async (sm) => {
+        sm.appendSessionInfo(`fix: ${spec}`);
+      },
+      withSession: async (c) => {
+        const cc = c as ExtensionCommandContext;
+        live = cc;
+        const lapFile = cc.sessionManager.getSessionFile() ?? undefined;
+        if (lapFile) store.saveFixSession(lapFile, { spec, findings: remaining });
+        store.event(spec, { type: "fix-start", findings: remaining.map((f) => f.title) });
+        await c.sendMessage({ customType: "pb-fix", content: seed, display: true }, { triggerTurn: true });
+        for (let nudge = 0; nudge < FIX_NUDGES; nudge++) {
+          await cc.waitForIdle();
+          if (!lapFile || !store.fixSession(lapFile)) return; // reported
+          await c.sendMessage({ customType: "pb-fix", content: "Finish with pb_fix_done now: report fixed ids, skipped ids and test results, then stop.", display: false }, { triggerTurn: true });
+        }
+        await cc.waitForIdle();
+      },
+    }).catch(() => ({ cancelled: true as const }));
+    if (result.cancelled || !live) return undefined;
+    const reports = readEvents(path.join(store.specDir(spec), "events.jsonl")).filter(
+      (e) => (e as { type?: unknown }).type === "fix" && typeof (e as { at?: unknown }).at === "string" && ((e as { at: string }).at ?? "") >= since,
+    );
+    const last = reports.at(-1) as { fixed?: unknown; skipped?: unknown; tests?: unknown } | undefined;
+    if (!last || !Array.isArray(last.fixed)) return { live, ms: Date.now() - started };
+    return { live, ms: Date.now() - started, report: { fixed: last.fixed.filter((x): x is string => typeof x === "string"), skipped: Array.isArray(last.skipped) ? last.skipped.filter((x): x is string => typeof x === "string") : [], tests: typeof last.tests === "string" ? last.tests : "" } };
+  };
+
+  /**
+   * Unattended fix loop: lap until every finding is fixed or skipped-as-spec-revision, up to FIX_LAPS, then
+   * come home with the outcome. The human runs /pb:review next: a lap's report says what it claims to have
+   * done, so the summary hands the checking over instead of doing it. The report names findings by the
+   * numbers the brief shows, so no prose has to be matched back to one.
+   */
+
+  const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[], allOpen: Finding[]): Promise<void> => {
+    const home = ctx.sessionManager.getSessionFile() ?? undefined;
+    const numberOf = new Map(allOpen.map((f, i) => [f, i + 1] as const));
+    const label = (f: Finding) => `#${numberOf.get(f) ?? "?"} ${f.title}`;
+    let live: ExtensionCommandContext = ctx;
+    let remaining = first;
+    const fixed: string[] = [];
+    const skipped: string[] = [];
+    let laps = 0;
+    let ms = 0;
+    let silent = false;
+    while (remaining.length && laps < FIX_LAPS) {
+      laps++;
+      const out = await runFixLap(live, store, spec, remaining);
+      if (!out) return; // its session never opened (cancelled): user is present, nothing to say
+      live = out.live;
+      ms += out.ms;
+      const report = out.report;
+      if (!report) {
+        silent = true;
+        break;
+      }
+      const skip = remaining.filter((f) => report.skipped.includes(f.title));
+      const done = remaining.filter((f) => !skip.includes(f) && report.fixed.includes(f.title));
+      fixed.push(...done.map(label));
+      skipped.push(...skip.map(label));
+      const resolved = new Set([...done, ...skip].map((f) => f.title));
+      remaining = remaining.filter((f) => !resolved.has(f.title));
+    }
+    const open = remaining.map(label);
+    const ids = remaining.flatMap((f) => (numberOf.has(f) ? [numberOf.get(f)!] : [])).join(" ");
+    // Cap the lists: a long title per finding makes the evidence line a wall, and /pb:status has the detail.
+    const list = (items: string[]) => (items.length <= 6 ? items.join(", ") : `${items.slice(0, 6).join(", ")}, +${items.length - 6} more`);
+    const next = open.length
+      ? `\`/${cmd("fix")}${ids ? ` ${ids}` : ""}\` (or fix them by hand), then \`/${cmd("review")}\`.`
+      : skipped.length
+        ? `revise the spec with \`/${cmd("spec")}\` for the skipped findings (or fix them by hand), then \`/${cmd("review")}\`.`
+        : `\`/${cmd("review")}\` checks the delta.`;
+    const time = ms ? duration(ms) : "";
+    const header = silent
+      ? phaseHeader("❌", "Fixes stopped", spec, "no report", time)
+      : phaseHeader(open.length ? "❌" : "✅", open.length ? "Fixes stopped" : "Fixes complete", spec, `${laps} lap${laps === 1 ? "" : "s"}`, time);
+    const summary = [
+      header,
+      "",
+      nextLine(next),
+      evidenceLine(`fixed ${list(fixed) || "none"}`, skipped.length ? `skipped as needing a spec revision: ${list(skipped)}` : "", open.length ? `still open: ${list(open)}` : "", silent ? `no report after ${FIX_NUDGES} nudges` : ""),
+      "",
+      `A fix lap's report is its own claim; \`/${cmd("review")}\` checks the files it changed.`,
+    ].join("\n");
+    try {
+      if (!home) throw new Error("no home session");
+      await live.switchSession(home, {
+        withSession: async (c) => {
+          await c.sendMessage({ customType: "pb", content: summary, display: true }, { triggerTurn: false });
+        },
+      });
+    } catch {
+      // Home is gone: the summary still lands in the spec's events for the next session to find.
+      store.event(spec, { type: "fix-summary", summary, ms });
+    }
+  };
+
+  pi.registerCommand(cmd("fix"), {
+    description: "Fix P0-P2 review findings in a fresh fenced session: /pb:fix [finding ids]. No ids = all open findings (P3 nits are never open: fix those by hand). Run /pb:review afterwards: it checks only those findings and what changed",
+    handler: async (args, ctx) => {
+      const store = new Store(ctx.cwd);
+      const session = ctx.sessionManager.getSessionFile();
+      const words = args.trim().split(/\s+/).filter(Boolean);
+      // Spec: named, else this session's. Findings: all open, else the named ones.
+      let name = words[0] && KEBAB_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
+      const ids = name ? words.slice(1) : words;
+      if (!name) name = specOfSession(ctx).name;
+      if (!name && session) {
+        // A planning session that wrote the spec but never built it: its writtenIn names it.
+        const mine = store.specNames().filter((n) => store.progress(n)?.writtenIn === session);
+        if (mine.length === 1) name = mine[0];
+        else if (mine.length > 1) return ctx.ui.notify(`Several specs here (${mine.join(", ")}): name one: \`/${cmd("fix")} <spec> [ids].`, "warning");
+      }
+      if (!name) return ctx.ui.notify(`No spec here: run /${cmd("fix")} from a build or review session, or name a spec.`, "warning");
+      const open = store.progress(name)?.review?.findings ?? [];
+      if (!open.length) return ctx.ui.notify(`\`${name}\` has no open review findings to fix.`, "info");
+      let picked = open;
+      if (ids.length) {
+        const misses: string[] = [];
+        picked = [];
+        for (const id of ids) {
+          const hit = /^\d+$/.test(id)
+            ? open[Number(id) - 1]
+            : open.filter((f) => f.title.toLowerCase().includes(id.toLowerCase())).length === 1
+              ? open.filter((f) => f.title.toLowerCase().includes(id.toLowerCase()))[0]
+              : undefined;
+          if (!hit || picked.includes(hit)) {
+            if (!hit) misses.push(id);
+            continue;
+          }
+          picked.push(hit);
+        }
+        if (misses.length || !picked.length) {
+          return ctx.ui.notify(
+            `No such finding${misses.length === 1 ? "" : "s"}: ${(misses.length ? misses : ids).join(", ")}. \`/pb:fix\` takes P0–P2 ids (P3 nits are never open: fix those by hand). Open findings for \`${name}\`:${open.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
+            "warning",
+          );
+        }
+      }
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      const cctx = ctx as ExtensionCommandContext;
+      if (typeof cctx.newSession !== "function") return ctx.ui.notify("This Pi can't open sessions: fix the findings here instead.", "warning");
+      await driveFix(cctx, store, name!, picked, open);
+    },
+  });
+
+  /* -------------------------------- stats -------------------------------- */
+}
