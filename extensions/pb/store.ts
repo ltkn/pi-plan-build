@@ -305,6 +305,34 @@ export interface Checkpoint {
   intro?: boolean;
 }
 
+/**
+ * Append a /pb:undo row only when it adds information. A row is what undo restores — the
+ * commit, the conversation point, the task list — so a row matching the last stored one in
+ * all of that says nothing new about the same step. The step's identity (id/task) is part
+ * of the comparison because downstream lookups find rows by id (task summaries, undo
+ * targets): a different step's row is never dropped, which structurally exempts the
+ * freshly-numbered `uN` rows. Fields refined after the fact (`at`, `summary`, `files`) are
+ * not information at append time.
+ */
+export const appendCheckpoint = (list: Checkpoint[], row: Checkpoint): boolean => {
+  const last = list.length ? list[list.length - 1] : undefined;
+  if (last && sameCheckpointState(last, row)) return false;
+  list.push(row);
+  return true;
+};
+
+const VOLATILE_CHECKPOINT_FIELDS = new Set<string>(["at", "summary", "files"]);
+const sameCheckpointState = (a: Checkpoint, b: Checkpoint) => {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof Checkpoint>;
+  for (const key of keys) {
+    if (VOLATILE_CHECKPOINT_FIELDS.has(key)) continue;
+    const av = key === "tasks" ? JSON.stringify(a[key]) : a[key];
+    const bv = key === "tasks" ? JSON.stringify(b[key]) : b[key];
+    if (av !== bv) return false;
+  }
+  return true;
+};
+
 export interface Baseline extends VerifyResult {
   head?: string;
   /** lint's result when the baseline ran it (null = no lint command): red warns, never blocks alone */

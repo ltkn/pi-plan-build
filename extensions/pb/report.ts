@@ -60,7 +60,7 @@ export interface ReportStats {
     exploreOut: number;
   };
   cost: { build: number; review: number; explore: number };
-  context: { compactions: number; resets: number; nudges: number; asks: number };
+  context: { compactions: number; resets: number; nudges: number };
   ms: number;
 }
 

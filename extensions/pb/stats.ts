@@ -143,10 +143,12 @@ export interface Summary {
   proof: { proven: number; sentBack: number; unproven: number };
   /** Confirmed P0/P1 of the latest review (post double-check). */
   confirmed: { p0: number; p1: number };
+  /** Review honesty: findings reported (post-verification tally + verifier-dismissed), dismissed, and distinct titles fixed in fix laps. Present once a review ran. */
+  precision?: { reported: number; dismissed: number; fixed: number };
   build: { prompt: number; cached: number; output: number; cost: number; peak: number; window?: number; turns: number };
   review: { prompt: number; output: number; cost: number };
   explorer: { calls: number; prompt: number; output: number; cost: number; ms: number };
-  context: { compactions: number; resets: number; nudges: number; asks: number };
+  context: { compactions: number; resets: number; nudges: number };
   /** wall-clock from the first build-start to built, pauses included */
   ms: number;
   /** the same span with pauses removed */
@@ -222,6 +224,13 @@ export function summarize(s: SpecStats): Summary {
   );
   const lastReview = [...e].reverse().find((x) => x.type === "review");
   const pp = Array.isArray(lastReview?.p) ? (lastReview.p as unknown[]) : [];
+  // Review honesty: `p` is the post-verification tally, so the reviewer's own report counted
+  // the verifier-dismissed ones too. Fix laps record raw titles; a title repeated across laps
+  // was still fixed once.
+  const reviewEvents = e.filter((x) => x.type === "review");
+  const reported = reviewEvents.reduce((n, x) => n + (Array.isArray(x.p) ? (x.p as unknown[]).reduce<number>((a, v) => a + num(v), 0) : 0) + num(x.dismissed), 0);
+  const dismissed = reviewEvents.reduce((n, x) => n + num(x.dismissed), 0);
+  const fixedTitles = new Set(e.filter((x) => x.type === "fix" && Array.isArray(x.fixed)).flatMap((x) => (x.fixed as unknown[]).filter((t): t is string => typeof t === "string")));
   return {
     tasks: tasks.length,
     done: done.length,
@@ -239,10 +248,11 @@ export function summarize(s: SpecStats): Summary {
       unproven: unprovenIds.size,
     },
     confirmed: { p0: num(pp[0]), p1: num(pp[1]) },
+    precision: reviewEvents.length ? { reported, dismissed, fixed: fixedTitles.size } : undefined,
     build,
     review,
     explorer,
-    context: { compactions: count("compact"), resets: count("reset"), nudges: count("nudge"), asks: count("ask") },
+    context: { compactions: count("compact"), resets: count("reset"), nudges: count("nudge") },
     ms: timing.wallMs,
     activeMs: timing.activeMs,
     specMs: lastMs("spec"),
@@ -270,13 +280,14 @@ export function renderCard(s: SpecStats): string {
     `Checks    ${x.checks} run, ${x.failed} failed`,
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,
     `Review    ${x.reviews.length ? `${x.reviews.join(" → ")} · P0/P1 confirmed (latest): ${x.confirmed.p0 + x.confirmed.p1}` : "not run"}`,
+    ...(x.precision ? [`Precision ${x.precision.reported} reported · ${x.precision.dismissed} dismissed (${pct(x.precision.dismissed, x.precision.reported)}) · ${x.precision.fixed} fixed`] : []),
     ...(hasRed ? [`Proof     ${x.proof.proven} proven · ${x.proof.sentBack} sent back · ${x.proof.unproven} no run could prove`] : []),
     `Build     ${b.turns} turns · in ${human(b.prompt)} (${pct(b.cached, b.prompt)} cached) · out ${human(b.output)} · $${b.cost.toFixed(2)}`,
     ...(phases.length ? [`Time      ${phases.join(" · ")}`] : []),
     `Context   peak ${human(b.peak)}${b.window ? ` (${pct(b.peak, b.window)} of ${human(b.window)})` : ""}`,
     `Reviewer  in ${human(x.review.prompt)} · out ${human(x.review.output)} · $${x.review.cost.toFixed(2)}`,
     `Explorer  ${x.explorer.calls ? `${x.explorer.calls} calls · in ${human(x.explorer.prompt)} · out ${human(x.explorer.output)}${x.explorer.ms > 0 ? ` @ ${outRate(x.explorer.prompt + x.explorer.output, x.explorer.ms)} tok/s` : ""} · $${x.explorer.cost.toFixed(2)}` : "not used"}`,
-    `Session   ${x.context.compactions} compactions · ${x.context.resets} resets · ${x.context.nudges} reminders · ${x.context.asks} questions`,
+    `Session   ${x.context.compactions} compactions · ${x.context.resets} resets · ${x.context.nudges} reminders`,
     "",
     "Build = the build session's model turns; the planning conversation isn't counted.",
     "```",

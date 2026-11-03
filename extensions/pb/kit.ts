@@ -714,6 +714,26 @@ export const checkpointing = new Map<string, { since: string; percent: number; f
 
 export const checkpointQuiet = new Map<string, number>();
 
+/** The last planning-write set posted per session, so a note is not repeated every settle. */
+
+export const planningWriteNotes = new Map<string, string>();
+
+/**
+ * Drop everything this process keyed by a session: keys are session file paths, so a
+ * replaced session (quit, reload, new, resume, fork) would otherwise hold its entries for
+ * the life of the process. A crash needs no such sweep — the maps die with the process.
+ */
+
+export const pruneSession = (session: string) => {
+  specStarted.delete(session);
+  compactStalls.delete(session);
+  baselineSessions.delete(session);
+  specWriting.delete(session);
+  checkpointing.delete(session);
+  checkpointQuiet.delete(session);
+  planningWriteNotes.delete(session);
+};
+
 /** The human's last message and the reply to it, for the reset summary: the thread you were in stays word for word. */
 
 export const noSnapshotWarning = (checkpoints: boolean) =>

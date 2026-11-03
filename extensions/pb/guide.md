@@ -819,7 +819,9 @@ different eyes.
 ## Undo
 
 Before each task the harness snapshots the working tree (in git's object store,
-without touching your branch, commits or staging area). `/pb:undo` in the build
+without touching your branch, commits or staging area). A row is stored in the
+undo list only when it adds information: one repeating the previous row's files,
+conversation point and task list would say nothing new. `/pb:undo` in the build
 session lists the tasks; pick one and the files and task list go back to how
 they were **before** it, and so does the **conversation**: the discarded attempt
 drops out of the context (a short note says what was undone, and repeats what
@@ -902,13 +904,15 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
   document for scripts.
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and
   failed, pauses, the review verdicts with the latest review's confirmed P0/P1,
+  a `Precision` line — findings the reviewers reported, how many the verifier
+  dismissed (their share of the reported), and how many were fixed in fix laps —,
   red proofs (proven, sent back, no run could prove), tokens in and out per role (with
   output rate where pure run time is known: explorer calls), peak context, cost,
   and a `Time` line: the spec-writing step, the spec review, the build and the
   latest review. Build time is active time, with the elapsed time in parentheses
   when pauses made them differ; the review time covers its reviewer, adversarial
   and verification passes. The card also reports how often the session was
-  compacted, reset, reminded or asked you something. Only explorer calls show an
+  compacted, reset or reminded. Only explorer calls show an
   output rate: they are a single measured run, while build and review time
   covers many turns. `/pb:stats all` compares every spec, archived ones included.
   `/pb:stats --json` prints the same report with each spec's stats.

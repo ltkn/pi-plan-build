@@ -15,9 +15,9 @@ import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildT
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { buildTimeLabel, buildTiming, loadStats, renderAll, renderCard } from "./stats.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, appendCheckpoint, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
-import { COHERE_MIN_TASKS, P_ORDER, SYNTHETIC_TASKS, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, mark, nextLine, nextTodo, normSpecArg, pauseBuild, phaseHeader, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sizeNote, sleep, specCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unfinishedPhase, warnLater, watchable, withChecking } from "./kit.ts";
+import { COHERE_MIN_TASKS, P_ORDER, SYNTHETIC_TASKS, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, mark, nextLine, nextTodo, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sizeNote, sleep, specCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unfinishedPhase, warnLater, watchable, withChecking } from "./kit.ts";
 
 const DRY_RUN_TIMEOUT_SEC = 120;
 
@@ -498,8 +498,7 @@ export function registerFlow(pi: ExtensionAPI) {
         const where = o.inTool
           ? { entry: tree(ctx).getLeafId?.() ?? undefined, pendingEntry: true as const, intro: o.intro || undefined }
           : { entry: tree(ctx).getLeafId?.() ?? undefined, intro: o.intro || undefined };
-        list.push({ id: taskId, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: taskId, ...where });
-        store.saveCheckpoints(p.spec, list);
+        if (appendCheckpoint(list, { id: taskId, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: taskId, ...where })) store.saveCheckpoints(p.spec, list);
       }
       // Outside git snapshot() is undefined: no undo point, and /pb:undo already says so. No silent failure.
     }
@@ -533,8 +532,7 @@ export function registerFlow(pi: ExtensionAPI) {
       const kept = store.checkpoints(p.spec).filter((c) => c.id !== COHERE_TASK_ID);
       const snap = snapshot(ctx.cwd, `pb: before ${p.spec} cohere`);
       if (snap) {
-        kept.push({ id: COHERE_TASK_ID, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: COHERE_TASK_ID, entry: tree(ctx).getLeafId?.() ?? undefined, pendingEntry: true });
-        store.saveCheckpoints(p.spec, kept);
+        if (appendCheckpoint(kept, { id: COHERE_TASK_ID, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: COHERE_TASK_ID, entry: tree(ctx).getLeafId?.() ?? undefined, pendingEntry: true })) store.saveCheckpoints(p.spec, kept);
       }
     }
     p.tasks.push({ id: COHERE_TASK_ID, title: "Coherence pass: consolidate what slicing split apart", status: "doing", attempts: 1 });
@@ -1338,9 +1336,6 @@ export function registerFlow(pi: ExtensionAPI) {
    * then clear the planning state and its widget. False = the human cancelled.
    */
 
-  /* The last planning-write set posted per session, so a note is not repeated every settle. */
-  const planningWrites = new Map<string, string>();
-
   pi.on("agent_settled", async (_e, ctx) => {
     if (await offerPendingBuild(ctx)) return;
     const { store, progress: p } = specOfSession(ctx);
@@ -1353,11 +1348,11 @@ export function registerFlow(pi: ExtensionAPI) {
     const current = snapshot(ctx.cwd, "pb: planning turn");
     const files = current ? changedPaths(ctx.cwd, snapshotAtStart, current.commit) : [];
     const key = [...files].sort().join("\n");
-    if (files.length && planningWrites.get(session) !== key) {
-      planningWrites.set(session, key);
+    if (files.length && planningWriteNotes.get(session) !== key) {
+      planningWriteNotes.set(session, key);
       const list = `${files.slice(0, 10).join(", ")}${files.length > 10 ? ` … (+${files.length - 10})` : ""}`;
       post(`**Changed while planning** — these project files differ from when planning began: ${list}\n\nCommands may write where edits are blocked. Nothing is lost: \`/${cmd("plan")} off\` or the build start offers to keep or restore them.`);
-    } else if (!files.length) planningWrites.delete(session);
+    } else if (!files.length) planningWriteNotes.delete(session);
   });
 
   /*

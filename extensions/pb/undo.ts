@@ -6,7 +6,7 @@ import type {
  } from "@earendil-works/pi-coding-agent";
 import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, appendCheckpoint, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { cmd, post, rewindPoint, runtime, showProgress, specOfSession, text, tree } from "./kit.ts";
 
 export function registerUndo(pi: ExtensionAPI) {
@@ -85,7 +85,9 @@ export function registerUndo(pi: ExtensionAPI) {
         }
       }
       const undoEntry: Checkpoint = { id: `u${cps.filter((c) => c.id.startsWith("u")).length + 1}`, at: now(), ...cur, head, tasks: structuredClone(p.tasks), entry: rewound ? oldLeaf : undefined };
-      store.saveCheckpoints(name, [...cps.slice(0, idx).concat(target.id === "start" ? [target] : []), undoEntry]);
+      const keptCps = cps.slice(0, idx).concat(target.id === "start" ? [target] : []);
+      appendCheckpoint(keptCps, undoEntry); // freshly numbered, so it always adds information
+      store.saveCheckpoints(name, keptCps);
       p.tasks = structuredClone(target.tasks).filter((t) => t.id !== "final" && t.id !== COHERE_TASK_ID);
       p.current = undefined;
       p.phase = "paused";

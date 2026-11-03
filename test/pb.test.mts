@@ -6916,3 +6916,180 @@ test("spec review defers to points the spec marks decided, absent new evidence",
 
 
 
+
+test("verify-test: proves named tests that ran and passed", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const root = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, [path.join(root, "scripts", "verify-test.mjs"), ...args], { cwd: root, encoding: "utf8", timeout: 120000 });
+  const fixture = ["--file", "test/verify-fixture.test.mjs"];
+  const passed = run([...fixture, "verify fixture passes one"]);
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+  // Regex metacharacters in a name match literally, and an unescaped (a+b) would not.
+  const regex = run([...fixture, "verify fixture regex (a+b)"]);
+  assert.equal(regex.status, 0, regex.stdout + regex.stderr);
+  // The default test file is the repo's own suite, named without --file.
+  const real = run(["plan mode stays with its session, not with the build session"]);
+  assert.equal(real.status, 0, real.stdout + real.stderr);
+});
+
+test("verify-test: refuses to prove a skipped, missing or failing test", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const root = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, [path.join(root, "scripts", "verify-test.mjs"), ...args], { cwd: root, encoding: "utf8", timeout: 120000 });
+  const fixture = ["--file", "test/verify-fixture.test.mjs"];
+  // The trap: `node --test --test-name-pattern=<zero-match>` itself exits 0.
+  assert.notEqual(run([...fixture, "verify fixture matches nothing"]).status, 0);
+  assert.notEqual(run([...fixture, "verify fixture skips one"]).status, 0);
+  assert.notEqual(run([...fixture, "verify fixture fails one"]).status, 0);
+});
+
+test("checkpoints: an unchanged tree reuses the tip commit without moving the ref", async () => {
+  const t = setup();
+  const { snapshot } = await import("../extensions/pb/checkpoint.ts");
+  const count = () => Number(execSync("git rev-list --count refs/pb/checkpoints", { cwd: t.repo, encoding: "utf8" }).trim());
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "one");
+  const first = snapshot(t.repo, "pb: first")!;
+  assert.equal(count(), 1);
+  const again = snapshot(t.repo, "pb: second")!; // nothing changed between the two calls
+  assert.equal(again.commit, first.commit);
+  assert.equal(again.tree, first.tree);
+  assert.equal(count(), 1); // no new commit object; the ref still stands where the first put it
+  fs.writeFileSync(path.join(t.repo, "a.txt"), "two");
+  const moved = snapshot(t.repo, "pb: third")!;
+  assert.notEqual(moved.commit, first.commit);
+  assert.equal(count(), 2);
+});
+
+test("checkpoints: a checkpoint row that adds no information over the last row is not stored", async () => {
+  const { appendCheckpoint } = await import("../extensions/pb/store.ts");
+  const list: any[] = [];
+  const row = (over: object = {}): any => ({
+    id: "T1", task: "T1", at: "2026-01-01 00:00:00", commit: "c1", tree: "t1", head: "h1", entry: "e1",
+    tasks: [{ id: "T1", title: "one", status: "todo", attempts: 1 }], ...over,
+  });
+  assert.equal(appendCheckpoint(list, row()), true);
+  // Same step, same commit, conversation point and task list: the row would say nothing new.
+  assert.equal(appendCheckpoint(list, row({ at: "2026-01-01 00:05:00", summary: "done later", files: ["a.ts"] })), false);
+  assert.equal(list.length, 1);
+  assert.equal(appendCheckpoint(list, row({ commit: "c2", tree: "t2" })), true); // the files moved
+  assert.equal(appendCheckpoint(list, row({ commit: "c2", tree: "t2", entry: "e2" })), true); // the conversation moved
+  assert.equal(appendCheckpoint(list, row({ commit: "c2", tree: "t2", entry: "e2", tasks: [] })), true); // the task list moved
+  // A row is found by its id (undo targets, task summaries): another step's row is never dropped.
+  assert.equal(appendCheckpoint(list, row({ commit: "c3", tree: "t3", entry: "e3", id: "T2", task: "T2" })), true);
+  assert.equal(list.length, 5);
+});
+
+test("session shutdown prunes every session-keyed registry for that session", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks"); // the standards offer
+  t.agent.script = async () => {
+    fs.writeFileSync(path.join(t.repo, "stray.txt"), "written by a shell command");
+  };
+  await t.run("plan", "x"); // a planning turn whose write seeds the planning-write dedupe note
+  const session = t.runtime().ctx.sessionManager.getSessionFile()!;
+  const kit = await import("../extensions/pb/kit.ts");
+  kit.specStarted.set(session, 1);
+  kit.rememberStall(session, { changed: [], read: [], tokens: 1, strikes: 1 });
+  kit.baselineSessions.add(session);
+  kit.specWriting.add(session);
+  kit.checkpointing.set(session, { since: "x", percent: 1, last: {} });
+  kit.checkpointQuiet.set(session, 1);
+  assert.ok(kit.planningWriteNotes.has(session), "the planning turn should have left a dedupe note");
+  await t.fire("session_shutdown", { reason: "quit" });
+  for (const [name, present] of Object.entries({
+    specStarted: kit.specStarted.has(session),
+    compactStalls: kit.compactStalls.has(session),
+    baselineSessions: kit.baselineSessions.has(session),
+    specWriting: kit.specWriting.has(session),
+    checkpointing: kit.checkpointing.has(session),
+    checkpointQuiet: kit.checkpointQuiet.has(session),
+    planningWriteNotes: kit.planningWriteNotes.has(session),
+  })) assert.ok(!present, `${name} still holds the shut-down session`);
+});
+
+test("session shutdown leaves other sessions state intact", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  t.agent.script = async () => {
+    fs.writeFileSync(path.join(t.repo, "stray.txt"), "written by a shell command");
+  };
+  await t.run("plan", "x");
+  const session = t.runtime().ctx.sessionManager.getSessionFile()!;
+  const kit = await import("../extensions/pb/kit.ts");
+  const other = path.join(t.repo, ".pi", "other-session.jsonl");
+  for (const s of [session, other]) {
+    kit.specStarted.set(s, 1);
+    kit.rememberStall(s, { changed: [], read: [], tokens: 1, strikes: 1 });
+    kit.baselineSessions.add(s);
+    kit.specWriting.add(s);
+    kit.checkpointing.set(s, { since: "x", percent: 1, last: {} });
+    kit.checkpointQuiet.set(s, 1);
+    kit.planningWriteNotes.set(s, "stray.txt");
+  }
+  await t.fire("session_shutdown", { reason: "new", targetSessionFile: "next" });
+  for (const [name, set] of Object.entries({
+    specStarted: kit.specStarted,
+    compactStalls: kit.compactStalls,
+    baselineSessions: kit.baselineSessions,
+    specWriting: kit.specWriting,
+    checkpointing: kit.checkpointing,
+    checkpointQuiet: kit.checkpointQuiet,
+    planningWriteNotes: kit.planningWriteNotes,
+  })) {
+    assert.ok(!set.has(session), `${name} still holds the shut-down session`);
+    assert.ok(set.has(other), `${name} dropped a live session`);
+  }
+});
+
+test("deps: the lockfile peer ranges match package.json", async () => {
+  const root = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
+  assert.deepEqual(lock.packages[""].peerDependencies, pkg.peerDependencies); // npm ci refuses when these disagree
+});
+
+test("stats: review precision line reports reported dismissed and fixed", async () => {
+  const { renderCard } = await import("../extensions/pb/stats.ts");
+  const spec = (events: unknown[]) =>
+    ({
+      name: "demo",
+      phase: "reviewed",
+      events,
+      explore: [],
+      progress: { spec: "demo", phase: "reviewed", session: "s", tasks: [], updatedAt: "2026-10-01 10:08:00" },
+    }) as any;
+  const card = renderCard(
+    spec([
+      { type: "review", at: "2026-10-01 10:08:00", verdict: "pass", p: [1, 2, 0, 1], dismissed: 2, ms: 60_000 },
+      { type: "fix", at: "2026-10-01 10:20:00", fixed: ["a", "b"], skipped: [], tests: "green" },
+      { type: "fix", at: "2026-10-01 10:30:00", fixed: ["b", "c"], skipped: [], tests: "green" }, // b reported twice, fixed once
+    ]),
+  );
+  assert.match(card, /^Precision 6 reported · 2 dismissed \(33%\) · 3 fixed$/m);
+  // No review happened: the line is absent, not zero-filled.
+  assert.doesNotMatch(renderCard(spec([{ type: "build-start", at: "2026-10-01 10:00:00" }])), /Precision/);
+  // A clean review has no share to show: pct(0, 0) is the same dash the rest of the card uses.
+  assert.match(
+    renderCard(spec([{ type: "review", at: "2026-10-01 10:08:00", verdict: "pass", p: [0, 0, 0, 0], dismissed: 0, ms: 60_000 }])),
+    /^Precision 0 reported · 0 dismissed \(–\) · 0 fixed$/m,
+  );
+});
+
+test("stats: the session line no longer counts questions", async () => {
+  const { renderCard } = await import("../extensions/pb/stats.ts");
+  const card = renderCard({
+    name: "demo",
+    phase: "reviewed",
+    events: [{ type: "ask", at: "2026-10-01 10:00:00" }], // nothing writes this event type: no card may imply it exists
+    explore: [],
+    progress: { spec: "demo", phase: "reviewed", session: "s", tasks: [], updatedAt: "2026-10-01 10:08:00" },
+  } as any);
+  assert.match(card, /^Session +\d+ compactions · \d+ resets · \d+ reminders$/m);
+  assert.doesNotMatch(card, /questions/);
+  const source = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "extensions", "pb", "stats.ts"), "utf8");
+  assert.ok(!/\basks\s*:/.test(source) && !source.includes('count("ask")'), "the dead asks counter must not remain in stats.ts");
+});

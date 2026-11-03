@@ -9,7 +9,7 @@ import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoint
 import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
 import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
 import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { COMPACT_STALL_LIMIT, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, loadSpec, pauseBuild, rememberStall, resetLimit, runtime, specOfSession, stop, tree, unfinishedPhase } from "./kit.ts";
+import { COMPACT_STALL_LIMIT, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, loadSpec, pauseBuild, pruneSession, rememberStall, resetLimit, runtime, specOfSession, stop, tree, unfinishedPhase } from "./kit.ts";
 import { pastCheckpoint, stateSummary } from "./flow.ts";
 
 export function registerHooks(pi: ExtensionAPI) {
@@ -341,9 +341,14 @@ export function registerHooks(pi: ExtensionAPI) {
 
   pi.on("session_before_tree", () => (runtime.undoSummary ? { summary: { summary: runtime.undoSummary } } : undefined));
 
-  // Best-effort: this process's private index files are inert but not git's business to keep.
+  // Best-effort: this process's private index files are inert but not git's business to keep, and a
+  // replaced session's in-memory entries would otherwise live as long as the process itself.
 
-  pi.on("session_shutdown", (_e, ctx) => cleanupIndexes(ctx.cwd));
+  pi.on("session_shutdown", (_e, ctx) => {
+    cleanupIndexes(ctx.cwd);
+    const session = ctx.sessionManager.getSessionFile();
+    if (session) pruneSession(session);
+  });
 
   // Keep the cache warm while a check runs: the agent certainly continues afterwards.
 

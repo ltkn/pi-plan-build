@@ -93,6 +93,10 @@ export function snapshot(cwd: string, message: string): Snapshot | undefined {
     run(cwd, ["add", "-A", "--", ".", ...addExcludes(cwd), ...huge.map((f) => `:(exclude,literal)${f}`)], env);
     const tree = run(cwd, ["write-tree"], env).trim();
     const parent = tryRun(cwd, ["rev-parse", "--verify", "-q", REF])?.trim();
+    // A tree identical to the tip's says nothing new: reuse the tip instead of minting a commit
+    // per planning turn / explore / review, which would grow refs/pb/checkpoints for no information.
+    const parentTree = parent ? tryRun(cwd, ["rev-parse", "--verify", "-q", `${parent}^{tree}`])?.trim() : undefined;
+    if (parent && parentTree === tree) return { commit: parent, tree };
     const commit = run(cwd, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", message], IDENT).trim();
     run(cwd, ["update-ref", REF, commit]);
     return { commit, tree };
