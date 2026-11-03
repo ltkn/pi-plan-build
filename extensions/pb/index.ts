@@ -323,6 +323,26 @@ export default function pb(pi: ExtensionAPI) {
   /** " · 2m 3s" when a phase recorded its time, nothing when it didn't (older events carry none). */
   const timeSuffix = (ms?: number) => (ms !== undefined ? ` · ${duration(ms)}` : "");
 
+  /** Synthetic build steps that are not spec tasks. */
+  const SYNTHETIC_TASKS = new Set(["final", COHERE_TASK_ID, "skeleton"]);
+  const specTasks = (p: Progress) => p.tasks.filter((t) => !SYNTHETIC_TASKS.has(t.id));
+
+  /** A phase result's first line: marker, phase, spec, then the facts that summarize it. */
+  const phaseHeader = (marker: string, phase: string, spec: string, ...facts: (string | false | undefined)[]) =>
+    `**${marker} ${phase} — ${spec}**${facts.filter((f): f is string => !!f).map((f) => ` · ${f}`).join("")}`;
+
+  /** The one primary action a result hands to the human. */
+  const nextLine = (action: string) => `**Next:** ${action}`;
+
+  /** The facts behind a result, on one line. */
+  const evidenceLine = (...parts: (string | false | undefined)[]) => {
+    const kept = parts.filter((p): p is string => !!p);
+    return kept.length ? `**Evidence:** ${kept.join(" · ")}` : "";
+  };
+
+  /** How many extra attempts the build needed across its real tasks. */
+  const retryCount = (p: Progress) => specTasks(p).reduce((n, t) => n + Math.max(0, t.attempts - 1), 0);
+
   /** The latest time one of the spec's events recorded, if any. */
   const recordedMs = (store: Store, name: string, type: string): number | undefined => {
     const ms = [...readEvents(path.join(store.specDir(name), "events.jsonl"))].reverse().find((e) => e.type === type && typeof e.ms === "number")?.ms;
@@ -1791,10 +1811,29 @@ export default function pb(pi: ExtensionAPI) {
     p.pause = reason;
     store.saveProgress(p);
     store.event(p.spec, { type: "pause", why, task: p.current });
+    const cfg = store.config();
     const timing = buildTiming(readEvents(path.join(store.specDir(p.spec), "events.jsonl")));
-    const took = timing.activeMs || timing.wallMs ? `⏱ Build so far: ${buildTimeLabel(timing)}\n\n` : "";
+    const tasks = specTasks(p);
+    const done = tasks.filter((t) => t.status === "done").length;
+    const current = p.current && !SYNTHETIC_TASKS.has(p.current) ? p.tasks.find((t) => t.id === p.current) : undefined;
+    const step = p.current === "final" ? "final check" : current ? `${current.id} · attempt ${current.attempts}/${cfg.maxAttempts}` : "";
+    const saved = cfg.checkpoints ? "progress and checkpoints saved" : "progress saved";
+    const next = tipKey === "build.contract"
+      ? `revise \`${store.rel("specs", p.spec, "spec.md")}\` if it should change, then \`/${cmd("build")} ${p.spec}\` re-approves it and resumes.`
+      : tipKey === "build.paused-attempts"
+        ? `\`/${cmd("build")}\` to retry with fresh attempts, or \`/${cmd("undo")} ${p.current ?? "start"}\` to throw this attempt away.`
+        : `\`/${cmd("build")}\` to continue (plain chat won't re-attach the harness).`;
     showProgress(ctx, p);
-    say(`**⏸ Build paused** — ${reason}\n\n${took}To continue, run \`/${cmd("build")}\` (plain chat like "resume" won't re-attach the harness).\n\n${tip(tipKey, { spec: p.spec, ...vars })}`);
+    say([
+      phaseHeader("⏸", "Build paused", p.spec, tasks.length ? `${done}/${tasks.length} tasks` : "", step, timing.activeMs || timing.wallMs ? buildTimeLabel(timing) : ""),
+      "",
+      nextLine(next),
+      evidenceLine(timing.activeMs || timing.wallMs ? `build time so far: ${buildTimeLabel(timing)}` : "", done ? `${done} task${done === 1 ? "" : "s"} done, kept` : "", saved),
+      "",
+      reason,
+      "",
+      tip(tipKey, { spec: p.spec, ...vars }),
+    ].join("\n"));
   };
 
   /**
@@ -1990,16 +2029,33 @@ export default function pb(pi: ExtensionAPI) {
     const rest = p.writtenIn ? store.specsOfPlanning(p.writtenIn) : [];
     const stale = staleProseRefs(ctx.cwd, p.baseCommit);
     const changedFiles = changedFilesSection(store, p);
-    const timing = buildTiming(readEvents(path.join(store.specDir(p.spec), "events.jsonl")));
+    const events = readEvents(path.join(store.specDir(p.spec), "events.jsonl"));
+    const timing = buildTiming(events);
+    const tasks = specTasks(p);
+    const done = tasks.filter((t) => t.status === "done").length;
+    // The final gate's commands, in the order they ran; a suite run the last task already did
+    // still records a final event, so the list is complete without a second run.
+    const gates = new Map<string, boolean>();
+    for (const e of events) {
+      if (e.type === "check" && e.task === "final" && typeof e.command === "string") gates.set(e.command, e.ok === true);
+    }
+    if (p.lastVerify?.command && p.lastVerify.ok !== null) gates.set(p.lastVerify.command, p.lastVerify.ok);
+    const gateLabel = (c: string) => (c === testCmd ? "suite" : c === buildCmd ? "build" : c === lintCmd ? "lint" : `\`${c}\``);
+    const gateFacts = [...gates].map(([c, ok]) => `${gateLabel(c)} ${ok ? "PASS" : "FAIL"}`);
+    const checks = events.filter((e) => e.type === "check" && e.task !== "final" && e.task !== COHERE_TASK_ID && e.task !== "skeleton").length;
+    const retries = retryCount(p);
+    const stat = diffStat(ctx.cwd, p.baseCommit).split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
     post(
       [
-        `**✅ BUILD COMPLETE — ${p.spec}**${notices}`,
+        phaseHeader("✅", "Build complete", p.spec, tasks.length ? `${done}/${tasks.length} tasks` : "", timing.activeMs || timing.wallMs ? buildTimeLabel(timing) : ""),
+        "",
+        nextLine(`\`/${cmd("review")}\` here in this session, then commit and \`/${cmd("archive")}\`.`),
+        evidenceLine(...gateFacts, checks ? `${checks} check${checks === 1 ? "" : "s"}` : "", retries ? `${retries} retr${retries === 1 ? "y" : "ies"}` : "", stat),
+        ...(notices ? [notices.trim()] : []),
         "",
         "```",
         ...p.tasks.map(taskLine),
         "```",
-        `Check: ${p.lastVerify?.summary.split("\n")[0] ?? `none (verification ${spec.gate})`}`,
-        ...(timing.activeMs || timing.wallMs ? [`⏱ Build time: ${buildTimeLabel(timing)}`] : []),
         p.assumptions?.length ? `\nChoices the build made where the spec was unclear (in the spec's Decisions; the review checks them):\n${p.assumptions.map((a) => `- ${a}`).join("\n")}` : "",
         p.unattended?.length ? `\nDecided without you (no answer in time):\n${p.unattended.map((c) => `- ${c}`).join("\n")}` : "",
         p.testChanges?.length ? `\nExisting tests the build changed (the review checks whether each was justified):\n${p.testChanges.map((c) => `- ${c}`).join("\n")}` : "",
@@ -2611,14 +2667,24 @@ export default function pb(pi: ExtensionAPI) {
    */
   const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, name: string, md: string): Promise<boolean> => {
     const hash = specHash(md);
+    const parsed = parseSpec(md).spec;
+    const criteria = acceptanceCriteria(md, parsed).length;
+    const assumptions = assumptionsOf(md).length;
+    const scope = [parsed ? `${parsed.tasks.length} task${parsed.tasks.length === 1 ? "" : "s"}` : "", criteria ? `${criteria} acceptance line${criteria === 1 ? "" : "s"}` : "", assumptions ? `${assumptions} assumption${assumptions === 1 ? "" : "s"}` : ""];
     const last = readEvents(path.join(store.specDir(name), "events.jsonl"))
       .filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block") && e.hash === hash)
       .at(-1);
-    const line = (f: Finding, i: number) => findingLine(f, i + 1);
     if (last?.verdict === "block") {
       const findings = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
-      const took = timeSuffix(typeof last.ms === "number" ? last.ms : undefined);
-      post(`**Spec review** — ❌ FAIL${took} · P0 blocks T1 (the spec is unchanged since that review):\n${findings.map(line).join("\n") || "The reviewer's answer could not be read as findings."}`);
+      const p0 = findings.filter((f) => f.priority === "P0").length;
+      post([
+        phaseHeader("❌", "Spec review", name, "FAIL", p0 ? `P0 ${p0}` : "", typeof last.ms === "number" ? duration(last.ms) : ""),
+        "",
+        nextLine(`fix the spec with \`/${cmd("spec")} ${name}\`, then \`/${cmd("build")}\`.`),
+        evidenceLine("the P0 blocks T1; nothing was built", "the recorded pass covers this text"),
+        "",
+        ...(findings.length ? findings.map((f) => findingLine(f)) : ["The reviewer's answer could not be read as findings."]),
+      ].join("\n"));
       ctx.ui.notify("❌ Spec review blocks T1 on a P0: fix the spec — the changed contract is reviewed again — or stop here.", "warning");
       return false;
     }
@@ -2632,23 +2698,39 @@ export default function pb(pi: ExtensionAPI) {
     const sessionNote = review.session ? `The whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
     if (review.block && !review.findings.length) {
       post([
-        `**Spec review** — ❌ FAIL${timeSuffix(review.ms)} · the reviewer returned no findings through its report tool, so no review of this text was recorded.`,
-        ...(review.prose ? [`What it wrote instead:\n\n${review.prose}`] : []),
-        `Run /${cmd("build")} again to try once more; if this model keeps answering in prose, point the reviewer at one that reports — \`"specReviewer": {"model": "provider/id"}\` in ${store.rel("config.json")}.`,
-        sessionNote,
-      ].filter(Boolean).join("\n\n"));
+        phaseHeader("❌", "Spec review", name, "FAIL", "no report", review.ms !== undefined ? duration(review.ms) : ""),
+        "",
+        nextLine(`\`/${cmd("build")}\` to try again, or point the reviewer at a model that reports: \`"specReviewer": {"model": "provider/id"}\` in ${store.rel("config.json")}.`),
+        evidenceLine("the reviewer returned no findings through its tool", "nothing was recorded"),
+        ...(review.prose ? ["", `What it wrote instead:\n\n${review.prose}`] : []),
+        ...(sessionNote ? ["", sessionNote] : []),
+      ].join("\n"));
       ctx.ui.notify("❌ Spec review did not report; nothing was recorded. Run the build again, or point specReviewer.model at a model that reports.", "warning");
       return false;
     }
     if (review.findings.length) {
       const p0 = review.findings.filter((f) => f.priority === "P0");
       const rest = review.findings.filter((f) => f.priority !== "P0");
-      const sections = [review.block ? `**Spec review** — ❌ FAIL${timeSuffix(review.ms)} · P0 blocks T1:` : `**Spec review** — ✅ PASS${timeSuffix(review.ms)} · advisory findings (P1-P3, not blocking):`];
-      if (p0.length) sections.push(`**P0**\n${p0.map(line).join("\n")}`);
-      if (rest.length) sections.push(`**Advisory**\n${rest.map(line).join("\n")}`);
-      post([...sections, sessionNote].filter(Boolean).join("\n\n"));
+      const counts = P_ORDER.map((k) => review.findings.filter((f) => f.priority === k).length);
+      const tally = counts.map((c, n) => `P${n} ${c}`).join(" · ");
+      const sections = [
+        phaseHeader(review.block ? "❌" : "✅", "Spec review", name, review.block ? "FAIL" : "PASS", tally, review.ms !== undefined ? duration(review.ms) : ""),
+        "",
+        nextLine(review.block ? `fix the spec with \`/${cmd("spec")} ${name}\`, then \`/${cmd("build")}\`.` : "T1 starts next."),
+        evidenceLine(...scope, review.block ? "the P0 blocks T1; nothing was built" : "the recorded pass covers this text; P1-P3 do not block"),
+      ];
+      if (p0.length) sections.push("", "**P0**", "", ...p0.map((f) => findingLine(f)));
+      if (rest.length) sections.push("", "**Advisory**", "", ...rest.map((f) => findingLine(f)));
+      if (sessionNote) sections.push("", sessionNote);
+      post(sections.join("\n"));
     } else {
-      post([`**Spec review** — ✅ PASS${timeSuffix(review.ms)} · no findings (the recorded pass covers this text).`, sessionNote].filter(Boolean).join("\n\n"));
+      post([
+        phaseHeader("✅", "Spec review", name, "PASS", "no findings", review.ms !== undefined ? duration(review.ms) : ""),
+        "",
+        nextLine("T1 starts next."),
+        evidenceLine(...scope, "the recorded pass covers this text"),
+        ...(sessionNote ? ["", sessionNote] : []),
+      ].join("\n"));
     }
     if (review.block) {
       ctx.ui.notify("❌ Spec review blocks T1 on a P0: fix the spec — the changed contract is reviewed again — or stop here.", "warning");
@@ -2779,19 +2861,24 @@ export default function pb(pi: ExtensionAPI) {
     }
   };
 
-  const showSpec = (store: Store, name: string, names: string[] = [name], extra: string[] = []) => {
+  const showSpec = (store: Store, name: string, o: { names?: string[]; next: string; extra?: string[] }) => {
     const loaded = loadSpec(store, name);
     if (!loaded) return;
+    const names = o.names ?? [name];
     const specMs = recordedMs(store, name, "spec");
+    const criteria = acceptanceCriteria(loaded.md, loaded.spec).length;
+    const assumptions = assumptionsOf(loaded.md);
+    const others = names.filter((n) => n !== name);
     post(
       [
-        `**✅ Spec written: ${name}** (${store.rel("specs", name, "spec.md")})${names.length > 1 ? ` · also: ${names.filter((n) => n !== name).join(", ")}` : ""}${timeSuffix(specMs)}`,
+        phaseHeader("✅", "Spec written", name, `${loaded.spec.tasks.length} task${loaded.spec.tasks.length === 1 ? "" : "s"}`, criteria ? `${criteria} criteri${criteria === 1 ? "on" : "a"}` : "", specMs !== undefined ? duration(specMs) : ""),
+        "",
+        nextLine(o.next),
+        evidenceLine(store.rel("specs", name, "spec.md"), `verification ${loaded.spec.gate}${loaded.spec.newTests ? "" : " · no new tests"}`, assumptions.length ? `${assumptions.length} assumption${assumptions.length === 1 ? "" : "s"} recorded` : "", others.length ? `also: ${others.join(", ")}` : ""),
         "",
         ...loaded.spec.tasks.map((t) => `- ${t.id}: ${t.title}${t.test ? ` · \`${t.test}\`` : ""}`),
-        "",
-        `Verification: ${loaded.spec.gate}${loaded.spec.newTests ? "" : " · no new tests"}`,
-        ...assumptionsOf(loaded.md).map((a, i) => `${i ? "" : "\nSettled without asking you (the review checks them):\n"}- ${a}`),
-        ...extra,
+        ...assumptions.map((a, i) => `${i ? "" : "\nSettled without asking you (the review checks them):\n"}- ${a}`),
+        ...(o.extra?.length ? o.extra : []),
       ].join("\n"),
     );
     pi.appendEntry("pb-spec", { name, markdown: loaded.md });
@@ -2899,7 +2986,11 @@ export default function pb(pi: ExtensionAPI) {
     }
     const dry = await dryRunTests(ctx, store, ready[0]);
     if (sessionGone(ctx)) return; // replaced during the dry run: a later /pb:build still offers the spec
-    showSpec(store, ready[0], ready, dry);
+    showSpec(store, ready[0], {
+      names: ready,
+      next: choice === FRESH ? "the build starts in a fresh session; one fresh reviewer checks the spec before T1." : "the build starts here; one fresh reviewer checks the spec before T1.",
+      extra: dry,
+    });
     await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes });
   };
 
@@ -2921,7 +3012,11 @@ export default function pb(pi: ExtensionAPI) {
       if (session) store.setPendingBuild(session);
       return true;
     }
-    showSpec(store, name, names, dry);
+    showSpec(store, name, {
+      names,
+      next: ctx.hasUI ? "choose how to build: here or in a fresh session — or edit the spec first." : `\`/${cmd("build")} ${name}\` builds it here.`,
+      extra: dry,
+    });
     if (!ctx.hasUI) {
       post(tip("spec.next"));
       return true;
@@ -3351,11 +3446,15 @@ export default function pb(pi: ExtensionAPI) {
   /** The review's message: verdict, findings, what was dismissed or changed during the review, and the sessions. */
   const reviewMessage = (
     run: ReviewRun,
-    o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; changedDuring: string[]; partial: boolean; verificationFailed?: string; thrash?: boolean },
+    o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; changedDuring: string[]; partial: boolean; verificationFailed?: string; verified?: boolean; verificationMs?: number; thrash?: boolean; midBuild?: string[] },
   ) => {
     const findings = [...o.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
     const inChange = findings.filter((f) => !f.outside);
     const outside = findings.filter((f) => f.outside);
+    // /pb:fix numbers the stored P0-P2 list; display numbers must match it exactly: in-change
+    // first, then outside, P3 nits unnumbered and never fixable.
+    const fixable = [...inChange, ...outside].filter((f) => f.priority !== "P3");
+    const number = new Map(fixable.map((f, i) => [f, i + 1] as const));
     const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
     const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left && !x.error);
     const unparsed = run.passes.filter((x) => x.unparsed && !x.left).map((x) => (x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"));
@@ -3368,7 +3467,7 @@ export default function pb(pi: ExtensionAPI) {
       run.passes.filter((x) => x.role === "review").flatMap((x) => x.acceptance ?? []),
     );
     const verdict = !run.passes.length || lost ? "none" : verdictOf(findings, coverage);
-    const tally = findings.length || o.dismissed.length ? ` · ${counts.map((c, n) => `P${n} ${c}`).join(" · ")}` : "";
+    const tally = findings.length || o.dismissed.length ? counts.map((c, n) => `P${n} ${c}`).join(" · ") : "";
     const sessions = run.passes
       .filter((x) => x.session)
       .map((x) => `${x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"} \`pi --session ${sessionIdOf(x.session)}\``);
@@ -3383,9 +3482,41 @@ export default function pb(pi: ExtensionAPI) {
       status: l.status === "not reported" ? "not verified" : l.status,
       evidence: l.status === "not reported" ? "not reported" : (l.evidence ?? ""),
     }));
-    const tipKey = verdict === "pass" ? "review.pass" : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
+    const midBuild = o.midBuild ?? [];
+    const stepName = (id: string) => (id === COHERE_TASK_ID ? "coherence pass" : id === "final" ? "final check" : id);
+    const midBuildView = midBuild.map(stepName);
+    const fixIds = fixable.map((_, i) => i + 1).join(" ");
+    const next = o.partial
+      ? `\`/${cmd("review")}\` continues this review.`
+      : lost
+        ? `read the ${unparsed.join(" and ")} session${unparsed.length === 1 ? "" : "s"}, then \`/${cmd("review")}\` again.`
+        : verdict === "unverified"
+          ? `check each unverified criterion (or amend the spec), then \`/${cmd("review")}\` again — \`/${cmd("review")} --full\` if nothing else changed.`
+          : verdict === "changes_needed"
+            ? run.name && fixIds
+              ? `\`/${cmd("fix")} ${fixIds}\` (or fix them by hand), then \`/${cmd("review")}\` again.`
+              : run.name
+                ? `fix the P3 nits by hand if you want them, then \`/${cmd("review")}\` again.`
+                : `fix what is above, then \`/${cmd("review")}\` again.`
+            : verdict === "pass"
+              ? midBuild.length
+                ? `\`/${cmd("build")}\` continues the build${midBuildView.length ? `; ${midBuildView.join(", ")} still to do` : ""}.`
+                : run.name
+                  ? `commit with the message below, then \`/${cmd("archive")}\`.`
+                  : "commit when ready."
+              : `\`/${cmd("review")}\` again, or read the sessions below.`;
+    const tipKey = verdict === "pass" ? (midBuild.length ? "review.mid-build" : "review.pass") : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
+    const passMark = finished("review") ? "✓" : run.passes.some((x) => x.role === "review" && x.error) ? "✗" : "—";
+    const abuseMark = run.security ? (finished("abuse") ? "✓" : run.passes.some((x) => x.role === "abuse" && x.error) ? "✗" : "—") : "";
+    const verifier = o.verified === undefined ? "" : o.verificationFailed ? "verifier ✗" : !o.verified ? "verifier skipped" : (o.verificationMs ?? 1) > 0 ? "verifier ✓" : "verifier —";
+    const stat = diffStat(run.cwd, run.before?.commit ?? run.base).split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
+    const scopeFacts = [stat, run.base ? `base ${run.base.slice(0, 7)}` : ""];
+    const result = lost ? "NO VERDICT" : verdict === "pass" ? "PASS" : verdict === "changes_needed" ? "CHANGES NEEDED" : verdict === "unverified" ? "UNVERIFIED" : "no verdict";
     const text = [
-      `**Review of ${run.label}**${run.followUp ? " (follow-up)" : ""} — ${lost ? "⚠ NO VERDICT — a pass reported in prose only" : verdict === "pass" ? "✅ PASS" : verdict === "changes_needed" ? "❌ CHANGES NEEDED" : verdict === "unverified" ? "⚠ UNVERIFIED" : "no verdict"}${tally}${finished("abuse") ? " · with an adversarial pass" : ""}${timeSuffix(run.ms)}`,
+      phaseHeader(verdict === "pass" ? "✅" : verdict === "changes_needed" ? "❌" : "⚠", "Review", `${run.label}${run.followUp ? " (follow-up)" : ""}`, result, tally, finished("abuse") ? "with an adversarial pass" : "", run.ms !== undefined ? duration(run.ms) : ""),
+      "",
+      nextLine(next),
+      evidenceLine(`${run.name ? "spec" : "intent"} pass ${passMark}`, abuseMark ? `adversarial ${abuseMark}` : "", verifier, coverage.enforced ? `${coverage.met}/${coverage.lines.length} criteria met` : "", ...scopeFacts, midBuildView.length ? `mid-build · ${midBuildView.join(", ")} still to build` : ""),
       ...(o.partial
         ? ["", `⚠ You left the review before it finished: this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),
@@ -3413,8 +3544,8 @@ export default function pb(pi: ExtensionAPI) {
               : []),
           ]
         : []),
-      ...(inChange.length ? ["", "**Findings**", "", ...inChange.map((f, i) => findingLine(f, i + 1))] : []),
-      ...(outside.length ? ["", "**Outside the change** — pre-existing, not caused by this revision", "", ...outside.map((f, i) => findingLine(f, i + 1))] : []),
+      ...(inChange.length ? ["", "**Findings**", "", ...inChange.map((f) => findingLine(f, number.get(f)))] : []),
+      ...(outside.length ? ["", "**Outside the change** — pre-existing, not caused by this revision", "", ...outside.map((f) => findingLine(f, number.get(f)))] : []),
       ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}${d.finding.outside ? " · Outside the change" : ""}] ${d.finding.title} — ${d.evidence}`)] : []),
       ...(o.changedDuring.length ? ["", `⚠ Files changed while the review ran (left as they are — the reviewer can't write, so these are yours or another session's): ${o.changedDuring.join(", ")}`] : []),
       ...(run.largeFiles?.length ? ["", `⚠ Untracked files over 20 MB are in no snapshot or diff (read them yourself): ${run.largeFiles.join(", ")}`] : []),
@@ -3426,7 +3557,7 @@ export default function pb(pi: ExtensionAPI) {
       "",
       tip(tipKey, { spec: run.label }),
     ].join("\n");
-    return { text, verdict, counts, findings, acceptance, complete: finished("review") && (!run.security || finished("abuse")), abuse: finished("abuse") };
+    return { text, verdict, counts, findings: fixable, acceptance, complete: finished("review") && (!run.security || finished("abuse")), abuse: finished("abuse") };
   };
 
   const allFindings = (run: ReviewRun) => run.passes.flatMap((x) => (x.role === "abuse" ? x.findings.map((f) => ({ ...f, title: `Adversarial: ${f.title}` })) : x.findings));
@@ -3472,20 +3603,31 @@ export default function pb(pi: ExtensionAPI) {
     if (run.before) run.largeFiles = [...new Set([...(run.largeFiles ?? []), ...skippedLargeFiles(run.cwd, commitTime(run.cwd, run.before.commit))])];
     // A stall from an earlier run of this spec must not mark this one: the events carry the run id.
     const thrash = run.name && run.id ? readEvents(path.join(store.specDir(run.name), "events.jsonl")).some((e) => e.type === "compact" && e.run === run.id && (e as { thrash?: unknown }).thrash === true) : false;
-    const m = reviewMessage(run, { findings: checked.findings, dismissed: checked.dismissed, changedDuring, partial: false, verificationFailed: checked.error?.split("\n")[0], thrash });
     const p = run.name ? store.progress(run.name) : undefined;
+    // Synthetic steps included: a review during a coherence pass or the final check must not
+    // mark a build that still has work as reviewed.
+    const remaining = p ? p.tasks.filter((t) => t.status !== "done").map((t) => t.id) : [];
+    const m = reviewMessage(run, {
+      findings: checked.findings,
+      dismissed: checked.dismissed,
+      changedDuring,
+      partial: false,
+      verificationFailed: checked.error?.split("\n")[0],
+      verified: cfg.reviewer.verify !== false,
+      verificationMs: checked.ms,
+      thrash,
+      midBuild: remaining,
+    });
     if (run.name && p) {
       store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ms: run.ms, ...checked.tokens, cost: checked.cost });
       // A lead for later features: completed findings survive the review's own files and the archive.
       const ledger = ledgerFindings(checked.findings);
       if (ledger.length) store.event(run.name, { type: "review-findings", review: run.id, findings: ledger });
-      const remaining = p.tasks.filter((t) => t.status !== "done").map((t) => t.id);
       if (m.complete) {
-        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings.filter((f) => f.priority !== "P3"), acceptance: m.acceptance };
+        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings, acceptance: m.acceptance };
         // A pass only finishes a finished build: with tasks still open the phase stays,
         // or the next /pb:build strands and /pb:archive offers a half-built spec.
         if (m.verdict === "pass" && !remaining.length) p.phase = "reviewed";
-        else if (m.verdict === "pass") m.text += `\n\nMid-build review: ${remaining.join(", ")} still to build — phase left as ${p.phase}.`;
       }
       p.reviewUnshown = true;
       store.saveProgress(p);
@@ -3839,8 +3981,10 @@ export default function pb(pi: ExtensionAPI) {
    * done, so the summary hands the checking over instead of doing it. The report names findings by the
    * numbers the brief shows, so no prose has to be matched back to one.
    */
-  const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[]): Promise<void> => {
+  const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[], allOpen: Finding[]): Promise<void> => {
     const home = ctx.sessionManager.getSessionFile() ?? undefined;
+    const numberOf = new Map(allOpen.map((f, i) => [f, i + 1] as const));
+    const label = (f: Finding) => `#${numberOf.get(f) ?? "?"} ${f.title}`;
     let live: ExtensionCommandContext = ctx;
     let remaining = first;
     const fixed: string[] = [];
@@ -3861,19 +4005,32 @@ export default function pb(pi: ExtensionAPI) {
       }
       const skip = remaining.filter((f) => report.skipped.includes(f.title));
       const done = remaining.filter((f) => !skip.includes(f) && report.fixed.includes(f.title));
-      fixed.push(...done.map((f) => f.title));
-      skipped.push(...skip.map((f) => f.title));
+      fixed.push(...done.map(label));
+      skipped.push(...skip.map(label));
       const resolved = new Set([...done, ...skip].map((f) => f.title));
       remaining = remaining.filter((f) => !resolved.has(f.title));
     }
-    const open = remaining.map((f) => f.title);
-    const skippedNote = skipped.length ? `; skipped as needing spec revision: ${skipped.join(", ")}` : "";
-    const checking = " Run /pb:review to check the delta: what a lap reports is its own claim, not a check.";
-    const summary = !open.length && !silent
-      ? `✅ Fixes for \`${spec}\` complete in ${laps} lap(s)${timeSuffix(ms)}: fixed ${fixed.join(", ") || "none"}${skippedNote}.${checking}`
-      : silent
-        ? `❌ Fix lap for \`${spec}\` went silent (no report after ${FIX_NUDGES} nudges)${timeSuffix(ms)}. Fixed so far: ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.${checking}`
-        : `❌ Fixes for \`${spec}\` stopped after ${laps} laps${timeSuffix(ms)}: fixed ${fixed.join(", ") || "none"}; still open: ${open.join(", ") || "none"}${skippedNote}.${checking}`;
+    const open = remaining.map(label);
+    const ids = remaining.flatMap((f) => (numberOf.has(f) ? [numberOf.get(f)!] : [])).join(" ");
+    // Cap the lists: a long title per finding makes the evidence line a wall, and /pb:status has the detail.
+    const list = (items: string[]) => (items.length <= 6 ? items.join(", ") : `${items.slice(0, 6).join(", ")}, +${items.length - 6} more`);
+    const next = open.length
+      ? `\`/${cmd("fix")}${ids ? ` ${ids}` : ""}\` (or fix them by hand), then \`/${cmd("review")}\`.`
+      : skipped.length
+        ? `revise the spec with \`/${cmd("spec")}\` for the skipped findings (or fix them by hand), then \`/${cmd("review")}\`.`
+        : `\`/${cmd("review")}\` checks the delta.`;
+    const time = ms ? duration(ms) : "";
+    const header = silent
+      ? phaseHeader("❌", "Fixes stopped", spec, "no report", time)
+      : phaseHeader(open.length ? "❌" : "✅", open.length ? "Fixes stopped" : "Fixes complete", spec, `${laps} lap${laps === 1 ? "" : "s"}`, time);
+    const summary = [
+      header,
+      "",
+      nextLine(next),
+      evidenceLine(`fixed ${list(fixed) || "none"}`, skipped.length ? `skipped as needing a spec revision: ${list(skipped)}` : "", open.length ? `still open: ${list(open)}` : "", silent ? `no report after ${FIX_NUDGES} nudges` : ""),
+      "",
+      `A fix lap's report is its own claim; \`/${cmd("review")}\` checks the files it changed.`,
+    ].join("\n");
     try {
       if (!home) throw new Error("no home session");
       await live.switchSession(home, {
@@ -3932,7 +4089,7 @@ export default function pb(pi: ExtensionAPI) {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const cctx = ctx as ExtensionCommandContext;
       if (typeof cctx.newSession !== "function") return ctx.ui.notify("This Pi can't open sessions: fix the findings here instead.", "warning");
-      await driveFix(cctx, store, name!, picked);
+      await driveFix(cctx, store, name!, picked, open);
     },
   });
 

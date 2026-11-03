@@ -1070,7 +1070,9 @@ test("build --fresh: a new session seeded with the spec, tasks behind their test
   assert.deepEqual(p.tasks.map((x: any) => [x.id, x.status]), [["T1", "done"], ["T2", "done"]]);
   assert.match(t.instructions[0], /\[pb:build order-cancellation\] Build \.pi\/pb\/specs\/order-cancellation\/spec\.md\.[\s\S]*\[pb:build\] Task T1\. Do only this task/);
   assert.match(t.results[0], /^✓ T1 passed[\s\S]*Task T2\. Do only this task/); // T1 was behind its own failing test first
-  assert.match(t.posts.at(-1)!, /BUILD COMPLETE — order-cancellation[\s\S]*PASS/);
+  assert.match(t.posts.at(-1)!, /Build complete — order-cancellation[\s\S]*PASS/);
+  assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:review` here in this session/);
+  assert.match(t.posts.at(-1)!, /\*\*Evidence:\*\* suite PASS/);
   assert.match(t.read(".pi/pb/specs/order-cancellation/events.jsonl"), /"type":"check","task":"final"/); // full suite after the task tests
 });
 
@@ -1080,7 +1082,7 @@ test("build complete: the other specs from the same plan are listed as still to 
   await t.callTool("pb_write_spec", { name: "refunds", content: SPEC() });
   t.agent.script = diligent;
   await t.run("build", "order-cancellation");
-  assert.match(t.posts.at(-1)!, /BUILD COMPLETE — order-cancellation[\s\S]*Still to build, from the same plan:\n- refunds: `\/pb:build refunds`/);
+  assert.match(t.posts.at(-1)!, /Build complete — order-cancellation[\s\S]*Still to build, from the same plan:\n- refunds: `\/pb:build refunds`/);
 });
 
 test("build: with taskChecks each, the check runs inside pb_task_done: one agent run from the first task to the end", async () => {
@@ -1256,7 +1258,7 @@ test("spec review: a P0 stops the build before T1 and is recorded against the sp
     delete process.env.MOCK_SPEC_REVIEW;
   }
   assert.equal(t.progress("order-cancellation").phase, "written");
-  assert.match(t.posts.join("\n"), /\*\*Spec review\*\* — ❌ FAIL[^\n]*P0 blocks T1:[\s\S]*\*\*P0\*\*[\s\S]*unguarded transition/);
+  assert.match(t.posts.join("\n"), /\*\*❌ Spec review — order-cancellation\*\* · FAIL[\s\S]*\*\*P0\*\*[\s\S]*unguarded transition/);
   assert.ok(!t.instructions.some((i) => /Task T1/.test(i)));
   const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
   const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
@@ -1276,13 +1278,14 @@ test("spec review: P1 and P2 are advisory and the build proceeds", async () => {
     delete process.env.MOCK_SPEC_REVIEW;
   }
   assert.equal(t.progress("order-cancellation").phase, "built");
-  assert.match(t.posts.join("\n"), /\*\*Spec review\*\* — ✅ PASS[^\n]*advisory findings[\s\S]*\[P1\][\s\S]*\[P2\]/);
+  assert.match(t.posts.join("\n"), /\*\*✅ Spec review — order-cancellation\*\* · PASS[\s\S]*\[P1\][\s\S]*\[P2\]/);
+  assert.match(t.posts.find((p) => p.startsWith("**✅ Spec review"))!, /\*\*Next:\*\* T1 starts next\./);
   const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
   assert.equal(event.verdict, "pass");
   assert.equal(typeof event.ms, "number");
   assert.ok(event.ms >= 0);
   assert.deepEqual(event.reported.map((f: any) => f.priority), ["P1", "P2"]);
-  assert.match(t.posts.find((p) => p.startsWith("**✅ BUILD COMPLETE"))!, /⏱ Build time: (?:<1s|\d+s)/);
+  assert.match(t.posts.find((p) => p.startsWith("**✅ Build complete"))!, / · (?:<1s|\d+s)/);
 });
 
 test("spec review: an unchanged spec re-posts the block without a second run; an edit reviews again", async () => {
@@ -1295,7 +1298,7 @@ test("spec review: an unchanged spec re-posts the block without a second run; an
     const afterFirst = runs();
     await t.run("build", "order-cancellation");
     assert.equal(runs(), afterFirst); // the recorded block still covers this text
-    assert.match(t.posts.at(-1)!, /P0 blocks T1 \(the spec is unchanged since that review\)/);
+    assert.match(t.posts.at(-1)!, /the recorded pass covers this text/);
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
   }
@@ -1330,7 +1333,8 @@ test("spec review: a run that reports no findings fails closed", async () => {
     delete process.env.MOCK_SPEC_REVIEW;
   }
   assert.equal(t.progress("order-cancellation").phase, "written");
-  assert.match(t.posts.at(-1)!, /reviewer returned no findings[^\n]*no review of this text was recorded[\s\S]*What it wrote instead:\n\nreviewer exploded[\s\S]*"specReviewer": \{"model": "provider\/id"\}/);
+  assert.match(t.posts.at(-1)!, /the reviewer returned no findings through its tool[\s\S]*What it wrote instead:\n\nreviewer exploded/);
+  assert.match(t.posts.at(-1)!, /\*\*Next:\*\*[^\n]*"specReviewer": \{"model": "provider\/id"\}/);
   assert.ok(!t.instructions.some((i) => /Task T1/.test(i)));
   const event = t.events("order-cancellation").filter((e: any) => e.type === "spec-review").at(-1);
   assert.equal(event.verdict, "error");
@@ -1521,7 +1525,7 @@ Create T2.txt.
   assert.equal(p.phase, "built");
   assert.deepEqual(p.tasks.map((x: any) => [x.id, !!x.redCommand]), [["T1", true], ["T2", false]]); // T2 has no command to run
   // T2's proof isn't there, and nothing pretends it is: the build says so, and so does the reviewer.
-  assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*New tests never seen failing[\s\S]*- T2: no Test: command, so nothing proves its new tests fail without the change/);
+  assert.match(t.posts.at(-1)!, /Build complete[\s\S]*New tests never seen failing[\s\S]*- T2: no Test: command, so nothing proves its new tests fail without the change/);
   await t.run("review");
   const brief = t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!;
   assert.match(brief, /## New tests never seen failing[\s\S]*Judge each: does its acceptance still have a test that checks it\?/);
@@ -2146,8 +2150,8 @@ test("build: after the last attempt it pauses; /pb:build resumes with a fresh se
   await t.run("build");
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "paused");
-  assert.match(t.posts.at(-1)!, /Build paused\*\* — T1 still fails after 2 attempts/);
-  assert.match(t.posts.at(-1)!, /⏱ Build so far: (?:<1s|\d+s)/);
+  assert.match(t.posts.at(-1)!, /Build paused — order-cancellation\*\*[\s\S]*T1 still fails after 2 attempts/);
+  assert.match(t.posts.at(-1)!, /build time so far: (?:<1s|\d+s)/);
   assert.match(t.results.at(-1)!, /That was the last attempt: the build is paused\. Stop here/);
   give = true;
   await t.run("build", "create the file in the repo root");
@@ -2173,7 +2177,7 @@ test("build: the build never asks; ambiguity is a reading recorded as an assumpt
   const spec = t.read(".pi/pb/specs/order-cancellation/spec.md");
   assert.match(spec, /- Assumption \(build, T1\): Follow the layout rules over the mockup/);
   assert.doesNotMatch(spec, /Which file name/);
-  assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Choices the build made where the spec was unclear[\s\S]*Assumption \(build, T1\): Follow the layout rules/);
+  assert.match(t.posts.at(-1)!, /Build complete[\s\S]*Choices the build made where the spec was unclear[\s\S]*Assumption \(build, T1\): Follow the layout rules/);
 });
 
 test("build: a colon Decisions heading takes decisions and guidance without wrecking the spec", async () => {
@@ -2456,7 +2460,7 @@ test("build: existing tests cut down or skipped don't fail a task: they are list
   assert.equal(t.stat.runs, 1);
   assert.deepEqual(p.testChanges, ["T1: tests/test_a.py: 2 → 1 test cases"]);
   assert.match(t.results[0], /⚠ existing tests changed \(the review checks them\): tests\/test_a\.py: 2 → 1 test cases/); // T1's
-  assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Existing tests the build changed[\s\S]*- T1: tests\/test_a\.py: 2 → 1 test cases/);
+  assert.match(t.posts.at(-1)!, /Build complete[\s\S]*Existing tests the build changed[\s\S]*- T1: tests\/test_a\.py: 2 → 1 test cases/);
   await t.run("review");
   assert.match(t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!, /## Existing tests the build changed[\s\S]*judge whether each was justified:\n- T1: tests\/test_a\.py: 2 → 1 test cases/);
 });
@@ -2694,7 +2698,7 @@ test("review: the harness check's own artifacts are reported, not reverted behin
   assert.ok(fs.existsSync(path.join(t.repo, "review-artifact.txt"))); // the checks leave it behind
   fs.rmSync(path.join(t.repo, "review-artifact.txt")); // ...so the review's own check is what recreates it
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS/);
+  assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS/);
   // Left in place and named: reverting it would also revert any edit you made in the same window.
   assert.ok(fs.existsSync(path.join(t.repo, "review-artifact.txt")));
   assert.match(t.posts.at(-1)!, /⚠ Files changed while the review ran[^\n]*review-artifact\.txt/);
@@ -2777,7 +2781,9 @@ test("fix: a report names findings by the number in the brief; a number outside 
   assert.match(said[0]!, /2 is not one of the findings shown for this lap/);
   assert.match(said[1]!, /Report at least one finding by its number/);
   assert.match(said[2]!, /cannot be both fixed and skipped/);
-  assert.match(t.posts.at(-1)!, /✅ Fixes for `order-cancellation` complete in 1 lap\(s\) · (?:<1s|\d+s):/);
+  assert.match(t.posts.at(-1)!, /\*\*✅ Fixes complete — order-cancellation\*\* · 1 lap · (?:<1s|\d+s)/);
+  assert.match(t.posts.at(-1)!, /#1 name the constant the reviewer named/); // findings carry the number /pb:fix takes
+  assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:review` checks the delta\./);
 });
 
 
@@ -2801,7 +2807,7 @@ test("fix: a lap that never reports stops the loop and escalates as silent", asy
   t.agent.script = async () => {}; // the lap never reports, nudges unanswered
   await t.run("fix");
   assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 1); // never retried into a second silent session
-  assert.match(t.posts.at(-1)!, /❌ Fix lap for `order-cancellation` went silent \(no report after 2 nudges\) · (?:<1s|\d+s)\./);
+  assert.match(t.posts.at(-1)!, /\*\*❌ Fixes stopped — order-cancellation\*\* · no report · (?:<1s|\d+s)/);
 });
 
 test("fix: skipped findings never start a lap and reach the escalation", async () => {
@@ -2937,6 +2943,7 @@ test("review: a pass verdict mid-build keeps the phase and says tasks remain", a
   assert.equal(p.phase, "building"); // a pass must not strand the build as reviewed
   assert.equal(p.review?.verdict, "pass"); // the follow-up delta baseline is still kept
   assert.match(t.posts.at(-1)!, /still to build/);
+  assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:build` continues the build; T2 still to do/);
   // A manual review while building uses the same acceptance checklist as the final one.
   assert.match(t.posts.at(-1)!, /\*\*Acceptance\*\* — 2\/2 met/);
   assert.equal(p.review?.acceptance?.length, 2);
@@ -2957,7 +2964,7 @@ test("review: an explicit spec name wins over this session's spec", async () => 
   await t.run("review", "beta-flag");
   assert.ok([...t.names.values()].includes("review: beta-flag · spec"));
   assert.ok(![...t.names.values()].some((n) => n === "review: order-cancellation · spec"));
-  assert.match(t.posts.at(-1)!, /Review of beta-flag/);
+  assert.match(t.posts.at(-1)!, /Review — beta-flag/);
 });
 
 test('review: "done" outside a review session is refused instead of reviewed', async () => {
@@ -3027,7 +3034,7 @@ test("review: security auto skips the adversarial pass on calm ground", async ()
   t.agent.script = diligent;
   await t.run("build");
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /✅ PASS/);
+  assert.match(t.posts.at(-1)!, /\*\*✅ Review — order-cancellation\*\* · PASS/);
   assert.doesNotMatch(t.posts.at(-1)!, /adversarial/);
 });
 
@@ -3037,7 +3044,7 @@ test("review: security off never runs the adversarial pass", async () => {
   t.agent.script = diligent;
   await t.run("build");
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /✅ PASS/);
+  assert.match(t.posts.at(-1)!, /\*\*✅ Review — order-cancellation\*\* · PASS/);
   assert.doesNotMatch(t.posts.at(-1)!, /adversarial/);
 });
 
@@ -3047,7 +3054,7 @@ test("review: by default the adversarial pass runs only on sensitive ground", as
   t.agent.script = diligent;
   await t.run("build");
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /✅ PASS/);
+  assert.match(t.posts.at(-1)!, /\*\*✅ Review — order-cancellation\*\* · PASS/);
   assert.doesNotMatch(t.posts.at(-1)!, /adversarial/);
 });
 
@@ -3097,7 +3104,7 @@ test("review: starting a new review clears an abandoned run from this session", 
   store.saveReviewRun({ id: "crashed-run", cwd: t.repo, label: "crashed", brief: "", followUp: false, passes: [], home });
   await t.run("review");
   assert.equal(store.reviewRun("crashed-run"), undefined);
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS/);
+  assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS/);
 });
 
 test("review: when the second look can't run, the findings are reported unconfirmed", async () => {
@@ -3112,7 +3119,7 @@ test("review: when the second look can't run, the findings are reported unconfir
   } finally {
     delete process.env.MOCK_VERIFY;
   }
-  assert.match(t.posts.at(-1)!, /❌ CHANGES NEEDED/); // the P1 stands: failure to verify never dismisses
+  assert.match(t.posts.at(-1)!, /CHANGES NEEDED/); // the P1 stands: failure to verify never dismisses
   assert.match(t.posts.at(-1)!, /The second look at the blocking findings couldn't run \(verifier exploded\): they are reported unconfirmed\./);
 });
 
@@ -3133,16 +3140,16 @@ test("review: a fresh review session with the spec first and the diff; you're br
   assert.ok([...t.names.values()].includes("review: order-cancellation · spec"));
   assert.ok(![...t.names.values()].some((n) => n.endsWith("· adversarial"))); // the abuse pass is a background process
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // back where you were
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session [^`]+`/);
+  assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n\[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session [^`]+`/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
   assert.equal(t.progress("order-cancellation").reviewUnshown, undefined);
-  assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /Review of order-cancellation\*\* — ✅ PASS/); // kept with the spec
+  assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /Review — order-cancellation\*\* · PASS/); // kept with the spec
 
   await t.run("review");
   assert.match(t.notes.at(-1)!, /Nothing changed since the last review \(pass\)/);
   t.reviewer.review = CHANGES;
   await t.run("review", "--full");
-  assert.match(t.posts.at(-1)!, /❌ CHANGES NEEDED/);
+  assert.match(t.posts.at(-1)!, /CHANGES NEEDED/);
 });
 
 test("review: the review session is read-only; a pass you leave can be continued", async () => {
@@ -3166,7 +3173,7 @@ test("review: the review session is read-only; a pass you leave can be continued
   assert.match(blocked!, /This is a review session: read-only/);
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // you went home by yourself
   const md = t.read(".pi/pb/specs/order-cancellation/review.md");
-  assert.match(md, /⚠ UNVERIFIED[\s\S]*You left the review before it finished: this is what had been reported[\s\S]*`\/pb:review` continues it/);
+  assert.match(md, /UNVERIFIED[\s\S]*You left the review before it finished: this is what had been reported[\s\S]*`\/pb:review` continues it/);
 
   // /pb:review offers to continue: back into the review session, which carries on where it was; the
   // adversarial pass then runs in the background and its findings are merged.
@@ -3181,7 +3188,7 @@ test("review: the review session is read-only; a pass you leave can be continued
   assert.ok(t.instructions.some((i) => i.startsWith("[pb] You were interrupted. Carry on where you were")));
   assert.ok(!t.notes.some((n) => /This review was interrupted/.test(n))); // pb was continuing it: no hint needed
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // and back home at the end
-  assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 2 · P3 1 · with an adversarial pass[\s\S]*Adversarial: cap the page size/);
+  assert.match(t.posts.at(-1)!, /PASS · P0 0 · P1 0 · P2 2 · P3 1 · with an adversarial pass[\s\S]*Adversarial: cap the page size/);
   assert.equal(JSON.parse(t.read(".pi/pb/config.json")).maxAttempts, 2);
   const runs = path.join(t.repo, ".pi/pb/review-runs");
   assert.deepEqual(fs.existsSync(runs) ? fs.readdirSync(runs) : [], []); // finished: nothing left to continue
@@ -3234,7 +3241,7 @@ test("review: reopening an interrupted review session, /pb:review continue picks
   t.reviewer.script = false;
   await t.run("review", "continue");
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home);
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* — ✅ PASS[\s\S]*with an adversarial pass/);
+  assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS[\s\S]*with an adversarial pass/);
 });
 
 test("review: an adversarial pass that fails is named, and the result is not recorded as complete", async () => {
@@ -3253,7 +3260,7 @@ test("review: an adversarial pass that fails is named, and the result is not rec
   assert.ok(!t.progress("order-cancellation").review); // incomplete: nothing recorded as reviewed
 
   await t.run("review"); // the next one completes
-  assert.match(t.posts.at(-1)!, /✅ PASS · [\s\S]*with an adversarial pass/);
+  assert.match(t.posts.at(-1)!, /PASS · [\s\S]*with an adversarial pass/);
   assert.ok(t.progress("order-cancellation").review);
 });
 
@@ -3370,7 +3377,7 @@ test("review: a stall from an earlier run never marks a later review of the same
     `${JSON.stringify({ at: "2026-01-01 00:00:00", type: "compact", thrash: true, run: "an-earlier-review-run" })}\n`,
   );
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /✅ PASS/);
+  assert.match(t.posts.at(-1)!, /\*\*✅ Review — order-cancellation\*\* · PASS/);
   assert.doesNotMatch(t.posts.at(-1)!, /wrapped up early/);
 });
 
@@ -3395,7 +3402,7 @@ test("review: a stall in this very run is still reported in its result", async (
     return diligent(text, tool);
   };
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /✅ PASS[\s\S]*wrapped up early/);
+  assert.match(t.posts.at(-1)!, /PASS[\s\S]*wrapped up early/);
 });
 
 test("review: a follow-up looks at the previous findings and what changed since", async () => {
@@ -3409,7 +3416,7 @@ test("review: a follow-up looks at the previous findings and what changed since"
   t.reviewer.review = [];
   await t.run("review");
   assert.match(briefOf(t), /## This is a follow-up review[\s\S]*1\. \[P1\] src\/order\.ts:12 — consider a guard clause[\s\S]*Changed since the previous review[\s\S]*T1\.txt/);
-  assert.match(t.posts.at(-1)!, /Review of order-cancellation\*\* \(follow-up\) — ✅ PASS/);
+  assert.match(t.posts.at(-1)!, /Review — order-cancellation \(follow-up\)\*\* · PASS/);
 });
 
 test("review: an omitted or unverified acceptance item never passes; the next review carries it", async () => {
@@ -3422,7 +3429,7 @@ test("review: an omitted or unverified acceptance item never passes; the next re
   ]; // T2.1 omitted on purpose
   await t.run("review");
   const post = t.posts.at(-1)!;
-  assert.match(post, /⚠ UNVERIFIED/);
+  assert.match(post, /UNVERIFIED/);
   assert.match(post, /\*\*Acceptance\*\* — 0\/2 met, 2 not verified/);
   assert.match(post, /\? not verified T1\.1: T1\.txt exists — the named test was not run/);
   assert.match(post, /\? not verified \(not reported\) T2\.1: T2\.txt exists/);
@@ -3445,7 +3452,7 @@ test("review: an omitted or unverified acceptance item never passes; the next re
     briefOf(t),
     /Acceptance at the previous review[\s\S]*T1\.1: not verified — the named test was not run[\s\S]*T2\.1: not verified — not reported/,
   );
-  assert.match(t.posts.at(-1)!, /✅ PASS[\s\S]*\*\*Acceptance\*\* — 2\/2 met/);
+  assert.match(t.posts.at(-1)!, /PASS[\s\S]*\*\*Acceptance\*\* — 2\/2 met/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
 });
 
@@ -3456,19 +3463,20 @@ test("review: findings carry priorities; P0/P1 are double-checked; only line-lea
   await t.run("build");
   t.reviewer.review = CHANGES;
   await t.run("review");
-  assert.match(t.posts.at(-1)!, /❌ CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 0(?: · with an adversarial pass)? · (?:<1s|\d+s)\n/);
+  assert.match(t.posts.at(-1)!, /CHANGES NEEDED · P0 0 · P1 1 · P2 1 · P3 0(?: · with an adversarial pass)? · (?:<1s|\d+s)\n/);
+  assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:fix 1 2` \(or fix them by hand\), then `\/pb:review` again/);
   const review = t.events("order-cancellation").filter((e: any) => e.type === "review").at(-1);
   assert.equal(typeof review.ms, "number");
   assert.ok(review.ms > 0);
   process.env.MOCK_VERIFY = "reject"; // the verifier finds the P1 isn't real
   await t.run("review", "--full");
   delete process.env.MOCK_VERIFY;
-  assert.match(t.posts.at(-1)!, /✅ PASS · P0 0 · P1 0 · P2 1 · P3 0[\s\S]*Dismissed after a second look:\n- \[P1\] consider a guard clause — src\/order\.ts:11 already guards it/);
+  assert.match(t.posts.at(-1)!, /PASS · P0 0 · P1 0 · P2 1 · P3 0[\s\S]*Dismissed after a second look:\n- \[P1\] consider a guard clause — src\/order\.ts:11 already guards it/);
   t.reviewer.silent = true; // no tool call: the prose's line-leading tags are the findings
   t.reviewer.prose = "No [P0] or [P1] issues found.\n\n1. [P2] src/order.ts:30 — name the constant.";
   await t.run("review", "--full");
   // "No [P0] or [P1] issues" isn't a finding; with no acceptance tool report, silence is unverified, not pass.
-  assert.match(t.posts.at(-1)!, /⚠ UNVERIFIED · P0 0 · P1 0 · P2 1 · P3 0/);
+  assert.match(t.posts.at(-1)!, /UNVERIFIED · P0 0 · P1 0 · P2 1 · P3 0/);
 });
 
 test("review: the second look reads the same frozen diff, with no shell to re-derive it", async () => {
@@ -3490,6 +3498,26 @@ test("review: the second look reads the same frozen diff, with no shell to re-de
   assert.doesNotMatch(brief, /git diff/);
 });
 
+test("review findings: display numbers run continuously across the change and outside it, and are the /pb:fix ids", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [
+    { priority: "P2", file: "src/order.ts", line: 30, title: "in the change", fix: "x" },
+    { priority: "P3", file: "src/order.ts", line: 12, title: "nit", fix: "y" },
+    { priority: "P1", file: "src/legacy.ts", line: 1, title: "outside the change", fix: "z", outside: true },
+  ];
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /1\. \[P2\] src\/order\.ts:30 — in the change/);
+  assert.match(post, /\n\[P3\] src\/order\.ts:12 — nit/); // nits are never numbered
+  assert.match(post, /2\. \[P1 · Outside the change\] src\/legacy\.ts:1 — outside the change/);
+  assert.match(post, /\*\*Next:\*\* `\/pb:fix 1 2`/);
+  // The ids /pb:fix reads are the stored review findings, in the same display order.
+  assert.deepEqual(t.progress("order-cancellation").review.findings.map((f: { title: string }) => f.title), ["in the change", "outside the change"]);
+});
+
 test("review: a pre-existing problem gets its own outside class instead of a prose note", async () => {
   const t = setup({ verify: "true", reviewer: { security: "off" } });
   await written(t);
@@ -3499,7 +3527,7 @@ test("review: a pre-existing problem gets its own outside class instead of a pro
   t.reviewer.prose = "Worth knowing: the legacy path predates this change.";
   await t.run("review");
   const post = t.posts.at(-1)!;
-  assert.match(post, /✅ PASS/); // an outside finding is advisory, even when it is the only one
+  assert.match(post, /\*\*✅ Review — order-cancellation\*\* · PASS/); // an outside finding is advisory, even when it is the only one
   assert.match(post, /\*\*Outside the change\*\* — pre-existing, not caused by this revision[\s\S]*\[P2 · Outside the change\].*legacy path/);
   assert.doesNotMatch(post, /\*\*Findings\*\*/); // its own section, not mixed into the change's findings
   const saved = t.progress("order-cancellation").review.findings;
@@ -3663,8 +3691,8 @@ test("review: a prose-only pass gives no verdict and leaves the phase short of r
   t.reviewer.prose = `P1 — the updated_at bump on in-place edits is silently lost: the scheduler sets the field on a detached entity, so the save never persists it.\n\nP2 — a DB failure between the landed post and the standing-set save orphans the set with no coordinate rows.\n\n${"Fix: persist the bump through the repository, not the entity. ".repeat(20)}`;
   await t.run("review");
   const post = t.posts.at(-1)!;
-  assert.match(post, /⚠ NO VERDICT — a pass reported in prose only/);
-  assert.doesNotMatch(post, /✅ PASS/);
+  assert.match(post, /NO VERDICT/);
+  assert.doesNotMatch(post, /\*\*✅ Review/);
   assert.match(post, /there is no verdict/);
   assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /NO VERDICT/);
   const p = t.progress("order-cancellation");
@@ -3694,7 +3722,7 @@ test("review: works without a spec, on the uncommitted change and its intent", a
   fs.writeFileSync(path.join(t.repo, "README"), "hello\n");
   await t.run("review", "greet more warmly");
   assert.match(briefOf(t), /--- brief ---\n\n# No spec[\s\S]*Intent: greet more warmly[\s\S]*## Changed files\n\nREADME/);
-  assert.match(t.posts.at(-1)!, /Review of the uncommitted change\*\* — ✅ PASS/);
+  assert.match(t.posts.at(-1)!, /Review — the uncommitted change\*\* · PASS/);
   assert.doesNotMatch(t.posts.at(-1)!, /Commit message/); // no spec to write it from
   // A path-like first word is intent text here, never refused: specDir's guard keeps it out of
   // paths, and the arg is documented as free text (only /pb:build refuses those).
@@ -4109,7 +4137,7 @@ test("build without a spec: it asks first, then writes the spec and builds it wi
   await t.run("build");
   assert.equal(t.selectTitles.at(-1), "Pi writes the spec first. Then?"); // asked before the spec, while you're here
   assert.match(t.instructions.find((i) => /pb_write_spec tool/.test(i))!, /After writing it, stop: the build starts by itself/);
-  assert.ok(t.posts.some((x) => /\*\*✅ Spec written: order-cancellation\*\*[\s\S]*- T1: first file · `test -f T1\.txt`/.test(x)));
+  assert.ok(t.posts.some((x) => /\*\*✅ Spec written — order-cancellation\*\*[\s\S]*- T1: first file · `test -f T1\.txt`/.test(x)));
   assert.deepEqual(t.views.map((v) => [v.customType, v.data.name]), [["pb-spec", "order-cancellation"]]); // the whole spec, shown, not sent to the model
   assert.equal(t.progress("order-cancellation").phase, "built"); // built here, with no dialog after the spec
   assert.match(t.progress("order-cancellation").session, /planning-session\.jsonl$/);
@@ -4397,7 +4425,7 @@ test("compaction: compacting the same task over and over with no progress pauses
   await t.run("build");
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "paused");
-  assert.match(t.posts.at(-1)!, /\*\*⏸ Build paused\*\* — compacted 3 times during T1 without getting anywhere[\s\S]*What now/);
+  assert.match(t.posts.at(-1)!, /\*\*⏸ Build paused — order-cancellation\*\*[\s\S]*compacted 3 times during T1 without getting anywhere[\s\S]*What now/);
   assert.deepEqual(t.events("order-cancellation").filter((e) => e.type === "pause").map((e) => e.why), ["thrash"]);
   // No compaction either: its summary would hand the model a step for a build the harness refuses.
   assert.deepEqual(fourth, [{ cancel: true }]);
@@ -5354,7 +5382,7 @@ test("build: nobody answers: after askTimeoutSec every dialog goes on with pb's 
   await t.run("build");
   assert.match(t.selectTitles.at(-1)!, /Build order-cancellation now\? 2 tasks/);
   assert.equal(t.progress("order-cancellation").phase, "built");
-  assert.match(t.posts.at(-1)!, /BUILD COMPLETE[\s\S]*Decided without you \(no answer in time\):\n- Build order-cancellation now\? 2 tasks → Build here/);
+  assert.match(t.posts.at(-1)!, /Build complete[\s\S]*Decided without you \(no answer in time\):\n- Build order-cancellation now\? 2 tasks → Build here/);
 });
 
 test("build: Esc on the first dialog cancels; a spec that isn't written yet is offered once it is", async () => {

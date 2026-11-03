@@ -5,13 +5,16 @@ write it down as a **spec**, **build** it task by task behind checks the harness
 runs, and have it **reviewed** by someone who never saw the build. After every
 step Pi shows a short **What now** block; `/pb:help <topic>` posts any section below.
 
-Every phase ends with a plain marker — `✅ PASS`, `❌ FAIL`, `❌ CHANGES NEEDED`,
-`⚠ UNVERIFIED`, `✅`/`❌` for a fix lap — and, where the harness measured it, a
-time. The time is **active time**: pauses you took are left out, and when they
-make a difference the elapsed wall time follows in parentheses
-(`25m (55m elapsed)`). A spec written by an older pb has no recorded spec,
-review or fix times; its `Time` line shows only what its events already carry
-(the build's own start and end).
+Every phase ends with a header — `**<marker> <Phase> — <spec>**` followed by
+the facts that summarize the outcome (`**✅ Build complete — order-cancellation** · 3/3 tasks · 25m`) —
+then a `**Next:**` line naming the one primary action, a `**Evidence:**` line
+with the facts behind the result (gates, progress, counts, where it ran), and
+the details. A result also ends with a **What now** block; `/pb:help <topic>`
+posts any section below. The time, where the harness measured it, is **active
+time**: pauses you took are left out, and when they make a difference the
+elapsed wall time follows in parentheses (`25m (55m elapsed)`). A spec written
+by an older pb has no recorded spec, review or fix times; its `Time` line shows
+only what its events already carry (the build's own start and end).
 
 <!-- pb:topic flow -->
 ## The normal path
@@ -383,8 +386,10 @@ shown in the session for later. Shown first, you choose: build here, build in a
 fresh session, **edit the spec first** (in an editor; it's saved only when it
 still parses, and the build then gets your version), or not now.
 
-The header reads `✅ Spec written` and, when the step recorded it, how long it
-took from `/pb:build` or `/pb:spec` to the first ready write.
+The header is `**✅ Spec written — <name>**` with the task and acceptance-criterion counts
+and, when the step recorded it, the time it took from `/pb:build` or `/pb:spec` to the
+first ready write. `**Next:**` says what happens next: the build starting, or your
+choice of where to build.
 
 **Before the first task, every spec gets one independent review.** The pass is
 fresh and read-only, and it is the only one: there are no rounds, no carry and
@@ -424,9 +429,10 @@ what it wrote instead and the run's session, so you can read the review anyway;
 `/pb:build` tries again, or `"specReviewer": {"model": "provider/id"}` in
 `.pi/pb/config.json` points the pass at a model that reports.
 
-The result heading is `✅ PASS` or `❌ FAIL`, followed by the review's time; a
-pass that reported nothing through its tool is `❌ FAIL` too, because no review
-of that text was recorded.
+The header reads `**✅ Spec review — <name>** · PASS` or `**❌ Spec review — <name>** · FAIL`,
+followed by the review's time; a pass that reported nothing through its tool is `❌ FAIL` too,
+because no review of that text was recorded. `**Next:**` on a pass is the build; a P0 says
+to fix the spec and run `/pb:build` again.
 
 **Read the plan yourself, in this order.** The spec reviewer is a second pair
 of eyes, not a substitute for yours:
@@ -727,9 +733,13 @@ any unverified item ends **UNVERIFIED**, not pass, and leaves the phase where
 it was. A not-met item is blocking and comes with a P1 finding. P2/P3 findings
 stay advisory.
 
-The result heading reads `✅ PASS`, `❌ CHANGES NEEDED` or `⚠ UNVERIFIED`, and
-ends with the review's active time: the watched reviewer, the adversarial pass
-and the verification pass together.
+The header reads `**✅ Review — <label>** · PASS`, `**❌ Review — <label>** · CHANGES NEEDED` or
+`**⚠ Review — <label>** · UNVERIFIED`, followed by the review's active time: the watched
+reviewer, the adversarial pass and the verification pass together. Findings in the
+Change section and outside it are numbered continuously (P0–P2; P3 nits are unnumbered),
+the same numbers `/pb:fix` takes. `**Next:**` names one action — `/pb:fix <ids>` for open
+findings, `/pb:build` when a mid-build review passed with tasks remaining, or `/pb:review`
+after fixes.
 
 The findings land in the session you ran it from; run it **in the build
 session** and fix them right there: that session knows the code it just wrote.
@@ -983,6 +993,13 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 **What now** — the review passed, the change is ready to merge
 - Minor findings? Ask Pi to fix them here ("fix finding 2"), then commit with the message above.
 - Done: `/pb:archive` files the spec away; the next feature starts with `/pb:build` from its planning session.
+<!-- /pb -->
+
+### Review passed, but the build is not done
+<!-- pb:tip review.mid-build -->
+**What now** — the review passed, but tasks remain in this build
+- Continue: `/pb:build` runs the next task; the build's phase and progress are unchanged.
+- The findings above are advisory: fix them here when convenient, or in a fresh `/pb:fix` pass.
 <!-- /pb -->
 
 ### Review found changes
