@@ -122,12 +122,13 @@ export function fromProse(text: string): Finding[] {
 }
 
 /**
- * A pass whose report can't be trusted structurally: no tool findings, nothing parseable
+ * A pass whose report can't be trusted structurally: no tool report, nothing parseable
  * in the prose, yet the prose is substantial (a real report in the wrong shape, not a
- * one-line "done"). The harness must say so instead of reporting a clean verdict.
+ * one-line "done"). An explicit empty report is a report: only `undefined` means the pass
+ * never called the tool, since the prompt requires an empty list when there are no findings.
  */
 export function unparsedReport(toolFindings: Finding[] | undefined, text: string): boolean {
-  return !toolFindings?.length && !fromProse(text).length && text.trim().length > 500;
+  return toolFindings === undefined && !fromProse(text).length && text.trim().length > 500;
 }
 
 /**

@@ -9,8 +9,33 @@ import type {
 import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { cmd, commands, evidenceLine, loadSpec, nextLine, phaseHeader, reply, specOfSession, stop } from "./kit.ts";
+
+/** One lap's report shape, normalized from its `fix` event. */
+export interface LapReport {
+  fixed: string[];
+  skipped: string[];
+  tests: string;
+}
+
+/**
+ * The report a fix lap owns: the last `fix` event appended after `from`, the event-log position
+ * right after the lap's own fix-start marker. Event order, not clock time — `at` strings truncate
+ * to seconds, so a prior lap's report in the same second must not read as this lap's.
+ */
+export function lapReport(events: readonly Record<string, unknown>[], from: number): LapReport | undefined {
+  const last = events
+    .slice(from)
+    .filter((e) => (e as { type?: unknown }).type === "fix")
+    .at(-1) as { fixed?: unknown; skipped?: unknown; tests?: unknown } | undefined;
+  if (!last || !Array.isArray(last.fixed)) return undefined;
+  return {
+    fixed: last.fixed.filter((x): x is string => typeof x === "string"),
+    skipped: Array.isArray(last.skipped) ? last.skipped.filter((x): x is string => typeof x === "string") : [],
+    tests: typeof last.tests === "string" ? last.tests : "",
+  };
+}
 
 export function registerFix(pi: ExtensionAPI) {
   pi.registerTool({
@@ -81,7 +106,9 @@ export function registerFix(pi: ExtensionAPI) {
       `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +
       `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), and test results; then stop.`;
     let live: ExtensionCommandContext | undefined;
-    const since = now();
+    // The lap owns only events appended after its own fix-start marker; `from` is the log
+    // position captured right after that marker is written.
+    let from = 0;
     const result = await ctx.newSession({
       parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
       setup: async (sm) => {
@@ -93,6 +120,7 @@ export function registerFix(pi: ExtensionAPI) {
         const lapFile = cc.sessionManager.getSessionFile() ?? undefined;
         if (lapFile) store.saveFixSession(lapFile, { spec, findings: remaining });
         store.event(spec, { type: "fix-start", findings: remaining.map((f) => f.title) });
+        from = readEvents(path.join(store.specDir(spec), "events.jsonl")).length;
         await c.sendMessage({ customType: "pb-fix", content: seed, display: true }, { triggerTurn: true });
         for (let nudge = 0; nudge < FIX_NUDGES; nudge++) {
           await cc.waitForIdle();
@@ -103,12 +131,9 @@ export function registerFix(pi: ExtensionAPI) {
       },
     }).catch(() => ({ cancelled: true as const }));
     if (result.cancelled || !live) return undefined;
-    const reports = readEvents(path.join(store.specDir(spec), "events.jsonl")).filter(
-      (e) => (e as { type?: unknown }).type === "fix" && typeof (e as { at?: unknown }).at === "string" && ((e as { at: string }).at ?? "") >= since,
-    );
-    const last = reports.at(-1) as { fixed?: unknown; skipped?: unknown; tests?: unknown } | undefined;
-    if (!last || !Array.isArray(last.fixed)) return { live, ms: Date.now() - started };
-    return { live, ms: Date.now() - started, report: { fixed: last.fixed.filter((x): x is string => typeof x === "string"), skipped: Array.isArray(last.skipped) ? last.skipped.filter((x): x is string => typeof x === "string") : [], tests: typeof last.tests === "string" ? last.tests : "" } };
+    const report = lapReport(readEvents(path.join(store.specDir(spec), "events.jsonl")), from);
+    if (!report) return { live, ms: Date.now() - started };
+    return { live, ms: Date.now() - started, report };
   };
 
   /**

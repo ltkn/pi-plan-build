@@ -160,6 +160,7 @@ export const pastCheckpoint = (ctx: ExtensionContext, store: Store) => {
   return usage.tokens >= limit ? Math.round((100 * usage.tokens) / usage.contextWindow) : undefined;
 };
 
+/** The build's state as a summary, for a reset at a task boundary or a compaction in the middle of a task. */
 export const stateSummary = (ctx: ExtensionContext, store: Store, p: Progress, reason: "reset" | "compaction", extra: { changed?: string[]; read?: string[]; previous?: string } = {}) => {
   const loaded = loadBuildSpec(store, p);
   const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
@@ -546,9 +547,12 @@ export function registerFlow(pi: ExtensionAPI) {
 
   const COHERE_MARKER = "▶ coherence pass";
 
-  /** The build's state as a summary, for a reset at a task boundary or a compaction in the middle of a task. */
-
-  const resetExhausted = (tp: { attempts: number } | undefined, max: number): boolean => {
+/**
+ * A resume buys an exhausted step a fresh set of attempts; any other pause keeps its count.
+ * Resets and returns true only when the step had exhausted its budget; the next handout
+ * counts the new attempt.
+ */
+const resetExhausted = (tp: { attempts: number } | undefined, max: number): boolean => {
     const exhausted = (tp?.attempts ?? 0) >= max;
     if (exhausted && tp) tp.attempts = 0;
     return exhausted;

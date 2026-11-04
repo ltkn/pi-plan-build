@@ -191,6 +191,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         ...(f.outside === true ? { outside: true } : {}),
       }];
     });
+    // undefined = no report call; [] = an explicit clean report. A non-empty call that yields no
+    // valid finding is malformed and falls back to the prose check, like a missing call.
+    const reported = raw === undefined || (raw.length > 0 && findings.length === 0) ? undefined : findings;
     // Its tokens are part of what the review cost: record them like the watched reviewer's own turns.
     if (run.name && res.tokens.input + res.tokens.output + res.tokens.cacheRead + res.tokens.cacheWrite > 0)
       store.event(run.name, {
@@ -202,7 +205,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         cacheWrite: res.tokens.cacheWrite,
         cost: res.cost,
       });
-    return { role: "abuse", findings, acceptance: [], prose: res.text, session: res.sessionFile ?? "", left: false, unparsed: unparsedReport(findings, res.text), ms: res.ms, ...(res.error ? { error: res.error } : {}) };
+    return { role: "abuse", findings, acceptance: [], prose: res.text, session: res.sessionFile ?? "", left: false, unparsed: unparsedReport(reported, res.text), ms: res.ms, ...(res.error ? { error: res.error } : {}) };
   };
 
   /** A finished pass joins the run, and its time adds to the review's total. */
@@ -688,18 +691,32 @@ export function registerReviewFlow(pi: ExtensionAPI) {
 
       const prevReview = p?.review;
       let previous: { snapshot: string; findings: Finding[]; changed: string[]; acceptance?: AcceptanceCheck[] } | undefined;
-      if (!full && prevReview?.snapshot && before) {
+      // A review without a verdict is not a baseline to skip from: the documented next step is
+      // another /pb:review, so run it fresh on the same tree instead of reporting "nothing changed".
+      if (!full && prevReview?.snapshot && prevReview.verdict !== "none" && before) {
         const since = changedPaths(ctx.cwd, prevReview.snapshot, before.commit);
-        if (!since.length && !largeFiles.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict === "none" ? "no verdict" : prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
+        if (!since.length && !largeFiles.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
         previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since, acceptance: prevReview.acceptance };
       }
       // Fix laps report into their own sessions, not the brief: hand the follow-up review the
       // reports (claims plus test results) so it judges evidence, capped like any test output.
+      // The boundary is event order: the last review event at or before the previous review's
+      // time (a report stamped in that same second still reads as earlier than it — clock
+      // strings truncate to seconds). No such event: every fix event counts, as before.
       const fixReports = (() => {
         if (!name || !previous) return undefined;
-        const since = prevReview?.at ?? "";
-        const reports = readEvents(path.join(store.specDir(name), "events.jsonl"))
-          .filter((e) => e.type === "fix" && typeof e.at === "string" && (e.at as string) >= since && Array.isArray(e.fixed))
+        const events = readEvents(path.join(store.specDir(name), "events.jsonl"));
+        const at = prevReview?.at ?? "";
+        let boundary = -1;
+        for (let i = events.length - 1; i >= 0; i--) {
+          if (events[i].type === "review" && typeof events[i].at === "string" && (events[i].at as string) <= at) {
+            boundary = i;
+            break;
+          }
+        }
+        const reports = events
+          .slice(boundary + 1)
+          .filter((e) => e.type === "fix" && Array.isArray(e.fixed))
           .slice(-3)
           .map((e) => ({
             fixed: (e.fixed as unknown[]).filter((x): x is string => typeof x === "string"),

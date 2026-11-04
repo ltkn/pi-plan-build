@@ -14,6 +14,24 @@ import { COMPACT_STALL_LIMIT, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointi
 import { pastCheckpoint, stateSummary } from "./flow.ts";
 
 export function registerHooks(pi: ExtensionAPI) {
+  /**
+   * A path in every spelling: resolved through symlinks (and other names for the same directory,
+   * such as macOS's /tmp vs /private/tmp), falling back to the real parent for a file that does
+   * not exist yet, and to the path as given when nothing resolves. Guards compare both the raw
+   * and the real form so a target cannot slip a block by being spelled another way.
+   */
+  const realPath = (p: string): string => {
+    try {
+      return fs.realpathSync(p);
+    } catch {}
+    try {
+      return path.join(fs.realpathSync(path.dirname(p)), path.basename(p)); // a file that does not exist yet
+    } catch {}
+    return p;
+  };
+  /** `target` is `dir` itself or below it. */
+  const under = (target: string, dir: string) => target === dir || target.startsWith(dir + path.sep);
+
   pi.on("tool_call", (e, ctx) => {
     const ev = e as { toolName: string; input: { path?: string } };
     if (ev.toolName !== "edit" && ev.toolName !== "write") return;
@@ -24,29 +42,20 @@ export function registerHooks(pi: ExtensionAPI) {
     if (building) {
       const specs = path.join(ctx.cwd, ".pi", "pb", "specs");
       const target = path.resolve(ctx.cwd, ev.input.path ?? "");
-      if (target === specs || target.startsWith(specs + path.sep))
+      // Both spellings count: a symlink under .pi (e.g. specs-link -> pb/specs) must not read as
+      // an unrelated path and reach the approved spec the build may not rewrite.
+      if (under(target, specs) || under(realPath(target), realPath(specs)))
         return {
           block: true,
           reason: `The build of ${building.spec} is running: its approved spec is read-only. Record a shape in Design or a decision in Decisions with pb_update_spec; if the contract itself must change, stop the task with pb_task_done status blocked, then revise it and /${cmd("build")} re-approves the revision.`,
         };
     }
     if (!session || !store.planningSessions().includes(session)) return;
-    // Both sides through the same normalizer: a target spelled in another path form (/tmp vs
-    // /private/tmp, a symlinked cwd) must not read as "outside the project" and slip the block.
     // Either pairing counts as inside: the raw one covers relative paths whose target may not
     // exist yet, the resolved one covers a different spelling of the same directory.
-    const real = (p: string) => {
-      try {
-        return fs.realpathSync(p);
-      } catch {}
-      try {
-        return path.join(fs.realpathSync(path.dirname(p)), path.basename(p)); // a file that does not exist yet
-      } catch {}
-      return p;
-    };
-    const inside = (target: string, cwd: string) => target !== cwd && target.startsWith(cwd + path.sep);
+    const inside = (target: string, cwd: string) => target !== cwd && under(target, cwd);
     const target = path.resolve(ctx.cwd, ev.input.path ?? "");
-    if (!inside(real(target), real(ctx.cwd)) && !inside(target, ctx.cwd)) return; // outside the project: scratch files are fine
+    if (!inside(realPath(target), realPath(ctx.cwd)) && !inside(target, ctx.cwd)) return; // outside the project: scratch files are fine
     return {
       block: true,
       reason: `Planning mode: the project's files stay untouched until /${cmd("build")}. Put scratch files outside the project (e.g. in a mktemp -d directory), or say what you would change.`,

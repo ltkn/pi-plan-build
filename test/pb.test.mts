@@ -1488,6 +1488,19 @@ test("review brief: fix reports and acceptance drift render as sections", async 
   assert.match(reviewerBrief({ changed: [], stat: "", check: "ok", focus: "", acceptanceDrift: drift }), /## Acceptance drift during build/);
 });
 
+test("review briefs: a diff capped once keeps the true cut count", async () => {
+  const { reviewerBrief, verifierBrief, REVIEW_DIFF_CHARS } = await import("../extensions/pb/prompts.ts");
+  const { cap } = await import("../extensions/pb/store.ts");
+  const diff = cap("x".repeat(REVIEW_DIFF_CHARS + 12345), REVIEW_DIFF_CHARS);
+  assert.match(diff, /\[truncated 12345 chars\]$/); // the capture's own cut
+  const brief = reviewerBrief({ changed: [], stat: "", check: "ok", focus: "", diff });
+  assert.match(brief, /\[truncated 12345 chars\]/);
+  assert.doesNotMatch(brief, /\[truncated 25 chars\]/); // the marker is not truncated into a second, false cut
+  const verifier = verifierBrief([], undefined, undefined, diff);
+  assert.match(verifier, /\[truncated 12345 chars\]/);
+  assert.doesNotMatch(verifier, /\[truncated 25 chars\]/);
+});
+
 test("review brief: every acceptance id is listed; a follow-up carries the previous statuses", async () => {
   const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
   const brief = reviewerBrief({
@@ -2782,6 +2795,7 @@ test("review: a long prose report with no parseable findings is flagged, not sil
   assert.equal(unparsedReport(undefined, "Done."), false); // short prose: nothing to lose
   const lost = `P1 — the updated_at bump on in-place edits is silently lost in production. GexStalenessScheduler.updateStoredSet calls row.setUpdatedAt(now) on detached entities, so the bump never persists.\n\nP2 — a DB failure between the landed post and saveAll orphans a stale standing set with no coordinate rows.\n\n${"Fix: persist the bump through the repository. ".repeat(20)}`;
   assert.equal(unparsedReport(undefined, lost), true); // substantial but tagless: warn, don't pass clean
+  assert.equal(unparsedReport([], lost), false); // an explicit empty report is a report, not silence
 });
 
 test("review: acceptance coverage treats silence as unverified, never met", async () => {
@@ -2938,6 +2952,49 @@ test("fix: a lap that never reports stops the loop and escalates as silent", asy
   await t.run("fix");
   assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 1); // never retried into a second silent session
   assert.match(t.posts.at(-1)!, /\*\*❌ Fixes stopped — order-cancellation\*\* · no report · (?:<1s|\d+s)/);
+});
+
+test("fix lap: the report is picked by event order, not the clock", async () => {
+  const { lapReport } = await import("../extensions/pb/fix.ts");
+  const prior = { at: "2026-01-01 10:00:01", type: "fix", fixed: ["first"], skipped: [], tests: "ok" };
+  const start = { at: "2026-01-01 10:00:01", type: "fix-start", findings: ["second"] };
+  const events = [prior, start];
+  const from = events.length; // the log position right after this lap's fix-start marker
+  assert.equal(lapReport(events, from), undefined); // the prior report shares the second; it is not this lap's
+  const report = { at: "2026-01-01 10:00:02", type: "fix", fixed: ["second"], skipped: ["third"], tests: "npm test" };
+  assert.deepEqual(lapReport([...events, report], from), { fixed: ["second"], skipped: ["third"], tests: "npm test" });
+  assert.equal(lapReport([...events, { at: "2026-01-01 10:00:03", type: "fix" }], from), undefined); // a fix event without a fixed list is not a report
+});
+
+test("fix: a silent lap is not read as the prior lap's report, whatever the clock says", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [
+    { priority: "P2", file: "src/order.ts", line: 30, title: "first" },
+    { priority: "P2", file: "src/order.ts", line: 12, title: "second" },
+  ]);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const event = Store.prototype.event;
+  // Every fix report is stamped far in the future: the lap must attribute by event order, not by
+  // comparing clock strings, or the prior lap's report stands in for this lap's silence.
+  Store.prototype.event = function (this: InstanceType<typeof Store>, name: string, e: Record<string, unknown>) {
+    return event.call(this, name, e.type === "fix" ? { ...e, at: "2099-01-01 00:00:00" } : e);
+  };
+  let laps = 0;
+  try {
+    t.agent.script = async (text, tool) => {
+      if (!text.startsWith("[pb:fix")) return;
+      laps++;
+      if (laps === 1) await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" }); // fixes "first"; later laps never report
+    };
+    await t.run("fix");
+  } finally {
+    Store.prototype.event = event;
+  }
+  assert.equal(laps, 2); // the silent lap stops the loop instead of consuming laps 2 and 3 on a stale report
+  assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 2);
+  assert.match(t.posts.at(-1)!, /no report after 2 nudges/);
 });
 
 test("fix: skipped findings never start a lap and reach the escalation", async () => {
@@ -3439,6 +3496,24 @@ test("review: the adversarial pass runs in the background and its findings are m
   assert.match(t.posts.at(-1)!, /with an adversarial pass[\s\S]*Adversarial: a forged owner cancels/);
 });
 
+test("review: an adversarial empty report with a long explanation is not a lost report", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [{ priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" }];
+  process.env.MOCK_ABUSE_PROSE = `No attacks found: I tried forged owners, replayed requests and reordered calls. `.repeat(12);
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_ABUSE_PROSE;
+  }
+  const post = t.posts.at(-1)!;
+  assert.match(post, /with an adversarial pass/);
+  assert.doesNotMatch(post, /adversarial pass[\s\S]*reported in prose only/);
+  assert.doesNotMatch(post, /NO VERDICT/);
+});
+
 
 test("review: compaction resets to role, brief, findings and files read; stalls wrap up", async () => {
   const t = setup();
@@ -3568,6 +3643,31 @@ test("review: a follow-up looks at the previous findings and what changed since"
   await t.run("review");
   assert.match(briefOf(t), /## This is a follow-up review[\s\S]*1\. \[P1\] src\/order\.ts:12 — consider a guard clause[\s\S]*Changed since the previous review[\s\S]*T1\.txt/);
   assert.match(t.posts.at(-1)!, /Review — order-cancellation \(follow-up\)\*\* · PASS/);
+});
+
+test("review: the follow-up brief carries only fix reports from after the review it follows up", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = CHANGES;
+  await t.run("review");
+  // A fix report stamped in the same second as the review but appended before its event is not
+  // the follow-up's evidence; one appended after it is. Event order, not clock comparison.
+  const reviewAt = "2026-10-01 10:00:00";
+  const events = (t.events("order-cancellation") as Record<string, unknown>[]).map((e) => (e.type === "review" ? { ...e, at: reviewAt } : e));
+  const reviewIndex = events.findIndex((e) => e.type === "review");
+  events.splice(reviewIndex, 0, { at: reviewAt, type: "fix", fixed: ["early report"], skipped: [], tests: "ok" });
+  events.push({ at: "2026-10-01 10:00:05", type: "fix", fixed: ["late report"], skipped: [], tests: "ok" });
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/events.jsonl"), `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
+  const p = t.progress("order-cancellation");
+  p.review.at = reviewAt;
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"), JSON.stringify(p));
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
+  t.reviewer.review = [];
+  await t.run("review");
+  assert.match(briefOf(t), /## What the fix laps reported[\s\S]*Lap 1 fixed: late report/);
+  assert.doesNotMatch(briefOf(t), /early report/);
 });
 
 test("review: an omitted or unverified acceptance item never passes; the next review carries it", async () => {
@@ -3849,6 +3949,28 @@ test("review: a prose-only pass gives no verdict and leaves the phase short of r
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "built"); // not promoted to reviewed on a lost pass
   assert.equal(p.review.verdict, "none");
+  // The post says to run /pb:review again: that must start a fresh pass, not short-circuit on
+  // "nothing changed" and demand --full. A lost review is not a baseline to skip from, and it is
+  // not a follow-up either: there are no trustworthy previous findings to carry.
+  const reviews = t.instructions.filter((i) => i.startsWith("[pb:review]")).length;
+  await t.run("review");
+  assert.equal(t.instructions.filter((i) => i.startsWith("[pb:review]")).length, reviews + 1);
+  assert.doesNotMatch(briefOf(t), /## This is a follow-up review/);
+  assert.ok(!t.notes.some((n) => /Nothing changed since the last review/.test(n)));
+});
+
+test("review: an empty report with a long explanation is a pass, not a lost pass", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [];
+  t.reviewer.prose = `No findings: the change matches the spec, the tests pass, and I found nothing to report. `.repeat(12);
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /\*\*✅ Review — order-cancellation\*\* · PASS/);
+  assert.doesNotMatch(post, /NO VERDICT|there is no verdict/);
+  assert.equal(t.progress("order-cancellation").review.verdict, "pass");
 });
 
 test("review: offers once to run the reviewer on another model than the one that built the change", async () => {
@@ -6727,6 +6849,8 @@ test("build: a spec rewrite that renumbers a task doesn't strand the resume at '
 test("build: the approved contract is frozen while the build runs", async () => {
   const t = setup({ verify: "true" });
   await written(t);
+  // Another name for the specs folder: a symlink under .pi, so it stays out of snapshots.
+  fs.symlinkSync(path.join(t.repo, ".pi", "pb", "specs"), path.join(t.repo, ".pi", "specs-link"), "dir");
   t.agent.script = async (text, tool) => {
     if (!text.includes("Task T1")) return;
     // The whole spec can't be rewritten, and only Design and Decisions may change.
@@ -6738,6 +6862,11 @@ test("build: the approved contract is frozen while the build runs", async () => 
     // A direct write into the spec's folder is blocked like the tool: the snapshot can't be touched either.
     assert.match((await tool("write", { path: ".pi/pb/specs/order-cancellation/spec.md", content: "# rewritten" })).error!, /approved spec is read-only/);
     assert.match((await tool("write", { path: ".pi/pb/specs/order-cancellation/approved.md", content: "# rewritten" })).error!, /approved spec is read-only/);
+    // The same folder spelled through the symlink is the spec too, not an unrelated path.
+    const before = t.read(".pi/pb/specs/order-cancellation/spec.md");
+    assert.match((await tool("write", { path: ".pi/specs-link/order-cancellation/spec.md", content: "# rewritten" })).error!, /approved spec is read-only/);
+    assert.match((await tool("write", { path: ".pi/specs-link/order-cancellation/approved.md", content: "# rewritten" })).error!, /approved spec is read-only/);
+    assert.equal(t.read(".pi/pb/specs/order-cancellation/spec.md"), before);
     await tool("pb_tests_red", { task: "T1" });
     fs.writeFileSync(path.join(t.repo, "T1.txt"), "x");
     await tool("pb_task_done", { task: "T1", status: "done", changed: "T1", caveat: "none", rejected: "none", open: "none" });

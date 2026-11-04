@@ -41,7 +41,7 @@ if (sys.includes("ATTACKER")) {
   if (process.env.MOCK_SYSTEM_OUT) fs.writeFileSync(process.env.MOCK_SYSTEM_OUT, sys);
   const findings = process.env.MOCK_ABUSE_FINDINGS ? JSON.parse(process.env.MOCK_ABUSE_FINDINGS) : [];
   report("report_findings", { findings });
-  say([{ type: "text", text: "Done." }]);
+  say([{ type: "text", text: process.env.MOCK_ABUSE_PROSE ?? "Done." }]);
 } else if (sys.includes("SPEC REVIEWER")) {
   // One structured pass: the reviewer reports findings with report_findings; only P0 blocks.
   // =block: a P0; =block-advisory: a P0 plus a P2; =advisory: a P1 plus a P2 (pass);

@@ -847,9 +847,3 @@ export const pauseBuild = (ctx: ExtensionContext, store: Store, p: Progress, rea
     tip(tipKey, { spec: p.spec, ...vars }),
   ].join("\n"));
 };
-
-/**
- * A resume buys an exhausted step a fresh set of attempts; any other pause keeps its count.
- * Resets and returns true only when the step had exhausted its budget; the next handout
- * counts the new attempt.
- */

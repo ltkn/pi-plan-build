@@ -7,7 +7,7 @@
  */
 import { tip } from "./help.ts";
 import { BINDING_SECTIONS, type ParsedSpec, type SpecTask, sectionHeading, sectionOf } from "./spec.ts";
-import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, type Progress, type TaskProgress, cap } from "./store.ts";
+import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, type Progress, type TaskProgress } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
 
@@ -151,7 +151,7 @@ No later step sees the whole change at once: tasks are built one by one. So pin 
 ## Migration and rollback
 Only when the change persists or transforms data, a schema or a stored format: how existing data moves to the new shape, how the change is rolled back, and what old and new code do while both run. Say "none — <why>" when nothing outlives the change.
 ## Threats and abuse
-Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks should carry this section: say "none — <why>" if the keyword points at nothing. The task acceptance lines then include the abuse cases.
+Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks should carry this section: say "none — <why>" if none of those triggers applies. The task acceptance lines then include the abuse cases.
 ## Open questions
 Only while Status is planning: what's undecided, the options still being weighed with what was found for and against each, and where the discussion stands.
 ## Tasks
@@ -514,7 +514,7 @@ export interface ReviewBrief {
   /** what the change is meant to do, when there is no spec */
   intent?: string;
   base?: string;
-  /** the diff from base (or HEAD) to the tree the review started on, capped for the brief */
+  /** the diff from base (or HEAD) to the tree the review started on, already capped at REVIEW_DIFF_CHARS by the caller */
   diff?: string;
   changed: string[];
   stat: string;
@@ -644,7 +644,7 @@ export function reviewerBrief(o: ReviewBrief): string {
     "",
     "## The diff",
     "",
-    o.diff?.trim() ? cap(o.diff.trim(), REVIEW_DIFF_CHARS) : "(no diff captured: the change is in the files listed below; read them.)",
+    o.diff?.trim() ? o.diff.trim() : "(no diff captured: the change is in the files listed below; read them.)",
     "",
     "## Changed files",
     "",
@@ -738,6 +738,7 @@ export function reviewStateSummary(o: { label: string; role: "review" | "abuse";
   ].join("\n");
 }
 
+/** `diff` is the capture `reviewDiff` already capped: re-capping it would report the marker's own cut, not the change's. */
 export function verifierBrief(findings: Finding[], base: string | undefined, specPath?: string, diff?: string): string {
   return [
     "# Findings to verify",
@@ -748,7 +749,7 @@ export function verifierBrief(findings: Finding[], base: string | undefined, spe
     "",
     base ? `Base commit: ${base}. The diff below is from that commit to the tree the review started on.` : "The diff below is from HEAD to the tree the review started on.",
     "",
-    diff?.trim() ? cap(diff.trim(), REVIEW_DIFF_CHARS) : "(no diff captured: read the files named by the findings.)",
+    diff?.trim() ? diff.trim() : "(no diff captured: read the files named by the findings.)",
     ...(specPath ? ["", "# The spec it was built from", "", `Read it at ${specPath}: it is the source of truth for what the change should do.`] : []),
   ].join("\n");
 }
