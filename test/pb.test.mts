@@ -3394,6 +3394,10 @@ test("review: the review session is gated (reporting tool present, editing block
     if (text.startsWith("[pb:review]")) {
       gated.push(t.runtime().pi.getActiveTools());
       blocked.push((await tool("write", { path: "x.ts", content: "x" })).error);
+      // The allowlist itself is the guard: a tool that is not on it is blocked even when it is
+      // neither edit nor write (a late-connecting MCP server's tool, say), not just left to
+      // Pi's active-tool state.
+      blocked.push((await tool("bash", { command: "echo hi" })).error);
       await tool("pb_report_findings", { findings: [], acceptance: acceptanceOf(text) });
       return;
     }
@@ -3404,6 +3408,7 @@ test("review: the review session is gated (reporting tool present, editing block
   // No shell either: the reviewer reads the frozen diff and the tree, so it cannot act on what it judges.
   assert.deepEqual(gated, [["read", "grep", "find", "ls", "pb_report_findings"]]);
   assert.match(blocked[0]!, /This is a review session: read-only/);
+  assert.match(blocked[1]!, /This is a review session: read-only/);
 });
 
 test("review: reopening an interrupted review session, /pb:review continue picks it up there", async () => {
@@ -3489,10 +3494,12 @@ test("review: the adversarial pass runs in the background and its findings are m
   assert.ok(!t.selectTitles.some((x) => /adversarial pass/.test(x)), "the pass is not asked for: it just runs");
   assert.ok(![...t.names.values()].some((n) => n.endsWith("· adversarial"))); // no session of its own
   // Read-only like the reviewer, and named its reporting tool: --tools is the whole selection,
-  // extension tools included, so an unnamed tool is never declared to the model.
+  // extension tools included, so an unnamed tool is never declared to the model. The user's MCP
+  // servers stay out too: they would be spawned (and their tools kept) inside the pass otherwise.
   const argv = fs.readFileSync(argsOut, "utf8").split("\n");
   assert.equal(argv[argv.indexOf("--tools") + 1], "read,grep,find,ls,report_findings");
   assert.ok(!argv.includes("bash"));
+  assert.ok(argv.includes("--no-mcp"));
   assert.match(t.posts.at(-1)!, /with an adversarial pass[\s\S]*Adversarial: a forged owner cancels/);
 });
 

@@ -1,6 +1,6 @@
 /** The spec-to-build pipeline: pb_write_spec & co, the spec review, and the build machinery behind /pb:build and /pb:spec. */
 import * as path from "node:path";
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { StringEnum, Type } from "./schema.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,

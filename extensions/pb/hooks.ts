@@ -34,10 +34,17 @@ export function registerHooks(pi: ExtensionAPI) {
 
   pi.on("tool_call", (e, ctx) => {
     const ev = e as { toolName: string; input: { path?: string } };
-    if (ev.toolName !== "edit" && ev.toolName !== "write") return;
     const session = ctx.sessionManager.getSessionFile();
     const store = new Store(ctx.cwd);
-    if (session && store.reviewSession(session)) return { block: true, reason: "This is a review session: read-only. Report what should change with pb_report_findings." };
+    // The review session's tool set is the allowlist itself, not a hope that Pi's active-tool
+    // state matches it: a late-connecting MCP server registers its tools after session_start and
+    // they activate on registration (or on resume), so anything off the list is blocked.
+    if (session && store.reviewSession(session)) {
+      if (!REVIEW_SESSION_TOOLS.includes(ev.toolName))
+        return { block: true, reason: "This is a review session: read-only. Report what should change with pb_report_findings." };
+      return;
+    }
+    if (ev.toolName !== "edit" && ev.toolName !== "write") return;
     const building = liveBuildOfSession(ctx, store);
     if (building) {
       const specs = path.join(ctx.cwd, ".pi", "pb", "specs");

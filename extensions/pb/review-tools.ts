@@ -3,7 +3,7 @@
  * report through, so pb reads their findings, verdicts and maps from tool calls instead of parsing prose.
  * The calls themselves are what pb reads; the tools only acknowledge them.
  */
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { StringEnum, Type } from "./schema.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function reviewTools(pi: ExtensionAPI) {

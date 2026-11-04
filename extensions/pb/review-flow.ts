@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { StringEnum, Type } from "./schema.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,

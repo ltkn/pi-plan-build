@@ -1,7 +1,7 @@
 /** pb_explore and pb_try: the two fresh-context research tools. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { StringEnum, Type } from "./schema.ts";
 import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";

@@ -7,6 +7,21 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { VERSION } from "@earendil-works/pi-coding-agent";
+
+/** MCP is a built-in extension that `--no-extensions` does not stop; Pi 1.0.4 added `--no-mcp` to turn it off. */
+const NO_MCP_FROM = "1.0.4";
+
+/** True when the running Pi's `VERSION` (e.g. "1.5.0") is at least `need`. A prerelease suffix parses as its triple. */
+export const piAtLeast = (need: string): boolean => {
+  const nums = (v: string) => v.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const have = nums(VERSION ?? "");
+  const want = nums(need);
+  for (let i = 0; i < Math.max(have.length, want.length); i++) {
+    if ((have[i] ?? 0) !== (want[i] ?? 0)) return (have[i] ?? 0) > (want[i] ?? 0);
+  }
+  return true;
+};
 
 export interface RunOptions {
   cwd: string;
@@ -172,6 +187,10 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
   await fs.promises.writeFile(briefFile, o.brief, { mode: 0o600 });
 
   const args = ["--mode", "json", "-p", ...(o.sessionDir ? ["--session-dir", o.sessionDir] : ["--no-session"]), "--no-extensions"];
+  // A restricted role must not carry the user's MCP servers: they would be spawned (and, since
+  // 1.0.4, their tools kept by `--tools`) inside a process that is meant to see only the brief.
+  // Skipped on an older Pi only because an unknown flag would fail every run; the floor is 1.5.
+  if (piAtLeast(NO_MCP_FROM)) args.push("--no-mcp");
   for (const e of o.extensions ?? []) args.push("-e", e);
   if (o.model) args.push("--model", o.model);
   if (o.thinking) args.push("--thinking", o.thinking);

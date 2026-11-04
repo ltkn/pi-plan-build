@@ -1,6 +1,6 @@
 /** The fixes: /pb:fix, pb_fix_done, and the fix-lap loop. */
 import * as path from "node:path";
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { StringEnum, Type } from "./schema.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
