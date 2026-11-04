@@ -900,7 +900,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 ## Status, stats and archive
 
 - **`/pb:status`**: every spec, its state, verification, dependencies and tasks.
-  `/pb:status --json` prints the same information as the `pb.report/1`
+  `/pb:status --json` prints the same information as the `pb.report/2`
   document for scripts.
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and
   failed, pauses, the review verdicts with the latest review's confirmed P0/P1,
@@ -918,7 +918,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
   `/pb:stats --json` prints the same report with each spec's stats.
 - **`pb-report`**: the report without Pi, for scripts and dashboards:
   `pb-report [--cwd dir] [--stats] [--review]`. The `schema` field is
-  `pb.report/1`; a breaking change gets a new one.
+  `pb.report/2`; a breaking change gets a new one (pb.report/1 lost its dead `context.asks` count).
 - **`/pb:archive`**: moves a finished spec to `.pi/pb-archive/` (which git
   ignores), so `/pb:build` and `/pb:status` only show live work, and offers to
   update the project map (`/pb:help map`). The approved spec moves with it; the

@@ -24,7 +24,7 @@ build. Your engineering standards live in AGENTS.md, written once.
                       section is replaced); java, vue, plain or your own template, detected by default
 /pb:spec [which]      write or revise a spec without building (optional)
 /pb:undo · /pb:status [--json] · /pb:stats [--json] · /pb:archive · /pb:help
-pb-report [--cwd dir] [--stats] [--review]   # the same pb.report/1 JSON, for scripts
+pb-report [--cwd dir] [--stats] [--review]   # the same pb.report/2 JSON, for scripts
 ```
 
 ## Install
@@ -214,7 +214,7 @@ compiled when done, when a compile command exists. After the suite the final
 gate also runs `lint` and `extraChecks`. `New tests: no` tells the build not to
 add tests while the existing ones still run.
 
-**Scripts read `pb.report/1`.** `/pb:status --json`, `/pb:stats --json` and
+**Scripts read `pb.report/2`.** (pb.report/1 lost its dead `context.asks` count.) `/pb:status --json`, `/pb:stats --json` and
 `pb-report` emit the same document: `schema`, `specs` (phase, verification, the
 latest review's verdict and findings, every acceptance status, and stats with
 `--stats`), and `summary`. The `schema` value changes only when the contract breaks.

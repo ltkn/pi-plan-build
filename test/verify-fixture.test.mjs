@@ -9,6 +9,9 @@ test("verify fixture passes one", () => {});
 
 test("verify fixture skips one", { skip: true }, () => {});
 
+// A bodyless todo prints `ok N - … # TODO` with `# fail 0`: not a proof either.
+test("verify fixture todo one", { todo: true }, () => {});
+
 // The metacharacters in this name only match literally when the prover escapes the pattern.
 test("verify fixture regex (a+b)", () => {});
 

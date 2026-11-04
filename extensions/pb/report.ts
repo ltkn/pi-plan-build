@@ -1,5 +1,5 @@
 /**
- * The machine-readable report: pb.report/1. `/pb:status --json`, `/pb:stats --json` and the
+ * The machine-readable report: pb.report/2 (pb.report/1 lost the dead context.asks count). `/pb:status --json`, `/pb:stats --json` and the
  * `pb-report` command all return this document, so a dashboard or a script reads one shape and
  * never has to parse the human views. The schema string is the contract: a breaking change
  * needs a new one.
@@ -8,7 +8,7 @@ import { acceptanceCriteria, parseSpec } from "./spec.ts";
 import { loadStats, summarize, type SpecStats } from "./stats.ts";
 import type { AcceptanceStatus, Finding, Gate, Phase, Priority, Store } from "./store.ts";
 
-export const REPORT_SCHEMA = "pb.report/1";
+export const REPORT_SCHEMA = "pb.report/2";
 
 export interface ReportTask {
   id: string;
@@ -221,7 +221,7 @@ function reportSpec(store: Store, name: string, options: ReportOptions, stats: M
   };
 }
 
-/** Build the pb.report/1 document for the store's live specs. */
+/** Build the pb.report/2 document for the store's live specs. */
 export function buildReport(store: Store, options: ReportOptions = {}): Report {
   const stats = options.stats ? new Map(loadStats(store).map((s) => [s.name, s])) : undefined;
   const specs = store.specNames().map((name) => reportSpec(store, name, options, stats));

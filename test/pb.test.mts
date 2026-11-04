@@ -2613,6 +2613,30 @@ test("undo restores the files and tasks to before a task, rewinds the conversati
   assert.equal(t.navigations.at(-1)!.summary, undefined);
 });
 
+test("undo: row ids stay unique across undo, revert and rebuild cycles", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  // u2 must be created while T2 is still todo, so its task clone carries the todo state and
+  // reverting it makes T2 todo again: undo T2, then undo T1 (its clone holds T2 todo).
+  await t.run("undo", "T2");
+  await t.run("undo", "T1");
+  await t.run("build"); // T1 and T2 rebuild
+  await t.run("undo", "T2"); // u3: its task clone holds T2 todo
+  await t.run("undo", "u3"); // revert u3: u3 is dropped, T2 is todo again
+  await t.run("build"); // T2 finishes again
+  await t.run("undo", "T2");
+  // The old numbering counted u rows in the pre-undo list (u2, u3) and issued u3 again while
+  // the kept rows still held the reverted cycle's u3 — /pb:undo u3 would resolve to the older row.
+  const cps = JSON.parse(t.read(".pi/pb/specs/order-cancellation/checkpoints.json"));
+  const ids = cps.map((c: any) => c.id);
+  assert.deepEqual(new Set(ids).size, ids.length, `duplicate checkpoint ids: ${ids.join(", ")}`);
+  assert.match(t.posts.at(-1)!, /Undone to before T2\*\*[\s\S]*\/pb:undo (u\d+)/);
+  const printed = t.posts.at(-1)!.match(/\/pb:undo (u\d+)/)![1];
+  assert.ok(!ids.slice(0, -1).includes(printed), `the tip printed ${printed}, which already named a row`);
+});
+
 test("undo to the start of the build: a resume sends the build's instructions again", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -3965,12 +3989,12 @@ test("archive moves a finished spec out of .pi/pb/, and stats still see it", asy
   assert.match(t.posts.at(-1)!, /order-cancellation +2\/2/);
 });
 
-test("report: status and stats --json return pb.report/1, and pb-report does too", async () => {
+test("report: status and stats --json return pb.report/2, and pb-report does too", async () => {
   const t = setup({ mapOnArchive: false });
   await written(t);
   await t.run("status", "--json");
   const status = JSON.parse(t.posts.at(-1)!);
-  assert.equal(status.schema, "pb.report/1");
+  assert.equal(status.schema, "pb.report/2");
   assert.equal(status.specs[0].name, "order-cancellation");
   assert.equal(status.specs[0].phase, "written");
   assert.deepEqual(status.specs[0].acceptance.map((a: { id: string }) => a.id), ["T1.1", "T2.1"]);
@@ -3980,12 +4004,14 @@ test("report: status and stats --json return pb.report/1, and pb-report does too
 
   await t.run("stats", "--json");
   const stats = JSON.parse(t.posts.at(-1)!);
-  assert.equal(stats.schema, "pb.report/1");
+  assert.equal(stats.schema, "pb.report/2");
   assert.equal(stats.specs[0].stats.tasks, 2);
+  // pb.report/2 dropped context.asks: nothing ever wrote an ask event, so the count was dead.
+  assert.deepEqual(Object.keys(stats.specs[0].stats.context).sort(), ["compactions", "nudges", "resets"]);
 
   const cli = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "extensions/pb/report-cli.mjs");
   const out = JSON.parse(execSync(`${JSON.stringify(process.execPath)} ${JSON.stringify(cli)} --cwd ${JSON.stringify(t.repo)} --stats --review`, { encoding: "utf8" }));
-  assert.equal(out.schema, "pb.report/1");
+  assert.equal(out.schema, "pb.report/2");
   assert.equal(out.specs[0].stats.tasks, 2);
   assert.deepEqual(out.specs[0].review.findings, []);
 });
@@ -6942,6 +6968,8 @@ test("verify-test: refuses to prove a skipped, missing or failing test", async (
   // The trap: `node --test --test-name-pattern=<zero-match>` itself exits 0.
   assert.notEqual(run([...fixture, "verify fixture matches nothing"]).status, 0);
   assert.notEqual(run([...fixture, "verify fixture skips one"]).status, 0);
+  // A bodyless todo prints `ok N - … # TODO` with `# fail 0` and exit 0: not a proof.
+  assert.notEqual(run([...fixture, "verify fixture todo one"]).status, 0);
   assert.notEqual(run([...fixture, "verify fixture fails one"]).status, 0);
 });
 
@@ -6960,6 +6988,54 @@ test("checkpoints: an unchanged tree reuses the tip commit without moving the re
   const moved = snapshot(t.repo, "pb: third")!;
   assert.notEqual(moved.commit, first.commit);
   assert.equal(count(), 2);
+});
+
+test("checkpoints: concurrent snapshot processes never orphan a commit the ref once named", async () => {
+  const t = setup();
+  // Six processes snapshot the same repo at once: each reads the tip, commits against it and
+  // moves the ref. With a blind update-ref the later writer rewinds the tip past the earlier
+  // commit (the window spans the commit-tree exec), orphaning it; compare-and-swap chains
+  // every commit, so each one a process got back stays an ancestor of the final tip.
+  const { spawnSync } = await import("node:child_process");
+  const moduleUrl = new URL("../extensions/pb/checkpoint.ts", import.meta.url).href;
+  const script = `
+    const { snapshot } = await import(process.argv[1]);
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const [cwd, id] = [process.argv[2], process.argv[3]];
+    const commits = [];
+    for (let k = 0; k < 12; k++) {
+      fs.writeFileSync(path.join(cwd, id + ".txt"), id + "-" + k);
+      const s = snapshot(cwd, "storm " + id + " " + k);
+      if (s) commits.push(s.commit);
+    }
+    console.log(commits.join(" "));
+  `;
+  const { spawn } = await import("node:child_process");
+  // All children run at once (spawn, not spawnSync): the race needs overlapping writers.
+  const children = [1, 2, 3, 4, 5, 6].map((n) => new Promise<{ code: number | null; out: string; err: string }>((resolve) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script, moduleUrl, t.repo, `w${n}`], { cwd: t.repo, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("close", (code) => resolve({ code, out, err }));
+  }));
+  const done = await Promise.all(children);
+  const commits = done.flatMap((c) => c.out.trim().split(/\s+/).filter(Boolean));
+  assert.equal(done.filter((c) => c.code === 0).length, done.length, done.map((c) => c.err).join("\n"));
+  assert.ok(commits.length >= 60, `the storm produced only ${commits.length} snapshots`);
+  const tip = execSync("git rev-parse refs/pb/checkpoints", { cwd: t.repo, encoding: "utf8" }).trim();
+  const lost = commits.filter((c) => {
+    try {
+      execSync(`git merge-base --is-ancestor ${c} ${tip}`, { cwd: t.repo, stdio: "ignore" });
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  assert.deepEqual(lost, [], `${lost.length} of ${commits.length} commits the storm recorded are unreachable from the tip`);
+  for (const f of fs.readdirSync(path.join(t.repo, ".git")).filter((f) => f.startsWith("pb-index-"))) fs.rmSync(path.join(t.repo, ".git", f), { force: true });
 });
 
 test("checkpoints: a checkpoint row that adds no information over the last row is not stored", async () => {

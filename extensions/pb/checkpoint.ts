@@ -92,14 +92,22 @@ export function snapshot(cwd: string, message: string): Snapshot | undefined {
     });
     run(cwd, ["add", "-A", "--", ".", ...addExcludes(cwd), ...huge.map((f) => `:(exclude,literal)${f}`)], env);
     const tree = run(cwd, ["write-tree"], env).trim();
-    const parent = tryRun(cwd, ["rev-parse", "--verify", "-q", REF])?.trim();
+    // Two pb processes snapshot the same repo concurrently: each reads the ref tip, commits
+    // against it and moves the ref. A blind update-ref would let the later writer rewind the
+    // tip past the earlier commit, orphaning any stored checkpoint row that names it — so the
+    // ref moves only by compare-and-swap, and a lost race re-parents against the fresh tip.
     // A tree identical to the tip's says nothing new: reuse the tip instead of minting a commit
     // per planning turn / explore / review, which would grow refs/pb/checkpoints for no information.
-    const parentTree = parent ? tryRun(cwd, ["rev-parse", "--verify", "-q", `${parent}^{tree}`])?.trim() : undefined;
-    if (parent && parentTree === tree) return { commit: parent, tree };
-    const commit = run(cwd, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", message], IDENT).trim();
-    run(cwd, ["update-ref", REF, commit]);
-    return { commit, tree };
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const parent = tryRun(cwd, ["rev-parse", "--verify", "-q", REF])?.trim();
+      const parentTree = parent ? tryRun(cwd, ["rev-parse", "--verify", "-q", `${parent}^{tree}`])?.trim() : undefined;
+      if (parent && parentTree === tree) return { commit: parent, tree };
+      const commit = run(cwd, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", message], IDENT).trim();
+      // `update-ref <ref> <new> <old>` moves the ref only when it still names <old>; an empty
+      // <old> asserts the ref does not exist yet. A failure is a lost race or a ref lock: retry.
+      if (tryRun(cwd, ["update-ref", REF, commit, ...(parent ? [parent] : [""])]) !== undefined) return { commit, tree };
+    }
+    return undefined; // persistently contended: no snapshot rather than an orphan
   } catch {
     return undefined;
   }

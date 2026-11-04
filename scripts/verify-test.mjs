@@ -5,9 +5,11 @@
  * `node --test --test-name-pattern=<no match>` exits 0 — a filtered command whose
  * pattern drifts is indistinguishable from a green run. This script runs the suite
  * with the names as a pattern and reads the TAP report: exit 0 only when every name
- * appears as a passing `ok` line (a `# SKIP` is not a proof) and the run reports
- * `# fail 0`. Spawned with an args array, never a shell; names are regex-escaped,
- * so metacharacters in a test name match literally.
+ * appears as a passing `ok` line (a `# SKIP` or `# TODO` is not a proof) and the run
+ * reports `# fail 0`. The runner itself must have finished cleanly — killed, timed
+ * out (10 min) or truncated output proves nothing even when the TAP looks green.
+ * Spawned with an args array, never a shell; names are regex-escaped, so
+ * metacharacters in a test name match literally.
  *
  * Usage: node scripts/verify-test.mjs [--file <test-file>] "<exact test name>" ...
  * The test file (default test/pb.test.mts) resolves against the repo root.
@@ -46,24 +48,33 @@ const unique = [...new Set(names)];
 // child with no TAP summary; the proof must always see the real report.
 const env = { ...process.env };
 delete env.NODE_TEST_CONTEXT;
+// A hung runner must fail the proof, not hang the loop that called it.
 const run = spawnSync(
   process.execPath,
   ["--test", "--test-reporter=tap", "--test-name-pattern", unique.map(escapeRe).join("|"), path.resolve(ROOT, testFile)],
-  { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env }
+  { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 10 * 60_000, env }
 );
 const out = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
 const lines = out.split("\n").map((l) => l.replace(/\r$/, ""));
 
 // A passing TAP line is `ok <n> - <name>`, optionally followed by a `# time=` comment;
-// `# SKIP` never counts, and `not ok` never matches the `ok` prefix anchored at line start.
-const passed = (name) => lines.some((l) => new RegExp(`^\\s*ok \\d+ - ${escapeRe(name)}(?: # (?!SKIP).*)?$`).test(l));
+// `# SKIP` and `# TODO` never count (a bodyless todo test prints ok with `# fail 0`),
+// and `not ok` never matches the `ok` prefix anchored at line start.
+const passed = (name) => lines.some((l) => new RegExp(`^\\s*ok \\d+ - ${escapeRe(name)}(?: # (?!SKIP|TODO).*)?$`).test(l));
 const failCount = lines.map((l) => /^# fail (\d+)$/.exec(l)).filter(Boolean).at(-1);
 
 const missing = unique.filter((n) => !passed(n));
 const problems = [];
-if (missing.length) problems.push(`not proven (missing, skipped or failing): ${missing.join("; ")}`);
+if (missing.length) problems.push(`not proven (missing, skipped, todo or failing): ${missing.join("; ")}`);
 if (failCount && Number(failCount[1]) > 0) problems.push(`the run reports ${failCount[1]} failing test(s)`);
-if (!failCount) problems.push(`the TAP report has no "# fail" summary (runner exit ${run.status ?? run.signal}); the run itself proves nothing`);
+if (!failCount) problems.push(`the TAP report has no "# fail" summary; the run itself proves nothing`);
+// The TAP text is the proof of the tests; the process result is the proof that the run
+// finished as a run at all: killed, timed out or truncated output proves nothing.
+if (run.error) problems.push(`the runner failed (${run.error.message ?? run.error})`);
+if (run.signal) problems.push(`the runner was killed by ${run.signal}`);
+if (typeof run.status === "number" && run.status !== 0 && !(failCount && Number(failCount[1]) > 0)) {
+  problems.push(`the runner exited ${run.status} while the TAP report looks green`);
+}
 
 if (problems.length) {
   console.error(`verify-test: NOT PROVEN — ${problems.join(". ")}`);

@@ -84,8 +84,12 @@ export function registerUndo(pi: ExtensionAPI) {
           runtime.undoSummary = undefined;
         }
       }
-      const undoEntry: Checkpoint = { id: `u${cps.filter((c) => c.id.startsWith("u")).length + 1}`, at: now(), ...cur, head, tasks: structuredClone(p.tasks), entry: rewound ? oldLeaf : undefined };
       const keptCps = cps.slice(0, idx).concat(target.id === "start" ? [target] : []);
+      // Number from the list being saved, never from the pre-undo list: rows from the target on
+      // are dropped here, so a count over them can re-issue an id that survives — and ids are
+      // looked up by first match, so a duplicate would send `/pb:undo uN` to an older state.
+      const undoNumber = keptCps.reduce((n, c) => (/^u\d+$/.test(c.id) ? Math.max(n, Number(c.id.slice(1))) : n), 0) + 1;
+      const undoEntry: Checkpoint = { id: `u${undoNumber}`, at: now(), ...cur, head, tasks: structuredClone(p.tasks), entry: rewound ? oldLeaf : undefined };
       appendCheckpoint(keptCps, undoEntry); // freshly numbered, so it always adds information
       store.saveCheckpoints(name, keptCps);
       p.tasks = structuredClone(target.tasks).filter((t) => t.id !== "final" && t.id !== COHERE_TASK_ID);

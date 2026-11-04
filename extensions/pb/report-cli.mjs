@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * pb-report: print the machine-readable pb.report/1 document for a project.
+ * pb-report: print the machine-readable pb.report/2 document for a project.
  * The same builder backs /pb:status --json and /pb:stats --json, so scripts and
  * dashboards read one shape whichever way they ask.
  *
@@ -15,7 +15,7 @@ import { Store } from "./store.ts";
 
 const USAGE = `Usage: pb-report [--cwd <dir>] [--stats] [--review]
 
-Print the pb.report/1 JSON document for the project at --cwd (default: the
+Print the pb.report/2 JSON document for the project at --cwd (default: the
 current directory).
 
   --cwd <dir>  project root holding .pi/pb
