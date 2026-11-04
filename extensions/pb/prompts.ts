@@ -6,9 +6,8 @@
  * in your Pi sessions; the explorer, the reviewer and the verifier are separate, fresh calls.
  */
 import { tip } from "./help.ts";
-import { safeLine } from "./markdown.ts";
 import { BINDING_SECTIONS, type ParsedSpec, type SpecTask, sectionHeading, sectionOf } from "./spec.ts";
-import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, FINDING_NOT_CHARS, PB_DIR, type Progress, type TaskProgress, cap } from "./store.ts";
+import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, type Progress, type TaskProgress, cap } from "./store.ts";
 
 const P = PB_DIR.replace(/\\/g, "/");
 
@@ -251,7 +250,7 @@ function gateLine(spec: ParsedSpec, buildCmd: string | null, each: boolean): str
 
 /** How the build works: the mechanics only (the standards come separately). each: a check after every task. */
 export function buildMechanics(spec: ParsedSpec, buildCmd: string | null, each = false, extra = ""): string {
-  return `- This build is autonomous: never ask. Where the spec is unclear or a detail has moved, take the sensible reading and record it with pb_record_decision (assumption: true) as claim + settler + cost.
+  return `- This build is autonomous: never ask. Where the spec is unclear or a detail has moved, take the sensible reading and record it with pb_record_decision (assumption: true): what you assume, what would settle it, and what settling costs.
 - Keep each change to its task. Tests: ${spec.newTests ? `add or extend tests for the behaviour each task introduces${spec.gate === "tests" ? ", seen failing before the code exists" : ""}.` : `add none for this feature (${spec.newTestsReason}).`} Change or remove an existing test only when what it covers changes; never skip or weaken one to get a check through.
 - Goal, Decisions, Contracts, Threats and Acceptance bind you; the how is yours: record a shape later tasks need in "## Design" (pb_update_spec); later changes in pb_record_decision. If a Contract or the Goal cannot be built as written, stop with pb_task_done status "blocked" and the evidence: that needs a revised spec and a new approval.
 - Don't commit or discard with git; leave .pi/ alone.
@@ -485,25 +484,18 @@ This session is read-only: don't edit or write files. The human can watch it and
 ${brief}`;
 }
 
-export const VERIFIER_SYSTEM = `You are a VERIFIER in a fresh context. A reviewer reported the findings in the brief about a change that may be uncommitted. For each one, look at the code yourself and decide: confirmed (the problem is real where the finding says, at about the priority it claims) or rejected (not real, or already handled), with one line of evidence (file:line).
+export const VERIFIER_SYSTEM = `You are a VERIFIER in a fresh context. A reviewer reported the findings in the brief about a change that may be uncommitted. For each one, look at the code yourself and decide: confirmed (the problem is real where the finding says) or rejected (not real, or already handled), with one line of evidence (file:line).
 
 A finding marked "outside the change" is pre-existing: confirm it when the problem is real and still present, whether or not this change caused it. Never reject a finding for being outside or pre-existing — that is its class, not a reason to dismiss it.
 
 ${READ_ONLY_PREAMBLE} Report with the report_verdicts tool: one entry per finding, by its number.`;
 
 /**
- * A reviewer's rejected alternative as it is kept: capped, and one line — it is re-rendered into the
- * human post, every later brief and the fix seed, where a second line would read as another field.
- */
-const storedNot = (text: string): string => safeLine(cap(text.trim(), FINDING_NOT_CHARS));
-
-/**
  * A finding's detail lines, in the one order every reader sees them: post, brief and fix seed alike.
  * A field a finding gains is added here, never at a call site, so no renderer of findings shows less
  * than another.
  */
-export const findingDetails = (f: Finding) =>
-  `${f.evidence ? `\n   Evidence: ${f.evidence}` : ""}${f.fix ? `\n   Fix: ${f.fix}` : ""}${f.alternative ? `\n   Not: ${f.alternative}` : ""}`;
+export const findingDetails = (f: Finding) => `${f.fix ? `\n   Fix: ${f.fix}` : ""}`;
 
 export const findingLine = (f: Finding, n?: number) =>
   `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}${findingDetails(f)}`;

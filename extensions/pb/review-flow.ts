@@ -36,7 +36,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
           line: Type.Optional(Type.Number()),
           title: Type.String({ description: "the problem, in one sentence" }),
           fix: Type.Optional(Type.String({ description: "a concrete fix" })),
-          outside: Type.Optional(Type.Boolean({ description: "true when the problem pre-dates this change (outside it): still a finding, capped at P2 and advisory" })),
+          outside: Type.Optional(Type.Boolean({ description: "true when the problem pre-dates this change (outside it): still a finding — give it the priority it deserves, and a serious one (P0/P1) still blocks" })),
         }),
       ),
       acceptance: Type.Optional(
@@ -252,8 +252,14 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         addPass(run, { role: "review", ...r });
         await reviewNext(c, store, run, r.left);
       },
+    }).catch((e) => {
+      store.clearCarry(); // a throw must not leave the handover behind either
+      throw e;
     });
-    if (result.cancelled) return reviewNext(from, store, run, true);
+    if (result.cancelled) {
+      store.clearCarry(); // its handover must not leak into a later, unrelated new session
+      return reviewNext(from, store, run, true);
+    }
   };
 
   /** Continue an interrupted pass in its own session (`c` is that session), then the rest of the review. */
@@ -314,6 +320,10 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const stepName = (id: string) => (id === COHERE_TASK_ID ? "coherence pass" : id === "final" ? "final check" : id);
     const midBuildView = midBuild.map(stepName);
     const fixIds = fixable.map((_, i) => i + 1).join(" ");
+    // /pb:fix resolves against the recorded review (progress.review.findings), which only a
+    // complete run writes: an incomplete one (the adversarial pass missing) would send the
+    // human after ids that resolve to nothing — or, on a follow-up, to the previous review.
+    const complete = finished("review") && (!run.security || finished("abuse"));
     const next = o.partial
       ? `\`/${cmd("review")}\` continues this review.`
       : lost
@@ -321,11 +331,13 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         : verdict === "unverified"
           ? `check each unverified criterion (or amend the spec), then \`/${cmd("review")}\` again — \`/${cmd("review")} --full\` if nothing else changed.`
           : verdict === "changes_needed"
-            ? run.name && fixIds
+            ? run.name && fixIds && complete
               ? `\`/${cmd("fix")} ${fixIds}\` (or fix them by hand), then \`/${cmd("review")}\` again.`
-              : run.name
-                ? `fix the P3 nits by hand if you want them, then \`/${cmd("review")}\` again.`
-                : `fix what is above, then \`/${cmd("review")}\` again.`
+              : run.name && fixIds
+                ? `fix them by hand for now, then \`/${cmd("review")}\` again — this result is incomplete, so \`/${cmd("fix")}\` does not see these findings yet.`
+                : run.name
+                  ? `fix the P3 nits by hand if you want them, then \`/${cmd("review")}\` again.`
+                  : `fix what is above, then \`/${cmd("review")}\` again.`
             : verdict === "pass"
               ? midBuild.length
                 ? `\`/${cmd("build")}\` continues the build${midBuildView.length ? `; ${midBuildView.join(", ")} still to do` : ""}.`
@@ -385,7 +397,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       "",
       tip(tipKey, { spec: run.label }),
     ].join("\n");
-    return { text, verdict, counts, findings: fixable, acceptance, complete: finished("review") && (!run.security || finished("abuse")), abuse: finished("abuse") };
+    return { text, verdict, counts, findings: fixable, acceptance, complete, abuse: finished("abuse") };
   };
 
   const allFindings = (run: ReviewRun) => run.passes.flatMap((x) => (x.role === "abuse" ? x.findings.map((f) => ({ ...f, title: `Adversarial: ${f.title}` })) : x.findings));

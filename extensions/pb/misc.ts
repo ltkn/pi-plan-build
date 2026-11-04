@@ -10,7 +10,7 @@ import { cmd, loadSpec, post, sessionIdOf, specCompletions, specOfSession, stack
 
 export function registerMisc(pi: ExtensionAPI) {
   pi.registerCommand(cmd("stats"), {
-    description: "How a build went: tasks, first-try rate, checks, pauses, tokens and cache. A spec name, or all; --json for pb.report/1",
+    description: "How a build went: tasks, first-try rate, checks, pauses, tokens and cache. A spec name, or all; --json for pb.report/2",
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
@@ -54,7 +54,7 @@ export function registerMisc(pi: ExtensionAPI) {
   });
 
   pi.registerCommand(cmd("status"), {
-    description: "Every spec and where it stands; --json for pb.report/1",
+    description: "Every spec and where it stands; --json for pb.report/2",
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
       if (args.trim().split(/\s+/).includes("--json")) return post(JSON.stringify(buildReport(store, { review: true }), null, 2));

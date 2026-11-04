@@ -103,8 +103,8 @@ export const suspiciousCommand = (command: string) => {
   const cmd = command.trim();
   if (/[;`$<>]/.test(cmd)) return true;
   if (/\|/.test(cmd)) return true;
-  if (/&&|\n/.test(cmd)) return true;
-  if (/(^|\s)&(\s|$)/.test(cmd)) return true;
+  // Any `&` chains (`a&b` backgrounds a and runs b; `&&` and `2>&1` are caught here too).
+  if (/&&|&|\n/.test(cmd)) return true;
   return /\b(curl|wget)\b/.test(cmd);
 };
 
@@ -709,7 +709,7 @@ export const commitBlock = (message: string | undefined) => (message ? `**Commit
 
 export const specWriting = new Set<string>();
 
-export const checkpointing = new Map<string, { since: string; percent: number; from?: string; last: { human?: string; answer?: string } }>();
+export const checkpointing = new Map<string, { since: string; percent: number; manual?: boolean; last: { human?: string; answer?: string } }>();
 // Don't ask again until the session has grown another 5% of its window (after a failed or undone checkpoint).
 
 export const checkpointQuiet = new Map<string, number>();

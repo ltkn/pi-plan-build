@@ -46,6 +46,9 @@ export function registerUndo(pi: ExtensionAPI) {
       if (ctx.hasUI && !(await ctx.ui.confirm(`Undo to before ${target.id === "start" ? "the build" : target.id}?`, summary))) return;
       const reverted = restore(ctx.cwd, cur.commit, target.commit);
       if (reverted.guardFailed) return ctx.ui.notify("Nothing was undone: the guard snapshot for the drift check failed (is git healthy?). Your files are as they were; try again.", "error");
+      // The drift guard deliberately leaves a file alone when it changed again since the diff was
+      // taken (you may have been typing in it while the dialog was open): name it, never count it.
+      const skipped = files.filter((f) => !reverted.restored.includes(f));
 
       // The conversation goes back too, so the discarded attempt doesn't anchor the next one;
       // everything before that point is still in the prompt cache.
@@ -103,8 +106,11 @@ export function registerUndo(pi: ExtensionAPI) {
       const note = beforeCompaction
         ? `\nThe conversation wasn't rewound (that point is before a context reset or compaction). What was undone: ${undoneCps.map((c) => c.summary ?? `${c.id} (unfinished)`).join("; ") || "nothing finished"}.`
         : "";
+      const leftAlone = skipped.length
+        ? `\nLeft alone because they changed again since the diff was taken: ${skipped.join(", ")} — restore them by hand if that wasn't you.`
+        : "";
       post(
-        `**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${files.length} file(s) restored${rewound ? ", the conversation rewound" : ""}.\n${summary}${note}\n\n${tip("undo.done", { id: undoEntry.id })}`,
+        `**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${reverted.restored.length} file(s) restored${rewound ? ", the conversation rewound" : ""}.\n${summary}${note}${leftAlone}\n\n${tip("undo.done", { id: undoEntry.id })}`,
       );
     },
   });

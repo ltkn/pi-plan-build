@@ -190,7 +190,8 @@ the harness runs the full suite after the last task, so a task never needs to
 run it, and work that would bundle several changes with that verification is
 split. Once the build starts, that
 contract is frozen: the build may change only Design and Decisions, and a hand
-edit to anything else pauses it until `/pb:build` re-approves the revision.
+edit to anything else pauses it until `/pb:build` shows you the changed blocks
+and re-approves the revision.
 
 **Requirements are the spec's contracts.** A capability's durable rules live
 in the spec that changed them — its Decisions, Contracts and task acceptance —

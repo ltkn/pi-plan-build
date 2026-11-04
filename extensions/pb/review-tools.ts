@@ -19,7 +19,7 @@ export default function reviewTools(pi: ExtensionAPI) {
           line: Type.Optional(Type.Number()),
           title: Type.String({ description: "the problem, in one sentence" }),
           fix: Type.Optional(Type.String({ description: "a concrete fix" })),
-          outside: Type.Optional(Type.Boolean({ description: "true when the problem pre-dates this change (outside it): still a finding, capped at P2 and advisory" })),
+          outside: Type.Optional(Type.Boolean({ description: "true when the problem pre-dates this change (outside it): still a finding — give it the priority it deserves, and a serious one (P0/P1) still blocks" })),
         }),
       ),
     }),

@@ -11,7 +11,7 @@ import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, specTextBlocks, tokensOf } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { buildTimeLabel, buildTiming, loadStats, renderAll, renderCard } from "./stats.ts";
@@ -1132,6 +1132,10 @@ export function registerFlow(pi: ExtensionAPI) {
     fresh: boolean,
     o: { decided?: boolean; checked?: boolean; notes?: string[] } = {},
   ): Promise<void> => {
+    // An explicit build consumes the pending offer either way: a record that survived it would
+    // keep agent_settled's stop-pause from firing for this session until the record expired.
+    const here = ctx.sessionManager.getSessionFile();
+    if (here) store.clearPendingBuild(here);
     const notes = o.notes ?? [];
     const checked = await preBuildChecks(ctx, store, name, o);
     if (!checked) return;
@@ -1159,6 +1163,14 @@ export function registerFlow(pi: ExtensionAPI) {
     }
 
     const session = ctx.sessionManager.getSessionFile();
+    // The review covered the text it read, and the placement dialog can take a while: approve
+    // only the text that was reviewed, so an edit in between starts a new review instead of
+    // riding in on the old one. (The seconds between here and a fresh session's approval stay
+    // uncovered; the dialog is the window a human edit actually needs.)
+    const reviewed = store.readSpec(name);
+    if (reviewed === undefined || specHash(reviewed) !== specHash(md)) {
+      return ctx.ui.notify(`The spec changed while it was under review: run /${cmd("build")} again and the new text will be reviewed.`, "warning");
+    }
     const init = initBuildProgress(ctx, store, name, spec, notes);
     if (!init) {
       // Nothing left to build: /pb:build still re-approves a revised contract, so the review
@@ -1204,6 +1216,17 @@ export function registerFlow(pi: ExtensionAPI) {
 
   /** The specs this session has written, ready to build, first those nothing else among them depends on. */
 
+  /**
+   * The reply's last block is a contract ("End your reply with this block, verbatim"), so the
+   * stop-instruction goes before it, never after — a prompt must not end by contradicting itself.
+   */
+
+  const withStopBeforeTip = (prompt: string, stop: string): string => {
+    const key = tip("spec.next");
+    const at = key ? prompt.lastIndexOf(key) : -1;
+    return at > 0 ? `${prompt.slice(0, at)}${stop}\n\n${prompt.slice(at)}` : `${prompt}\n\n${stop}`;
+  };
+
   const specThenBuild = async (ctx: ExtensionCommandContext, store: Store, marker: string, prompt: string) => {
     const session = ctx.sessionManager.getSessionFile();
     const { cfg, testCmd } = commands(ctx.cwd, store);
@@ -1224,13 +1247,13 @@ export function registerFlow(pi: ExtensionAPI) {
     if (choice === SHOW) {
       if (session) specStarted.set(session, Date.now());
       store.setPendingBuild(session);
-      return instruct(marker, `${prompt}\n\nAfter writing it, stop: the harness shows it to me and asks whether to build.`);
+      return instruct(marker, withStopBeforeTip(prompt, "After writing it, stop: the harness shows it to me and asks whether to build."));
     }
 
     const since = now();
     if (session) specWriting.add(session);
     if (session) specStarted.set(session, Date.now());
-    instruct(marker, `${prompt}\n\nAfter writing it, stop: the build starts by itself.`);
+    instruct(marker, withStopBeforeTip(prompt, "After writing it, stop: the build starts by itself."));
     // Wait for the spec here, in the command: the run starts right after this handler hands it over.
     // Capped: on timeout the pending offer below picks the spec up once it is written.
     // The human may move on while waiting: a dead session ends the wait quietly (nothing is
@@ -1362,8 +1385,26 @@ export function registerFlow(pi: ExtensionAPI) {
    * compaction in the middle of a task). No summarizing model call.
    */
 
+  /**
+   * What the resume confirm shows the human: every block the contract binds — everything but
+   * Design and Decisions, which the build itself may change — as it was approved and as it
+   * stands now, each side capped so the dialog stays readable.
+   */
+
+  const contractDiff = (store: Store, name: string, md: string): string => {
+    const approved = store.readApprovedSpec(name);
+    if (approved === undefined) return `No approved copy on file: the build would run against ${store.rel("specs", name, "spec.md")} as it stands now.`;
+    const label = (key: string) => (key === "header" ? "the header (Status, Depends on)" : `## ${key.replace(/^section:/, "")}`);
+    const was = new Map(specTextBlocks(approved).map((b) => [b.key, b.text]));
+    const changed = specTextBlocks(md).filter((b) => b.key !== "section:design" && b.key !== "section:decisions" && was.get(b.key) !== b.text);
+    const body = changed
+      .map((b) => [label(b.key), "--- approved ---", cap(was.get(b.key) ?? "(absent)", 700), "--- now ---", cap(b.text, 700)].join("\n"))
+      .join("\n\n");
+    return `${changed.map((b) => label(b.key)).join(", ")}\n\n${body}`;
+  };
+
   pi.registerCommand(cmd("build"), {
-    description: "Build the planned feature here, task by task, each checked (writes the spec first if there isn't one). --fresh builds in a new session. In a paused build: continue, optionally with guidance",
+    description: "Build the planned feature here, task by task (the full check runs after the last task; writes the spec first if there isn't one). --fresh builds in a new session. In a paused build: continue, optionally with guidance",
     getArgumentCompletions: (prefix: string) => [{ value: "--fresh", label: "--fresh" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
@@ -1404,10 +1445,16 @@ export function registerFlow(pi: ExtensionAPI) {
           ctx.ui.notify("Guidance not recorded: it would leave the spec unparseable.", "warning");
         }
         const from = guidance ? `\n\nFrom the human: ${guidance}` : "";
-        // A resume approves the spec as it stands: a contract edited while paused is the human's
-        // revision, and the build must not keep running against the snapshot it was approved at.
+        // A resume approves the spec as it stands — but only a revision the human has seen. The
+        // model gets turns while paused too, so "a contract edited while paused is the human's
+        // revision" was an assumption: show what changed and ask, instead of inheriting it.
         const live = loadSpec(store, p.spec);
         if (!live) return ctx.ui.notify(`${store.rel("specs", p.spec, "spec.md")} doesn't parse. Fix it (or /${cmd("spec")} ${p.spec}), then /${cmd("build")}.`, "error");
+        if (p.approval && contractHash(live.md) !== p.approval.contractHash && ctx.hasUI) {
+          if (!(await ctx.ui.confirm(`${p.spec}'s contract changed while the build was paused`, contractDiff(store, p.spec, live.md)))) {
+            return ctx.ui.notify("Not re-approved: the build stays paused. Edit the spec (or /" + cmd("spec") + ` ${p.spec}), then /${cmd("build")} again.`, "warning");
+          }
+        }
         const reapproved = approveSpec(store, p, live.md, live.spec);
         store.saveProgress(p);
         if (reapproved) post(`**Spec re-approved** — ${p.spec}'s contract changed while the build was paused; it now runs against the revised spec. Tasks already done stay done.`);

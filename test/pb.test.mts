@@ -18,6 +18,8 @@ process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agen
 const { default: pb } = await import("../extensions/pb/index.ts");
 const { parseSpec, acceptanceCriteria, addDecision, contractHash, needsRed, redExemption, specHash } = await import("../extensions/pb/spec.ts");
 const { specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+const { specTextBlocks } = await import("../extensions/pb/spec.ts");
+type Finding = import("../extensions/pb/store.ts").Finding;
 
 type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
 type Tool = (name: string, params: object) => Promise<Result>;
@@ -44,6 +46,8 @@ function setup(config: object = {}) {
 
   const posts: string[] = [];
   const notes: string[] = [];
+  const confirmBodies: string[] = [];
+  const confirmAnswers: (boolean | undefined)[] = [];
   const widgets = new Map<string, string[] | undefined>();
   const instructions: string[] = [];
   const results: string[] = []; // every pb_task_done result, including the ones that end the run
@@ -212,6 +216,8 @@ function setup(config: object = {}) {
           selectTitles.push(title);
           selectOptions.push(opts);
           dialogTimeouts.push(o?.timeout);
+          // A file the human (or an editor) saves while the dialog is open: the drift windows' test hook.
+          if (process.env.MOCK_SELECT_TOUCH) fs.appendFileSync(process.env.MOCK_SELECT_TOUCH, "edited\n");
           const pick = selects.shift();
           if (pick === "<hang>") {
             // A dialog that stays open until dismissed: resolves on abort, like a real timeout.
@@ -229,7 +235,14 @@ function setup(config: object = {}) {
             if (i >= 0) terminalInput.splice(i, 1);
           };
         },
-        confirm: async (title: string) => (confirms.push(title), true),
+        confirm: async (title: string, body?: string) => {
+          confirms.push(title);
+          confirmBodies.push(body ?? "");
+          // A file saved while the dialog is open: the drift windows' test hook.
+          if (process.env.MOCK_CONFIRM_TOUCH) fs.appendFileSync(process.env.MOCK_CONFIRM_TOUCH, "edited\n");
+          const scripted = confirmAnswers.shift();
+          return scripted ?? true;
+        },
         input: async () => selects.shift() ?? "",
         editor: async () => editors.shift(),
       },
@@ -382,6 +395,8 @@ function setup(config: object = {}) {
     names,
     posts,
     notes,
+    confirmBodies,
+    confirmAnswers,
     widgets,
     instructions,
     results,
@@ -2118,6 +2133,38 @@ test("spec: showing it runs each red-eligible Test: once, for approval — small
   assert.doesNotMatch(u.posts.find((p) => p.startsWith("**✅ Spec written")!)!, /Test commands, run once/);
 });
 
+test("spec: a bare `&` chain is suspicious — the pre-approval dry-run refuses to run it", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await written(t, SPEC({
+    tasks: "### T1: first file\nCreate T1.txt.\n- Acceptance: T1.txt exists\n- Test: `test -f T1.txt&touch side-effect.txt`\n\n### T2: second file\nCreate T2.txt.\n- Acceptance: T2.txt exists\n- Test: `test -f T2.txt`",
+  }));
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).setPendingBuild(t.runtime().ctx.sessionManager.getSessionFile());
+  t.selects.push("Not now");
+  await t.fire("agent_settled", {});
+  const shown = t.posts.find((p) => p.startsWith("**✅ Spec written")!)!;
+  assert.match(shown, /`test -f T1\.txt&touch side-effect\.txt` couldn't run here \(not run here: chains shells or reaches the network/);
+  assert.ok(!fs.existsSync(path.join(t.repo, "side-effect.txt"))); // never executed before approval: `a&b` chains
+  assert.match(shown, /- ✗ `test -f T2\.txt` fails \(expected/); // a command without the chain still runs
+});
+
+test("build: a spec edited while the placement dialog is open is not approved on the reviewed text", async () => {
+  const t = setup({ verify: "true", freshAbove: 0 });
+  process.chdir(t.repo);
+  await written(t);
+  process.env.MOCK_SELECT_TOUCH = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md"); // saved while the dialog is open
+  t.selects.push("Build here anyway");
+  try {
+    await t.run("build");
+  } finally {
+    delete process.env.MOCK_SELECT_TOUCH;
+  }
+  assert.match(t.notes.at(-1)!, /The spec changed while it was under review/);
+  assert.equal(t.progress("order-cancellation").phase, "written"); // nothing started on the stale text
+  assert.ok(!t.instructions.some((i) => i.startsWith("[pb:build"))); // no task was handed out
+});
+
 test("build: a failing check goes back to the agent, and passes on the next attempt", async () => {
   const t = setup({ taskChecks: "each",  verify: "true" });
   await written(t);
@@ -2158,6 +2205,35 @@ test("build: after the last attempt it pauses; /pb:build resumes with a fresh se
   assert.equal(t.progress("order-cancellation").phase, "built");
   assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /- create the file in the repo root/); // guidance recorded as a decision
   assert.match(t.instructions.find((i) => /From the human: create the file/.test(i))!, /Task T1 \(attempt 1 of 2\)|Task T1\. Do only/);
+});
+
+test("build: a resume approves a contract changed while paused only after showing the diff", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  let stopped = false;
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T2") && !text.includes("You stopped") && !stopped) {
+      stopped = true; // the first handout only: T2 stops, is reminded, stops again — the build pauses
+      return undefined;
+    }
+    if (text.includes("You stopped without finishing T2")) return undefined; // the reminder: stop again, so the build pauses
+    if (text.includes("Continue task T2")) return diligent("Task T2", tool); // the approved resume hands T2 back: finish it
+    return diligent(text, tool);
+  };
+  await t.run("build"); // T2 stops, is reminded, stops again: the build pauses
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+  const { setSection } = await import("../extensions/pb/spec.ts");
+  const specPath = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  fs.writeFileSync(specPath, setSection(t.read(".pi/pb/specs/order-cancellation/spec.md"), "Contracts", "- T1 owns T1.txt; T2 owns T2.txt; deletes are forbidden."));
+  t.confirmAnswers.push(false); // the human reads the diff and declines
+  await t.run("build");
+  assert.match(t.notes.at(-1)!, /Not re-approved: the build stays paused/);
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+  await t.run("build"); // then approves it
+  assert.match(t.confirms.at(-1)!, /contract changed while the build was paused/);
+  assert.match(t.confirmBodies.at(-1)!, /deletes are forbidden/); // what the contract now says
+  assert.match(t.confirmBodies.at(-1)!, /no shared seams beyond the file list/); // what it was approved at
+  assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
 test("build: the build never asks; ambiguity is a reading recorded as an assumption", async () => {
@@ -2254,6 +2330,19 @@ test("build: an agent that stops mid-task is reminded once, like a stop hook, be
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "built");
   assert.equal(t.events("order-cancellation").filter((e) => e.type === "nudge").length, 1);
+});
+
+test("build: a surviving pending-build record doesn't silence the stopped-agent pause", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const { Store } = await import("../extensions/pb/store.ts");
+  // A record the pending offer never consumed (the session was replaced at its dialog, say):
+  // the explicit build consumes it, or agent_settled keeps "still waiting" instead of pausing.
+  new Store(t.repo).setPendingBuild(t.runtime().ctx.sessionManager.getSessionFile());
+  t.agent.script = async (text, tool) => (text.includes("Task T1") && !text.includes("You stopped") ? undefined : diligent(text, tool));
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+  assert.match(t.posts.at(-1)!, /Build paused/);
 });
 
 test("build: pb_task_done must name the current task", async () => {
@@ -2611,6 +2700,23 @@ test("undo restores the files and tasks to before a task, rewinds the conversati
   assert.ok(fs.existsSync(path.join(t.repo, "T2.txt")));
   assert.equal(t.navigations.at(-1)!.target, leafBefore);
   assert.equal(t.navigations.at(-1)!.summary, undefined);
+});
+
+test("undo: a file that changed again while the dialog was open is named, not counted as restored", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  process.env.MOCK_CONFIRM_TOUCH = path.join(t.repo, "T2.txt"); // saved while the confirm was open
+  try {
+    await t.run("undo", "T2");
+  } finally {
+    delete process.env.MOCK_CONFIRM_TOUCH;
+  }
+  assert.match(t.posts.at(-1)!, /0 file\(s\) restored/); // the diff said 1; the guard left it alone
+  assert.match(t.posts.at(-1)!, /Left alone because they changed again since the diff was taken: T2\.txt/);
+  assert.match(fs.readFileSync(path.join(t.repo, "T2.txt"), "utf8"), /edited/); // the drifted content survives
+  assert.deepEqual(t.progress("order-cancellation").tasks.map((x: any) => [x.id, x.status]), [["T1", "done"], ["T2", "todo"]]); // the task state still rolled back
 });
 
 test("undo: row ids stay unique across undo, revert and rebuild cycles", async () => {
@@ -3286,6 +3392,27 @@ test("review: an adversarial pass that fails is named, and the result is not rec
   await t.run("review"); // the next one completes
   assert.match(t.posts.at(-1)!, /PASS · [\s\S]*with an adversarial pass/);
   assert.ok(t.progress("order-cancellation").review);
+});
+
+test("review: an incomplete review does not offer /pb:fix ids it never recorded", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [{ priority: "P1", file: "src/order.ts", line: 12, title: "the check is skipped", fix: "run it" }];
+  process.env.MOCK_ABUSE = "crash";
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_ABUSE;
+  }
+  const post = t.posts.at(-1)!;
+  assert.match(post, /incomplete/);
+  assert.doesNotMatch(post, /`\/pb:fix` \d/); // the displayed numbers resolve against the OLD (or no) recorded list
+  assert.match(post, /this result is incomplete, so `\/pb:fix` does not see these findings yet/);
+  assert.ok(!t.progress("order-cancellation").review);
+  await t.run("fix", "1"); // the human tries the number anyway: there is genuinely nothing to fix
+  assert.match(t.notes.at(-1)!, /no open review findings/);
 });
 
 test("review: the adversarial pass runs in the background and its findings are merged", async () => {
@@ -4039,6 +4166,24 @@ test("archive: a name collision never moves the spec into a folder that already 
   assert.ok(fs.existsSync(path.join(dest, "spec.md")));
 });
 
+test("archive: a failed archive leaves the live spec's review guard state in place", async () => {
+  const t = setup({ mapOnArchive: false, verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review"); // the reviewer session's read-only record now guards it
+  fs.writeFileSync(path.join(t.repo, ".pi/pb-archive"), "a file where the archive root belongs"); // archive() will throw
+  try {
+    await t.run("archive");
+  } finally {
+    fs.rmSync(path.join(t.repo, ".pi/pb-archive"), { force: true });
+  }
+  assert.match(t.notes.at(-1)!, /Could not archive/);
+  assert.ok(fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md"))); // still live
+  const guards = fs.readdirSync(path.join(t.repo, ".pi/pb/reviews"));
+  assert.ok(guards.length > 0, "the fail-closed review-session records must survive a failed archive");
+});
+
 test("help: every What-now block the code uses exists in the guide, and /pb:help lists the topics", async () => {
   const { tip } = await import("../extensions/pb/help.ts");
   const dir = path.join(path.dirname(new URL(import.meta.url).pathname), "../extensions/pb");
@@ -4391,6 +4536,20 @@ test("checkpoint: when the plan isn't written, the conversation goes on as it is
   assert.equal(t.instructions.filter((i) => i.startsWith("[pb:compact]")).length, asked);
 });
 
+test("checkpoint: /pb:compact resets to a spec that is already current instead of reporting it unwritten", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  await new Promise((r) => setTimeout(r, 1100)); // the write lands in an earlier second than the request's `since`: no write happened "since"
+  t.agent.script = async () => {}; // the spec is current: nothing left to write, so no pb write happens
+  await t.run("compact");
+  assert.equal(t.resets.length, 1); // the reset the command asked for
+  assert.match(t.resets[0].summary, /^\[pb plan checkpoint\]/);
+  assert.match(t.posts.at(-1)!, /\*\*Plan checkpointed\*\*/);
+});
+
 test("checkpoint: sessions that aren't planning are left to Pi; checkpointAt 0 turns it off", async () => {
   const t = setup({ verify: "true", checkpointAt: 0 });
   process.chdir(t.repo);
@@ -4629,6 +4788,20 @@ test("planning guard: absolute paths inside the project are blocked, outside are
   await t.run("plan", "x");
   assert.match((await t.callTool("write", { path: path.join(t.repo, "inside.txt"), content: "x" })).error!, /Planning mode/);
   assert.equal((await t.callTool("write", { path: path.join(os.tmpdir(), "pb-outside.txt"), content: "x" })).error, undefined);
+});
+
+test("planning guard: the same directory spelled in another path form is still inside", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.run("plan", "x");
+  // /var/... is a symlink to /private/var/... on macOS: a target spelled the other way must not
+  // read as "outside the project" and slip the block.
+  const other = fs.realpathSync(t.repo);
+  assert.notEqual(other, t.repo, "this test needs a repo whose path resolves through a symlink");
+  assert.match((await t.callTool("write", { path: path.join(other, "inside.txt"), content: "x" })).error!, /Planning mode/);
+  assert.ok(!fs.existsSync(path.join(t.repo, "inside.txt")));
 });
 
 test("/pb:plan outside git warns the baseline shares the working copy", async () => {
@@ -6672,8 +6845,10 @@ test("spec: the pre-approval dry-run is watched like every other check", async (
 
 test("review ledger: a rejected alternative is not a lead — no such key reaches the map", async () => {
   const { ledgerFindings } = await import("../extensions/pb/store.ts");
+  // `alternative` no longer exists on Finding (the Not: machinery is gone), but a runtime caller —
+  // an old event replayed, a tool sending extra JSON — can still hand one in: the ledger must drop it.
   const stored = ledgerFindings([
-    { priority: "P1", file: "src/scan.ts", line: 10, title: "the bound names no owner", fix: "name src/scan.ts:10", alternative: "dropping the cadence" },
+    { priority: "P1", file: "src/scan.ts", line: 10, title: "the bound names no owner", fix: "name src/scan.ts:10", alternative: "dropping the cadence" } as Finding,
     { priority: "P0", title: "a blocker with no alternative" },
   ]);
   assert.deepEqual(stored, [

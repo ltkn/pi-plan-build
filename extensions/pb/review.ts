@@ -1,7 +1,8 @@
 /**
- * The review: a reviewer and an abuse pass, each in a real Pi session you can watch (see /pb:review), report
- * findings through pb_report_findings; a fresh background call double-checks the blocking ones (P0/P1)
- * against the code before they reach you, since a false P1 costs a whole fix cycle.
+ * The review: a reviewer reports findings through pb_report_findings in the session you watch; the
+ * adversarial pass is a background runFresh on the same frozen brief (see /pb:review). A fresh
+ * background call double-checks the blocking ones (P0/P1) against the code before they reach you,
+ * since a false P1 costs a whole fix cycle.
  */
 import { fileURLToPath } from "node:url";
 import { VERIFIER_SYSTEM, verifierBrief } from "./prompts.ts";

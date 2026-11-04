@@ -204,9 +204,9 @@ whether to keep or restore it.
 
 **Questions.** Pi asks what only you can decide; a choice between options comes
 as a dialog (`pb_ask`) with its recommendation marked. If you're away, it counts
-down (`askTimeoutSec`, 5 minutes of idle time — any key you press restarts it)
-and Pi goes on with its recommendation, telling
-you it's an assumption to confirm. Picking "Something else (type it)" keeps the
+down (`askTimeoutSec`, 5 minutes of idle time — any key you press restarts it),
+and nothing is decided: the question stays open, waiting for your answer.
+Picking "Something else (type it)" keeps the
 options in the chat, lettered, so you can write your answer from them.
 
 A question you didn't answer (it timed out, or you closed the dialog) **stays in
@@ -281,6 +281,7 @@ says why. The header tells the build how to check the work:
 
 ```
 # Order cancellation
+Status: ready                  (planning: a checkpoint — no tasks yet)
 Depends on: none
 Verification: tests            (or: build — why · none — why)
 New tests: yes                 (or: no — why)
@@ -362,7 +363,8 @@ after the last task; keep the task's `Test:` targeted and split it if it
 bundles several changes), a behaviour task with no `Test:` (add one, or stay disclosed),
 a `Test:` that always passes like `true` (the build would wedge demanding
 red — omit it instead), and a `Test:` that chains shells or reaches the
-network (`;`, `|`, `$`, backticks, `curl`/`wget` — it runs with your
+network (`;`, `|`, `&`, `$`, `<`, `>`, backticks, a newline, `curl`/`wget` —
+it runs with your
 privileges, so review it; the dry-run below doesn't execute it). A ready spec keeps no Open questions.
 
 When the spec is shown for approval, the harness runs each red-eligible
@@ -373,11 +375,13 @@ config, refactors and other non-test changes have no red-eligible commands
 and skip this entirely.
 
 **Writing it is painless.** The questions belong to planning. What the
-discussion left open, Pi settles itself and records in Decisions as
-`Assumption: <claim> — settles by <how>, because <reason>`. They're listed when the spec is shown, and the
-reviewer checks them. It asks you only about a choice that changes behaviour,
+discussion left open stays open: it goes under Open questions and the spec
+stays `Status: planning` until you answer — Pi never invents a decision to
+close a gap. It asks you only about a choice that changes behaviour,
 an API or data that you didn't settle, all at once, and when `/pb:build` is
-writing the spec those questions count down too. A checkpoint asks nothing at
+writing the spec those questions count down too. (Assumptions are recorded
+later, by the build, for the small readings it takes there — the reviewer
+checks them.) A checkpoint asks nothing at
 all: what's undecided goes under Open questions.
 
 When `/pb:build` writes it, it asks first: **build here**, **build in a fresh
@@ -448,7 +452,7 @@ of eyes, not a substitute for yours:
    rather than assumed away?
 5. **Tasks**: does each leave the code working, and does each named test prove
    its acceptance line? Do the tasks build in an order that could actually run?
-6. **Findings (and Context)**: are the facts still true, and does every
+6. **Findings**: are the facts still true, and does every
    `path:line` citation still hold the content it is cited for? A line number
    that drifted is corrected silently, so judge the content.
 
@@ -542,8 +546,9 @@ The spec's Goal, Out of scope, Decisions, Design, Contracts, Migration and
 rollback, Threats and abuse (`Threats` reads as the same section) and Acceptance
 bind the build. How to build it is the build's: a better way found while coding
 is taken, and a change to the Design goes in Decisions. Every task handout,
-check retry, coherence pass and fix lap names the spec file and those sections,
-plus the finished tasks' caveats, rejections and open items. The spec is never
+check retry, coherence pass and fix lap names the spec file and those sections;
+the finished tasks' caveats, rejections and open items reach the model through
+the reset and compaction summaries. The spec is never
 pasted: it would be shortened, stale or too big for the model reading it, so
 the model reads the one file that is the source of truth.
 

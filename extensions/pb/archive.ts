@@ -1,5 +1,6 @@
 /** /pb:archive: move a finished spec out of the way. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findingsOf, ignoredPathsFor, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
@@ -27,13 +28,16 @@ export function registerArchive(pi: ExtensionAPI) {
       const reviewFindings = reviewLedger(readEvents(path.join(store.specDir(name), "events.jsonl")));
       const changed = changedSince(ctx.cwd, store.progress(name)?.baseCommit);
       // The feature is finished: its review runs and the explorer and map runs so far aren't needed any more.
-      store.dropSessions(name);
       let dest: string;
       try {
         dest = store.archive(name);
       } catch (e) {
         return ctx.ui.notify(`Could not archive ${name}: ${(e as Error).message}`, "error");
       }
+      // Only after the move succeeded: a failed archive must leave the live spec with its review
+      // runs and the fail-closed review-session records that keep its reviewers read-only.
+      store.dropSessions(name);
+      fs.rmSync(path.join(dest, "sessions"), { recursive: true, force: true }); // dropSessions no longer sees it: it moved with the spec
       if (!store.specNames().length) dropCheckpoints(ctx.cwd); // no live spec left to undo: let git reclaim the snapshots
       // The feature is done: what it established about the project goes into the map every session reads.
       let mapChanges: string[] | undefined;

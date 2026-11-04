@@ -1,4 +1,5 @@
 /** Pi's event hooks: session lifecycle, compaction, and the planning protections. */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
   ExtensionAPI,
@@ -30,8 +31,22 @@ export function registerHooks(pi: ExtensionAPI) {
         };
     }
     if (!session || !store.planningSessions().includes(session)) return;
+    // Both sides through the same normalizer: a target spelled in another path form (/tmp vs
+    // /private/tmp, a symlinked cwd) must not read as "outside the project" and slip the block.
+    // Either pairing counts as inside: the raw one covers relative paths whose target may not
+    // exist yet, the resolved one covers a different spelling of the same directory.
+    const real = (p: string) => {
+      try {
+        return fs.realpathSync(p);
+      } catch {}
+      try {
+        return path.join(fs.realpathSync(path.dirname(p)), path.basename(p)); // a file that does not exist yet
+      } catch {}
+      return p;
+    };
+    const inside = (target: string, cwd: string) => target !== cwd && target.startsWith(cwd + path.sep);
     const target = path.resolve(ctx.cwd, ev.input.path ?? "");
-    if (target !== ctx.cwd && !target.startsWith(ctx.cwd + path.sep)) return; // outside the project: scratch files are fine
+    if (!inside(real(target), real(ctx.cwd)) && !inside(target, ctx.cwd)) return; // outside the project: scratch files are fine
     return {
       block: true,
       reason: `Planning mode: the project's files stay untouched until /${cmd("build")}. Put scratch files outside the project (e.g. in a mktemp -d directory), or say what you would change.`,
@@ -99,10 +114,10 @@ export function registerHooks(pi: ExtensionAPI) {
 
   /** Ask for the checkpoint now: the spec is written in this run, and the reset follows when it settles. */
 
-  const requestCheckpoint = (ctx: ExtensionContext, store: Store, session: string) => {
+  const requestCheckpoint = (ctx: ExtensionContext, store: Store, session: string, manual = false) => {
     const usage = ctx.getContextUsage();
     const percent = usage?.tokens != null ? Math.round((100 * usage.tokens) / usage.contextWindow) : Math.round(usage?.percent ?? 0);
-    checkpointing.set(session, { since: now(), percent, from: tree(ctx).getLeafId?.() ?? undefined, last: lastExchange(ctx) });
+    checkpointing.set(session, { since: now(), percent, last: lastExchange(ctx), ...(manual ? { manual: true } : {}) });
     return checkpointPrompt(percent, store.specsOfPlanning(session));
   };
 
@@ -123,7 +138,7 @@ export function registerHooks(pi: ExtensionAPI) {
       }
       if (!session || !store.planningSessions().includes(session))
         return ctx.ui.notify(`/${cmd("compact")} is for planning and build sessions; elsewhere, Pi's /compact.`, "warning");
-      return instruct(`▶ /${cmd("compact")} — writing the plan to its spec, then resetting to it`, requestCheckpoint(ctx, store, session));
+      return instruct(`▶ /${cmd("compact")} — writing the plan to its spec, then resetting to it`, requestCheckpoint(ctx, store, session, true));
     },
   });
 
@@ -139,7 +154,11 @@ export function registerHooks(pi: ExtensionAPI) {
     if (pending) {
       checkpointing.delete(session);
       const planned = store.specsOfPlanning(session);
-      if (!planned.some((n) => (store.progress(n)?.updatedAt ?? "") >= pending.since)) {
+      // A manual /pb:compact asks for the reset, not for a write: a spec that is already
+      // current (nothing left to change, so no write happened since the request) counts as
+      // written, or the command could never succeed — every retry stamped a later `since`.
+      const current = !!pending.manual && planned.length > 0 && planned.every((n) => (store.readSpec(n) ?? "").trim());
+      if (!planned.some((n) => (store.progress(n)?.updatedAt ?? "") >= pending.since) && !current) {
         checkpointQuiet.set(session, usage?.tokens ?? 0);
         return { entries: [{ type: "custom_message" as const, customType: "pb", content: "pb: the plan wasn't written to a spec, so the conversation goes on as it is (Pi compacts it when it's full).", display: true }] };
       }

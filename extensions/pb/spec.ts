@@ -300,14 +300,14 @@ export const specPathRefs = (md: string): Array<{ path: string; line: number; te
 export const BINDING_SECTIONS: readonly string[] = ["Goal", "Out of scope", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse", "Threats"];
 
 /** A spec's distinct text blocks: its header and each `##` section, keyed by heading. */
-interface SpecTextBlock {
+export interface SpecTextBlock {
   key: string;
   text: string;
 }
 
 const blockName = (heading: string) => heading.trim().toLowerCase().replace(/\s+/g, " ").replace(/:$/, "");
 
-const specTextBlocks = (md: string): SpecTextBlock[] => {
+export const specTextBlocks = (md: string): SpecTextBlock[] => {
   const lines = md.split("\n");
   const blanked = blankFenced(md);
   const blocks: SpecTextBlock[] = [];

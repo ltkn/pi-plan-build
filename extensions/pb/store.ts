@@ -199,12 +199,8 @@ export interface Finding {
   file?: string;
   line?: number;
   title: string;
-  /** the trace that shows the problem: quoted spec text, a code fact, or the file:line that proves it */
-  evidence?: string;
   fix?: string;
-  /** the alternative the reviewer weighed and rejected, from its `Not:` line; never carried into the ledger or the project map */
-  alternative?: string;
-  /** a pre-existing problem outside the change under review: still reported and pickable, at most P2 in a code review; only an outside P0 blocks a spec review */
+  /** a pre-existing problem outside the change under review: still reported and pickable; the P2 cap is the reviewer's rule, and a serious one keeps its priority */
   outside?: boolean;
 }
 
@@ -450,8 +446,6 @@ export const REVIEW_FINDINGS_CAP = 40;
 export const LEDGER_FILE_CHARS = 300;
 export const LEDGER_TITLE_CHARS = 300;
 export const LEDGER_FIX_CHARS = 500;
-/** How much of a spec reviewer's rejected alternative is kept: enough for the next round and the fix lap, short enough not to inflate them. */
-export const FINDING_NOT_CHARS = 500;
 
 /** A finding whose title is nothing but markup is still a lead: it keeps this instead of vanishing. */
 export const UNTITLED_FINDING = "(untitled finding)";
@@ -466,9 +460,7 @@ export type StoredReviewFinding = Omit<ReviewLedgerEntry, "count" | "last">;
 
 /**
  * What a completed review keeps for later features: its P0–P2 findings in the order reported, each
- * field already safe to store here and in the project map, which is built from these lines. A
- * reviewer's rejected alternative is deliberately not among them: an alternative some past review threw
- * away is not a lead for a future feature.
+ * field already safe to store here and in the project map, which is built from these lines.
  */
 export function ledgerFindings(findings: Finding[]): StoredReviewFinding[] {
   return findings
