@@ -5670,6 +5670,28 @@ test("pb_explore live view keeps a wider, bounded window over bursts", async () 
   assert.deepEqual(lines, [...steps.slice(-8).map((s) => `↳ ${s}`), ...writing.slice(-4).map((l) => `│ ${l}`), "12 steps · 18s"]);
 });
 
+test("build tool rows: the verdict line collapsed, the handout or failure detail one expand away", async () => {
+  const { buildToolResultLines, renderBuildToolCall } = await import("../extensions/pb/render.ts");
+  const handout = "✓ T1 passed (`npm test`)\n\n[pb:build] Task T2. Do only this task:\nread the spec, write tests";
+  assert.deepEqual(buildToolResultLines(handout, false), [
+    { text: "✓ T1 passed (`npm test`)", color: "success" },
+    { text: "… 2 more lines (expand)", color: "dim" },
+  ]);
+  const expanded = buildToolResultLines(handout, true);
+  assert.deepEqual(expanded.map((l) => l.color), ["success", "text"]);
+  assert.match(expanded[1].text, /Task T2/);
+  // a failed attempt: the head names the failure, the retry instruction hides behind the expand
+  assert.deepEqual(buildToolResultLines("The check for T1 failed (attempt 2 of 2): `npm test` failed\n\nFix the cause, then call pb_task_done again.", false)[0], {
+    text: "The check for T1 failed (attempt 2 of 2): `npm test` failed",
+    color: "warning",
+  });
+  assert.deepEqual(buildToolResultLines("The build stopped.", false).length, 1); // one line: no expand hint
+  assert.deepEqual(buildToolResultLines("", false), []);
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+  assert.match(renderBuildToolCall("pb_tests_red", { task: "T2" }, theme).render(200).join("\n"), /pb_tests_red T2 · running its tests, expecting them to fail/);
+  assert.match(renderBuildToolCall("pb_task_done", { task: "T1", status: "blocked" }, theme).render(200).join("\n"), /pb_task_done T1 · blocked — the human decides/);
+});
+
 test("fresh runs preview what and where: pattern in path, full command capped", async () => {
   const { previewCall } = await import("../extensions/pb/runner.ts");
   assert.equal(previewCall("grep", { pattern: "tradingview", path: "src/main/java" }), "tradingview in src/main/java");
@@ -6407,7 +6429,7 @@ test("notify: a desktop notification when pb asks, and none when it's turned off
     v.agent.script = diligent;
     v.selects.push("Build here anyway");
     await v.run("build");
-    assert.deepEqual(sent.at(-1), ["pb: your choice", "Build order-cancellation: this session is 72% full"]);
+    assert.ok(sent.some(([title, body]) => title === "pb: your choice" && body === "Build order-cancellation: this session is 72% full")); // the build ending adds its own ping after this one
 
     const u = setup();
     process.chdir(u.repo);
@@ -6417,6 +6439,45 @@ test("notify: a desktop notification when pb asks, and none when it's turned off
     u.selects.push("mail");
     await u.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"] });
     assert.equal(sent.length, before);
+  } finally {
+    setNotifySink(undefined);
+  }
+});
+
+test("notify: the build pings when it completes and when it pauses, and not when notify is off", async () => {
+  const sent: string[][] = [];
+  const { setNotifySink } = await import("../extensions/pb/notify.ts");
+  setNotifySink((title, body) => sent.push([title, body]));
+  try {
+    const t = setup({ verify: "true", notify: true });
+    await written(t);
+    t.agent.script = diligent;
+    await t.run("build");
+    assert.equal(t.progress("order-cancellation").phase, "built");
+    assert.ok(sent.some(([title, body]) => title === "pb: build complete" && body.includes("order-cancellation") && /every check passed/.test(body)), JSON.stringify(sent));
+
+    sent.length = 0;
+    const u = setup({ taskChecks: "each", verify: "true", notify: true });
+    await written(u);
+    u.agent.script = async (text, tool) => {
+      // never creates the task's file: every attempt's check fails, and the build pauses
+      const task = text.match(/(?:Task|check for) (T\d+)/)?.[1];
+      if (task) {
+        await tool("pb_tests_red", { task });
+        return void (await tool("pb_task_done", { task, status: "done", changed: "claimed", caveat: "none", rejected: "none", open: "none" }));
+      }
+      return diligent(text, tool);
+    };
+    await u.run("build");
+    assert.equal(u.progress("order-cancellation").phase, "paused");
+    assert.ok(sent.some(([title, body]) => title === "pb: build paused" && body.includes("order-cancellation")), JSON.stringify(sent));
+
+    sent.length = 0;
+    const v = setup({ verify: "true" }); // notify off by default
+    await written(v);
+    v.agent.script = diligent;
+    await v.run("build");
+    assert.deepEqual(sent, []);
   } finally {
     setNotifySink(undefined);
   }

@@ -145,6 +145,38 @@ export function renderTryCall(args: { goal?: string }, theme: Theme) {
   return new Text(theme.fg("toolTitle", theme.bold("try ")) + theme.fg("accent", args.goal ?? ""), 0, 0);
 }
 
+/* ------------------------------ build tool rows ------------------------------ */
+
+/**
+ * The result rows of pb_task_done and pb_tests_red. Every reply of these tools — verdict, fix
+ * instructions, refusal, handout — states what happened on its first line; that line is the row,
+ * and everything the harness said is one expand away.
+ */
+export function buildToolResultLines(text: string, expanded: boolean): { text: string; color: "success" | "warning" | "text" | "dim" }[] {
+  const body = text.trim();
+  if (!body) return [];
+  const cut = body.indexOf("\n");
+  const head = (cut === -1 ? body : body.slice(0, cut)).trim();
+  const rest = cut === -1 ? "" : body.slice(cut + 1).trim();
+  const verdict: "success" | "warning" | "text" = head.startsWith("✓") ? "success" : /failed|cannot|stopped|paused|blocked/i.test(head) ? "warning" : "text";
+  const first = [{ text: head, color: verdict }];
+  if (!rest) return first;
+  if (expanded) return [...first, { text: rest, color: "text" as const }];
+  const hidden = rest.split("\n").filter((l) => l.trim()).length;
+  return [...first, { text: `… ${hidden} more line${hidden === 1 ? "" : "s"} (expand)`, color: "dim" as const }];
+}
+
+/** The call, while the harness runs its check: the tool, the task, and what happens next. */
+export function renderBuildToolCall(name: string, args: { task?: string; status?: string }, theme: Theme) {
+  const note = name === "pb_tests_red" ? "running its tests, expecting them to fail" : args.status === "blocked" ? "blocked — the human decides" : "checking its command";
+  return new Text(theme.fg("toolTitle", theme.bold(name)) + theme.fg("accent", ` ${args.task ?? ""}`) + theme.fg("dim", ` · ${note}`), 0, 0);
+}
+
+export function renderBuildToolResult(result: { content: { type: string; text?: string }[] }, opts: { expanded: boolean }, theme: Theme) {
+  const lines = buildToolResultLines(result.content.map((c) => c.text ?? "").join(""), opts.expanded);
+  return new Text(lines.map((l) => theme.fg(l.color, l.text)).join("\n"), 0, 0);
+}
+
 export function renderTryResult(result: { content: { type: string; text?: string }[]; details?: ExploreDetails }, opts: { expanded: boolean; isPartial: boolean }, theme: Theme, isError = false) {
   const answer = result.content.map((c) => c.text ?? "").join("");
   const color = { step: "dim", count: "muted", done: "success", answer: "text", file: "dim", error: "error", writing: "muted" } as const;

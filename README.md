@@ -245,7 +245,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |
-| `notify` | true | a desktop notification when pb asks you something, or when a spec review finishes while you're elsewhere |
+| `notify` | true | a desktop notification when pb asks you something, when a build pauses or finishes, or when a spec review finishes while you're elsewhere |
 | `extra` | unset | your instructions added to a role's prompt: `{"plan", "spec", "build", "review", "adversarial", "map"}`; also read from `~/.pi/agent/pb/config.json`, applied first |
 | `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build is reset at the next task boundary; 0 = never |
 

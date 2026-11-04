@@ -34,7 +34,9 @@ only what its events already carry (the build's own start and end).
    `/pb:build` again to go on after a block. A clean or advisory-only review
    starts by itself, so you can walk away. The
    tasks then run one by one, and the harness runs the full test suite after the
-   last one; a failure goes back to Pi to fix.
+   last one; a failure goes back to Pi to fix. When the build pauses or finishes,
+   pb sends a **desktop notification** — those are the moments you've reliably
+   walked away from (`"notify": false` turns it off).
 3. **`/pb:review`**: a fresh reviewer compares the change with the spec and
    your standards; blocking findings get a second look before you see them.
    Fix them right there, `/pb:review` again (it looks only at what changed),

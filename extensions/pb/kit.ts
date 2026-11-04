@@ -846,4 +846,6 @@ export const pauseBuild = (ctx: ExtensionContext, store: Store, p: Progress, rea
     "",
     tip(tipKey, { spec: p.spec, ...vars }),
   ].join("\n"));
+  // A pause is exactly the moment the human has walked away: the post alone goes unseen.
+  if (cfg.notify) notifyDesktop("pb: build paused", `${p.spec}: ${reason}`);
 };

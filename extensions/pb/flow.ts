@@ -11,6 +11,8 @@ import { HELP_PATH, tip, topic, topics } from "./help.ts";
 import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
+import { notifyDesktop } from "./notify.ts";
+import { renderBuildToolCall, renderBuildToolResult } from "./render.ts";
 import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, specTextBlocks, tokensOf } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
@@ -347,6 +349,9 @@ export function registerFlow(pi: ExtensionAPI) {
       open: Type.Optional(Type.String({ description: 'done only: what is still unchecked ("none" when nothing)' })),
     }),
     executionMode: "sequential",
+    // The row is the verdict line the harness replies with; the next handout stays one expand away.
+    renderCall: (args, theme) => renderBuildToolCall("pb_task_done", args, theme),
+    renderResult: (result, opts, theme) => renderBuildToolResult(result as { content: { type: string; text?: string }[] }, opts, theme),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { store, progress: p } = buildOfSession(ctx);
       if (params.task !== p.current) throw new Error(`The current task is ${p.current ?? "none"}, not ${params.task}.`);
@@ -399,6 +404,8 @@ export function registerFlow(pi: ExtensionAPI) {
       task: Type.String({ description: 'the task id, e.g. "T2"' }),
     }),
     executionMode: "sequential",
+    renderCall: (args, theme) => renderBuildToolCall("pb_tests_red", args, theme),
+    renderResult: (result, opts, theme) => renderBuildToolResult(result as { content: { type: string; text?: string }[] }, opts, theme),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { store, progress: p } = buildOfSession(ctx);
       if (params.task !== p.current) throw new Error(`The current task is ${p.current ?? "none"}, not ${params.task}.`);
@@ -783,6 +790,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         ...rest.map((n, i) => `${i ? "" : "\nStill to build, from the same plan:\n"}- ${n}: \`/${cmd("build")} ${n}\``),
       ].join("\n"),
     );
+    // The completion is the other moment the human is reliably away from the terminal.
+    if (cfg.notify) notifyDesktop("pb: build complete", `${p.spec}: ${done}/${tasks.length} tasks done, every check passed`);
     return stop(`${passed}\n\nBuild complete: every check passed. Stop here; the harness shows the summary.`);
   };
 
