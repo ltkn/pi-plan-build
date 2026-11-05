@@ -1988,6 +1988,43 @@ test("spec-harden: a review that reports nothing stops the run instead of declar
   assert.equal(specFixEvents(t, "spec-harden").length, 0);
 });
 
+test("the digest prints the check's findings in full: no 400-char cut, bulleted, with what pb left standing", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  process.env.MOCK_SETTLE = "huge";
+  try {
+    await t.run("spec-review", "order-cancellation");
+    t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+    await t.run("spec-fix", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SETTLE;
+  }
+  const digest = t.posts.at(-1)!;
+  assert.match(digest, /the whole claim in one breath and more words and more words and more words/);
+  assert.doesNotMatch(digest, /\[truncated \d+ chars\]/, "a realistic claim is printed in full");
+  assert.match(digest, /- \[P1\]/, "claims are bulleted");
+});
+
+test("a field pb had to clip names the run log that holds the uncut text", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  process.env.MOCK_SETTLE = "clipped";
+  try {
+    await t.run("spec-review", "order-cancellation");
+    t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+    await t.run("spec-fix", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SETTLE;
+  }
+  const digest = t.posts.at(-1)!;
+  assert.match(digest, /Some fields above are clipped by pb's length bound/);
+  assert.match(digest, /pi --session \.pi\/pb\/sessions\/spec-check\//, "the pointer names the run log");
+});
+
 test("spec-harden: a confirming review that reports nothing stops before the summary claims coverage", async () => {
   const t = setup({ verify: "true" });
   await written(t);

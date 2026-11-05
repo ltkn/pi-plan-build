@@ -86,7 +86,11 @@ if (sys.includes("ATTACKER")) {
           { priority: "P1", title: 'The bound "≤ 90 s" carries no probe and no assumed tag', fix: "probe: name the scheduler the context resolves, or tag it assumed" },
           { priority: "P2", title: "\"the feed sends trip-level delay\" is asserted, not measured", fix: "decode the payload already downloaded and record it in Findings" },
         ]
-      : [];
+      : mode === "huge"
+        ? [{ priority: "P1", title: `the whole claim in one breath ${"and more words ".repeat(120)}`, fix: "probe it and write the number down" }]
+        : mode === "clipped"
+          ? [{ priority: "P1", title: "x".repeat(10_500), fix: "probe it" }]
+          : [];
   report("report_findings", { findings: claims });
   say([{ type: "text", text: "Done." }]);
 } else if (sys.includes("REVIEWER")) {

@@ -570,15 +570,16 @@ const toFindings = (raw: unknown[] | undefined): Finding[] =>
   (raw ?? []).flatMap((item) => {
     const f = item as { priority?: unknown; title?: unknown; file?: unknown; line?: unknown; fix?: unknown };
     if (typeof f.title !== "string" || !f.title.trim() || (f.priority !== "P0" && f.priority !== "P1" && f.priority !== "P2" && f.priority !== "P3")) return [];
-    // bounded and stripped of control characters: these travel into events.jsonl, into a repair lap's
-    // brief and back to the terminal, and a model wrote them
+    // Sanitised and bounded — but the bound is generous: the human reads this to decide, and a
+    // clipped report is one they can't fully act on. Pathological output still can't fill the ledger.
+    const FINDING_FIELD_CAP = 10_000;
     const field = (v: string, max: number) => cap(safeLine(v), max);
     return [{
       priority: f.priority,
-      title: field(f.title.trim(), 400),
+      title: field(f.title.trim(), FINDING_FIELD_CAP),
       ...(typeof f.file === "string" && f.file.trim() ? { file: field(f.file.trim(), 300) } : {}),
       ...(typeof f.line === "number" && Number.isFinite(f.line) ? { line: f.line } : {}),
-      ...(typeof f.fix === "string" && f.fix.trim() ? { fix: field(f.fix.trim(), 400) } : {}),
+      ...(typeof f.fix === "string" && f.fix.trim() ? { fix: field(f.fix.trim(), FINDING_FIELD_CAP) } : {}),
     }];
   });
 
@@ -1191,7 +1192,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         nextLine(door.blockNext),
         evidenceLine(door.blockEvidence, door.passEvidence, moved(last.head), note),
         "",
-        ...(findings.length ? findings.map((f) => findingLine(f)) : ["The reviewer's answer could not be read as findings."]),
+        ...(findings.length ? findings.map((f) => `- ${findingLine(f)}`) : ["The reviewer's answer could not be read as findings."]),
       ].join("\n"));
       ctx.ui.notify(door.blockNotify, "warning");
       return "block";
@@ -1206,7 +1207,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         "",
         nextLine(door.passNext),
         evidenceLine(...scope, door.passEvidence, moved(last.head), note),
-        ...(findings.length ? ["", "**Advisory**", "", ...findings.map((f) => findingLine(f))] : []),
+        ...(findings.length ? ["", "**Advisory**", "", ...findings.map((f) => `- ${findingLine(f)}`)] : []),
         ...(findings.length && door.advisoryHint ? ["", door.advisoryHint] : []),
         ...(typeof last.session === "string" ? ["", `The whole run: \`pi --session ${path.relative(ctx.cwd, last.session)}.\``] : []),
       ].join("\n"));
@@ -1243,8 +1244,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         nextLine(review.block ? door.blockNext : door.passNext),
         evidenceLine(...scope, review.block ? door.blockEvidence : door.advisoryEvidence, note),
       ];
-      if (p0.length) sections.push("", "**P0**", "", ...p0.map((f) => findingLine(f)));
-      if (rest.length) sections.push("", "**Advisory**", "", ...rest.map((f) => findingLine(f)));
+      if (p0.length) sections.push("", "**P0**", "", ...p0.map((f) => `- ${findingLine(f)}`));
+      if (rest.length) sections.push("", "**Advisory**", "", ...rest.map((f) => `- ${findingLine(f)}`));
       if (rest.length && door.advisoryHint) sections.push("", door.advisoryHint);
       if (sessionNote) sections.push("", sessionNote);
       post(sections.join("\n"));
@@ -1525,8 +1526,10 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     md: string,
     driver: boolean,
     stoppedWith?: string,
+    session?: string,
   ): string => {
     const tokens = tokensOf(md);
+    const clipped = claims.some((f) => /…\[truncated \d+ chars\]/.test(f.title ?? "") || (f.fix !== undefined && /…\[truncated \d+ chars\]/.test(f.fix)));
     const verdict = verdictOn(store, name, md);
     const blocked = verdict === "block";
     const next = stoppedWith
@@ -1564,7 +1567,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
               ? `${claims.length} left standing on nothing`
               : "it decided everything it was shown",
       ),
-      ...(claims.length ? ["", "**Still standing on nothing**", "", ...claims.slice(0, 8).map((f) => findingLine(f)), ...(claims.length > 8 ? ["", `(+${claims.length - 8} more)`] : [])] : []),
+      ...(clipped && session ? ["", `Some fields above are clipped by pb's length bound; the uncut text is in the run log: \`pi --session ${path.relative(path.join(store.root, "..", ".."), session)}\`.`] : []),
+      ...(claims.length ? ["", "**Still standing on nothing**", "", ...claims.map((f) => `- ${findingLine(f)}`)] : []),
     ].join("\n");
   };
 
@@ -1630,7 +1634,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       // lap given that list again would change nothing again. Say what is left instead of burning minutes.
       p.fix = undefined;
       store.saveProgress(p);
-      post(fixDigest(store, name, fix, [], loaded.md, fix.driver, `the lap changed nothing (it parked or assumed everything it was shown): \`/${cmd("spec-review")} ${name}\` when you have decided, or \`/${cmd("spec-fix")} ${name}\` with the numbers you want argued.`));
+      post(fixDigest(store, name, fix, [], loaded.md, fix.driver, `the lap changed nothing (it parked or assumed everything it was shown): \`/${cmd("spec-review")} ${name}\` when you have decided, or \`/${cmd("spec-fix")} ${name}\` with the numbers you want argued.`, undefined));
       return true;
     }
     const check = await runClaimCheck(ctx, store, name, loaded.md);
@@ -1646,7 +1650,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     if (!fix.driver) {
       p.fix = undefined;
       store.saveProgress(p);
-      post(fixDigest(store, name, fix, check.claims, loaded.md, false));
+      post(fixDigest(store, name, fix, check.claims, loaded.md, false, undefined, check.session));
       return true;
     }
     if (check.claims.length && fix.laps < maxLaps) {
@@ -1669,7 +1673,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         const stoppedWith = reviewed === "error"
           ? `the confirming review did not report (point \`specReviewer.model\` in ${store.rel("config.json")} at a model that reports, then /${cmd("spec-harden")} ${name} again)`
           : `the spec changed while the confirming review ran (/${cmd("spec-harden")} ${name} again)`;
-        post(fixDigest(store, name, fix, check.claims, md, true, `${stoppedWith} — nothing was declared hardened.`));
+        post(fixDigest(store, name, fix, check.claims, md, true, `${stoppedWith} — nothing was declared hardened.`, check.session));
         return true;
       }
       const md = store.readSpec(name);
@@ -1684,7 +1688,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     store.event(name, { type: "spec-harden", run: fix.run, hash: specHash(md), laps: fix.laps, reviews: fix.reviews, applied: fix.applied, rebutted: fix.rebutted, assumed: fix.assumed, unEvidenced: check.claims.length, findingsOnText: md === undefined ? 0 : recordedFindings(store, name, md).length });
     p.fix = undefined;
     store.saveProgress(p);
-    post(fixDigest(store, name, fix, check.claims, md, true));
+    post(fixDigest(store, name, fix, check.claims, md, true, undefined, check.session));
     if (cfg.notify) notifyDesktop(blocked ? "pb: spec harden stopped" : "pb: spec hardened", `${name}: ${fix.laps} repair laps, ${fix.applied} applied, ${check.claims.length} claims left for you`);
     return true;
   };
