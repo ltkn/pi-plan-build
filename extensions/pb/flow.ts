@@ -8,7 +8,7 @@ import type {
  } from "@earendil-works/pi-coding-agent";
 import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { HELP_PATH, tip, topic, topics } from "./help.ts";
-import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
+import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, claimCheckBrief, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, specFixPrompt, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { notifyDesktop } from "./notify.ts";
@@ -17,9 +17,10 @@ import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildT
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { buildTimeLabel, buildTiming, loadStats, renderAll, renderCard } from "./stats.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, appendCheckpoint, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, appendCheckpoint, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, pathExists, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
-import { COHERE_MIN_TASKS, P_ORDER, SYNTHETIC_TASKS, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, mark, nextLine, nextTodo, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sizeNote, sleep, specCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unfinishedPhase, warnLater, watchable, withChecking } from "./kit.ts";
+import { safeLine } from "./markdown.ts";
+import { COHERE_MIN_TASKS, P_ORDER, SYNTHETIC_TASKS, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, mark, nextLine, nextTodo, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unfinishedPhase, warnLater, watchable, withChecking } from "./kit.ts";
 
 const DRY_RUN_TIMEOUT_SEC = 120;
 
@@ -555,6 +556,27 @@ export function registerFlow(pi: ExtensionAPI) {
   const COHERE_MARKER = "▶ coherence pass";
 
 /**
+ * A fresh report's findings, normalized: an unknown priority or an empty title drops the item rather than
+ * reaching the human as something they cannot act on. Shared by the spec review and the claim check, so a
+ * report is read the same way wherever it comes from.
+ */
+const toFindings = (raw: unknown[] | undefined): Finding[] =>
+  (raw ?? []).flatMap((item) => {
+    const f = item as { priority?: unknown; title?: unknown; file?: unknown; line?: unknown; fix?: unknown };
+    if (typeof f.title !== "string" || !f.title.trim() || (f.priority !== "P0" && f.priority !== "P1" && f.priority !== "P2" && f.priority !== "P3")) return [];
+    // bounded and stripped of control characters: these travel into events.jsonl, into a repair lap's
+    // brief and back to the terminal, and a model wrote them
+    const field = (v: string, max: number) => cap(safeLine(v), max);
+    return [{
+      priority: f.priority,
+      title: field(f.title.trim(), 400),
+      ...(typeof f.file === "string" && f.file.trim() ? { file: field(f.file.trim(), 300) } : {}),
+      ...(typeof f.line === "number" && Number.isFinite(f.line) ? { line: f.line } : {}),
+      ...(typeof f.fix === "string" && f.fix.trim() ? { fix: field(f.fix.trim(), 400) } : {}),
+    }];
+  });
+
+/**
  * A resume buys an exhausted step a fresh set of attempts; any other pause keeps its count.
  * Resets and returns true only when the step had exhausted its budget; the next handout
  * counts the new attempt.
@@ -814,6 +836,13 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       ctx.ui.notify(`${name} is still being planned: /${cmd("build")} ${name} finishes it first.`, "warning");
       return undefined;
     }
+    const prog = store.progress(name);
+    if (prog?.fix && fixLive(prog.fix)) {
+      // A lap is the model holding the plan in its hands: a build approved now would be built from
+      // whichever half-written text the lap had reached when its turn happened to end.
+      ctx.ui.notify(`A repair lap for ${name} is still open (the model is rewriting its plan). Let it report, or /${cmd("undo")} to drop the lap — then /${cmd("build")} ${name}.`, "warning");
+      return undefined;
+    }
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     if (spec.gate === "tests" && !testCmd) {
       ctx.ui.notify(`Verification is "tests" but no test command is set: set "verify" in ${store.rel("config.json")}, or use Verification: build/none in the spec.`, "warning");
@@ -982,18 +1011,88 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
   };
 
   /**
-   * Fresh eyes on the plan before the first task: one independent pass over the frozen draft that
-   * attacks Decisions, re-tests rejected alternatives and flags unmeasured claims. The pass records
-   * the hash of exactly the text it saw; only a P0 blocks, and a later start reuses that verdict
-   * until the spec text changes.
+   * The two doors onto one pass. `/pb:build` runs it in front of T1; `/pb:spec-review` runs it on
+   * demand for a spec that is ready but must not be built yet. The pass, the event it records and the
+   * reuse by `specHash` are one piece of machinery; only what follows the verdict differs, and that
+   * is all this carries. `retryCmd` is what to run again — after a fix, or a run that reported nothing.
    */
 
-  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string): Promise<{ findings: Finding[]; block: boolean; session?: string; prose?: string; ms: number }> => {
+  type ReviewDoor = {
+    opening: string;
+    retryCmd: string;
+    blockNext: string;
+    blockEvidence: string;
+    passNext: string;
+    passEvidence: string;
+    advisoryEvidence: string;
+    blockNotify: string;
+    noReportNotify: string;
+    advisoryNotify: (n: number) => string;
+    /** a stored pass is the whole answer at this door, so it is shown; the build door has a T1 to walk into */
+    repostStoredPass: boolean;
+  };
+
+  const reviewDoor = (name: string, entry: "build" | "standalone" | "harden"): ReviewDoor => {
+    const fix = `fix the spec with \`/${cmd("spec")} ${name}\``;
+    if (entry === "build") {
+      return {
+        opening: `▶ **Spec review** — one fresh reviewer checks **${name}** before T1; the verdict lands here.`,
+        retryCmd: `/${cmd("build")}`,
+        blockNext: `${fix}, then \`/${cmd("build")}\`.`,
+        blockEvidence: "the P0 blocks T1; nothing was built",
+        passNext: "T1 starts next.",
+        passEvidence: "the recorded pass covers this text",
+        advisoryEvidence: "the recorded pass covers this text; P1-P3 do not block",
+        blockNotify: "❌ Spec review blocks T1 on a P0: fix the spec — the changed contract is reviewed again — or stop here.",
+        noReportNotify: "❌ Spec review did not report; nothing was recorded. Run the build again, or point specReviewer.model at a model that reports.",
+        advisoryNotify: (n) => `✅ Spec review passed with ${n} advisory finding${n === 1 ? "" : "s"} (shown above); building now.`,
+        repostStoredPass: false,
+      };
+    }
+    const again = `/${cmd("spec-review")} ${name}`;
+    if (entry === "harden") {
+      return {
+        opening: `▶ **Spec review** — one fresh reviewer checks **${name}**; pb repairs what it finds.`,
+        retryCmd: `/${cmd("spec-harden")} ${name}`,
+        blockNext: `${fix}, then \`/${cmd("spec-harden")} ${name}\`.`,
+        blockEvidence: "a P0 is repaired before this spec is built",
+        passNext: "pb works through these in the next repair lap; the confirming review is its last act, then it is yours.",
+        passEvidence: "the recorded verdict covers this text",
+        advisoryEvidence: "the recorded verdict covers this text; the repair lap takes what it can settle",
+        blockNotify: "❌ Spec review found a P0: pb works through it in the repair lap with the rest.",
+        noReportNotify: `❌ Spec review did not report; nothing was recorded. Run \`/${cmd("spec-harden")} ${name}\` again, or point specReviewer.model at a model that reports.`,
+        advisoryNotify: () => "✅ Spec review passed; pb takes the findings into the next repair lap.",
+        repostStoredPass: true,
+      };
+    }
+    return {
+      opening: `▶ **Spec review** — one fresh reviewer checks **${name}** now; the verdict lands here, and \`/${cmd("build")} ${name}\` rides on it.`,
+      retryCmd: again,
+      blockNext: `${fix}, then \`${again}\`.`,
+      blockEvidence: "a P0 means this plan should not be built as written",
+      passNext: `\`/${cmd("build")} ${name}\` starts at T1 on this verdict — no second pass while the text is unchanged.`,
+      passEvidence: "the recorded verdict covers this text",
+      advisoryEvidence: "the recorded verdict covers this text; P1-P3 are yours to weigh",
+      blockNotify: `❌ Spec review found a P0: this plan should not be built as written. Fix it with \`/${cmd("spec")} ${name}\`, then \`${again}\`.`,
+      noReportNotify: `❌ Spec review did not report; nothing was recorded. Run \`${again}\` again, or point specReviewer.model at a model that reports.`,
+      advisoryNotify: () => `✅ Spec review passed (shown above); /${cmd("build")} ${name} starts from this verdict.`,
+      repostStoredPass: true,
+    };
+  };
+
+  /**
+   * The pass: independent eyes on the frozen draft that attacks Decisions, re-tests rejected
+   * alternatives and flags unmeasured claims. It records the hash of exactly the text it saw, and the
+   * HEAD it read the repo in; only a P0 blocks, and a later door reuses that verdict until the spec
+   * text changes.
+   */
+
+  const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, md: string, door: ReviewDoor): Promise<{ findings: Finding[]; block: boolean; session?: string; prose?: string; ms: number }> => {
     const cfg = store.config();
     const reviewModel = cfg.specReviewer.model ?? sessionModel(ctx);
     const cwd = ctx.cwd;
     const reviewBefore = snapshot(cwd, "pb: before spec-review");
-    post(`▶ **Spec review** — one fresh reviewer checks **${name}** before T1; the verdict lands here.`);
+    post(door.opening);
     const started = Date.now();
     let lastStep: string | undefined;
     const paint = () => safely(() => ctx.ui.setWidget("pb-spec-review", [`pb spec-review ${name} · ${Math.round((Date.now() - started) / 1000)}s`, ...(lastStep ? [`  ↳ ${lastStep}`] : [])]));
@@ -1027,37 +1126,39 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     }
     const call = res.toolCalls.filter((c) => c.name === "report_findings").at(-1);
     const raw = call && Array.isArray(call.arguments.findings) ? call.arguments.findings : undefined;
-    const findings: Finding[] = (raw ?? []).flatMap((item) => {
-      const f = item as { priority?: unknown; title?: unknown; file?: unknown; line?: unknown; fix?: unknown };
-      if (typeof f.title !== "string" || !f.title.trim() || (f.priority !== "P0" && f.priority !== "P1" && f.priority !== "P2" && f.priority !== "P3")) return [];
-      return [{
-        priority: f.priority,
-        title: f.title.trim(),
-        ...(typeof f.file === "string" && f.file.trim() ? { file: f.file.trim() } : {}),
-        ...(typeof f.line === "number" && Number.isFinite(f.line) ? { line: f.line } : {}),
-        ...(typeof f.fix === "string" && f.fix.trim() ? { fix: f.fix.trim() } : {}),
-      }];
-    });
+    const findings = toFindings(raw);
     const session = res.sessionFile;
     if (raw === undefined) {
       const prose = cap(res.text || res.error || "the reviewer returned no findings", 12000);
-      store.event(name, { type: "spec-review", verdict: "error", hash: specHash(md), findings: 0, reported: [], model: reviewModel, thinking: cfg.specReviewer.thinking, session, prose, ms: res.ms });
+      store.event(name, { type: "spec-review", verdict: "error", hash: specHash(md), head: gitHead(cwd), findings: 0, reported: [], model: reviewModel, thinking: cfg.specReviewer.thinking, session, prose, ms: res.ms });
       // The reviewer's own words are the only thing the human can act on: a pass that wrote its whole
       // report as prose did the work, and losing it would leave a dead end with nothing to read.
       return { findings: [], block: true, session, ms: res.ms, ...(prose.trim() ? { prose: cap(prose.trim(), 2000) } : {}) };
     }
     const block = findings.some((f) => f.priority === "P0");
-    store.event(name, { type: "spec-review", verdict: block ? "block" : "pass", hash: specHash(md), findings: findings.length, reported: findings, model: reviewModel, thinking: cfg.specReviewer.thinking, session, ms: res.ms });
+    store.event(name, { type: "spec-review", verdict: block ? "block" : "pass", hash: specHash(md), head: gitHead(cwd), findings: findings.length, reported: findings, model: reviewModel, thinking: cfg.specReviewer.thinking, session, ms: res.ms });
     return { findings, block, session, ms: res.ms };
   };
 
   /**
-   * One review pass per spec text: a pass or block on this hash is reused; editing the spec makes
-   * the next build start review the new text. Only P0 blocks; P1-P3 are advisory.
+   * One review per spec text, whichever door asked for it: a pass or a block on this hash is reused;
+   * editing the spec makes the next review read the new text. Only a P0 blocks the build; P1-P3 are
+   * advisory. Returns whether this text may be built.
+   *
+   * `note` is what else belongs on the evidence line where the human stands: the standalone door names
+   * a build already underway, because a plan-level pass does not re-gate a running one.
    */
 
-  const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, name: string, md: string): Promise<boolean> => {
+  const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, name: string, md: string, door: ReviewDoor, note?: string): Promise<boolean> => {
     const hash = specHash(md);
+    // A pass is bound to the spec bytes alone: the repository its citations were checked in is not in
+    // that hash. A moved HEAD says that ground has moved on, so it is said out loud — and never used
+    // to void the pass, because uncommitted drift moves no HEAD: as a gate it would miss half its cases.
+    const moved = (recorded: unknown) => {
+      const was = typeof recorded === "string" ? recorded : "";
+      const at = gitHead(ctx.cwd);
+      return was && at && was !== at ? `it read the code at ${was.slice(0, 8)}, HEAD is now ${at.slice(0, 8)}` : "";
+    };
     const parsed = parseSpec(md).spec;
     const criteria = acceptanceCriteria(md, parsed).length;
     const assumptions = assumptionsOf(md).length;
@@ -1071,19 +1172,34 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       post([
         phaseHeader("❌", "Spec review", name, "FAIL", p0 ? `P0 ${p0}` : "", typeof last.ms === "number" ? duration(last.ms) : ""),
         "",
-        nextLine(`fix the spec with \`/${cmd("spec")} ${name}\`, then \`/${cmd("build")}\`.`),
-        evidenceLine("the P0 blocks T1; nothing was built", "the recorded pass covers this text"),
+        nextLine(door.blockNext),
+        evidenceLine(door.blockEvidence, door.passEvidence, moved(last.head), note),
         "",
         ...(findings.length ? findings.map((f) => findingLine(f)) : ["The reviewer's answer could not be read as findings."]),
       ].join("\n"));
-      ctx.ui.notify("❌ Spec review blocks T1 on a P0: fix the spec — the changed contract is reviewed again — or stop here.", "warning");
+      ctx.ui.notify(door.blockNotify, "warning");
       return false;
     }
-    if (last?.verdict === "pass") return true;
-    const review = await runSpecReview(ctx, store, name, md);
+    if (last?.verdict === "pass") {
+      // The build door has a T1 to walk into; at this door the recorded verdict is the whole answer, so
+      // it is shown with its findings instead of the pass being consumed silently.
+      if (!door.repostStoredPass) return true;
+      const findings = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
+      post([
+        phaseHeader("✅", "Spec review", name, "PASS (already on record)", findings.length ? `P1-P3 ${findings.length}` : "no findings", typeof last.ms === "number" ? duration(last.ms) : ""),
+        "",
+        nextLine(door.passNext),
+        evidenceLine(...scope, door.passEvidence, moved(last.head), note),
+        ...(findings.length ? ["", "**Advisory**", "", ...findings.map((f) => findingLine(f))] : []),
+        ...(typeof last.session === "string" ? ["", `The whole run: \`pi --session ${path.relative(ctx.cwd, last.session)}.\``] : []),
+      ].join("\n"));
+      ctx.ui.notify(`✅ ${name} already has a pass on this exact text: /${cmd("build")} ${name} starts without a second review.`, "info");
+      return true;
+    }
+    const review = await runSpecReview(ctx, store, name, md, door);
     if (sessionGone(ctx)) return false;
     if (store.readSpec(name) !== md) {
-      ctx.ui.notify(`The spec changed while it was under review: run /${cmd("build")} again and the new text will be reviewed.`, "warning");
+      ctx.ui.notify(`The spec changed while it was under review: run \`${door.retryCmd}\` again and the new text will be reviewed.`, "warning");
       return false;
     }
     const sessionNote = review.session ? `The whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
@@ -1091,12 +1207,12 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       post([
         phaseHeader("❌", "Spec review", name, "FAIL", "no report", review.ms !== undefined ? duration(review.ms) : ""),
         "",
-        nextLine(`\`/${cmd("build")}\` to try again, or point the reviewer at a model that reports: \`"specReviewer": {"model": "provider/id"}\` in ${store.rel("config.json")}.`),
+        nextLine(`\`${door.retryCmd}\` to try again, or point the reviewer at a model that reports: \`"specReviewer": {"model": "provider/id"}\` in ${store.rel("config.json")}.`),
         evidenceLine("the reviewer returned no findings through its tool", "nothing was recorded"),
         ...(review.prose ? ["", `What it wrote instead:\n\n${review.prose}`] : []),
         ...(sessionNote ? ["", sessionNote] : []),
       ].join("\n"));
-      ctx.ui.notify("❌ Spec review did not report; nothing was recorded. Run the build again, or point specReviewer.model at a model that reports.", "warning");
+      ctx.ui.notify(door.noReportNotify, "warning");
       return false;
     }
     if (review.findings.length) {
@@ -1107,8 +1223,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       const sections = [
         phaseHeader(review.block ? "❌" : "✅", "Spec review", name, review.block ? "FAIL" : "PASS", tally, review.ms !== undefined ? duration(review.ms) : ""),
         "",
-        nextLine(review.block ? `fix the spec with \`/${cmd("spec")} ${name}\`, then \`/${cmd("build")}\`.` : "T1 starts next."),
-        evidenceLine(...scope, review.block ? "the P0 blocks T1; nothing was built" : "the recorded pass covers this text; P1-P3 do not block"),
+        nextLine(review.block ? door.blockNext : door.passNext),
+        evidenceLine(...scope, review.block ? door.blockEvidence : door.advisoryEvidence, note),
       ];
       if (p0.length) sections.push("", "**P0**", "", ...p0.map((f) => findingLine(f)));
       if (rest.length) sections.push("", "**Advisory**", "", ...rest.map((f) => findingLine(f)));
@@ -1118,18 +1234,603 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       post([
         phaseHeader("✅", "Spec review", name, "PASS", "no findings", review.ms !== undefined ? duration(review.ms) : ""),
         "",
-        nextLine("T1 starts next."),
-        evidenceLine(...scope, "the recorded pass covers this text"),
+        nextLine(door.passNext),
+        evidenceLine(...scope, door.passEvidence, note),
         ...(sessionNote ? ["", sessionNote] : []),
       ].join("\n"));
     }
     if (review.block) {
-      ctx.ui.notify("❌ Spec review blocks T1 on a P0: fix the spec — the changed contract is reviewed again — or stop here.", "warning");
+      ctx.ui.notify(door.blockNotify, "warning");
       return false;
     }
-    if (review.findings.length) ctx.ui.notify(`✅ Spec review passed with ${review.findings.length} advisory finding${review.findings.length === 1 ? "" : "s"} (shown above); building now.`, "info");
+    if (review.findings.length) ctx.ui.notify(door.advisoryNotify(review.findings.length), "info");
     return true;
   };
+
+  /** Which spec to review: the named one, else this session's, else the only ready one, else ask. */
+
+  const reviewTarget = async (ctx: ExtensionContext, store: Store, word: string | undefined): Promise<string | undefined> => {
+    if (word) {
+      if (store.readSpec(word)) return word;
+      ctx.ui.notify(`No spec \`${word}\` here. /${cmd("status")} lists what there is.`, "warning");
+      return undefined;
+    }
+    const ready = store.specNames().filter((n) => loadSpec(store, n)?.spec.status === "ready");
+    if (!ready.length) {
+      ctx.ui.notify(`Nothing ready to review yet: /${cmd("spec")} writes the spec first.`, "info");
+      return undefined;
+    }
+    const session = ctx.sessionManager.getSessionFile();
+    const mine = specOfSession(ctx).name ?? (session ? ready.find((n) => store.progress(n)?.writtenIn === session) : undefined);
+    if (mine && ready.includes(mine)) return mine;
+    if (ready.length === 1 || !ctx.hasUI) return ready[0];
+    const choice = await ctx.ui.select("Review which spec?", ready);
+    return choice && ready.includes(choice) ? choice : undefined;
+  };
+
+  /**
+   * The pre-build review on its own, for a spec that is ready but must not be built yet: the same
+   * fresh pass and the same recorded verdict, so the build that follows starts at T1 without
+   * re-reviewing the text. Nothing here reaches a build: that gate stays the one in startBuild, which
+   * re-reads the text and compares hashes before anything is approved.
+   */
+
+  pi.registerCommand(cmd("spec-review"), {
+    description: "Review a ready spec with fresh eyes without building it: the same read-only pass that gates T1 (only a P0 counts as blocking), recorded against the exact text, so /pb:build then starts at T1 without a second review. Optional: which spec",
+    getArgumentCompletions: specCompletions,
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      const store = new Store(ctx.cwd);
+      const word = args.trim().split(/\s+/).filter(Boolean)[0];
+      // The name is the only user string that reaches a path: anything that isn't one is refused here,
+      // before store.specDir is ever asked about it.
+      if (word && !KEBAB_NAME.test(word)) {
+        return ctx.ui.notify(`\`${word}\` isn't a valid spec name (spec names are lowercase with hyphens). Name a spec exactly as written, or run it with no name to review this session's spec.`, "warning");
+      }
+      const name = await reviewTarget(ctx, store, word);
+      if (!name) return;
+      const loaded = loadSpec(store, name);
+      if (!loaded) {
+        return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
+      }
+      if (loaded.spec.status === "planning") {
+        return ctx.ui.notify(`${name} is still being planned: there is no contract to review yet. Finish it with /${cmd("spec")} ${name}.`, "warning");
+      }
+      const p = store.progress(name);
+      const underway = p && unfinishedPhase(p.phase) ? `a build of ${name} is underway: this pass does not re-gate it — \`/${cmd("review")} ${name}\` judges the code` : undefined;
+      await ensureSpecReviewed(ctx, store, name, loaded.md, reviewDoor(name, "standalone"), underway);
+    },
+  });
+
+  /* --------------------------- spec repair laps ---------------------------- */
+
+  /**
+   * The findings recorded against exactly this text, each numbered as its repair lap will be shown them.
+   * No verdict on these bytes means no worklist: findings judged different bytes, and pb never carries a
+   * finding across an edit — once a build has started, spec prose is the code reviewer's to judge.
+   */
+
+  const recordedFindings = (store: Store, name: string, md: string): { id: number; f: Finding }[] => {
+    const hash = specHash(md);
+    const last = readEvents(path.join(store.specDir(name), "events.jsonl"))
+      .filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block") && e.hash === hash)
+      .at(-1);
+    const reported = last && Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
+    return reported.map((f, i) => ({ id: i + 1, f }));
+  };
+
+  /**
+   * A lap is live while the session that owes its report still exists and its report is recent: a lap left
+   * by a killed or abandoned session would otherwise lock the spec out of repair until someone found the
+   * file to clear. Six hours is a working day, not a wall clock anyone waits on.
+   */
+
+  const fixLive = (fix: NonNullable<Progress["fix"]>) => pathExists(fix.session) && Date.now() - fix.startedAt < 6 * 60 * 60 * 1000;
+
+  /** The spec whose open repair lap this session owns: the lap record is the authority, not the conversation. */
+
+  const fixOfSession = (store: Store, session: string | undefined): { name: string; p: Progress } | undefined => {
+    if (!session) return undefined;
+    for (const n of store.specNames()) {
+      const p = store.progress(n);
+      if (p?.fix?.session === session) return { name: n, p };
+    }
+    return undefined;
+  };
+
+  /**
+   * Open a repair lap: the undo point first, so a lap that rewrote the plan can be dropped whole with
+   * /pb:undo; then the record naming the one session allowed to report it; then the instruction. A lap is
+   * a turn in the session that owns the spec, not a fresh run: it probes with pb_try, asks you with
+   * pb_ask, and writes through pb_write_spec, so the format gates and your standards still bind what it
+   * writes — an unreviewed run holding the spec's pen would be the wrong kind of automatic.
+   */
+
+  const beginFixLap = (
+    ctx: ExtensionContext,
+    store: Store,
+    name: string,
+    p: Progress,
+    list: { id: number; f: Finding }[],
+    o: { work: "findings" | "claims"; driver: boolean; hash: string; run: string; reviews: number; answers?: string[] },
+  ) => {
+    const cfg = store.config();
+    const session = ctx.sessionManager.getSessionFile();
+    if (!session) {
+      // The lap record names the one session allowed to report it; without a session file there is no
+      // such name, and a lap nobody can report would sit there blocking the spec.
+      ctx.ui.notify("This session has no session file, so pb cannot tie a repair lap to it and open one.", "warning");
+      return;
+    }
+    const lap = (p.fix?.laps ?? 0) + 1;
+    if (cfg.checkpoints) {
+      const snap = snapshot(ctx.cwd, `pb: before ${name} spec lap ${lap}`);
+      if (snap) {
+        const rows = store.checkpoints(name);
+        if (appendCheckpoint(rows, { id: `lap${lap}`, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: `lap${lap}`, entry: tree(ctx).getLeafId?.() ?? undefined })) store.saveCheckpoints(name, rows);
+      }
+    }
+    p.fix = {
+      session,
+      driver: o.driver,
+      stage: "lap",
+      startedAt: Date.now(),
+      hash: o.hash,
+      work: o.work,
+      ids: list.map((x) => x.id),
+      run: o.run,
+      laps: lap,
+      reviews: o.reviews,
+      applied: p.fix?.applied ?? 0,
+      rebutted: p.fix?.rebutted ?? 0,
+      assumed: p.fix?.assumed ?? 0,
+      parked: p.fix?.parked ?? [],
+    };
+    store.saveProgress(p);
+    instruct(
+      `\u25b6 spec-fix ${name} lap ${lap}`,
+      specFixPrompt({ name, work: o.work, items: list.map(({ id, f }) => findingLine(f, id)), lap, answers: o.answers, extra: store.extra("spec-fix") }),
+    );
+  };
+
+  /**
+   * The one cheap question that makes an unattended repair safe to leave running: not "is this spec good"
+   * (the full review's job, minutes, and it finds new subjects rather than confirming this repair) but
+   * "which load-bearing claims still stand on nothing". Recorded as `spec-check`, never `spec-review`: the
+   * build gate reuses review verdicts and must never read a claim check as one. A run that reports nothing
+   * is an error, not a clean bill of health.
+   */
+
+  const runClaimCheck = async (
+    ctx: ExtensionContext,
+    store: Store,
+    name: string,
+    md: string,
+  ): Promise<{ claims: Finding[]; reported: boolean; ms: number; session?: string }> => {
+    const cfg = store.config();
+    const model = cfg.specFix.model ?? sessionModel(ctx);
+    const cwd = ctx.cwd;
+    const before = snapshot(cwd, "pb: before spec-check");
+    post(`\u25b7 **Claim check** — which load-bearing claims in **${name}** carry no evidence and no \`assumed\` tag.`);
+    let res: Awaited<ReturnType<typeof runFresh>>;
+    try {
+      res = await runFresh({
+        cwd,
+        role: "spec-check",
+        systemPrompt: SPEC_CLAIM_CHECK_SYSTEM + extraBlock(store.extra("spec-check")),
+        brief: claimCheckBrief(name, md),
+        prompt: "Check the claims in the attached spec.",
+        tools: ["read", "grep", "find", "ls", "report_findings"],
+        extensions: [REVIEW_TOOLS],
+        model,
+        thinking: cfg.specFix.thinking,
+        maxConcurrent: cfg.maxConcurrent,
+        sessionDir: store.sessionsDir("spec-check"),
+      });
+    } finally {
+      revertFreshRun(cwd, (m) => warnLater(ctx, m), "the claim check", before, snapshot(cwd, "pb: after spec-check"));
+    }
+    const call = res.toolCalls.filter((c) => c.name === "report_findings").at(-1);
+    const raw = call && Array.isArray(call.arguments.findings) ? call.arguments.findings : undefined;
+    if (raw === undefined) {
+      store.event(name, { type: "spec-check", verdict: "error", hash: specHash(md), findings: 0, reported: [], model, thinking: cfg.specFix.thinking, ms: res.ms });
+      return { claims: [], reported: false, ms: res.ms };
+    }
+    const claims = toFindings(raw);
+    store.event(name, { type: "spec-check", verdict: "pass", hash: specHash(md), findings: claims.length, reported: claims, model, thinking: cfg.specFix.thinking, session: res.sessionFile, ms: res.ms });
+    return { claims, reported: true, ms: res.ms, session: res.sessionFile };
+  };
+
+  /**
+   * A lap's parked questions, put to you once, each with pb's recommendation beside it. Unanswered past
+   * askTimeoutSec the recommendation is taken and recorded as decided without you; dismissing stops the
+   * run, because a human who pressed Esc has not agreed to anything.
+   */
+
+  const askParked = async (
+    ctx: ExtensionContext,
+    store: Store,
+    name: string,
+    p: Progress,
+    fix: NonNullable<Progress["fix"]>,
+  ): Promise<{ answers: string[]; stopped: boolean }> => {
+    const notes: string[] = [];
+    const answers: string[] = [];
+    for (const q of fix.parked) {
+      const label = `${q.recommendation} (pb's recommendation)`;
+      const choice = await choose(ctx, store, q.question, [label, "Neither — let me say"], label, notes);
+      if (choice === undefined) return { answers, stopped: true };
+      answers.push(`"${q.question}" \u2192 ${choice === label ? q.recommendation : choice}`);
+      store.event(name, { type: "spec-fix-answer", run: fix.run, question: q.question, answer: answers[answers.length - 1] });
+    }
+    // on the record in the live object, not a copy: the caller saves this same progress after asking,
+    // and a copy here would be overwritten by that save
+    if (notes.length) p.unattended = [...(p.unattended ?? []), ...notes];
+    return { answers, stopped: false };
+  };
+
+  /** What a repair run leaves behind: one block saying what it settled, argued, and left standing on nothing. */
+
+  const fixDigest = (
+    name: string,
+    fix: NonNullable<Progress["fix"]>,
+    claims: Finding[],
+    md: string,
+    driver: boolean,
+    stoppedWith?: string,
+  ): string => {
+    const tokens = tokensOf(md);
+    return [
+      phaseHeader(
+        driver ? "\u2705" : "\ud83d\udd27",
+        driver ? "Spec hardened" : "Spec fix",
+        name,
+        `${fix.applied} applied`,
+        `${fix.rebutted} rebutted`,
+        fix.assumed ? `${fix.assumed} assumed` : "",
+        claims.length ? `${claims.length} un-evidenced` : "no un-evidenced claims",
+      ),
+      "",
+      nextLine(
+        stoppedWith
+          ? stoppedWith
+          : driver
+            ? `\`/${cmd("build")} ${name}\` — the review's verdict covers this text${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
+            : `\`/${cmd("spec-review")} ${name}\` — the text changed, so the verdict on the old text does not cover it.`,
+      ),
+      evidenceLine(
+        `${fix.laps} repair lap${fix.laps === 1 ? "" : "s"}`,
+        driver ? `${fix.reviews} review${fix.reviews === 1 ? "" : "s"}` : "",
+        tokens ? `spec now ~${tokens} tokens` : "",
+        fix.parked.length ? `${fix.parked.length} question${fix.parked.length === 1 ? "" : "s"} it would not decide` : "it decided everything it was shown",
+      ),
+      ...(claims.length ? ["", "**Still standing on nothing**", "", ...claims.slice(0, 8).map((f) => findingLine(f)), ...(claims.length > 8 ? ["", `(+${claims.length - 8} more)`] : [])] : []),
+    ].join("\n");
+  };
+
+  /**
+   * The step owed after a repair lap's turn ends — one place, both doors. A lap that never reported is
+   * stopped, not looped on; a lap that changed nothing is not checked or re-reviewed (same bytes, same
+   * answers, minutes wasted); otherwise the text goes to the claim check, and the driver either hands the
+   * next lap, spends its confirming review, or finishes with the digest. A manual lap stops at the check.
+   */
+
+  const advanceSpecFix = async (ctx: ExtensionContext, store: Store, name: string, p: Progress): Promise<boolean> => {
+    const fix = p.fix;
+    if (!fix) return false;
+    if (unfinishedPhase(p.phase)) {
+      // A build took the plan while this lap's turn was still open: the build holds whatever text the lap
+      // had reached, and repairing under it would move the contract that build is holding. Answer false —
+      // the build's own settling still owes its pause.
+      p.fix = undefined;
+      store.saveProgress(p);
+      post([
+        phaseHeader("\u23f8", "Spec fix", name, `lap ${fix.laps} dropped: the build took the plan`),
+        "",
+        nextLine(`the build owns the plan now; harden it with \`/${cmd("spec-harden")} ${name}\` after the review.`),
+      ].join("\n"));
+      return false;
+    }
+    const cfg = store.config();
+    const maxLaps = cfg.specFix.maxLaps ?? 3;
+    if (fix.stage === "lap") {
+      p.fix = undefined;
+      store.saveProgress(p);
+      post([
+        phaseHeader("\u26a0", "Spec fix", name, `lap ${fix.laps} ended without reporting`),
+        "",
+        nextLine(`nothing was recorded. \`/${cmd("spec-fix")} ${name}\` to run the lap again, or say what to settle and it will do that.`),
+        evidenceLine("a lap that did not report cannot count as one that settled something"),
+      ].join("\n"));
+      return true;
+    }
+    const loaded = loadSpec(store, name);
+    if (!loaded) {
+      p.fix = undefined;
+      store.saveProgress(p);
+      ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse, so the repair stops here. Rewrite it with /${cmd("spec")} ${name}.`, "error");
+      return true;
+    }
+    // The lap's questions come first: they are the part only you can settle.
+    let answers: string[] = [];
+    if (fix.parked.length) {
+      const asked = await askParked(ctx, store, name, p, fix);
+      answers = asked.answers;
+      fix.parked = [];
+      store.saveProgress(p);
+      if (asked.stopped) {
+        p.fix = undefined;
+        store.saveProgress(p);
+        post([phaseHeader("\u23f8", "Spec fix", name, "stopped at your question"), "", nextLine(`say what you think, then \`/${cmd("spec-fix")} ${name}\`.`)].join("\n"));
+        return true;
+      }
+    }
+    if (specHash(loaded.md) === fix.hash) {
+      // Nothing in the text changed: the same check and the same review would return the same list, and a
+      // lap given that list again would change nothing again. Say what is left instead of burning minutes.
+      p.fix = undefined;
+      store.saveProgress(p);
+      post(fixDigest(name, fix, [], loaded.md, fix.driver, `the lap changed nothing (it parked or assumed everything it was shown): \`/${cmd("spec-review")} ${name}\` when you have decided, or \`/${cmd("spec-fix")} ${name}\` with the numbers you want argued.`));
+      return true;
+    }
+    const check = await runClaimCheck(ctx, store, name, loaded.md);
+    if (sessionGone(ctx)) return true;
+    if (!check.reported) {
+      p.fix = undefined;
+      store.saveProgress(p);
+      ctx.ui.notify("The claim check did not report, so pb stopped rather than read silence as clean. Run the lap again, or point specFix.model at a model that reports.", "warning");
+      return true;
+    }
+    if (check.claims.length && fix.laps < maxLaps) {
+      beginFixLap(ctx, store, name, p, check.claims.map((f, i) => ({ id: i + 1, f })), { work: "claims", driver: fix.driver, hash: specHash(loaded.md), run: fix.run, reviews: fix.reviews, answers: answers.length ? answers : undefined });
+      return true;
+    }
+    if (!fix.driver) {
+      p.fix = undefined;
+      store.saveProgress(p);
+      post(fixDigest(name, fix, check.claims, loaded.md, false));
+      return true;
+    }
+    const maxReviews = cfg.specFix.maxReviews ?? 2;
+    if (fix.reviews < maxReviews) {
+      fix.reviews += 1;
+      store.saveProgress(p);
+      await ensureSpecReviewed(ctx, store, name, loaded.md, reviewDoor(name, "harden"));
+      if (sessionGone(ctx)) return true;
+      const md = store.readSpec(name);
+      const fresh = md === undefined ? [] : recordedFindings(store, name, md);
+      if (fresh.length && fix.laps < maxLaps) {
+        beginFixLap(ctx, store, name, p, fresh, { work: "findings", driver: true, hash: specHash(md ?? loaded.md), run: fix.run, reviews: fix.reviews, answers: answers.length ? answers : undefined });
+        return true;
+      }
+    }
+    const md = store.readSpec(name) ?? loaded.md;
+    store.event(name, { type: "spec-harden", run: fix.run, hash: specHash(md), laps: fix.laps, reviews: fix.reviews, applied: fix.applied, rebutted: fix.rebutted, assumed: fix.assumed, unEvidenced: check.claims.length, findingsOnText: md === undefined ? 0 : recordedFindings(store, name, md).length });
+    p.fix = undefined;
+    store.saveProgress(p);
+    post(fixDigest(name, fix, check.claims, md, true));
+    if (cfg.notify) notifyDesktop("pb: spec hardened", `${name}: ${fix.laps} repair laps, ${fix.applied} applied, ${check.claims.length} claims left for you`);
+    return true;
+  };
+
+  /**
+   * What a repair lap reports. The numbers it may name are the ones its brief showed it, so a report can
+   * neither claim a finding it was never given nor quietly drop one by renumbering; only the session the
+   * lap record names may report, so another session cannot bless work it did not do.
+   */
+
+  pi.registerTool({
+    name: "pb_spec_fix_done",
+    label: "Spec repair done",
+    description:
+      "At the end of a pb spec repair lap (started by /pb:spec-fix or /pb:spec-harden): report which numbered items you applied, which you rebutted (you wrote the argument in Decisions), which you park for the human (question + your recommendation), and which claims you marked assumed, with one line on what the spec now says differently. Then stop: pb checks the new text for un-evidenced claims and reviews it. " + reportRegister,
+    parameters: Type.Object({
+      applied: Type.Array(Type.Number(), { description: "the numbers this lap settled by evidence, decision or deletion, as shown in its brief" }),
+      rebutted: Type.Array(Type.Number(), { description: "the numbers you argued against, having written the argument and its citation into Decisions" }),
+      parked: Type.Array(
+        Type.Object({
+          question: Type.String({ description: "one question only the human can answer, in a sentence" }),
+          recommendation: Type.String({ description: "what you recommend, and why — it is what runs if nobody answers" }),
+        }),
+        { description: "only where two defensible answers genuinely differ; not a place to park work you could have settled" },
+      ),
+      assumed: Type.Array(Type.String(), { description: "claims you had to tag assumed, each naming what would falsify it" }),
+      summary: Type.String({ description: "one line: what the spec says differently now" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const store = new Store(ctx.cwd);
+      const owner = fixOfSession(store, ctx.sessionManager.getSessionFile());
+      const fix = owner?.p.fix;
+      if (!owner || !fix || fix.stage !== "lap") {
+        throw new Error("No spec repair lap is open in this session, so nothing was recorded. Report a lap only in the session /pb:spec-fix or /pb:spec-harden started it in.");
+      }
+      const show = (n: number) => Number.isInteger(n) && fix.ids.includes(n);
+      const take = (numbers: number[], what: string): number[] => {
+        const out: number[] = [];
+        for (const n of numbers ?? []) {
+          if (!show(n)) throw new Error(`${n} is not one of the numbers this lap was shown (${fix.ids.join(", ")}). Report only what the brief gave you.`);
+          if (out.includes(n)) throw new Error(`${n} is in "${what}" twice.`);
+          out.push(n);
+        }
+        return out;
+      };
+      const applied = take(params.applied, "applied");
+      const rebutted = take(params.rebutted, "rebutted");
+      const twice = applied.filter((n) => rebutted.includes(n));
+      if (twice.length) throw new Error(`${twice.join(", ")} reported both applied and rebutted: it is one or the other.`);
+      const parked = (params.parked ?? []).map((q) => ({ question: cap(String(q.question ?? "").trim(), 400), recommendation: cap(String(q.recommendation ?? "").trim(), 400) }));
+      const assumed = (params.assumed ?? []).map((a) => cap(String(a ?? "").trim(), 300)).filter(Boolean);
+      const md = store.readSpec(owner.name);
+      store.event(owner.name, {
+        type: "spec-fix",
+        hash: fix.hash,
+        run: fix.run,
+        lap: fix.laps,
+        work: fix.work,
+        applied,
+        rebutted,
+        parked,
+        assumed,
+        summary: cap(String(params.summary ?? "").trim(), 600),
+        ...(md === undefined ? {} : { tokens: tokensOf(md) }),
+        by: "model",
+      });
+      fix.stage = "advance";
+      fix.applied += applied.length;
+      fix.rebutted += rebutted.length;
+      fix.assumed += assumed.length;
+      fix.parked = [...fix.parked, ...parked];
+      store.saveProgress(owner.p);
+      return reply(`Lap ${fix.laps} recorded: ${applied.length} applied, ${rebutted.length} rebutted, ${parked.length} parked, ${assumed.length} assumed. pb now checks what you wrote and decides the next step — stop here and let it.`);
+    },
+  });
+
+  /**
+   * One repair lap, on your say-so: it works the findings recorded against the exact text now on disk.
+   * P3 polish is not picked by default (name its number and it joins) — the default is what a lap can
+   * settle without your judgment, which is also what the next review will otherwise find again.
+   */
+
+  pi.registerCommand(cmd("spec-fix"), {
+    description: "Repair a reviewed spec: one lap over the findings recorded against this exact text — it probes what needs measuring, applies the fix it recommends, argues in Decisions when a finding is wrong, and parks only what it will not decide. Optional: which spec, then the finding numbers (every P0-P2 by default)",
+    getArgumentCompletions: specCompletions,
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      const store = new Store(ctx.cwd);
+      const words = args.trim().split(/\s+/).filter(Boolean);
+      const named = words[0] && !/^\d+$/.test(words[0]) && KEBAB_NAME.test(words[0]) ? words[0] : undefined;
+      if (words[0] && !named && !/^\d+$/.test(words[0])) {
+        return ctx.ui.notify(`\`${words[0]}\` isn't a valid spec name (spec names are lowercase with hyphens). Name a spec exactly as written, or give finding numbers: \`/${cmd("spec-fix")} 1 4\`.`, "warning");
+      }
+      const opened = await openRepair(ctx, store, named, words.slice(named ? 1 : 0).filter((w) => /^\d+$/.test(w)).map(Number));
+      if (!opened) return;
+      beginFixLap(ctx, store, opened.name, opened.p, opened.picked, { work: "findings", driver: false, hash: opened.hash, run: now(), reviews: 0 });
+    },
+  });
+
+  /**
+   * The checks a repair door shares: the spec resolves and parses, it isn't mid-build (repairing a plan
+   * under a running build would change the contract that build is holding), and no lap is already open.
+   * Plus, for the manual door, the findings picked from what the review recorded for this text.
+   */
+
+  const openRepair = async (
+    ctx: ExtensionContext,
+    store: Store,
+    named: string | undefined,
+    numbers: number[],
+  ): Promise<{ name: string; p: Progress; picked: { id: number; f: Finding }[]; hash: string } | undefined> => {
+    const name = await reviewTarget(ctx, store, named);
+    if (!name) return undefined;
+    const loaded = loadSpec(store, name);
+    if (!loaded) {
+      ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
+      return undefined;
+    }
+    if (loaded.spec.status === "planning") {
+      ctx.ui.notify(`${name} is still being planned: there is no contract to repair yet. Finish it with /${cmd("spec")} ${name}.`, "warning");
+      return undefined;
+    }
+    const p: Progress = store.progress(name) ?? { spec: name, phase: "written", tasks: syncTasks(loaded.spec, []), updatedAt: now() };
+    if (p.fix && !fixLive(p.fix)) {
+      ctx.ui.notify(`The repair lap recorded for ${name} was left open by a session that is gone; pb dropped it and opened this one.`, "info");
+      p.fix = undefined;
+      store.saveProgress(p);
+    } else if (p.fix) {
+      ctx.ui.notify(`A repair lap for ${name} is already open${p.fix.session ? ` in \`pi --session ${sessionIdOf(p.fix.session)}\`` : ""}. Let it finish, or /${cmd("undo")} to take its lap back.`, "warning");
+      return undefined;
+    }
+    if (unfinishedPhase(p.phase)) {
+      ctx.ui.notify(`${name} is being built: repairing its plan now would change the contract under the running build. Its code is reviewed with /${cmd("review")} ${name}; rewrite the spec with /${cmd("spec")} ${name} after.`, "warning");
+      return undefined;
+    }
+    const all = recordedFindings(store, name, loaded.md);
+    if (!all.length) {
+      ctx.ui.notify(`Nothing is recorded against this exact text, so there is nothing to repair: /${cmd("spec-review")} ${name} first — a lap repairs findings, it never invents them.`, "info");
+      return undefined;
+    }
+    const byId = new Map(all.map((x) => [x.id, x]));
+    if (numbers.length) {
+      const missing = numbers.filter((n) => !byId.has(n));
+      if (missing.length) {
+        ctx.ui.notify(`${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not among the ${all.length} findings recorded for this text (${all.map((x) => x.id).join(", ")}).`, "warning");
+        return undefined;
+      }
+      return { name, p, picked: numbers.map((n) => byId.get(n)!), hash: specHash(loaded.md) };
+    }
+    const picked = all.filter((x) => x.f.priority !== "P3");
+    if (!picked.length) {
+      ctx.ui.notify(`Every finding recorded for ${name} is P3 polish (${all.map((x) => x.id).join(", ")}): name the numbers to have them repaired.`, "info");
+      return undefined;
+    }
+    return { name, p, picked, hash: specHash(loaded.md) };
+  };
+
+  /**
+   * Auto-pilot over a written spec: laps that settle, a claim check after each, one confirming review, one
+   * last lap. The budget is the point — the loop cannot chase "no findings", because a fresh full pass
+   * never runs out of subjects, so it stops on facts it can check (nothing un-evidenced left, laps or
+   * review budget spent, or a lap that changed nothing) and hands you what is left with its reasoning.
+   */
+
+  pi.registerCommand(cmd("spec-harden"), {
+    description: "Auto-pilot for a written spec: repair laps over the review's findings, a claim check after each lap, one confirming review, one last lap over what it brings back. It probes what needs measuring, applies the fix it recommends and argues in Decisions when a finding is wrong; it brings you only what two defensible answers differ on. Optional: which spec",
+    getArgumentCompletions: specCompletions,
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
+      const store = new Store(ctx.cwd);
+      const word = args.trim().split(/\s+/).filter(Boolean)[0];
+      if (word && !KEBAB_NAME.test(word)) {
+        return ctx.ui.notify(`\`${word}\` isn't a valid spec name (spec names are lowercase with hyphens). Name a spec exactly as written, or run it with no name for this session's spec.`, "warning");
+      }
+      const cfg = store.config();
+      const notes: string[] = [];
+      const named = word && KEBAB_NAME.test(word) && store.readSpec(word) ? word : undefined;
+      const name = await reviewTarget(ctx, store, named);
+      if (!name) return;
+      const loaded = loadSpec(store, name);
+      if (!loaded) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
+      if (loaded.spec.status === "planning") return ctx.ui.notify(`${name} is still being planned: there is no contract to harden yet. Finish it with /${cmd("spec")} ${name}.`, "warning");
+      const p: Progress = store.progress(name) ?? { spec: name, phase: "written", tasks: syncTasks(loaded.spec, []), updatedAt: now() };
+      if (p.fix && !fixLive(p.fix)) {
+        ctx.ui.notify(`The repair lap recorded for ${name} was left open by a session that is gone; pb dropped it.`, "info");
+        p.fix = undefined;
+        store.saveProgress(p);
+      } else if (p.fix) return ctx.ui.notify(`A repair lap for ${name} is already open${p.fix.session ? ` in \`pi --session ${sessionIdOf(p.fix.session)}\`` : ""}.`, "warning");
+      if (unfinishedPhase(p.phase)) return ctx.ui.notify(`${name} is being built: its plan is frozen while the build holds it. Harden it before /${cmd("build")}, or after the review.`, "warning");
+
+      let findings = recordedFindings(store, name, loaded.md);
+      let reviews = 0;
+      post([
+        `\u25b6 **Spec harden** — **${name}**`,
+        "",
+        `- ${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} already recorded against this text` : "no verdict on this text yet: pb runs one review pass first to find the work"}`,
+        `- budget: at most ${cfg.specFix.maxLaps} repair laps and ${cfg.specFix.maxReviews} review pass${cfg.specFix.maxReviews === 1 ? "" : "es"} in total`,
+        `- each lap may only: point a claim at evidence (it runs the probe), delete it, decide it in Decisions with the alternative it rejected, or tag it \`assumed\`; it argues back in Decisions when it thinks a finding is wrong`,
+        `- it stops early when nothing is left un-evidenced or a lap changes nothing, and brings you whatever it would not decide, with its recommendation`,
+      ].join("\n"));
+      if (!(await agree(ctx, store, `Harden ${name} now?`, notes))) return;
+
+      let md = loaded.md;
+      if (!findings.length) {
+        if (reviews >= (cfg.specFix.maxReviews ?? 2)) {
+          return ctx.ui.notify(`No review budget left to find the work: run /${cmd("spec-review")} ${name} first, then /${cmd("spec-harden")} ${name}.`, "info");
+        }
+        reviews += 1;
+        await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "harden"));
+        if (sessionGone(ctx)) return;
+        const after = store.readSpec(name);
+        if (after === undefined || after !== md) {
+          return ctx.ui.notify(`The spec changed while it was under review: run \`/${cmd("spec-harden")} ${name}\` again and the new text will be hardened.`, "warning");
+        }
+        findings = recordedFindings(store, name, after);
+        if (!findings.length) {
+          return post([phaseHeader("\u2705", "Spec hardened", name, "nothing to repair"), "", nextLine(`\`/${cmd("build")} ${name}\` — the pass above covers this text and reported no findings.`), evidenceLine("the review found nothing a repair lap could settle")].join("\n"));
+        }
+      }
+      beginFixLap(ctx, store, name, p, findings, { work: "findings", driver: true, hash: specHash(md), run: now(), reviews, answers: notes.length ? notes : undefined });
+    },
+  });
 
   /**
    * Start building a spec. In this session by default: the conversation that planned it
@@ -1154,7 +1855,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     if (!checked) return;
     const { spec, md, cfg } = checked;
 
-    if (!(await ensureSpecReviewed(ctx, store, name, md))) return;
+    if (!(await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "build")))) return;
     const buildModel = cfg.buildModel ? findModel(ctx, cfg.buildModel) : undefined;
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
     const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";
@@ -1374,6 +2075,12 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
 
   pi.on("agent_settled", async (_e, ctx) => {
     if (await offerPendingBuild(ctx)) return;
+    // An open spec repair: the lap's turn just ended, so the harness owes the next step (claim check, the
+    // next lap, the confirming review, or the digest). This is the only place that step happens, for both
+    // doors, so a lap that ends silently is seen by the same code that reads one that reports.
+    const fixStore = new Store(ctx.cwd);
+    const owned = fixOfSession(fixStore, ctx.sessionManager.getSessionFile());
+    if (owned?.p.fix && (await advanceSpecFix(ctx, fixStore, owned.name, owned.p))) return;
     const { store, progress: p } = specOfSession(ctx);
     if (p?.phase === "building") pauseBuild(ctx, store, p, "the agent stopped without finishing its task (you stopped it, or it stopped again after a reminder).", "build.paused", "stopped");
     // bash can write where edit and write are blocked: say what changed as soon as the turn ends,

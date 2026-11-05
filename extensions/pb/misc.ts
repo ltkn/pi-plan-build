@@ -65,7 +65,7 @@ export function registerMisc(pi: ExtensionAPI) {
         const p = store.progress(n);
         const s = loadSpec(store, n)?.spec;
         const where = p?.session && n !== here ? ` · session: pi --session ${sessionIdOf(p.session)}` : "";
-        const head = `${n === here ? "▸ " : ""}${n} — ${p?.phase ?? "written"}${where}${s ? ` · verification ${s.gate}${s.newTests ? "" : " · no new tests"}${s.dependsOn ? ` · depends on ${s.dependsOn}` : ""}` : " · ⚠ doesn't parse"}${p?.pause ? ` · paused: ${p.pause}` : ""}`;
+        const head = `${n === here ? "▸ " : ""}${n} — ${p?.phase ?? "written"}${where}${s ? ` · verification ${s.gate}${s.newTests ? "" : " · no new tests"}${s.dependsOn ? ` · depends on ${s.dependsOn}` : ""}` : " · ⚠ doesn't parse"}${p?.pause ? ` · paused: ${p.pause}` : ""}${p?.fix ? ` · repair lap ${p.fix.laps} open (${p.fix.driver ? "hardening" : "one lap"})` : ""}`;
         return [head, ...(p && p.phase !== "written" ? p.tasks.map((t) => `    ${taskLine(t)}`) : [])];
       });
       ctx.ui.notify([...lines, `help: /${cmd("help")}`].join("\n"), "info");

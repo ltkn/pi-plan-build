@@ -7,6 +7,9 @@
  *   /pb:compact            planning: write the plan to its spec and reset to it; build: compact to the build's state
  *   /pb:spec [which]       write or revise the spec(s) from the discussion
  *   /pb:build [name]       build a spec here (--fresh: in a new session); resumes after a pause
+ *   /pb:spec-review [name] the pre-build review on its own: fresh eyes on a ready spec, nothing built
+ *   /pb:spec-fix [name] [ids] one repair lap over the review's findings: probes, decides, argues, asks
+ *   /pb:spec-harden [name]  auto-pilot: repair laps, a claim check after each, one confirming review, one last lap
  *   /pb:review [focus]     fresh, independent review against the spec, or of any uncommitted change
  *   /pb:deps [scope]       check dependencies and propose upgrades, as a change of their own
  *   /pb:undo [id]          restore the files, and rewind the conversation, to before a task
@@ -24,7 +27,8 @@
  * boundaries (the build's approval gate, the read-only review, the fix numbering) stay
  * legible one module at a time:
  *   plan.ts       /pb:plan, /pb:approach, /pb:deps — the baseline and the planning guard
- *   flow.ts       pb_write_spec … pb_tests_red, the spec review, /pb:build and /pb:spec
+ *   flow.ts       pb_write_spec … pb_spec_fix_done, the spec review and its repair laps,
+ *                 /pb:build, /pb:spec, /pb:spec-review, /pb:spec-fix, /pb:spec-harden
  *   review-flow.ts pb_report_findings, the review passes and /pb:review
  *   fix.ts        pb_fix_done, the fix-lap loop and /pb:fix
  *   hooks.ts      pi's event hooks (compaction, checkpoints, planning protections) and /pb:compact

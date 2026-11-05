@@ -58,6 +58,14 @@ export interface Config {
    * plan checked by the model that will implement it. Every ready spec gets one pass.
    */
   specReviewer: { model?: string; thinking?: string };
+  /**
+   * The spec fixer: the model for the claim check (unset = your session's — the question is narrow, so
+   * it does not need the reviewer's model), and the budget one `/pb:spec-harden` run may spend: repair
+   * laps (`maxLaps`, default 3) and spec reviews (`maxReviews`, default 2 — the pass that finds the work
+   * and the one that confirms the repair). A harden run spends no more than that on either: a third pass
+   * over a plan is a decision you make by hand, not a step an unattended run takes.
+   */
+  specFix: { model?: string; thinking?: string; maxLaps?: number; maxReviews?: number };
   /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
   freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
@@ -84,7 +92,7 @@ export interface Config {
 }
 
 /** The roles whose prompts take extra instructions. */
-export const ROLES = ["plan", "spec", "build", "review", "adversarial", "map"] as const;
+export const ROLES = ["plan", "spec", "build", "review", "adversarial", "map", "spec-fix", "spec-check"] as const;
 export type Role = (typeof ROLES)[number];
 
 export const DEFAULT_CONFIG: Config = {
@@ -101,6 +109,7 @@ export const DEFAULT_CONFIG: Config = {
   checkpoints: true,
   reviewer: { verify: true, security: "auto" },
   specReviewer: {},
+  specFix: { maxLaps: 3, maxReviews: 2 },
   freshAbove: 50,
   baseline: true,
   explorer: {},
@@ -116,6 +125,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
   const strOrNull = (v: unknown, d: string | null) => (v === null || v === undefined ? d : typeof v === "string" ? v : d);
   const reviewerRaw = typeof raw.reviewer === "object" && raw.reviewer !== null ? raw.reviewer : {};
   const specReviewerRaw = typeof raw.specReviewer === "object" && raw.specReviewer !== null ? raw.specReviewer : {};
+  const specFixRaw = typeof raw.specFix === "object" && raw.specFix !== null ? raw.specFix : {};
   const explorerRaw = typeof raw.explorer === "object" && raw.explorer !== null ? raw.explorer : {};
   const security = (reviewerRaw as { security?: unknown }).security;
   return {
@@ -143,6 +153,14 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     specReviewer: {
       model: typeof (specReviewerRaw as { model?: unknown }).model === "string" ? (specReviewerRaw as { model: string }).model : undefined,
       thinking: typeof (specReviewerRaw as { thinking?: unknown }).thinking === "string" ? (specReviewerRaw as { thinking: string }).thinking : undefined,
+    },
+    specFix: {
+      model: typeof (specFixRaw as { model?: unknown }).model === "string" ? (specFixRaw as { model: string }).model : undefined,
+      thinking: typeof (specFixRaw as { thinking?: unknown }).thinking === "string" ? (specFixRaw as { thinking: string }).thinking : undefined,
+      // A repair lap is the model rewriting its own plan: three of them is already a long unattended run.
+      maxLaps: Math.max(1, Math.floor(num((specFixRaw as { maxLaps?: unknown }).maxLaps, DEFAULT_CONFIG.specFix.maxLaps!))),
+      // Two passes, no more: the one that finds the work and the one that confirms the repair.
+      maxReviews: Math.max(0, Math.floor(num((specFixRaw as { maxReviews?: unknown }).maxReviews, DEFAULT_CONFIG.specFix.maxReviews!))),
     },
     freshAbove: num((raw as { freshAbove?: unknown }).freshAbove, DEFAULT_CONFIG.freshAbove),
     baseline: bool((raw as { baseline?: unknown }).baseline, true),
@@ -243,6 +261,36 @@ export interface SpecApproval {
   contractHash: string;
 }
 
+/**
+ * Where an open spec repair stands (Progress.fix). A repair lap is a turn in the session that asked for
+ * it, so the model can probe, ask and write through pb_write_spec; `stage` says who has the ball.
+ */
+export interface SpecFixState {
+  /** the session whose turn repairs the spec: only it may report a lap */
+  session: string;
+  /** true while /pb:spec-harden sequences the laps; false for one manual /pb:spec-fix lap */
+  driver: boolean;
+  /** "lap": the model has the turn and owes a report; "advance": it reported, the harness owes the next step */
+  stage: "lap" | "advance";
+  /** when the lap opened: a lap left by a session that has since died is dead, not blocking */
+  startedAt: number;
+  /** the spec text the worklist was taken from: what the lap's report is bound to */
+  hash: string;
+  /** what the worklist was: a review's findings, or the claim check's un-evidenced claims */
+  work: "findings" | "claims";
+  /** the numbers this lap was handed, so its report cannot name a finding it was not shown */
+  ids: number[];
+  /** this run's stamp, written on every event it adds so a digest counts its own laps and nothing older */
+  run: string;
+  laps: number;
+  reviews: number;
+  applied: number;
+  rebutted: number;
+  assumed: number;
+  /** questions a lap refused to answer, each with its recommendation; the driver puts them to the human */
+  parked: { question: string; recommendation: string }[];
+}
+
 export interface Progress {
   spec: string;
   phase: Phase;
@@ -271,6 +319,13 @@ export interface Progress {
   reviewUnshown?: boolean;
   /** existing tests the build deleted, cut down or skipped, per task: for the reviewer to judge */
   testChanges?: string[];
+  /**
+   * An open spec repair: the laps run in the session that asked for them, and only that session may
+   * report one. `stage` says who has the ball: "lap" = the model has the turn and owes a report,
+   * "advance" = it reported and the harness owes the next step. `ids` are the finding numbers that
+   * lap was handed, so its report cannot name a finding it was not shown.
+   */
+  fix?: SpecFixState;
   pause?: string;
   /** the conversation was rewound to before the build's first message: a resume sends it again */
   needsIntro?: boolean;
@@ -404,6 +459,16 @@ export function writeFileAtomic(file: string, content: string): void {
   fs.writeFileSync(tmp, content, "utf8");
   fs.renameSync(tmp, file);
 }
+
+/** Whether a path pb recorded earlier is still there: a repair lap whose session file is gone can never be reported. */
+
+export const pathExists = (p: string): boolean => {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
+};
 
 export function readEvents(file: string): Record<string, unknown>[] {
   try {

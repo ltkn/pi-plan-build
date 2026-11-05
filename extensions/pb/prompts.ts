@@ -719,6 +719,65 @@ ${markdown}
 Review this one frozen draft against the repository as it is now. Report findings with report_findings: an empty list is a pass; only a P0 blocks the build, while P1-P3 are advisory to the human. Do not modify the spec or the project.`;
 }
 
+/**
+ * The discipline a spec repair lap works under. Its whole point: a lap may not mint a new un-evidenced
+ * claim, because that is how a spec that has been "fixed" twice comes back with more P1s than it started
+ * with — a decision restated in Contract voice reads as measured until someone runs the thing.
+ */
+export const SPEC_FIX_RULES = `A repair may do only one of four things to a claim:
+- **point it at evidence you have** — read the file or run the probe (pb_try), then write the answer with the \`path:line\` or the command and its output beside it;
+- **delete it** — a claim nothing supports and nothing needs is not a finding to argue with;
+- **decide it** — write the choice and the alternative you rejected, with the reason;
+- **mark it assumed** — \`assumed: <what would falsify it>\`, when only the human or production can settle it.
+Anything else is a new un-evidenced claim, and the next pass finds it as a finding: restating the reviewer's sentence in Contract voice, a hedged number ("about 90 s"), or naming a knob nobody checked the runtime actually reads.
+
+Route each answer to the section it belongs to; never append it where you stand: a measured fact → "Findings" (with its probe line); a behaviour a test can pin → an \`Acceptance:\` line on the owning task, and that task's \`Test:\`; something the outside world sees → "Contracts"; a choice between designs → "Decisions" with the rejected alternative; a repo standard → the task that has to meet it.
+
+Push back in writing when you are sure. If a finding is wrong, do not comply with it: put the argument and its citation in "Decisions" and report the finding as rebutted — the next reviewer attacks that argument, which is the deal. The same holds for an instruction you were given that the repository contradicts: say so in your report instead of writing the contradiction into the spec.
+
+Keep the spec the same size or smaller. Evidence replaces the paragraph that argued about it: a Contracts line quoting the measured value has no use for the essay that guessed it.`;
+
+/** One repair lap in the session that owns the spec: the worklist, the rules, the report it owes. */
+export function specFixPrompt(o: { name: string; work: "findings" | "claims"; items: string[]; lap: number; answers?: string[]; extra?: string }): string {
+  return [
+    `[pb:spec-fix] Repair lap ${o.lap} on ${o.name}: ${o.items.length} ${o.work === "findings" ? "finding" : "claim"}${o.items.length === 1 ? "" : "s"} to settle.`,
+    "",
+    ...o.items,
+    "",
+    SPEC_FIX_RULES,
+    "",
+    `Settle them in the spec file itself (${P}/specs/${o.name}/spec.md, written with pb_write_spec so the format gates apply to what you write), then report with pb_spec_fix_done: which numbers you applied, which you rebutted (with the Decisions line you wrote), which you park (only where two defensible answers genuinely differ — one question each, with what you recommend and why), and which claims you had to mark assumed. A number you were not shown is not reportable; a claim you could not settle is parked or assumed, never guessed.`,
+    "",
+    "Touch nothing but the spec: this lap designs, it does not build.",
+    ...(o.answers?.length ? ["", "What the human answered since the last lap:", ...o.answers.map((a) => `- ${a}`)] : []),
+    ...(o.extra?.trim() ? ["", o.extra.trim()] : []),
+  ].join("\n");
+}
+
+/**
+ * The narrow, cheap question that makes an unattended repair safe to leave running: not "is this spec
+ * good" (a 20-minute review, which never finishes) but "which claims stand on nothing" (minutes).
+ */
+export const SPEC_CLAIM_CHECK_SYSTEM = `You are a CLAIM CHECKER in a fresh context: one feature spec, one narrow question — which load-bearing claims stand on nothing. You read only (read/grep/find/ls, no shell), and you change nothing.
+
+A claim is load-bearing when the build would do something different if it were false: a number or bound (a size, count, latency, threshold, timeout, interval), a statement about what this repository, build, runtime, configuration or external feed does or contains, or a stated behaviour of an external surface.
+
+A claim is settled when the text beside it carries its evidence: a probe line (the command run and what it printed), a \`path:line\` that resolves to what the claim says, or an explicit \`assumed:\` tag naming what would falsify it. Check a cited \`path:line\` resolves before believing it.
+
+Report every load-bearing claim that is neither settled nor tagged: P1 when getting it wrong would change the design, the data model or a contract; P2 otherwise. Report nothing else: not whether a number is right (you cannot run anything), not whether the design is good, not style, not missing tests, not a claim the spec already tags assumed. An empty list is the normal, good result.
+
+Report with report_findings in one call, an empty list when there is nothing, made as soon as you have them and before writing your reply: pb reads the call, never your prose. Title each finding with the claim itself, quoted short, and name in \`fix\` the one probe or read that would settle it.`;
+
+export function claimCheckBrief(name: string, markdown: string): string {
+  return `# Claims to check: ${name}
+
+${markdown}
+
+# Your job
+
+List the load-bearing claims in this spec that carry no evidence and no \`assumed:\` tag. Judge evidence only — you are not reviewing the design.`;
+}
+
 export function reviewStateSummary(o: { label: string; role: "review" | "abuse"; brief: string; findings: Finding[]; acceptance?: AcceptanceCheck[]; read?: string[]; wrapUp?: boolean }): string {
   return [
     `[pb review state: ${o.label}] This ${o.role === "review" ? "review" : "abuse-pass"} session was compacted. The brief below is the complete baseline: re-read any files you need from it, and carry on where the findings and acceptance checks leave off.`,

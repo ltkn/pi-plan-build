@@ -1377,6 +1377,545 @@ test("spec review: the configured model and thinking run the pass and are record
   assert.equal(event.thinking, "high");
 });
 
+/* ------------------------------ /pb:spec-review ------------------------------ */
+
+const specRel = ".pi/pb/specs/order-cancellation/spec.md";
+const reviewRuns = (t: ReturnType<typeof setup>) => fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length;
+const reviewEvents = (t: ReturnType<typeof setup>) => t.events("order-cancellation").filter((e: any) => e.type === "spec-review");
+
+test("spec-review command: the pre-build review on its own, with nothing built", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  // The verdict lands; nothing else follows from it: no approval, no task, no build session.
+  assert.equal(t.progress("order-cancellation").phase, "written");
+  assert.equal(t.instructions.length, 0, `a review must not instruct a build: ${t.instructions.join("\n")}`);
+  const posted = t.posts.find((p) => p.startsWith("**\u2705 Spec review"))!;
+  assert.match(posted, /· PASS · P0 0 · P1 1 · P2 1 · P3 0/);
+  assert.match(posted, /\*\*Next:\*\* `\/pb:build order-cancellation` starts at T1 on this verdict/);
+  assert.match(posted, /\*\*Advisory\*\*[\s\S]*\[P1\][\s\S]*\[P2\]/);
+  const event = reviewEvents(t).at(-1);
+  assert.equal(event.verdict, "pass");
+  assert.equal(event.hash, specHash(t.read(specRel)));
+  assert.equal(typeof event.head, "string", "the pass stamps the HEAD its citations were read in");
+});
+
+test("spec-review command: /pb:build rides on the pass it recorded instead of reviewing again", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(reviewRuns(t), 1);
+  t.agent.script = diligent;
+  await t.run("build", "order-cancellation");
+  assert.equal(reviewRuns(t), 1, "the recorded pass covers this text: no second reviewer");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("spec-review command: a verdict on record is shown, and says which commit it read the code in", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(reviewRuns(t), 1, "the stored pass is answered without a new run");
+  const second = t.posts.at(-1)!;
+  assert.match(second, /PASS \(already on record\)/);
+  assert.match(second, /\*\*Advisory\*\*[\s\S]*\[P1\]/); // its findings come back with it
+  assert.match(second, /the recorded verdict covers this text/);
+  assert.ok(!second.includes("it read the code at"), "an unchanged HEAD has nothing to say");
+  // A pass is bound to the spec bytes; the repository its citations were read in is not in that hash,
+  // so a moved HEAD is said out loud rather than used to void the pass.
+  execSync("git commit -qm moved --allow-empty", { cwd: t.repo });
+  await t.run("spec-review", "order-cancellation");
+  assert.match(t.posts.at(-1)!, /it read the code at [0-9a-f]{8}, HEAD is now [0-9a-f]{8}/);
+  assert.equal(reviewRuns(t), 1);
+});
+
+test("spec-review command: a P0 is re-posted without a second run and still stops the build", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "block";
+  try {
+    await t.run("spec-review", "order-cancellation");
+    const first = t.posts.at(-1)!;
+    assert.match(first, /\*\*\u274c Spec review \u2014 order-cancellation\*\* · FAIL · P0 1/);
+    assert.match(first, /\*\*Next:\*\* fix the spec with `\/pb:spec order-cancellation`, then `\/pb:spec-review order-cancellation`\./);
+    assert.match(first, /unguarded transition/);
+    assert.equal(reviewEvents(t).at(-1)!.verdict, "block");
+    await t.run("spec-review", "order-cancellation");
+    assert.equal(reviewRuns(t), 1, "the standing P0 needs no second reviewer");
+    // The build that follows meets the same verdict: a recorded block is not a suggestion.
+    t.agent.script = diligent;
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(reviewRuns(t), 1);
+  assert.equal(t.progress("order-cancellation").phase, "written");
+  assert.ok(!t.instructions.some((i) => /Task T1/.test(i)));
+});
+
+test("spec-review command: a run that reported nothing is never read as a pass", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "crash";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.match(t.posts.at(-1)!, /the reviewer returned no findings through its tool/);
+  assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:spec-review order-cancellation` to try again/);
+  assert.equal(reviewEvents(t).at(-1)!.verdict, "error");
+  assert.equal(reviewRuns(t), 1);
+  // An error cannot carry a build: the build reviews the text itself.
+  t.agent.script = diligent;
+  await t.run("build", "order-cancellation");
+  assert.equal(reviewRuns(t), 2);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("spec-review command: a spec edited while the pass runs is left without a verdict for the new text", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_EDIT = path.join(t.repo, specRel); // the reviewer's run touches the draft
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_EDIT;
+  }
+  assert.match(t.notes.at(-1)!, /changed while it was under review: run `\/pb:spec-review order-cancellation` again/);
+  assert.equal(t.progress("order-cancellation").phase, "written");
+  const event = reviewEvents(t).at(-1)!;
+  assert.notEqual(event.hash, specHash(t.read(specRel)), "the pass covers the text it read, never the newer one");
+});
+
+test("spec-review command: an unusable name is refused before any path is read", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  for (const bad of ["../order-cancellation", "Order.Cancellation", "."]) {
+    await t.run("spec-review", bad);
+    assert.match(t.notes.at(-1)!, /isn't a valid spec name/, `"${bad}" was taken as a name`);
+  }
+  await t.run("spec-review", "no-such-spec");
+  assert.match(t.notes.at(-1)!, /No spec `no-such-spec` here/);
+  assert.equal(reviewEvents(t).length, 0);
+  assert.ok(!t.posts.some((p) => p.includes("Spec review \u2014")));
+});
+
+test("spec-review command: a spec still being planned has no contract to review yet", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const file = path.join(t.repo, specRel);
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("# Order cancellation\n", "# Order cancellation\nStatus: planning\n"));
+  await t.run("spec-review", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /still being planned/);
+  assert.equal(reviewEvents(t).length, 0);
+});
+
+test("spec-review command: a spec whose build is running gets the plan review as advice", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  let died = false;
+  t.agent.script = async (text, tool) => {
+    if (taskOf(text) === "T2" && !died) {
+      died = true;
+      return; // the session "dies" mid-build: the build is paused, not finished
+    }
+    return diligent(text, tool);
+  };
+  await t.run("build", "order-cancellation");
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+  await t.run("spec-review", "order-cancellation");
+  // The build's own pass already covers this text, so the answer is the stored verdict — and it says
+  // plainly that a running build is not re-gated by a plan-level review.
+  const posted = t.posts.at(-1)!;
+  assert.match(posted, /PASS \(already on record\)/);
+  assert.match(posted, /a build of order-cancellation is underway: this pass does not re-gate it/);
+  assert.equal(t.progress("order-cancellation").phase, "paused", "a review leaves the paused build alone");
+});
+
+/* ------------------------- spec repair laps / harden ------------------------ */
+
+/**
+ * The lap played by the session's own script: it settles the text (each lap's edit is a real byte
+ * change, so the next step sees the text move), then reports. `report` may depend on which lap it is.
+ */
+const repairLap =
+  (t: ReturnType<typeof setup>, report: object | ((lap: number) => object)): Script => {
+    let laps = 0;
+    return async (text, tool) => {
+      if (!text.includes("[pb:spec-fix]")) return;
+      laps += 1;
+      const md = fs.readFileSync(path.join(t.repo, specRel), "utf8");
+      const w = await tool("pb_write_spec", { name: "order-cancellation", content: md.replace("Refunds.", `Refunds. Lap ${laps} cites the paths it probed.`) });
+      assert.equal(w.error, undefined, w.error ?? "");
+      const r = await tool("pb_spec_fix_done", typeof report === "function" ? report(laps) : report);
+      assert.equal(r.error, undefined, r.error ?? "");
+    };
+  };
+
+/** A lap that reports without touching the text: nothing to check, nothing to re-review. */
+const quietLap =
+  (t: ReturnType<typeof setup>, report: object): Script =>
+  async (text, tool) => {
+    if (!text.includes("[pb:spec-fix]")) return;
+    const r = await tool("pb_spec_fix_done", report);
+    assert.equal(r.error, undefined, r.error ?? "");
+  };
+
+const specFixEvents = (t: ReturnType<typeof setup>, type: string) => t.events("order-cancellation").filter((e: any) => e.type === type);
+
+test("spec-fix command: a lap repairs the findings recorded for this text, and refuses without them", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  // no verdict at all: a lap never invents a worklist
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /Nothing is recorded against this exact text/);
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 0);
+  // a pass that found nothing is still no worklist
+  t.agent.script = diligent;
+  await t.run("spec-review", "order-cancellation");
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /Nothing is recorded against this exact text/);
+  // findings on this text: the lap is handed them, numbered, under the rules it works by
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("Refunds.", "Refunds and chargebacks.") });
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const open: any[] = [];
+  t.agent.script = async (text, tool) => {
+    if (!text.includes("[pb:spec-fix]")) return;
+    open.push(structuredClone(t.progress("order-cancellation").fix));
+    await tool("pb_spec_fix_done", { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+  };
+  await t.run("spec-fix", "order-cancellation");
+  const lap = t.instructions.find((i) => i.includes("[pb:spec-fix]"))!;
+  assert.match(lap, /Repair lap 1 on order-cancellation: 2 findings to settle/);
+  assert.match(lap, /1\. \[P1\][\s\S]*2\. \[P2\]/);
+  assert.match(lap, /A repair may do only one of four things[\s\S]*mark it assumed/);
+  assert.match(lap, /Route each answer to the section it belongs to/);
+  assert.match(lap, /Push back in writing when you are sure/);
+  assert.deepEqual(open[0].ids, [1, 2], "the lap is open on the two findings it was shown");
+  assert.equal(open[0].stage, "lap");
+  assert.equal(open[0].driver, false, "a manual lap runs alone; it does not sequence anything");
+  assert.equal(t.read(".pi/pb/specs/order-cancellation/checkpoints.json").includes("lap1"), true, "the lap has an undo point");
+});
+
+test("spec-fix command: an unknown finding number or an unusable name is refused before a lap opens", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  await t.run("spec-fix", "order-cancellation 7");
+  assert.match(t.notes.at(-1)!, /7 is not among the 2 findings recorded for this text \(1, 2\)/);
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+  await t.run("spec-fix", "../order-cancellation");
+  assert.match(t.notes.at(-1)!, /isn't a valid spec name/);
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 0);
+});
+
+test("pb_spec_fix_done: only the session with an open lap may report, and only the numbers it was shown", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const refused: string[] = [];
+  t.agent.script = async (text, tool) => {
+    if (!text.includes("[pb:spec-fix]")) return;
+    const r = t.runtime();
+    const real = r.ctx.sessionManager.getSessionFile;
+    r.ctx.sessionManager.getSessionFile = () => path.join(t.repo, "elsewhere.jsonl");
+    refused.push((await tool("pb_spec_fix_done", { applied: [1], rebutted: [], parked: [], assumed: [], summary: "x" })).error ?? "no error");
+    r.ctx.sessionManager.getSessionFile = real;
+    refused.push((await tool("pb_spec_fix_done", { applied: [1, 9], rebutted: [], parked: [], assumed: [], summary: "x" })).error ?? "no error");
+    refused.push((await tool("pb_spec_fix_done", { applied: [1], rebutted: [1], parked: [], assumed: [], summary: "x" })).error ?? "no error");
+  };
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(refused[0], /No spec repair lap is open in this session/);
+  assert.match(refused[1], /9 is not one of the numbers this lap was shown \(1, 2\)/);
+  assert.match(refused[2], /1 reported both applied and rebutted/);
+  assert.equal(specFixEvents(t, "spec-fix").length, 0, "a refused report records nothing");
+});
+
+test("spec-fix lap: the report is recorded, the claim check runs on what it wrote, and the digest says the verdict is stale", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  t.agent.script = repairLap(t, { applied: [1], rebutted: [2], parked: [], assumed: ["the feed sends trip-level delay"], summary: "the delay source is now cited" });
+  await t.run("spec-fix", "order-cancellation");
+  const lap = specFixEvents(t, "spec-fix").at(-1)!;
+  assert.equal(lap.lap, 1);
+  assert.deepEqual(lap.applied, [1]);
+  assert.deepEqual(lap.rebutted, [2]);
+  assert.deepEqual(lap.assumed, ["the feed sends trip-level delay"]);
+  assert.equal(lap.work, "findings");
+  const check = specFixEvents(t, "spec-check").at(-1)!;
+  assert.equal(check.verdict, "pass", "the clean default check is recorded as a pass");
+  assert.equal(check.hash, specHash(t.read(specRel)), "the check judged the text the lap wrote, not the old one");
+  const digest = t.posts.at(-1)!;
+  assert.match(digest, /\*\*🔧 Spec fix — order-cancellation\*\* · 1 applied · 1 rebutted · 1 assumed · no un-evidenced claims/);
+  assert.match(digest, /\*\*Next:\*\* `\/pb:spec-review order-cancellation` — the text changed/);
+  assert.match(digest, /1 repair lap · spec now ~\d+ tokens · it decided everything it was shown/);
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+  // the check is a read-only pass with its reporting tool, and it is not a review: a build on this text
+  // still has to earn its own pass
+  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-check")).length, 1);
+  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length, 1);
+  const reviewed = () => t.events("order-cancellation").filter((e: any) => e.type === "spec-review" && e.hash === specHash(t.read(specRel))).length;
+  assert.equal(reviewed(), 0, "the repair's claim check is no verdict on the new text");
+  t.agent.script = diligent;
+  await t.run("build", "order-cancellation");
+  assert.equal(reviewed(), 1, "the build reviewed the repaired text for itself");
+});
+
+test("spec-fix lap: it runs read-only and reports through the tool its --tools names", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  const argsOut = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pb-args-")), "argv");
+  process.env.MOCK_SETTLE_ARGS_OUT = argsOut;
+  try {
+    await t.run("spec-review", "order-cancellation");
+    t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "both settled" });
+    await t.run("spec-fix", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SETTLE_ARGS_OUT;
+  }
+  const argv = fs.readFileSync(argsOut, "utf8").split("\n");
+  assert.equal(argv[argv.indexOf("--tools") + 1], "read,grep,find,ls,report_findings");
+  assert.ok(!argv.includes("bash"), "the claim check has no shell");
+  assert.ok(argv.includes("--no-mcp") || !argv.includes("--mcp"), "the check runs without the user's MCP servers");
+});
+
+test("spec-fix lap: a lap that changed nothing is not checked or re-reviewed, and a check that stays silent stops the run", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  // same bytes: the same check and review would answer the same, so say what is left instead
+  t.agent.script = quietLap(t, { applied: [], rebutted: [], parked: [], assumed: [], summary: "nothing settled" });
+  await t.run("spec-fix", "order-cancellation");
+  assert.equal(specFixEvents(t, "spec-check").length, 0, "an unchanged text is not re-checked");
+  assert.match(t.posts.at(-1)!, /the lap changed nothing/);
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+
+  // a check that reports nothing is not a clean bill
+  const u = setup({ verify: "true" });
+  await written(u);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  process.env.MOCK_SETTLE = "crash";
+  try {
+    await u.run("spec-review", "order-cancellation");
+    u.agent.script = repairLap(u, { applied: [1], rebutted: [], parked: [], assumed: [], summary: "one settled" });
+    await u.run("spec-fix", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SETTLE;
+  }
+  assert.match(u.notes.at(-1)!, /did not report, so pb stopped rather than read silence as clean/);
+  assert.equal(specFixEvents(u, "spec-check").at(-1)!.verdict, "error");
+  assert.equal(u.progress("order-cancellation").fix, undefined);
+});
+
+test("spec-fix: a lap whose turn ends without reporting stops and records nothing", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  t.agent.script = async (text) => {
+    if (text.includes("[pb:spec-fix]")) return; // the lap "dies" mid-turn
+  };
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(t.posts.at(-1)!, /lap 1 ended without reporting[\s\S]*nothing was recorded/);
+  assert.equal(specFixEvents(t, "spec-fix").length, 0);
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+});
+
+test("spec-harden: plan, review, lap, claim check, confirming review, last lap — then it stops and reports", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length : 0);
+  const checks = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-check")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-check")).length : 0);
+  t.selects.push("Yes, go on"); // the plan
+  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-harden", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.match(t.posts.find((p) => p.startsWith("▶ **Spec harden"))!, /no verdict on this text yet: pb runs one review pass first[\s\S]*at most 3 repair laps and 2 review passes/);
+  assert.match(t.posts.find((p) => p.includes("A repair may do only one of four things")) ?? t.instructions.find((i) => i.includes("[pb:spec-fix]"))!, /.+/);
+  const laps = t.instructions.filter((i) => i.includes("[pb:spec-fix]"));
+  assert.equal(laps.length, 2, `expected a findings lap and a lap over what the confirming review brought back: ${laps.length}`);
+  assert.match(laps[0], /Repair lap 1 on order-cancellation: 2 findings to settle/);
+  assert.match(laps[1], /Repair lap 2/);
+  assert.equal(reviews(), 2, "the pass that found the work, and the one that confirmed the repair — no more");
+  assert.equal(checks(), 2, "a claim check after each lap");
+  const harden = specFixEvents(t, "spec-harden").at(-1)!;
+  assert.equal(harden.laps, 2);
+  assert.equal(harden.reviews, 2);
+  assert.ok(harden.applied >= 2);
+  const digest = t.posts.at(-1)!;
+  assert.match(digest, /\*\*✅ Spec hardened — order-cancellation\*\*/);
+  assert.match(digest, /\*\*Next:\*\* `\/pb:build order-cancellation`/);
+  assert.match(digest, /2 repair laps · 2 reviews/);
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+  assert.equal(t.progress("order-cancellation").phase, "written", "hardening never starts a build");
+});
+
+test("spec-harden: the budget is the stop rule — claims keep coming, the run still ends", async () => {
+  const t = setup({ verify: "true", specFix: { maxLaps: 2, maxReviews: 0 } });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  process.env.MOCK_SETTLE = "claims"; // the check always finds un-evidenced claims: only the budget can end this
+  t.selects.push("Yes, go on");
+  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled what it was shown" });
+  try {
+    await t.run("spec-review", "order-cancellation"); // the work exists; the budget here is for the repairs
+    await t.run("spec-harden", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SETTLE;
+  }
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 2, "maxLaps laps, not one more");
+  const harden = specFixEvents(t, "spec-harden").at(-1)!;
+  assert.equal(harden.laps, 2);
+  assert.equal(harden.reviews, 0, "no review budget: the run confirms nothing by itself");
+  assert.equal(harden.unEvidenced, 2);
+  assert.match(t.posts.at(-1)!, /2 un-evidenced[\s\S]*Still standing on nothing[\s\S]*≤ 90 s/);
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+});
+
+test("spec-harden: a lap's parked question reaches you with its recommendation, and the answer drives the next lap", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  t.selects.push("Yes, go on"); // the plan
+  t.selects.push("Drop the city column — stop_name already carries it"); // the parked question
+  t.agent.script = async (text, tool) => {
+    if (!text.includes("[pb:spec-fix]")) return;
+    if (text.includes("Repair lap 1")) {
+      const md = fs.readFileSync(path.join(t.repo, specRel), "utf8");
+      await tool("pb_write_spec", { name: "order-cancellation", content: md.replace("Cancel orders.", "Cancel orders; the lap settled one and parked one.") });
+      await tool("pb_spec_fix_done", { applied: [1], rebutted: [], parked: [{ question: "Is originCity worth a column the feed cannot fill?", recommendation: "Drop it: stop_name already carries the city" }], assumed: [], summary: "one settled, one parked" });
+      return;
+    }
+    await tool("pb_spec_fix_done", { applied: [2], rebutted: [], parked: [], assumed: [], summary: "the rest settled" });
+  };
+  try {
+    await t.run("spec-harden", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.ok(t.selectTitles.some((s) => s.includes("originCity")), "the question was put to the human");
+  const answer = specFixEvents(t, "spec-fix-answer").at(-1)!;
+  assert.match(answer.answer, /Drop the city column/);
+  const second = t.instructions.filter((i) => i.includes("[pb:spec-fix]"))[1];
+  assert.match(second, /What the human answered since the last lap:[\s\S]*Drop the city column/);
+});
+
+test("spec-harden and spec-fix refuse a spec that is mid-build or already mid-lap", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const progressFile = ".pi/pb/specs/order-cancellation/progress.json";
+  const write = (p: object) => fs.writeFileSync(path.join(t.repo, progressFile), JSON.stringify({ spec: "order-cancellation", tasks: [], updatedAt: new Date().toISOString(), ...p }));
+  write({ phase: "building", current: "T1" });
+  await t.run("spec-harden", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /is being built: its plan is frozen while the build holds it/);
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /is being built: repairing its plan now would change the contract/);
+  fs.writeFileSync(path.join(t.repo, "live.jsonl"), ""); // the session that owes the report still exists
+  write({ phase: "written", fix: { session: path.join(t.repo, "live.jsonl"), startedAt: Date.now(), driver: true, stage: "lap", hash: "x", work: "findings", ids: [1], run: "r", laps: 1, reviews: 0, applied: 0, rebutted: 0, assumed: 0, parked: [] } });
+  await t.run("spec-harden", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /A repair lap for order-cancellation is already open in `pi --session /);
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /already open/);
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 0, "neither door opened a second lap");
+  // a lap left behind by a session that no longer exists cannot be reported by anyone: it is dropped, not obeyed
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  write({ phase: "written", fix: { session: path.join(t.repo, "gone.jsonl"), startedAt: Date.now(), driver: true, stage: "lap", hash: "x", work: "findings", ids: [1], run: "r", laps: 1, reviews: 0, applied: 0, rebutted: 0, assumed: 0, parked: [] } });
+  t.agent.script = quietLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /was left open by a session that is gone; pb dropped it/);
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 1, "the dropped lap's spec is repairable again");
+  // and a build never starts over an open lap: the lap holds the plan in mid-air
+  fs.writeFileSync(path.join(t.repo, "live.jsonl"), "");
+  write({ phase: "written", fix: { session: path.join(t.repo, "live.jsonl"), startedAt: Date.now(), driver: false, stage: "lap", hash: "x", work: "findings", ids: [1], run: "r", laps: 1, reviews: 0, applied: 0, rebutted: 0, assumed: 0, parked: [] } });
+  await t.run("build", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /A repair lap for order-cancellation is still open \(the model is rewriting its plan\)/);
+  assert.equal(t.progress("order-cancellation").phase, "written", "the build refused before approving anything");
+});
+
+test("spec fix: a build that takes the plan drops the open lap, and still pauses as a build does", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      session: t.runtime().ctx.sessionManager.getSessionFile(),
+      phase: "building",
+      current: "T1",
+      tasks: [{ id: "T1", status: "doing", attempt: 1 }],
+      updatedAt: new Date().toISOString(),
+      fix: { session: t.runtime().ctx.sessionManager.getSessionFile(), startedAt: Date.now(), driver: false, stage: "lap", hash: "x", work: "findings", ids: [1], run: "r", laps: 1, reviews: 0, applied: 0, rebutted: 0, assumed: 0, parked: [] },
+    }),
+  );
+  t.agent.script = async () => {};
+  await t.runtime().pi.sendMessage({ content: "A turn of the build.", display: false }, { triggerTurn: true });
+  await t.settle();
+  assert.match(t.posts.join("\n"), /lap 1 dropped: the build took the plan/);
+  assert.equal(t.progress("order-cancellation").fix, undefined, "no repair is owed under a running build");
+  assert.equal(t.progress("order-cancellation").phase, "paused", "the build's own settling still ran");
+  assert.match(t.progress("order-cancellation").pause, /the agent stopped without finishing its task/);
+});
+
 test("build: with taskChecks end, each task is still compiled when a build command exists", async () => {
   const t = setup({ verify: "true", build: "false" });
   await written(t);
