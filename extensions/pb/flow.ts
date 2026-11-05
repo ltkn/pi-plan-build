@@ -1459,6 +1459,11 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     const cwd = ctx.cwd;
     const before = snapshot(cwd, "pb: before spec-check");
     post(`\u25b7 **Claim check** — which load-bearing claims in **${name}** carry no evidence and no \`assumed\` tag.`);
+    const started = Date.now();
+    let lastStep: string | undefined;
+    const paint = () => safely(() => ctx.ui.setWidget("pb-spec-check", [`pb spec-check ${name} · ${Math.round((Date.now() - started) / 1000)}s`, ...(lastStep ? [`  ↳ ${lastStep}`] : [])]));
+    paint();
+    const beat = watchable(ctx) ? setInterval(paint, 1000) : undefined;
     let res: Awaited<ReturnType<typeof runFresh>>;
     try {
       res = await runFresh({
@@ -1473,8 +1478,11 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         thinking,
         maxConcurrent: cfg.maxConcurrent,
         sessionDir: store.sessionsDir("spec-check"),
+        onActivity: (line) => { lastStep = line; paint(); },
       });
     } finally {
+      if (beat !== undefined) clearInterval(beat);
+      safely(() => ctx.ui.setWidget("pb-spec-check", undefined));
       revertFreshRun(cwd, (m) => warnLater(ctx, m), "the claim check", before, snapshot(cwd, "pb: after spec-check"));
     }
     const call = res.toolCalls.filter((c) => c.name === "report_findings").at(-1);
@@ -1516,7 +1524,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     return { answers, stopped: false };
   };
 
-  /** What a repair run leaves behind: one block saying what it settled, argued, and left standing on nothing. */
+  /** What a repair run leaves behind: one block saying what it settled, argued, and what it could not establish. */
 
   const fixDigest = (
     store: Store,
@@ -1564,11 +1572,17 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
           : fix.assumed
             ? `${fix.assumed} claim${fix.assumed === 1 ? "" : "s"} tagged assumed`
             : claims.length
-              ? `${claims.length} left standing on nothing`
+              ? `${claims.length} claim${claims.length === 1 ? "" : "s"} without a probe`
               : "it decided everything it was shown",
       ),
       ...(clipped && session ? ["", `Some fields above are clipped by pb's length bound; the uncut text is in the run log: \`pi --session ${path.relative(path.join(store.root, "..", ".."), session)}\`.`] : []),
-      ...(claims.length ? ["", "**Still standing on nothing**", "", ...claims.map((f) => `- ${findingLine(f)}`)] : []),
+      ...(claims.length ? [
+        "",
+        "**Claims with nothing behind them**",
+        "Statements the build takes as fact that carry no probe and no `assumed:` tag: settle each with a measurement (the command and what it printed) or tag it `assumed:` with what would falsify it.",
+        "",
+        ...claims.map((f) => `- ${findingLine(f)}`),
+      ] : []),
     ].join("\n");
   };
 

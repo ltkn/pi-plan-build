@@ -1746,7 +1746,7 @@ test("spec-fix: a manual lap stops after one lap even when the claim check finds
   }
   assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 1, "one manual lap, never a second");
   assert.equal(specFixEvents(t, "spec-check").length, 1, "the check is the lap's last step");
-  assert.match(t.posts.at(-1)!, /🔧 Spec fix — order-cancellation[\s\S]*2 un-evidenced[\s\S]*Still standing on nothing/);
+  assert.match(t.posts.at(-1)!, /🔧 Spec fix — order-cancellation[\s\S]*2 un-evidenced[\s\S]*Claims with nothing behind them/);
   assert.equal(t.progress("order-cancellation").fix, undefined);
   assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length, 1, "a manual lap does not run a confirming review");
 });
@@ -1955,8 +1955,8 @@ test("spec-harden: the budget is the stop rule — claims keep coming, the run s
   assert.equal(harden.laps, 2);
   assert.equal(harden.reviews, 0, "no review budget: the run confirms nothing by itself");
   assert.equal(harden.unEvidenced, 2);
-  assert.match(t.posts.at(-1)!, /2 un-evidenced[\s\S]*Still standing on nothing[\s\S]*≤ 90 s/);
-  assert.match(t.posts.at(-1)!, /2 left standing on nothing/, "the digest never claims the run cleared the claims it did not touch");
+  assert.match(t.posts.at(-1)!, /2 un-evidenced[\s\S]*Claims with nothing behind them[\s\S]*≤ 90 s/);
+  assert.match(t.posts.at(-1)!, /2 claims without a probe/, "the digest never claims the run cleared the claims it did not touch");
   assert.equal(t.progress("order-cancellation").fix, undefined);
 });
 
