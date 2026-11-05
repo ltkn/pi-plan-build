@@ -443,7 +443,10 @@ the same record, so the verdict it leaves is what a later `/pb:build` rides on:
 T1 starts without a second pass while the text is unchanged, and a P0 it found
 holds that build until the spec is amended. Nothing else follows from it — no
 approval, no task, no checkpoint. With no name it reviews this session's spec,
-or the only ready one. Run it again after editing, since the verdict is bound to
+or the only ready one, and headless with several ready it refuses and lists
+them, so nothing is judged sight unseen. `/pb:spec-review --fresh` pays for
+another pass at the exact same text instead of reusing the recorded verdict.
+Run it again after editing, since the verdict is bound to
 the bytes, not to the day: a re-posted verdict names the commit its citations
 were read in, because a pass covers the spec's text while the code around it can
 move. Ask it about a spec whose build is already running and you get the plan
@@ -1043,6 +1046,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
 - Review it before building: `/pb:spec-review` — the same fresh reviewer, nothing built, and `/pb:build` then starts at T1 without re-reviewing.
+- The review found things? `/pb:spec-fix` — one lap over its findings on your say-so — or `/pb:spec-harden` — laps, a claim check and one confirming review, unattended.
 - Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — every spec is reviewed first: a P0 stops it before the first task · more: `/pb:help spec`
 <!-- /pb -->
 

@@ -135,6 +135,19 @@ export const fileLines = (file: string): number | undefined => {
 };
 
 /**
+ * A repair lap is shown the reviewer's file:line anchors; one that does not resolve is usually the
+ * reviewer guessing, and a lap that probes a file that doesn't exist finds nothing. The worklist is
+ * not withheld — an unresolvable anchor may be real (outside the project) or not — but it is named,
+ * so the lap verifies instead of trusting it.
+ */
+export const unresolvedAnchors = (cwd: string, findings: { file?: string }[]): string[] => {
+  const files = projectFiles(cwd);
+  return [...new Set(findings.flatMap((f) => (f.file ? [f.file] : [])))]
+    .filter((p) => resolveProjectPath(cwd, p, files) === undefined)
+    .sort();
+};
+
+/**
  * A ready spec's `path:line` citations must resolve to a real file and a real line. A citation the visible
  * file list can't answer is asked of the working tree once for all of them, and the file that answers is
  * line-checked like any other, so a gitignored file must really carry the line it is cited at.

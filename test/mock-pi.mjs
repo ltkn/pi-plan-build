@@ -66,6 +66,8 @@ if (sys.includes("ATTACKER")) {
   else if (mode === "block-advisory") report("report_findings", { findings: [p0, p2] });
   else if (mode === "advisory") report("report_findings", { findings: [p1, p2] });
   else if (mode === "mixed") report("report_findings", { findings: [p0, p1] });
+  // A finding whose file does not exist: the lap must be told, not handed a hallucinated anchor.
+  else if (mode === "badfile") report("report_findings", { findings: [{ priority: "P1", file: "no/such/file.ts", line: 9, title: "the cache is never invalidated", fix: "invalidate on write" }] });
   else report("report_findings", { findings: [] });
   say([{ type: "text", text: "Done." }]);
 } else if (sys.includes("CLAIM CHECKER")) {

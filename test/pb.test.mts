@@ -1713,6 +1713,7 @@ test("spec-fix lap: the report is recorded, the claim check runs on what it wrot
   assert.equal(lap.work, "findings");
   const check = specFixEvents(t, "spec-check").at(-1)!;
   assert.equal(check.verdict, "pass", "the clean default check is recorded as a pass");
+  assert.equal(check.thinking, "low", "an unconfigured claim check runs at low thinking, not the session default");
   assert.equal(check.hash, specHash(t.read(specRel)), "the check judged the text the lap wrote, not the old one");
   const digest = t.posts.at(-1)!;
   assert.match(digest, /\*\*🔧 Spec fix — order-cancellation\*\* · 1 applied · 1 rebutted · no un-evidenced claims/);
@@ -2006,9 +2007,106 @@ test("spec-harden: a confirming review that reports nothing stops before the sum
   }
   assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 1, "the error did not open another lap");
   assert.ok(!t.posts.some((p) => /Spec hardened/.test(p)), "the digest never claims a verdict that was not read");
-  assert.match(t.notes.at(-1)!, /confirming review did not report/);
+  assert.match(t.posts.at(-1)!, /Spec harden stopped[\s\S]*the confirming review did not report[\s\S]*nothing was declared hardened/);
   assert.equal(t.progress("order-cancellation").fix, undefined);
   assert.equal(specFixEvents(t, "spec-harden").length, 0);
+});
+
+test("spec-review: no name and several ready specs refuse headless instead of judging an arbitrary one", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const other = await t.callTool("pb_write_spec", { name: "other-spec", content: SPEC().replace("# Order cancellation", "# Other spec") });
+  assert.equal(other.error, undefined, other.error ?? "");
+  const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length : 0);
+  t.runtime().hasUI = false;
+  try {
+    await t.run("spec-review");
+  } finally {
+    t.runtime().hasUI = true;
+  }
+  assert.match(t.notes.at(-1)!, /Which spec\?[\s\S]*other-spec/);
+  assert.equal(reviews(), 0, "no pass ran on a spec nobody picked");
+});
+
+test("spec-review: --fresh pays for another pass at the same text instead of reusing", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length : 0);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+    assert.equal(reviews(), 1);
+    await t.run("spec-review", "order-cancellation");
+    assert.equal(reviews(), 1, "the stored pass is reused on identical text");
+    assert.match(t.posts.at(-1)!, /PASS \(already on record\)/);
+    await t.run("spec-review", "order-cancellation --fresh");
+    assert.equal(reviews(), 2, "--fresh forces another pass at the same bytes");
+    assert.match(t.posts.at(-1)!, /\*\*✅ Spec review — order-cancellation\*\* · PASS/);
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+});
+
+test("spec-review: a PASS with advisory findings names the door that works through them", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+    assert.match(t.posts.at(-1)!, /\/pb:spec-harden order-cancellation/);
+    await t.run("spec-review", "order-cancellation"); // the stored pass points at it too
+    assert.match(t.posts.at(-1)!, /PASS \(already on record\)[\s\S]*\/pb:spec-harden order-cancellation/);
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+});
+
+test("spec-fix: a live lap in this session refuses a second; a dead one is dropped", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const other = await t.callTool("pb_write_spec", { name: "other-spec", content: SPEC().replace("# Order cancellation", "# Other spec") });
+  assert.equal(other.error, undefined, other.error ?? "");
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  const own = t.runtime().ctx.sessionManager.getSessionFile();
+  // The harness's session file is virtual: give it a real one so a lap looks live.
+  fs.writeFileSync(own, "{}\n");
+  const pokeLap = (startedAt: number) => {
+    const prog = store.progress("other-spec")!;
+    prog.fix = { session: own, driver: false, stage: "lap", startedAt, hash: "x", work: "findings", ids: [1], run: "r", laps: 1, reviews: 0, applied: 0, rebutted: 0, assumed: 0, parked: [] };
+    store.saveProgress(prog);
+  };
+  pokeLap(Date.now());
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /repair lap for other-spec is already open in this session/);
+  pokeLap(Date.now() - 7 * 60 * 60 * 1000); // older than the six-hour staleness window: dead
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /Nothing is recorded against this exact text/, "the dead lap was dropped and the command went on");
+  assert.equal(store.progress("other-spec")?.fix, undefined, "the dead lap is dropped from the other spec too");
+});
+
+test("unresolvedAnchors: an anchor that is not in the project is flagged, one that resolves is not", async () => {
+  const { unresolvedAnchors } = await import("../extensions/pb/kit.ts");
+  const t = setup({ verify: "true" });
+  fs.mkdirSync(path.join(t.repo, "src"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export const x = 1;\n");
+  assert.deepEqual(unresolvedAnchors(t.repo, [{ file: "src/order.ts" }]), []);
+  assert.deepEqual(unresolvedAnchors(t.repo, [{ file: "README" }]), []);
+  assert.deepEqual(unresolvedAnchors(t.repo, [{ file: "no/such/file.ts" }, { file: "src/order.ts" }]), ["no/such/file.ts"]);
+});
+
+test("a repair lap is told when the review cites a path that does not exist in the project", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "badfile";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  t.agent.script = repairLap(t, { applied: [1], rebutted: [], parked: [], assumed: [], summary: "settled" });
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(t.instructions.find((i) => i.includes("[pb:spec-fix]"))!, /The review cites paths that don't exist in this project: no\/such\/file\.ts — treat those locations as unverified/);
 });
 
 test("spec-harden: a lap's parked question reaches you with its recommendation, and the answer drives the next lap", async () => {

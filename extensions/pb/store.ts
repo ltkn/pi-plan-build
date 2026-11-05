@@ -1118,13 +1118,18 @@ export class Store {
     return mine.filter((x) => !x.p!.detached).sort((a, b) => (b.p!.updatedAt ?? "").localeCompare(a.p!.updatedAt ?? ""))[0]?.n;
   }
 
-  /** The spec whose open repair lap this session owns: the lap record, not the conversation. */
-  fixOfSession(sessionFile: string | undefined): { name: string; p: Progress } | undefined {
-    if (!sessionFile) return undefined;
+  /** The spec whose open repair lap this session owns, newest first: usually one. */
+  fixesOfSession(sessionFile: string | undefined): { name: string; p: Progress }[] {
+    if (!sessionFile) return [];
     return this.specNames()
       .map((n) => ({ name: n, p: this.progress(n) }))
       .filter((x): x is { name: string; p: Progress } => typeof x.p?.fix?.session === "string" && samePath(x.p.fix.session, sessionFile))
-      .sort((a, b) => (b.p.updatedAt ?? "").localeCompare(a.p.updatedAt ?? ""))[0];
+      .sort((a, b) => (b.p.updatedAt ?? "").localeCompare(a.p.updatedAt ?? ""));
+  }
+
+  /** The spec whose open repair lap this session owns: the lap record, not the conversation. */
+  fixOfSession(sessionFile: string | undefined): { name: string; p: Progress } | undefined {
+    return this.fixesOfSession(sessionFile)[0];
   }
 
   /**
