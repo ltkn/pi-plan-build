@@ -243,6 +243,13 @@ export type ReplacedSessionContext = Parameters<NonNullable<Parameters<Extension
 /** The tools a review session's model gets: read-only, plus the one it reports with. */
 export const REVIEW_SESSION_TOOLS = ["read", "grep", "find", "ls", "pb_report_findings"];
 
+/**
+ * The tools a repair lap may use: read the repo and spec, probe read-only through pb_try, ask the
+ * human, and write only through the spec tools. No shell, no edit/write: a lap repairs a plan, it
+ * must not change the project or another spec.
+ */
+export const REPAIR_SESSION_TOOLS = ["read", "grep", "find", "ls", "pb_write_spec", "pb_update_spec", "pb_try", "pb_ask", "pb_spec_fix_done"];
+
 /** A tool result that ends the agent's run: the build paused or finished. */
 export const stop = (t: string) => ({ content: text(t), details: undefined, terminate: true });
 

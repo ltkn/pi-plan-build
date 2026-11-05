@@ -288,7 +288,7 @@ export interface SpecFixState {
   rebutted: number;
   assumed: number;
   /** questions a lap refused to answer, each with its recommendation; the driver puts them to the human */
-  parked: { question: string; recommendation: string }[];
+  parked: { id: number; question: string; recommendation: string }[];
 }
 
 export interface Progress {
@@ -354,6 +354,12 @@ export interface Checkpoint {
   pendingReset?: boolean;
   /** the build's first message comes after `entry`: rewinding here drops it */
   intro?: boolean;
+  /** a spec repair lap: its row restores `spec`, and its task list is not a build task list */
+  kind?: "lap";
+  /** the spec text at this point; /pb:undo restores it for a lap row */
+  spec?: string;
+  /** the progress phase at this point, restored with the row */
+  phase?: Phase;
 }
 
 /**
@@ -581,6 +587,16 @@ export function reviewLedger(events: Record<string, unknown>[]): ReviewLedgerEnt
     .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || (a.last < b.last ? 1 : a.last > b.last ? -1 : 0) || a.title.localeCompare(b.title))
     .slice(0, REVIEW_FINDINGS_CAP);
 }
+
+/** Session paths compare by realpath: /tmp vs /private/tmp must not orphan a lap or a build. */
+const samePath = (a: string, b: string): boolean => {
+  if (a === b) return true;
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return false;
+  }
+};
 
 export class Store {
   readonly root: string;
@@ -1092,22 +1108,35 @@ export class Store {
    */
   specForSession(sessionFile: string | undefined): string | undefined {
     if (!sessionFile) return undefined;
-    const same = (a: string, b: string) => {
-      if (a === b) return true;
-      try {
-        return fs.realpathSync(a) === fs.realpathSync(b);
-      } catch {
-        return false;
-      }
-    };
     const mine = this.specNames()
       .map((n) => ({ n, p: this.progress(n) }))
-      .filter((x) => typeof x.p?.session === "string" && same(x.p.session as string, sessionFile));
+      .filter((x) => typeof x.p?.session === "string" && samePath(x.p.session as string, sessionFile));
     const active = mine
       .filter((x) => ["building", "paused"].includes(x.p!.phase))
       .sort((a, b) => (b.p!.updatedAt ?? "").localeCompare(a.p!.updatedAt ?? ""))[0];
     if (active) return active.n;
     return mine.filter((x) => !x.p!.detached).sort((a, b) => (b.p!.updatedAt ?? "").localeCompare(a.p!.updatedAt ?? ""))[0]?.n;
+  }
+
+  /** The spec whose open repair lap this session owns: the lap record, not the conversation. */
+  fixOfSession(sessionFile: string | undefined): { name: string; p: Progress } | undefined {
+    if (!sessionFile) return undefined;
+    return this.specNames()
+      .map((n) => ({ name: n, p: this.progress(n) }))
+      .filter((x): x is { name: string; p: Progress } => typeof x.p?.fix?.session === "string" && samePath(x.p.fix.session, sessionFile))
+      .sort((a, b) => (b.p.updatedAt ?? "").localeCompare(a.p.updatedAt ?? ""))[0];
+  }
+
+  /**
+   * The spec this session wrote, newest first. A repair lap writes the spec it is fixing, so a session
+   * that owns no build (or open lap) can still be the one whose `/pb:undo` takes a lap back.
+   */
+  writtenSpec(sessionFile: string | undefined): { name: string; p: Progress } | undefined {
+    if (!sessionFile) return undefined;
+    return this.specNames()
+      .map((n) => ({ name: n, p: this.progress(n) }))
+      .filter((x): x is { name: string; p: Progress } => typeof x.p?.writtenIn === "string" && samePath(x.p.writtenIn, sessionFile) && !x.p.detached)
+      .sort((a, b) => (b.p.updatedAt ?? "").localeCompare(a.p.updatedAt ?? ""))[0];
   }
 
   /** Specs this session wrote that aren't built yet: what a planning session is working on. */

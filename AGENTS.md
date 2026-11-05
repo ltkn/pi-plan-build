@@ -26,6 +26,7 @@
 - A spec name never becomes a path directly: `specDir` (`extensions/pb/store.ts`) is the only spec-name→path point; anything that is not `KEBAB_NAME` (`extensions/pb/names.ts`) or the name of an existing spec dir throws before a path is built. (security)
 - A build tool may only record into the build its own session owns, and only the current step: `specForSession` (realpath-compares the session file) → `buildOfSession` throws unless `phase === "building"`, and `pb_task_done`/`pb_tests_red` refuse `params.task !== p.current` (`extensions/pb/flow.ts`). The tool is never the place to relax this. (security)
 - Review sessions are read-only by the `tool_call` guard (`extensions/pb/hooks.ts`), which blocks every tool outside `REVIEW_SESSION_TOOLS` for any session holding a `reviewSession` record — not just `edit`/`write`, because a tool Pi activates after `session_start` (a late-connecting MCP server's, say) must not reach a reviewer; the pass re-marks the new session fail-closed inside `newSession`'s `withSession` (`extensions/pb/review-flow.ts`), so stolen or expired handover state cannot yield a writable reviewer. `pb_report_findings` separately refuses any session without that record. (security)
+- A repair lap can write only its own spec: the same `tool_call` guard blocks every tool outside `REPAIR_SESSION_TOOLS` (`extensions/pb/kit.ts`: read/grep/find/ls, `pb_try`, `pb_ask`, the spec tools and `pb_spec_fix_done`) for a session owning an open lap, and `pb_write_spec`/`pb_update_spec` separately refuse a name other than that lap's spec. (security)
 - Planning mode's project protection is three-layer: the same `tool_call` hook blocks `edit`/`write` at in-project paths for sessions in `planningSessions()`; `agent_settled` (flow.ts) posts the files that differ from the planning snapshot as soon as a turn ends (`changedPaths` against a fresh snapshot); and `reviewPlanningChanges` asks keep-or-restore at the end of planning — paths outside the project are deliberately allowed (scratch). (security)
 - A review cannot mutate what it judges: the code-review session's tool set is `REVIEW_SESSION_TOOLS` (read/grep/find/ls plus `pb_report_findings`, no shell), and the fresh spec reviewer, verifier and adversarial pass get the same four read tools (the pass reports with `report_findings` through `REVIEW_TOOLS`). The change reaches them as `reviewDiff` — one `gitDiff`+`untrackedText` capture taken right after the review's `before` snapshot, capped at `REVIEW_DIFF_CHARS` — so a check or a later edit cannot change it. The verifier is handed that same diff. (security)
 - Model-authored text never reaches a markdown container unsanitised: `safeLine`/`safeBlock` (`extensions/pb/markdown.ts`) strip control characters before comment markers and repeat to a fixpoint; every stored ledger field goes through `ledgerField`/`cap`. Pinned by the test "review ledger: an injected marker cannot reach the project map". (security)
@@ -33,7 +34,7 @@
 - A passing spec review covers exactly the text it saw: `ensureSpecReviewed` (`extensions/pb/flow.ts`) reuses a `spec-review` event only while `specHash(markdown)` matches, and only a P0 blocks. Two doors reach that one pass — on the way into a build, and on demand from `/pb:spec-review` (`reviewDoor(name, "build" | "standalone")` carries only the wording; the recorded event and the reuse are shared), so a standalone pass is what the following build rides on instead of reviewing again. Neither door re-reviews a spec edited after T1 started: that is the code reviewer's. The event also stamps the `head` the pass read the repo at, and a re-posted verdict says so when HEAD has moved — information only, never a second gate (uncommitted drift moves no HEAD).
 - `/pb:spec-review` records a plan-level verdict but gates nothing: only `startBuild`'s own re-read of the text (`specHash` against the reviewed bytes) precedes `approveSpec`, so a mid-build standalone pass cannot carry a build past an unreviewed or edited contract. (security)
 - Handover state is single-use and scoped: `takeCarry` (`extensions/pb/store.ts`) consumes the handover file in the pb state dir, enforces a 60-minute TTL, and returns it only to the child of the recorded parent session; every cancel/throw path calls `clearCarry` (`extensions/pb/store.ts`, `extensions/pb/flow.ts`, `extensions/pb/review-flow.ts`) — a leaked carry turns the next new session from the home session into a read-only review session.
-- `/pb:undo` restores files, task state and conversation but never moves the branch; the task snapshot in each checkpoint is what drops red proofs with the files. Its result counts what `restore` actually restored and names the files the drift guard left alone — never the pre-dialog diff count.
+- `/pb:undo` restores files, task state and conversation but never moves the branch; the task snapshot in each checkpoint is what drops red proofs with the files. A repair lap's row also carries the spec text and phase, restored from the row because the spec is outside the snapshots, behind the same drift guard. Its result counts what `restore` actually restored plus the spec it rewrote, and names the files the drift guard left alone — never the pre-dialog diff count.
 - `/pb:undo` numbers its row from the highest `u` id in the rows it keeps, never from a count over the pre-undo list: the undo drops the rows from the target on, and a count over those can re-issue an id a surviving row still holds — `/pb:undo uN` resolves to the first match, so a duplicate would restore an older state than the tip printed.
 
 ### Session-keyed state (extensions/pb/kit.ts, extensions/pb/hooks.ts)
@@ -59,11 +60,14 @@
   citation when a finding is wrong. It never invents a worklist: `recordedFindings` (flow.ts) numbers only
   the findings recorded for the exact text now on disk, and no finding is ever carried across an edit.
 - `Progress.fix` (`store.ts`) is the whole authority: it names the one session allowed to report
-  (`pb_spec_fix_done` refuses any other, and refuses numbers its brief didn't show), says whose turn is
-  owed (`stage: "lap"` → the model has the ball, `"advance"` → pb does), and survives a restart.
-  `advanceSpecFix` (flow.ts) is the **only** step-forward and runs from `agent_settled` alone, for both
-  doors: an unreported lap stops and says so; an unchanged text is not re-checked or re-reviewed; parked
-  questions are asked before anything else. `fixLive` drops a lap whose session file is gone or older than
+  (`pb_spec_fix_done` refuses any other, refuses numbers its brief didn't show, and refuses a report
+  that leaves one of them out), says whose turn is owed (`stage: "lap"` → the model has the ball,
+  `"advance"` → pb does), and survives a restart. `advanceSpecFix` (flow.ts) is the **only** step-forward
+  and runs from `agent_settled` alone, for both doors: an unreported lap stops and says so; an unchanged
+  text is not re-checked or re-reviewed; parked questions are asked before anything else; a manual
+  `/pb:spec-fix` lap stops at its claim check, and only the driver chains another lap. A review that
+  reports nothing (or whose text changed under it) stops the run: no digest claims a verdict on text no
+  review read. `fixLive` drops a lap whose session file is gone or older than
   six hours, so a killed session cannot lock a spec out of repair.
 - The claim check (`spec-check` role, `SPEC_CLAIM_CHECK_SYSTEM`) is the cheap pass that makes an
   unattended repair safe: it answers only "which load-bearing claims carry no evidence and no `assumed`
@@ -106,7 +110,7 @@
 - `BINDING_SECTIONS` (`spec.ts`) is the single list every build prompt names for the model to read (`specReference`), and the guide and README must state it in the exported order (test "binding: the guide and README list the binding sections in the exported order"). Nothing renders or shortens the sections any more: the spec file is one read away.
 
 ### Tests and commands (test/, scripts/verify-test.mjs, package.json)
-- `npm test` → `node --test test/pb.test.mts` (365 tests, ~165s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
+- `npm test` → `node --test test/pb.test.mts` (371 tests, ~165s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
 - `node scripts/verify-test.mjs [--file <file>] "<exact test name>" ...` is the per-task proof: it exits 0 only when every name has a TAP `ok N - <name>` line and the report says `# fail 0` (a `# SKIP` is not a proof), because `node --test --test-name-pattern=<zero-match>` itself exits 0. Names are regex-escaped; default file `test/pb.test.mts`; dev-only (outside `package.json` `files`).
 - `test/verify-fixture.test.mjs` is deliberately **not** run by `npm test` (the suite names pb.test.mts alone); the prover's tests drive it through `--file`, so they never nest the real suite.
 - Peer ranges must stay identical in `package.json` and `package-lock.json` or `npm ci` refuses in CI: after touching a peer, run `npm install --package-lock-only`. Pinned by "deps: the lockfile peer ranges match package.json".

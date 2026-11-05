@@ -548,10 +548,11 @@ Either way the run brings you only what it would not decide itself: a question, 
 recommendation, and what it would do unattended (that goes on the record as decided
 without you). The lap's pen is the ordinary one, so the format gates and your
 standards still bind it: it writes through `pb_write_spec` and `pb_try` writes
-nothing. Each lap is an undo point — `/pb:undo` drops one whole, red proofs and
-all. Repair and build never overlap: `/pb:build` waits while a lap is open, and a
-build that starts anyway drops the open lap rather than build a plan that is
-mid-edit — harden before `/pb:build`, not during it.
+nothing. Each lap is an undo point — `/pb:undo` restores the spec text and the
+phase it had before the lap, and drops the lap whole. Repair and build never
+overlap: `/pb:build` waits while a lap is open, and a build that starts anyway
+drops the open lap rather than build a plan that is mid-edit — harden before
+`/pb:build`, not during it.
 
 **If a spec keeps finding things**: read the P1s, and let the laps decide what
 only the business can decide — you keep the calls, the model does the clerking.
@@ -903,8 +904,10 @@ without touching your branch, commits or staging area). A row is stored in the
 undo list only when it adds information: one repeating the previous row's files,
 conversation point and task list would say nothing new. `/pb:undo` in the build
 session lists the tasks; pick one and the files and task list go back to how
-they were **before** it, and so does the **conversation**: the discarded attempt
-drops out of the context (a short note says what was undone, and repeats what
+they were **before** it. In the spec's repair session it lists the repair laps,
+and picking one restores the spec text and phase from before that lap. Either
+way the **conversation** goes back too: the discarded attempt drops out of the
+context (a short note says what was undone, and repeats what
 you said meanwhile so your guidance isn't lost), so it doesn't anchor the next
 try, and everything before that point is still in the prompt cache.
 `/pb:undo u1` reverses an undo, conversation included. If you committed

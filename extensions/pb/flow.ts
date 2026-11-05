@@ -201,6 +201,9 @@ export function registerFlow(pi: ExtensionAPI) {
       if (params.name === "off") throw new Error(`"off" is reserved (/${cmd("plan")} off ends planning): pick another spec name.`);
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
+      const repair = store.fixOfSession(session);
+      if (repair && params.name !== repair.name)
+        throw new Error(`A repair lap for ${repair.name} is open in this session: it may write that spec only, not ${params.name}. Finish the lap, or /${cmd("undo")} to drop it.`);
       const building = liveBuildOfSession(ctx, store);
       if (building)
         throw new Error(
@@ -251,11 +254,14 @@ export function registerFlow(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
-      const mine = store.specForSession(ctx.sessionManager.getSessionFile());
+      const repair = store.fixOfSession(session);
+      const mine = store.specForSession(session);
       const live = mine ? store.progress(mine) : undefined;
       const building = live?.phase === "building" ? live : undefined;
-      const name = params.name ?? mine;
+      const name = params.name ?? repair?.name ?? mine;
       if (!name) throw new Error("Which spec? Give its name.");
+      if (repair && name !== repair.name)
+        throw new Error(`A repair lap for ${repair.name} is open in this session: it may write that spec only, not ${name}. Finish the lap, or /${cmd("undo")} to drop it.`);
       if (building) {
         if (name !== building.spec)
           throw new Error(`The build of ${building.spec} is running in this session: only its Design and Decisions may change, not ${name}.`);
@@ -1017,6 +1023,13 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
    * is all this carries. `retryCmd` is what to run again — after a fix, or a run that reported nothing.
    */
 
+  /**
+   * What one gate on a spec text produced. "pass" and "block" are verdicts on exactly the bytes the
+   * reviewer read; "error" is a run that reported nothing, "changed" is text edited mid-review, and
+   * "gone" is a session replaced under it. A caller that claims coverage must accept only a verdict.
+   */
+  type SpecReviewOutcome = "pass" | "block" | "error" | "changed" | "gone";
+
   type ReviewDoor = {
     opening: string;
     retryCmd: string;
@@ -1149,7 +1162,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
    * a build already underway, because a plan-level pass does not re-gate a running one.
    */
 
-  const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, name: string, md: string, door: ReviewDoor, note?: string): Promise<boolean> => {
+  const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, name: string, md: string, door: ReviewDoor, note?: string): Promise<SpecReviewOutcome> => {
     const hash = specHash(md);
     // A pass is bound to the spec bytes alone: the repository its citations were checked in is not in
     // that hash. A moved HEAD says that ground has moved on, so it is said out loud — and never used
@@ -1178,12 +1191,12 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         ...(findings.length ? findings.map((f) => findingLine(f)) : ["The reviewer's answer could not be read as findings."]),
       ].join("\n"));
       ctx.ui.notify(door.blockNotify, "warning");
-      return false;
+      return "block";
     }
     if (last?.verdict === "pass") {
       // The build door has a T1 to walk into; at this door the recorded verdict is the whole answer, so
       // it is shown with its findings instead of the pass being consumed silently.
-      if (!door.repostStoredPass) return true;
+      if (!door.repostStoredPass) return "pass";
       const findings = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
       post([
         phaseHeader("✅", "Spec review", name, "PASS (already on record)", findings.length ? `P1-P3 ${findings.length}` : "no findings", typeof last.ms === "number" ? duration(last.ms) : ""),
@@ -1194,13 +1207,13 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         ...(typeof last.session === "string" ? ["", `The whole run: \`pi --session ${path.relative(ctx.cwd, last.session)}.\``] : []),
       ].join("\n"));
       ctx.ui.notify(`✅ ${name} already has a pass on this exact text: /${cmd("build")} ${name} starts without a second review.`, "info");
-      return true;
+      return "pass";
     }
     const review = await runSpecReview(ctx, store, name, md, door);
-    if (sessionGone(ctx)) return false;
+    if (sessionGone(ctx)) return "gone";
     if (store.readSpec(name) !== md) {
       ctx.ui.notify(`The spec changed while it was under review: run \`${door.retryCmd}\` again and the new text will be reviewed.`, "warning");
-      return false;
+      return "changed";
     }
     const sessionNote = review.session ? `The whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
     if (review.block && !review.findings.length) {
@@ -1213,7 +1226,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         ...(sessionNote ? ["", sessionNote] : []),
       ].join("\n"));
       ctx.ui.notify(door.noReportNotify, "warning");
-      return false;
+      return "error";
     }
     if (review.findings.length) {
       const p0 = review.findings.filter((f) => f.priority === "P0");
@@ -1241,10 +1254,10 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     }
     if (review.block) {
       ctx.ui.notify(door.blockNotify, "warning");
-      return false;
+      return "block";
     }
     if (review.findings.length) ctx.ui.notify(door.advisoryNotify(review.findings.length), "info");
-    return true;
+    return "pass";
   };
 
   /** Which spec to review: the named one, else this session's, else the only ready one, else ask. */
@@ -1310,13 +1323,22 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
    * finding across an edit — once a build has started, spec prose is the code reviewer's to judge.
    */
 
-  const recordedFindings = (store: Store, name: string, md: string): { id: number; f: Finding }[] => {
+  const lastReviewOn = (store: Store, name: string, md: string) => {
     const hash = specHash(md);
-    const last = readEvents(path.join(store.specDir(name), "events.jsonl"))
+    return readEvents(path.join(store.specDir(name), "events.jsonl"))
       .filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block") && e.hash === hash)
       .at(-1);
+  };
+
+  const recordedFindings = (store: Store, name: string, md: string): { id: number; f: Finding }[] => {
+    const last = lastReviewOn(store, name, md);
     const reported = last && Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
     return reported.map((f, i) => ({ id: i + 1, f }));
+  };
+
+  const verdictOn = (store: Store, name: string, md: string): "pass" | "block" | undefined => {
+    const verdict = lastReviewOn(store, name, md)?.verdict;
+    return verdict === "pass" || verdict === "block" ? verdict : undefined;
   };
 
   /**
@@ -1326,17 +1348,6 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
    */
 
   const fixLive = (fix: NonNullable<Progress["fix"]>) => pathExists(fix.session) && Date.now() - fix.startedAt < 6 * 60 * 60 * 1000;
-
-  /** The spec whose open repair lap this session owns: the lap record is the authority, not the conversation. */
-
-  const fixOfSession = (store: Store, session: string | undefined): { name: string; p: Progress } | undefined => {
-    if (!session) return undefined;
-    for (const n of store.specNames()) {
-      const p = store.progress(n);
-      if (p?.fix?.session === session) return { name: n, p };
-    }
-    return undefined;
-  };
 
   /**
    * Open a repair lap: the undo point first, so a lap that rewrote the plan can be dropped whole with
@@ -1367,7 +1378,23 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       const snap = snapshot(ctx.cwd, `pb: before ${name} spec lap ${lap}`);
       if (snap) {
         const rows = store.checkpoints(name);
-        if (appendCheckpoint(rows, { id: `lap${lap}`, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: `lap${lap}`, entry: tree(ctx).getLeafId?.() ?? undefined })) store.saveCheckpoints(name, rows);
+        // Rows are looked up by id: a later run's lap 1 must not collide with an earlier run's.
+        let id = `lap${lap}`;
+        for (let n = 2; rows.some((c) => c.id === id); n++) id = `lap${lap}-${n}`;
+        const row: Checkpoint = {
+          id,
+          at: now(),
+          ...snap,
+          head: gitHead(ctx.cwd),
+          tasks: structuredClone(p.tasks),
+          task: id,
+          kind: "lap",
+          spec: store.readSpec(name) ?? "",
+          phase: p.phase,
+          summary: `the spec repair in lap ${lap}`,
+          entry: tree(ctx).getLeafId?.() ?? undefined,
+        };
+        if (appendCheckpoint(rows, row)) store.saveCheckpoints(name, rows);
       }
     }
     p.fix = {
@@ -1472,6 +1499,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
   /** What a repair run leaves behind: one block saying what it settled, argued, and left standing on nothing. */
 
   const fixDigest = (
+    store: Store,
     name: string,
     fix: NonNullable<Progress["fix"]>,
     claims: Finding[],
@@ -1480,10 +1508,21 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     stoppedWith?: string,
   ): string => {
     const tokens = tokensOf(md);
+    const verdict = verdictOn(store, name, md);
+    const blocked = verdict === "block";
+    const next = stoppedWith
+      ? stoppedWith
+      : driver
+        ? blocked
+          ? `\`/${cmd("spec-fix")} ${name}\` — the confirming review still blocks on a P0${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
+          : verdict
+            ? `\`/${cmd("build")} ${name}\` — the review's verdict covers this text${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
+            : `\`/${cmd("build")} ${name}\` — it reviews this text before T1${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
+        : `\`/${cmd("spec-review")} ${name}\` — the text changed, so the verdict on the old text does not cover it.`;
     return [
       phaseHeader(
-        driver ? "\u2705" : "\ud83d\udd27",
-        driver ? "Spec hardened" : "Spec fix",
+        driver ? (blocked ? "\u26a0" : "\u2705") : "\ud83d\udd27",
+        driver ? (blocked ? "Spec harden stopped" : "Spec hardened") : "Spec fix",
         name,
         `${fix.applied} applied`,
         `${fix.rebutted} rebutted`,
@@ -1491,18 +1530,16 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         claims.length ? `${claims.length} un-evidenced` : "no un-evidenced claims",
       ),
       "",
-      nextLine(
-        stoppedWith
-          ? stoppedWith
-          : driver
-            ? `\`/${cmd("build")} ${name}\` — the review's verdict covers this text${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
-            : `\`/${cmd("spec-review")} ${name}\` — the text changed, so the verdict on the old text does not cover it.`,
-      ),
+      nextLine(next),
       evidenceLine(
         `${fix.laps} repair lap${fix.laps === 1 ? "" : "s"}`,
         driver ? `${fix.reviews} review${fix.reviews === 1 ? "" : "s"}` : "",
         tokens ? `spec now ~${tokens} tokens` : "",
-        fix.parked.length ? `${fix.parked.length} question${fix.parked.length === 1 ? "" : "s"} it would not decide` : "it decided everything it was shown",
+        fix.parked.length
+          ? `${fix.parked.length} question${fix.parked.length === 1 ? "" : "s"} it would not decide`
+          : fix.assumed
+            ? `${fix.assumed} claim${fix.assumed === 1 ? "" : "s"} tagged assumed`
+            : "it decided everything it was shown",
       ),
       ...(claims.length ? ["", "**Still standing on nothing**", "", ...claims.slice(0, 8).map((f) => findingLine(f)), ...(claims.length > 8 ? ["", `(+${claims.length - 8} more)`] : [])] : []),
     ].join("\n");
@@ -1570,7 +1607,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       // lap given that list again would change nothing again. Say what is left instead of burning minutes.
       p.fix = undefined;
       store.saveProgress(p);
-      post(fixDigest(name, fix, [], loaded.md, fix.driver, `the lap changed nothing (it parked or assumed everything it was shown): \`/${cmd("spec-review")} ${name}\` when you have decided, or \`/${cmd("spec-fix")} ${name}\` with the numbers you want argued.`));
+      post(fixDigest(store, name, fix, [], loaded.md, fix.driver, `the lap changed nothing (it parked or assumed everything it was shown): \`/${cmd("spec-review")} ${name}\` when you have decided, or \`/${cmd("spec-fix")} ${name}\` with the numbers you want argued.`));
       return true;
     }
     const check = await runClaimCheck(ctx, store, name, loaded.md);
@@ -1581,22 +1618,32 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       ctx.ui.notify("The claim check did not report, so pb stopped rather than read silence as clean. Run the lap again, or point specFix.model at a model that reports.", "warning");
       return true;
     }
-    if (check.claims.length && fix.laps < maxLaps) {
-      beginFixLap(ctx, store, name, p, check.claims.map((f, i) => ({ id: i + 1, f })), { work: "claims", driver: fix.driver, hash: specHash(loaded.md), run: fix.run, reviews: fix.reviews, answers: answers.length ? answers : undefined });
-      return true;
-    }
+    // A manual lap is one lap, on the human's say-so: the claim check is its last step. Only the
+    // harden driver may chain another lap from what the check found.
     if (!fix.driver) {
       p.fix = undefined;
       store.saveProgress(p);
-      post(fixDigest(name, fix, check.claims, loaded.md, false));
+      post(fixDigest(store, name, fix, check.claims, loaded.md, false));
+      return true;
+    }
+    if (check.claims.length && fix.laps < maxLaps) {
+      beginFixLap(ctx, store, name, p, check.claims.map((f, i) => ({ id: i + 1, f })), { work: "claims", driver: true, hash: specHash(loaded.md), run: fix.run, reviews: fix.reviews, answers: answers.length ? answers : undefined });
       return true;
     }
     const maxReviews = cfg.specFix.maxReviews ?? 2;
     if (fix.reviews < maxReviews) {
       fix.reviews += 1;
       store.saveProgress(p);
-      await ensureSpecReviewed(ctx, store, name, loaded.md, reviewDoor(name, "harden"));
-      if (sessionGone(ctx)) return true;
+      const reviewed = await ensureSpecReviewed(ctx, store, name, loaded.md, reviewDoor(name, "harden"));
+      if (sessionGone(ctx) || reviewed === "gone") return true;
+      if (reviewed !== "pass" && reviewed !== "block") {
+        // No verdict on the text: never finish by claiming one covers it. The review door has already
+        // said what failed; this only records that the run stopped short.
+        p.fix = undefined;
+        store.saveProgress(p);
+        if (reviewed === "error") ctx.ui.notify("The confirming review did not report, so the run stopped rather than claim the text was hardened. Run the harden again, or point specReviewer.model at a model that reports.", "warning");
+        return true;
+      }
       const md = store.readSpec(name);
       const fresh = md === undefined ? [] : recordedFindings(store, name, md);
       if (fresh.length && fix.laps < maxLaps) {
@@ -1605,11 +1652,12 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       }
     }
     const md = store.readSpec(name) ?? loaded.md;
+    const blocked = verdictOn(store, name, md) === "block";
     store.event(name, { type: "spec-harden", run: fix.run, hash: specHash(md), laps: fix.laps, reviews: fix.reviews, applied: fix.applied, rebutted: fix.rebutted, assumed: fix.assumed, unEvidenced: check.claims.length, findingsOnText: md === undefined ? 0 : recordedFindings(store, name, md).length });
     p.fix = undefined;
     store.saveProgress(p);
-    post(fixDigest(name, fix, check.claims, md, true));
-    if (cfg.notify) notifyDesktop("pb: spec hardened", `${name}: ${fix.laps} repair laps, ${fix.applied} applied, ${check.claims.length} claims left for you`);
+    post(fixDigest(store, name, fix, check.claims, md, true));
+    if (cfg.notify) notifyDesktop(blocked ? "pb: spec harden stopped" : "pb: spec hardened", `${name}: ${fix.laps} repair laps, ${fix.applied} applied, ${check.claims.length} claims left for you`);
     return true;
   };
 
@@ -1623,43 +1671,68 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     name: "pb_spec_fix_done",
     label: "Spec repair done",
     description:
-      "At the end of a pb spec repair lap (started by /pb:spec-fix or /pb:spec-harden): report which numbered items you applied, which you rebutted (you wrote the argument in Decisions), which you park for the human (question + your recommendation), and which claims you marked assumed, with one line on what the spec now says differently. Then stop: pb checks the new text for un-evidenced claims and reviews it. " + reportRegister,
+      "At the end of a pb spec repair lap (started by /pb:spec-fix or /pb:spec-harden): report which numbered items you applied, which you rebutted (you wrote the argument in Decisions), which you park for the human (question + your recommendation), and which you marked assumed (the claim and what would falsify it), with one line on what the spec now says differently. Every number the brief showed you must appear in exactly one list. Then stop: pb checks the new text for un-evidenced claims and reviews it. " + reportRegister,
     parameters: Type.Object({
       applied: Type.Array(Type.Number(), { description: "the numbers this lap settled by evidence, decision or deletion, as shown in its brief" }),
       rebutted: Type.Array(Type.Number(), { description: "the numbers you argued against, having written the argument and its citation into Decisions" }),
       parked: Type.Array(
         Type.Object({
+          id: Type.Number({ description: "the number this question is about, as shown in the brief" }),
           question: Type.String({ description: "one question only the human can answer, in a sentence" }),
           recommendation: Type.String({ description: "what you recommend, and why — it is what runs if nobody answers" }),
         }),
         { description: "only where two defensible answers genuinely differ; not a place to park work you could have settled" },
       ),
-      assumed: Type.Array(Type.String(), { description: "claims you had to tag assumed, each naming what would falsify it" }),
+      assumed: Type.Array(
+        Type.Object({
+          id: Type.Number({ description: "the number this claim was shown as, from the brief" }),
+          claim: Type.String({ description: "the claim as you tagged it assumed, and what would falsify it" }),
+        }),
+        { description: "items only the human or production can settle; every one must name what would falsify it" },
+      ),
       summary: Type.String({ description: "one line: what the spec says differently now" }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const store = new Store(ctx.cwd);
-      const owner = fixOfSession(store, ctx.sessionManager.getSessionFile());
+      const owner = store.fixOfSession(ctx.sessionManager.getSessionFile());
       const fix = owner?.p.fix;
       if (!owner || !fix || fix.stage !== "lap") {
         throw new Error("No spec repair lap is open in this session, so nothing was recorded. Report a lap only in the session /pb:spec-fix or /pb:spec-harden started it in.");
       }
       const show = (n: number) => Number.isInteger(n) && fix.ids.includes(n);
-      const take = (numbers: number[], what: string): number[] => {
-        const out: number[] = [];
-        for (const n of numbers ?? []) {
-          if (!show(n)) throw new Error(`${n} is not one of the numbers this lap was shown (${fix.ids.join(", ")}). Report only what the brief gave you.`);
-          if (out.includes(n)) throw new Error(`${n} is in "${what}" twice.`);
-          out.push(n);
-        }
-        return out;
+      const covered = new Map<number, string>();
+      const claim = (n: number, what: string) => {
+        if (!show(n)) throw new Error(`${n} is not one of the numbers this lap was shown (${fix.ids.join(", ")}). Report only what the brief gave you.`);
+        const previous = covered.get(n);
+        if (previous === what) throw new Error(`${n} is in "${what}" twice.`);
+        if (previous) throw new Error(`${n} reported both ${previous} and ${what}: it is one or the other.`);
+        covered.set(n, what);
       };
-      const applied = take(params.applied, "applied");
-      const rebutted = take(params.rebutted, "rebutted");
-      const twice = applied.filter((n) => rebutted.includes(n));
-      if (twice.length) throw new Error(`${twice.join(", ")} reported both applied and rebutted: it is one or the other.`);
-      const parked = (params.parked ?? []).map((q) => ({ question: cap(String(q.question ?? "").trim(), 400), recommendation: cap(String(q.recommendation ?? "").trim(), 400) }));
-      const assumed = (params.assumed ?? []).map((a) => cap(String(a ?? "").trim(), 300)).filter(Boolean);
+      const applied = params.applied ?? [];
+      const rebutted = params.rebutted ?? [];
+      for (const n of applied) claim(n, "applied");
+      for (const n of rebutted) claim(n, "rebutted");
+      const parked = (params.parked ?? []).map((q) => {
+        const id = Number(q.id);
+        claim(id, "parked");
+        const question = cap(String(q.question ?? "").trim(), 400);
+        const recommendation = cap(String(q.recommendation ?? "").trim(), 400);
+        if (!question || !recommendation) throw new Error(`The parked question for ${id} needs both a question and a recommendation.`);
+        return { id, question, recommendation };
+      });
+      const assumed = (params.assumed ?? []).map((a) => {
+        const id = Number(a.id);
+        claim(id, "assumed");
+        const text = cap(String(a.claim ?? "").trim(), 300);
+        if (!text) throw new Error(`The assumed entry for ${id} needs the claim and what would falsify it.`);
+        return { id, claim: text };
+      });
+      const missing = fix.ids.filter((n) => !covered.has(n));
+      if (missing.length) {
+        throw new Error(
+          `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} missing from the report: every number the lap was shown (${fix.ids.join(", ")}) must be applied, rebutted, parked or assumed — a partial report would advance on work it never accounted for.`,
+        );
+      }
       const md = store.readSpec(owner.name);
       store.event(owner.name, {
         type: "spec-fix",
@@ -1817,14 +1890,17 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
           return ctx.ui.notify(`No review budget left to find the work: run /${cmd("spec-review")} ${name} first, then /${cmd("spec-harden")} ${name}.`, "info");
         }
         reviews += 1;
-        await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "harden"));
-        if (sessionGone(ctx)) return;
+        const reviewed = await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "harden"));
+        if (sessionGone(ctx) || reviewed === "gone" || reviewed === "changed" || reviewed === "error") return;
         const after = store.readSpec(name);
         if (after === undefined || after !== md) {
           return ctx.ui.notify(`The spec changed while it was under review: run \`/${cmd("spec-harden")} ${name}\` again and the new text will be hardened.`, "warning");
         }
         findings = recordedFindings(store, name, after);
         if (!findings.length) {
+          if (reviewed === "block") {
+            return ctx.ui.notify(`The review blocked ${name} but recorded no findings pb can read, so there is no worklist and nothing was declared hardened. Run /${cmd("spec-review")} ${name} again.`, "warning");
+          }
           return post([phaseHeader("\u2705", "Spec hardened", name, "nothing to repair"), "", nextLine(`\`/${cmd("build")} ${name}\` — the pass above covers this text and reported no findings.`), evidenceLine("the review found nothing a repair lap could settle")].join("\n"));
         }
       }
@@ -1855,7 +1931,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     if (!checked) return;
     const { spec, md, cfg } = checked;
 
-    if (!(await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "build")))) return;
+    if ((await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "build"))) !== "pass") return;
     const buildModel = cfg.buildModel ? findModel(ctx, cfg.buildModel) : undefined;
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
     const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";
@@ -2079,7 +2155,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     // next lap, the confirming review, or the digest). This is the only place that step happens, for both
     // doors, so a lap that ends silently is seen by the same code that reads one that reports.
     const fixStore = new Store(ctx.cwd);
-    const owned = fixOfSession(fixStore, ctx.sessionManager.getSessionFile());
+    const owned = fixStore.fixOfSession(ctx.sessionManager.getSessionFile());
     if (owned?.p.fix && (await advanceSpecFix(ctx, fixStore, owned.name, owned.p))) return;
     const { store, progress: p } = specOfSession(ctx);
     if (p?.phase === "building") pauseBuild(ctx, store, p, "the agent stopped without finishing its task (you stopped it, or it stopped again after a reminder).", "build.paused", "stopped");

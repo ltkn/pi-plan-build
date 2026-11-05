@@ -1655,12 +1655,43 @@ test("pb_spec_fix_done: only the session with an open lap may report, and only t
     r.ctx.sessionManager.getSessionFile = real;
     refused.push((await tool("pb_spec_fix_done", { applied: [1, 9], rebutted: [], parked: [], assumed: [], summary: "x" })).error ?? "no error");
     refused.push((await tool("pb_spec_fix_done", { applied: [1], rebutted: [1], parked: [], assumed: [], summary: "x" })).error ?? "no error");
+    // Every shown number must be accounted for: a partial report would advance on work it never reported.
+    refused.push((await tool("pb_spec_fix_done", { applied: [1], rebutted: [], parked: [], assumed: [], summary: "x" })).error ?? "no error");
   };
   await t.run("spec-fix", "order-cancellation");
   assert.match(refused[0], /No spec repair lap is open in this session/);
   assert.match(refused[1], /9 is not one of the numbers this lap was shown \(1, 2\)/);
   assert.match(refused[2], /1 reported both applied and rebutted/);
+  assert.match(refused[3], /2 is missing from the report: every number the lap was shown \(1, 2\)/);
   assert.equal(specFixEvents(t, "spec-fix").length, 0, "a refused report records nothing");
+});
+
+test("pb_spec_fix_done: a parked or assumed entry carries the number it settles", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  t.agent.script = async (text, tool) => {
+    if (!text.includes("[pb:spec-fix]")) return;
+    const r = await tool("pb_spec_fix_done", {
+      applied: [],
+      rebutted: [],
+      parked: [{ id: 1, question: "Keep the 90 s bound?", recommendation: "Keep it: measured on this scheduler" }],
+      assumed: [{ id: 2, claim: "the feed sends trip-level delay, falsified by a payload decode" }],
+      summary: "one parked, one assumed",
+    });
+    assert.equal(r.error, undefined, r.error ?? "");
+  };
+  await t.run("spec-fix", "order-cancellation");
+  const lap = specFixEvents(t, "spec-fix").at(-1)!;
+  assert.deepEqual(lap.parked, [{ id: 1, question: "Keep the 90 s bound?", recommendation: "Keep it: measured on this scheduler" }]);
+  assert.deepEqual(lap.assumed, [{ id: 2, claim: "the feed sends trip-level delay, falsified by a payload decode" }]);
+  assert.ok(t.selectTitles.some((s) => s.includes("Keep the 90 s bound?")), "the parked question was put to the human");
+  assert.match(t.posts.at(-1)!, /1 assumed[\s\S]*1 claim tagged assumed/);
 });
 
 test("spec-fix lap: the report is recorded, the claim check runs on what it wrote, and the digest says the verdict is stale", async () => {
@@ -1672,19 +1703,19 @@ test("spec-fix lap: the report is recorded, the claim check runs on what it wrot
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
   }
-  t.agent.script = repairLap(t, { applied: [1], rebutted: [2], parked: [], assumed: ["the feed sends trip-level delay"], summary: "the delay source is now cited" });
+  t.agent.script = repairLap(t, { applied: [1], rebutted: [2], parked: [], assumed: [], summary: "the delay source is now cited" });
   await t.run("spec-fix", "order-cancellation");
   const lap = specFixEvents(t, "spec-fix").at(-1)!;
   assert.equal(lap.lap, 1);
   assert.deepEqual(lap.applied, [1]);
   assert.deepEqual(lap.rebutted, [2]);
-  assert.deepEqual(lap.assumed, ["the feed sends trip-level delay"]);
+  assert.deepEqual(lap.assumed, []);
   assert.equal(lap.work, "findings");
   const check = specFixEvents(t, "spec-check").at(-1)!;
   assert.equal(check.verdict, "pass", "the clean default check is recorded as a pass");
   assert.equal(check.hash, specHash(t.read(specRel)), "the check judged the text the lap wrote, not the old one");
   const digest = t.posts.at(-1)!;
-  assert.match(digest, /\*\*🔧 Spec fix — order-cancellation\*\* · 1 applied · 1 rebutted · 1 assumed · no un-evidenced claims/);
+  assert.match(digest, /\*\*🔧 Spec fix — order-cancellation\*\* · 1 applied · 1 rebutted · no un-evidenced claims/);
   assert.match(digest, /\*\*Next:\*\* `\/pb:spec-review order-cancellation` — the text changed/);
   assert.match(digest, /1 repair lap · spec now ~\d+ tokens · it decided everything it was shown/);
   assert.equal(t.progress("order-cancellation").fix, undefined);
@@ -1697,6 +1728,106 @@ test("spec-fix lap: the report is recorded, the claim check runs on what it wrot
   t.agent.script = diligent;
   await t.run("build", "order-cancellation");
   assert.equal(reviewed(), 1, "the build reviewed the repaired text for itself");
+});
+
+test("spec-fix: a manual lap stops after one lap even when the claim check finds more work", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  process.env.MOCK_SETTLE = "claims";
+  try {
+    await t.run("spec-review", "order-cancellation");
+    t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+    await t.run("spec-fix", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SETTLE;
+  }
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 1, "one manual lap, never a second");
+  assert.equal(specFixEvents(t, "spec-check").length, 1, "the check is the lap's last step");
+  assert.match(t.posts.at(-1)!, /🔧 Spec fix — order-cancellation[\s\S]*2 un-evidenced[\s\S]*Still standing on nothing/);
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length, 1, "a manual lap does not run a confirming review");
+});
+
+test("spec-fix lap: it cannot write another spec or the project, and still writes its own", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const other = await t.callTool("pb_write_spec", { name: "other-spec", content: SPEC().replace("# Order cancellation", "# Other spec") });
+  assert.equal(other.error, undefined, other.error ?? "");
+  const otherBefore = t.read(".pi/pb/specs/other-spec/spec.md");
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const refused: string[] = [];
+  t.agent.script = async (text, tool) => {
+    if (!text.includes("[pb:spec-fix]")) return;
+    refused.push((await tool("pb_write_spec", { name: "other-spec", content: SPEC().replace("# Order cancellation", "# Other spec rewritten") })).error ?? "no error");
+    refused.push((await tool("pb_update_spec", { name: "other-spec", section: "Context", content: "The lap rewrote this." })).error ?? "no error");
+    refused.push((await tool("write", { path: "README", content: "changed" })).error ?? "no error");
+    refused.push((await tool("bash", { command: "echo changed > README" })).error ?? "no error");
+    const ownUpdate = await tool("pb_update_spec", { section: "Context", content: "src/order.ts holds the model, as this lap probed." });
+    assert.equal(ownUpdate.error, undefined, ownUpdate.error ?? "");
+    const md = fs.readFileSync(path.join(t.repo, specRel), "utf8");
+    const own = await tool("pb_write_spec", { name: "order-cancellation", content: md.replace("Refunds.", "Refunds. The lap changed its own spec.") });
+    assert.equal(own.error, undefined, own.error ?? "");
+    const r = await tool("pb_spec_fix_done", { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+    assert.equal(r.error, undefined, r.error ?? "");
+  };
+  await t.run("spec-fix", "order-cancellation");
+  assert.match(refused[0], /repair lap for order-cancellation is open in this session: it may write that spec only/);
+  assert.match(refused[1], /repair lap for order-cancellation is open in this session: it may write that spec only/);
+  assert.match(refused[2], /repair lap for order-cancellation is open in this session/);
+  assert.match(refused[3], /repair lap for order-cancellation is open in this session/);
+  assert.equal(t.read(".pi/pb/specs/other-spec/spec.md"), otherBefore, "the other spec is untouched");
+  assert.equal(t.read("README"), "hi\n", "the project is untouched");
+  assert.match(t.read(specRel), /as this lap probed/, "the unnamed update went to the lap's own spec");
+  assert.match(t.read(specRel), /The lap changed its own spec/);
+});
+
+test("undo: a repair lap is taken back whole, spec text and all, and a later run's lap gets its own row", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const original = t.read(specRel);
+  const rows = () => JSON.parse(t.read(".pi/pb/specs/order-cancellation/checkpoints.json"));
+  const lapRows = () => rows().filter((c: any) => c.kind === "lap");
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+  await t.run("spec-fix", "order-cancellation");
+  const afterLap = t.read(specRel);
+  assert.notEqual(afterLap, original, "the lap changed the spec");
+  assert.equal(t.progress("order-cancellation").session, undefined, "the spec was never built: its repair session is the only one that can undo the lap");
+  assert.deepEqual(lapRows().map((c: any) => c.id), ["lap1"]);
+  assert.equal(lapRows()[0].spec, original, "the row holds the text before the lap");
+  assert.equal(lapRows()[0].phase, "written");
+  // A second run starts at lap 1 again; its row must not take the first run's id.
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both again" });
+  await t.run("spec-fix", "order-cancellation");
+  const afterSecond = t.read(specRel);
+  assert.deepEqual(lapRows().map((c: any) => c.id), ["lap1", "lap1-2"]);
+  assert.equal(lapRows()[1].spec, afterLap, "the later row restores the text the second lap started from");
+  // /pb:undo in the repair session: no build session, no open lap — the spec it wrote names it.
+  await t.run("undo", "lap1-2");
+  assert.equal(t.read(specRel), afterLap, "the second lap's text change is gone");
+  assert.notEqual(t.read(specRel), afterSecond);
+  assert.equal(t.progress("order-cancellation").phase, "written", "the phase the lap opened in comes back");
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+  assert.match(t.posts.at(-1)!, /Undone to before lap1-2[\s\S]*1 file\(s\) restored/);
+  assert.deepEqual(lapRows().map((c: any) => c.id), ["lap1"], "the undo drops its target and what came after it, not the earlier run's row");
 });
 
 test("spec-fix lap: it runs read-only and reports through the tool its --tools names", async () => {
@@ -1729,7 +1860,7 @@ test("spec-fix lap: a lap that changed nothing is not checked or re-reviewed, an
     delete process.env.MOCK_SPEC_REVIEW;
   }
   // same bytes: the same check and review would answer the same, so say what is left instead
-  t.agent.script = quietLap(t, { applied: [], rebutted: [], parked: [], assumed: [], summary: "nothing settled" });
+  t.agent.script = quietLap(t, { applied: [], rebutted: [], parked: [], assumed: [{ id: 1, claim: "≤ 90 s, falsified by a slower scheduler" }, { id: 2, claim: "trip-level delay, falsified by a field decode" }], summary: "nothing settled" });
   await t.run("spec-fix", "order-cancellation");
   assert.equal(specFixEvents(t, "spec-check").length, 0, "an unchanged text is not re-checked");
   assert.match(t.posts.at(-1)!, /the lap changed nothing/);
@@ -1742,7 +1873,7 @@ test("spec-fix lap: a lap that changed nothing is not checked or re-reviewed, an
   process.env.MOCK_SETTLE = "crash";
   try {
     await u.run("spec-review", "order-cancellation");
-    u.agent.script = repairLap(u, { applied: [1], rebutted: [], parked: [], assumed: [], summary: "one settled" });
+    u.agent.script = repairLap(u, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "both settled" });
     await u.run("spec-fix", "order-cancellation");
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
@@ -1827,6 +1958,47 @@ test("spec-harden: the budget is the stop rule — claims keep coming, the run s
   assert.equal(t.progress("order-cancellation").fix, undefined);
 });
 
+test("spec-harden: a review that reports nothing stops the run instead of declaring the spec hardened", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.selects.push("Yes, go on");
+  process.env.MOCK_SPEC_REVIEW = "crash";
+  try {
+    await t.run("spec-harden", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 0, "no lap was opened on an unread verdict");
+  assert.ok(!t.posts.some((p) => /Spec hardened/.test(p)), "silence is never a harden result");
+  assert.match(t.notes.at(-1)!, /did not report/);
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+  assert.equal(specFixEvents(t, "spec-harden").length, 0);
+});
+
+test("spec-harden: a confirming review that reports nothing stops before the summary claims coverage", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  t.selects.push("Yes, go on");
+  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+  process.env.MOCK_SPEC_REVIEW = "crash";
+  try {
+    await t.run("spec-harden", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 1, "the error did not open another lap");
+  assert.ok(!t.posts.some((p) => /Spec hardened/.test(p)), "the digest never claims a verdict that was not read");
+  assert.match(t.notes.at(-1)!, /confirming review did not report/);
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+  assert.equal(specFixEvents(t, "spec-harden").length, 0);
+});
+
 test("spec-harden: a lap's parked question reaches you with its recommendation, and the answer drives the next lap", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -1838,7 +2010,7 @@ test("spec-harden: a lap's parked question reaches you with its recommendation, 
     if (text.includes("Repair lap 1")) {
       const md = fs.readFileSync(path.join(t.repo, specRel), "utf8");
       await tool("pb_write_spec", { name: "order-cancellation", content: md.replace("Cancel orders.", "Cancel orders; the lap settled one and parked one.") });
-      await tool("pb_spec_fix_done", { applied: [1], rebutted: [], parked: [{ question: "Is originCity worth a column the feed cannot fill?", recommendation: "Drop it: stop_name already carries the city" }], assumed: [], summary: "one settled, one parked" });
+      await tool("pb_spec_fix_done", { applied: [1], rebutted: [], parked: [{ id: 2, question: "Is originCity worth a column the feed cannot fill?", recommendation: "Drop it: stop_name already carries the city" }], assumed: [], summary: "one settled, one parked" });
       return;
     }
     await tool("pb_spec_fix_done", { applied: [2], rebutted: [], parked: [], assumed: [], summary: "the rest settled" });

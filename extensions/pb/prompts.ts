@@ -746,7 +746,7 @@ export function specFixPrompt(o: { name: string; work: "findings" | "claims"; it
     "",
     SPEC_FIX_RULES,
     "",
-    `Settle them in the spec file itself (${P}/specs/${o.name}/spec.md, written with pb_write_spec so the format gates apply to what you write), then report with pb_spec_fix_done: which numbers you applied, which you rebutted (with the Decisions line you wrote), which you park (only where two defensible answers genuinely differ — one question each, with what you recommend and why), and which claims you had to mark assumed. A number you were not shown is not reportable; a claim you could not settle is parked or assumed, never guessed.`,
+    `Settle them in the spec file itself (${P}/specs/${o.name}/spec.md, written with pb_write_spec so the format gates apply to what you write), then report with pb_spec_fix_done: every number you were shown goes in exactly one list — applied, rebutted (with the Decisions line you wrote), parked (only where two defensible answers genuinely differ: the number, your question, what you recommend and why), or assumed (the number, the claim, and what would falsify it). A number you were not shown is not reportable, and a report that leaves one out is refused: a claim you could not settle is parked or assumed, never guessed.`,
     "",
     "Touch nothing but the spec: this lap designs, it does not build.",
     ...(o.answers?.length ? ["", "What the human answered since the last lap:", ...o.answers.map((a) => `- ${a}`)] : []),

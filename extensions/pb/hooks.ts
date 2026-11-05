@@ -10,7 +10,7 @@ import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoint
 import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
 import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
 import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { COMPACT_STALL_LIMIT, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, loadSpec, pauseBuild, pruneSession, rememberStall, resetLimit, runtime, specOfSession, stop, tree, unfinishedPhase } from "./kit.ts";
+import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, loadSpec, pauseBuild, pruneSession, rememberStall, resetLimit, runtime, specOfSession, stop, tree, unfinishedPhase } from "./kit.ts";
 import { pastCheckpoint, stateSummary } from "./flow.ts";
 
 export function registerHooks(pi: ExtensionAPI) {
@@ -43,6 +43,17 @@ export function registerHooks(pi: ExtensionAPI) {
       if (!REVIEW_SESSION_TOOLS.includes(ev.toolName))
         return { block: true, reason: "This is a review session: read-only. Report what should change with pb_report_findings." };
       return;
+    }
+    // A repair lap gets the spec's pen, nothing else: read, probe through pb_try (itself read-only),
+    // ask, and write the one spec with the spec tools. A lap that could edit the project or run a
+    // shell is a build without its gates.
+    if (session) {
+      const repair = store.fixOfSession(session);
+      if (repair && !REPAIR_SESSION_TOOLS.includes(ev.toolName))
+        return {
+          block: true,
+          reason: `A repair lap for ${repair.name} is open in this session: read and probe with pb_try, ask with pb_ask, and change only that spec through pb_write_spec or pb_update_spec. Stop the project edits and report the lap with pb_spec_fix_done.`,
+        };
     }
     if (ev.toolName !== "edit" && ev.toolName !== "write") return;
     const building = liveBuildOfSession(ctx, store);
