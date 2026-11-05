@@ -1955,7 +1955,19 @@ test("spec-harden: the budget is the stop rule — claims keep coming, the run s
   assert.equal(harden.reviews, 0, "no review budget: the run confirms nothing by itself");
   assert.equal(harden.unEvidenced, 2);
   assert.match(t.posts.at(-1)!, /2 un-evidenced[\s\S]*Still standing on nothing[\s\S]*≤ 90 s/);
+  assert.match(t.posts.at(-1)!, /2 left standing on nothing/, "the digest never claims the run cleared the claims it did not touch");
   assert.equal(t.progress("order-cancellation").fix, undefined);
+});
+
+test("a finding title capped mid-sentence renders on one line, with the cut disclosed inline", async () => {
+  const { findingLine } = await import("../extensions/pb/prompts.ts");
+  const { cap } = await import("../extensions/pb/store.ts");
+  const title = cap(`${"the claim and how contradicted it is ".repeat(20)}rest that must be cut`, 400);
+  const line = findingLine({ priority: "P1", file: "apps-tempo/docs/tempo-design.md", line: 1, title, fix: "re-run the decode and count" });
+  const [body, fixLine] = line.split("\n");
+  assert.match(body!, /…\[truncated \d+ chars\]$/, "the cut is disclosed inline at the end of the title line");
+  assert.doesNotMatch(body!, /rest that must be cut/);
+  assert.equal(fixLine, "   Fix: re-run the decode and count");
 });
 
 test("spec-harden: a review that reports nothing stops the run instead of declaring the spec hardened", async () => {

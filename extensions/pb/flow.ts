@@ -1539,7 +1539,9 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
           ? `${fix.parked.length} question${fix.parked.length === 1 ? "" : "s"} it would not decide`
           : fix.assumed
             ? `${fix.assumed} claim${fix.assumed === 1 ? "" : "s"} tagged assumed`
-            : "it decided everything it was shown",
+            : claims.length
+              ? `${claims.length} left standing on nothing`
+              : "it decided everything it was shown",
       ),
       ...(claims.length ? ["", "**Still standing on nothing**", "", ...claims.slice(0, 8).map((f) => findingLine(f)), ...(claims.length > 8 ? ["", `(+${claims.length - 8} more)`] : [])] : []),
     ].join("\n");

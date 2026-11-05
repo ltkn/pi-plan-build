@@ -495,10 +495,13 @@ ${READ_ONLY_PREAMBLE} Report with the report_verdicts tool: one entry per findin
  * A field a finding gains is added here, never at a call site, so no renderer of findings shows less
  * than another.
  */
-export const findingDetails = (f: Finding) => `${f.fix ? `\n   Fix: ${f.fix}` : ""}`;
+/** A field as one line: no raw break can split a line item (the cap marker's own newline folds in). */
+const oneLine = (s: string) => s.replace(/\s*\n\s*/g, " ");
+
+export const findingDetails = (f: Finding) => `${f.fix ? `\n   Fix: ${oneLine(f.fix)}` : ""}`;
 
 export const findingLine = (f: Finding, n?: number) =>
-  `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${f.title}${findingDetails(f)}`;
+  `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${oneLine(f.file)}${f.line ? `:${f.line}` : ""} — ` : ""}${oneLine(f.title)}${findingDetails(f)}`;
 
 /**
  * How much of the frozen diff a review brief carries. Most changes fit; past the cap the reviewer
@@ -766,7 +769,7 @@ A claim is settled when the text beside it carries its evidence: a probe line (t
 
 Report every load-bearing claim that is neither settled nor tagged: P1 when getting it wrong would change the design, the data model or a contract; P2 otherwise. Report nothing else: not whether a number is right (you cannot run anything), not whether the design is good, not style, not missing tests, not a claim the spec already tags assumed. An empty list is the normal, good result.
 
-Report with report_findings in one call, an empty list when there is nothing, made as soon as you have them and before writing your reply: pb reads the call, never your prose. Title each finding with the claim itself, quoted short, and name in \`fix\` the one probe or read that would settle it.`;
+Report with report_findings in one call, an empty list when there is nothing, made as soon as you have them and before writing your reply: pb reads the call, never your prose. Title each finding with the claim quoted short: one line, at most 160 characters — never a paragraph or the claim re-pasted; the contradiction, the evidence and the probe belong in \`fix\`.`;
 
 export function claimCheckBrief(name: string, markdown: string): string {
   return `# Claims to check: ${name}
