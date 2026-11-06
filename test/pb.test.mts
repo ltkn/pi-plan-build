@@ -3809,6 +3809,42 @@ test("fix: a report names findings by the number in the brief; a number outside 
   assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:review` checks the delta\./);
 });
 
+test("fix: a lap that revises the approved contract says re-approve before review", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const approved = SPEC();
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: approved });
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/approved.md"), approved);
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  fs.writeFileSync(
+    path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"),
+    JSON.stringify({
+      spec: "order-cancellation",
+      phase: "built",
+      session,
+      tasks: [],
+      review: {
+        at: "2026-10-01 10:00:00",
+        verdict: "changes",
+        findings: [{ priority: "P2", file: "src/order.ts", line: 12, title: "name the constant the reviewer named" }],
+      },
+      approval: { at: "2026-10-01 10:00:00", hash: "old-approved-hash", contractHash: contractHash(approved) },
+      updatedAt: "2026-10-01 10:00:00",
+    }),
+  );
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    await tool("pb_write_spec", { name: "order-cancellation", content: approved.replace("Cancel orders.", "Cancel pending orders.") });
+    await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
+  };
+  await t.run("fix");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /\*\*The fix changed the approved contract\.\*\*/);
+  assert.match(post, /\*\*Next:\*\* `\/pb:build order-cancellation` re-approves the revised contract/);
+  assert.match(post, /re-approve it before `\/pb:review` can run/);
+  assert.doesNotMatch(post, /\*\*Next:\*\* `\/pb:review` checks the delta\./);
+});
+
 
 
 test("fix: a lap that never reports stops the loop and escalates as silent", async () => {

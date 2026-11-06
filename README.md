@@ -14,7 +14,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
                       (--fresh: in a new session from the spec). Before T1, one fresh reviewer
                       reads the frozen draft: P0 findings stop the build until amended; P1-P3 are advisory
-/pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default); /pb:review checks the delta after
+/pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default); after the fix, /pb:build re-approves a changed contract first, then /pb:review checks the delta
 /pb:review [focus]    independent review: a spec pass in a fresh session you watch, then an adversarial pass in the background, P0–P3, blocking findings
                       double-checked; follow-ups look only at what changed (--full: everything)
                       no spec? reviews the uncommitted change against its intent
@@ -77,7 +77,7 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
      tests, comments and your standards; then an adversarial pass that tries to
      break the change; P0/P1 findings double-checked
    → **✅ Review — order-cancellation** · PASS · the review's active time (CHANGES NEEDED / UNVERIFIED likewise)
-   → **Next:** `/pb:fix <ids>` for open findings, then `/pb:review` again (only what changed)
+   → **Next:** `/pb:fix <ids>` for open findings, then `/pb:build` to re-approve if the fix changed the approved contract, then `/pb:review` again (only what changed)
 ```
 
 For a small change, skip the flow: work with Pi as usual, then `/pb:review`.

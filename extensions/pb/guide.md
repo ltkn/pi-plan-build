@@ -837,16 +837,18 @@ The header reads `**✅ Review — <label>** · PASS`, `**❌ Review — <label>
 reviewer, the adversarial pass and the verification pass together. Findings in the
 Change section and outside it are numbered continuously (P0–P2; P3 nits are unnumbered),
 the same numbers `/pb:fix` takes. `**Next:**` names one action — `/pb:fix <ids>` for open
-findings, `/pb:build` when a mid-build review passed with tasks remaining, or `/pb:review`
-after fixes.
+findings, `/pb:build` when a mid-build review passed with tasks remaining or the fix changed
+the approved contract, or `/pb:review` after fixes.
 
 The findings land in the session you ran it from; run it **in the build
 session** and fix them right there: that session knows the code it just wrote.
 Or fix them in a fresh fenced session: `/pb:fix [ids]` takes P0–P2 finding
 ids (no ids = all open ones); P3 nits never block and are fixed by hand or
-ignored. The next `/pb:review` is a **follow-up**: it checks the previous findings and
-looks only at what changed since (`--full` reviews everything again). If
-nothing changed, it says so and costs nothing.
+ignored. If the fixes change the approved contract, `/pb:build` must re-approve
+it before the review runs; otherwise the next `/pb:review` is a **follow-up**:
+it checks the previous findings and looks only at what changed since
+(`--full` reviews everything again). If nothing changed, it says so and costs
+nothing.
 
 **The adversarial pass, when the change looks sensitive.** A background pass (its own fresh
 process, not a session you watch) has a single job: break the change. For every entry point it adds or alters and

@@ -10,7 +10,7 @@ import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { cmd, commands, evidenceLine, loadSpec, nextLine, phaseHeader, reply, specOfSession, stop } from "./kit.ts";
+import { cmd, commands, evidenceLine, loadSpec, nextLine, phaseHeader, reply, specOfSession, stop, approvalDrift } from "./kit.ts";
 
 /** One lap's report shape, normalized from its `fix` event. */
 export interface LapReport {
@@ -42,7 +42,7 @@ export function registerFix(pi: ExtensionAPI) {
     name: "pb_fix_done",
     label: "Fixes done",
     description:
-      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Name each by the number it was shown as in the brief. Then stop: the home session runs /pb:review next to check the delta. " + reportRegister,
+      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Name each by the number it was shown as in the brief. Then stop: the home session runs the approved path after the fix — /pb:build to re-approve a revised contract, otherwise /pb:review to check the delta. " + reportRegister,
     parameters: Type.Object({
       fixed: Type.Array(Type.Number(), { description: "the numbers of the findings this lap fixed, as shown in the brief (e.g. 1, 3)" }),
       skipped: Type.Array(Type.Number(), { description: "the numbers of findings that need a design decision (spec revision), not an edit, as shown in the brief" }),
@@ -69,7 +69,12 @@ export function registerFix(pi: ExtensionAPI) {
       if (!fixed.length && !skipped.length) throw new Error("Report at least one finding by its number in fixed or skipped, with the test results.");
       store.event(rec.spec, { type: "fix", fixed: fixed.map((f) => f.title), skipped: skipped.map((f) => f.title), tests: params.tests });
       store.clearFixSession(session);
-      return reply(`Recorded fix report for \`${rec.spec}\`: fixed ${fixed.length}, skipped ${skipped.length}. Reply briefly, then stop: run /pb:review back home to check the delta.`);
+      const cur = store.progress(rec.spec);
+      const drift = cur ? approvalDrift(store, cur) : undefined;
+      const nextStep = drift
+        ? `the fix changed the approved contract, so run \`/${cmd("build")} ${rec.spec}\` to re-approve it, then \`/${cmd("review")}\`.`
+        : `run \`/${cmd("review")}\` back home to check the delta.`;
+      return reply(`Recorded fix report for \`${rec.spec}\`: fixed ${fixed.length}, skipped ${skipped.length}. Reply briefly, then stop: ${nextStep}`);
     },
   });
 
@@ -176,11 +181,20 @@ export function registerFix(pi: ExtensionAPI) {
     const ids = remaining.flatMap((f) => (numberOf.has(f) ? [numberOf.get(f)!] : [])).join(" ");
     // Cap the lists: a long title per finding makes the evidence line a wall, and /pb:status has the detail.
     const list = (items: string[]) => (items.length <= 6 ? items.join(", ") : `${items.slice(0, 6).join(", ")}, +${items.length - 6} more`);
+    // The fix may have revised the approved contract. Review judges the code against that
+    // contract, so it cannot run until `/pb:build` has re-approved whatever stands now.
+    const drift = (() => {
+      const p = store.progress(spec);
+      return p ? approvalDrift(store, p) : undefined;
+    })();
+    const reviewStep = drift
+      ? `\`/${cmd("build")} ${spec}\` re-approves the ${drift === "missing" ? "spec as it stands (its approved copy is missing or changed)" : "revised contract (the fix changed it)"}, then \`/${cmd("review")}\` can check the delta.`
+      : `\`/${cmd("review")}\` checks the delta.`;
     const next = open.length
-      ? `\`/${cmd("fix")}${ids ? ` ${ids}` : ""}\` (or fix them by hand), then \`/${cmd("review")}\`.`
+      ? `\`/${cmd("fix")}${ids ? ` ${ids}` : ""}\` (or fix them by hand), then ${reviewStep}`
       : skipped.length
-        ? `revise the spec with \`/${cmd("spec")}\` for the skipped findings (or fix them by hand), then \`/${cmd("review")}\`.`
-        : `\`/${cmd("review")}\` checks the delta.`;
+        ? `revise the spec with \`/${cmd("spec")}\` for the skipped findings (or fix them by hand), then ${reviewStep}`
+        : reviewStep;
     const time = ms ? duration(ms) : "";
     const header = silent
       ? phaseHeader("❌", "Fixes stopped", spec, "no report", time)
@@ -190,8 +204,11 @@ export function registerFix(pi: ExtensionAPI) {
       "",
       nextLine(next),
       evidenceLine(`fixed ${list(fixed) || "none"}`, skipped.length ? `skipped as needing a spec revision: ${list(skipped)}` : "", open.length ? `still open: ${list(open)}` : "", silent ? `no report after ${FIX_NUDGES} nudges` : ""),
+      ...(drift ? ["", `**The fix changed the approved contract.** \`/${cmd("build")} ${spec}\` must re-approve it before \`/${cmd("review")}\` can run.`] : []),
       "",
-      `A fix lap's report is its own claim; \`/${cmd("review")}\` checks the files it changed.`,
+      drift
+        ? `A fix lap's report is its own claim; the revised contract must be re-approved before \`/${cmd("review")}\` checks the files it changed.`
+        : `A fix lap's report is its own claim; \`/${cmd("review")}\` checks the files it changed.`,
     ].join("\n");
     try {
       if (!home) throw new Error("no home session");
