@@ -481,13 +481,35 @@ export const changedFilesSection = (store: Store, p: Progress): string => {
   return lines.length ? `\nChanged files, by task (from checkpoints, not the model's report):\n${lines.join("\n")}` : "";
 };
 
+/**
+ * The pointer a later task gets to the code the finished tasks left: their ids and changed files,
+ * from checkpoints, plus the requirement to inspect what it depends on before editing. The code
+ * is evidence, not approval: Design remains the shared-shape contract for later tasks.
+ */
+
+export const doneHandoff = (store: Store, p: Progress, current: string): string => {
+  const done = p.tasks.filter((t) => t.status === "done" && t.id !== current && t.id !== "final" && t.id !== COHERE_TASK_ID);
+  if (!done.length) return "";
+  let cps: Checkpoint[] = [];
+  try {
+    cps = store.checkpoints(p.spec);
+  } catch {}
+  const described = done.map((t) => {
+    const files = cps.find((c) => c.id === t.id)?.files ?? [];
+    if (!files.length) return t.id;
+    const shown = files.slice(0, 8);
+    return `${t.id} (${shown.join(", ")}${files.length > shown.length ? `, +${files.length - shown.length} more` : ""})`;
+  });
+  return `Already done: ${described.join("; ")}. This is a pointer, not the truth: before editing, inspect the earlier tasks' code this task depends on (contracts, types, migrations, error handling and tests first; use pb_explore if you don't know where to start). If it conflicts with the spec, don't build on it silently: make the conflict explicit, and stop with blocked and the evidence if the Goal or a Contract cannot be built as written. If it matches, extend it rather than duplicating it. Design is the shared-shape contract: record any shape this task settles for later tasks there before you finish.`;
+};
+
 /** What the agent is told for a step: the task, the check it will run, and the spec to read. */
 
 export const stepPrompt = (ctx: ExtensionContext, store: Store, spec: ParsedSpec, p: Progress, task: SpecTask, attempts: number) => {
   const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
   const tp = p.tasks.find((t) => t.id === task.id);
   const red = needsRed(spec, task);
-  return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specReference(p.spec));
+  return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specReference(p.spec), doneHandoff(store, p, task.id));
 };
 
 /**

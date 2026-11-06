@@ -155,12 +155,35 @@ export const confirmLiveBuild = async (ctx: ExtensionContext, store: Store, name
   return agree(ctx, store, `\`${name}\` looks like it is building in another session (${staleness(pr.updatedAt)}). ${action}`);
 };
 
+/** The context share in use, rounded, for a reset event and notice; absent when the context is unknown. */
+const contextPercent = (ctx: ExtensionContext): number | undefined => {
+  const usage = ctx.getContextUsage();
+  if (!usage) return undefined;
+  if (usage.tokens != null && usage.contextWindow) return Math.round((100 * usage.tokens) / usage.contextWindow);
+  return usage.percent != null ? Math.round(usage.percent) : undefined;
+};
+
 export const pastCheckpoint = (ctx: ExtensionContext, store: Store) => {
   const cfg = store.config();
   const usage = ctx.getContextUsage();
   if (!cfg.checkpointAt || !usage || usage.tokens == null) return undefined;
   const limit = Math.min((usage.contextWindow * cfg.checkpointAt) / 100, resetLimit(usage.contextWindow));
-  return usage.tokens >= limit ? Math.round((100 * usage.tokens) / usage.contextWindow) : undefined;
+  return usage.tokens >= limit ? contextPercent(ctx) : undefined;
+};
+
+/**
+ * When a build resets its context at the next task boundary. "task" (the default) resets every
+ * boundary: each later task starts from the spec, the done ledger and the code, not from the
+ * finished tasks' conversation. "threshold" keeps the checkpointAt behaviour; "never" leaves it to Pi.
+ */
+export const buildResetDue = (ctx: ExtensionContext, store: Store): { percent?: number } | undefined => {
+  const mode = store.config().buildReset;
+  if (mode === "never") return undefined;
+  if (mode === "threshold") {
+    const percent = pastCheckpoint(ctx, store);
+    return percent === undefined ? undefined : { percent };
+  }
+  return { percent: contextPercent(ctx) };
 };
 
 /** The build's state as a summary, for a reset at a task boundary or a compaction in the middle of a task. */
@@ -181,8 +204,6 @@ export const stateSummary = (ctx: ExtensionContext, store: Store, p: Progress, r
           : `Carry on with ${p.current ?? "the build"}; finish it with pb_task_done.`;
   return buildStateSummary({ p, markdown: loaded?.md, mechanics: loaded ? buildMechanics(loaded.spec, buildCmd, each, store.extra("build")) : "", current, reason, ...extra });
 };
-
-/** When a build session should be reset at a task boundary: past checkpointAt, always before Pi would compact. */
 
 import { offerStandards } from "./plan.ts";
 
@@ -2232,13 +2253,6 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       post(`**Changed while planning** — these project files differ from when planning began: ${list}\n\nCommands may write where edits are blocked. Nothing is lost: \`/${cmd("plan")} off\` or the build start offers to keep or restore them.`);
     } else if (!files.length) planningWriteNotes.delete(session);
   });
-
-  /*
-   * At the end of a turn: rewind points for tasks started mid-run, and the build's reset. Right after a task
-   * passed and the next was handed out, past checkpointAt, the session is reset to the build's state: the
-   * finished task is done and summarized, the next hasn't started, so nothing half-done is lost (unlike a
-   * compaction in the middle of a task). No summarizing model call.
-   */
 
   /**
    * What the resume confirm shows the human: every block the contract binds — everything but

@@ -76,10 +76,16 @@ export interface Config {
   buildModel?: string;
   /**
    * Past this share of the context window (%), and always early enough to stay clear of Pi's own compaction:
-   * a planning session writes the plan to its spec and is reset to it; a build session is reset to the
-   * build's state at the next task boundary. 0 = never (Pi compacts; pb still writes the summary).
+   * a planning session writes the plan to its spec and is reset to it. A build uses it only when
+   * `buildReset` is "threshold"; 0 turns off the planning checkpoint and the threshold reset.
    */
   checkpointAt: number;
+  /**
+   * What a build does between tasks. "task" (the default): reset at every task boundary, so each
+   * later task reads the spec and the code instead of inheriting the finished tasks' conversation.
+   * "threshold": reset only past `checkpointAt`. "never": leave compaction to Pi (pb still writes the summary).
+   */
+  buildReset: "task" | "threshold" | "never";
   /** /pb:archive updates the project map in AGENTS.md from the finished feature. */
   mapOnArchive: boolean;
   /** A desktop notification when pb asks you something (a question, or a dialog that goes on without you). */
@@ -114,6 +120,7 @@ export const DEFAULT_CONFIG: Config = {
   baseline: true,
   explorer: {},
   checkpointAt: 75,
+  buildReset: "task",
   mapOnArchive: true,
   notify: true,
 };
@@ -122,6 +129,7 @@ export const DEFAULT_CONFIG: Config = {
 function sanitizeConfig(raw: Partial<Config>): Config {
   const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : d);
   const bool = (v: unknown, d: boolean) => (typeof v === "boolean" ? v : d);
+  const oneOf = <T extends string>(v: unknown, allowed: readonly T[], d: T): T => (allowed.includes(v as T) ? (v as T) : d);
   const strOrNull = (v: unknown, d: string | null) => (v === null || v === undefined ? d : typeof v === "string" ? v : d);
   const reviewerRaw = typeof raw.reviewer === "object" && raw.reviewer !== null ? raw.reviewer : {};
   const specReviewerRaw = typeof raw.specReviewer === "object" && raw.specReviewer !== null ? raw.specReviewer : {};
@@ -170,6 +178,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     },
     buildModel: typeof (raw as { buildModel?: unknown }).buildModel === "string" ? (raw as { buildModel: string }).buildModel : undefined,
     checkpointAt: num((raw as { checkpointAt?: unknown }).checkpointAt, DEFAULT_CONFIG.checkpointAt),
+    buildReset: oneOf((raw as { buildReset?: unknown }).buildReset, ["task", "threshold", "never"] as const, DEFAULT_CONFIG.buildReset),
     mapOnArchive: bool((raw as { mapOnArchive?: unknown }).mapOnArchive, true),
     notify: bool((raw as { notify?: unknown }).notify, true),
     extra: typeof raw.extra === "object" && raw.extra !== null ? raw.extra : undefined,

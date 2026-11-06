@@ -130,7 +130,9 @@ export function registerUndo(pi: ExtensionAPI) {
       p.current = undefined;
       p.phase = target.phase ?? "paused";
       p.pause = p.phase === "paused" ? `undone to before ${target.id}` : undefined;
-      p.needsIntro = rewound && !!target.intro ? true : undefined;
+      // A start-of-build row always reintroduces the build instructions: even when the conversation
+      // can't be rewound (it lies before a reset or compaction), the task starts fresh from them.
+      p.needsIntro = target.intro ? true : undefined;
       p.fix = undefined;
       store.saveProgress(p);
       showProgress(ctx, p);

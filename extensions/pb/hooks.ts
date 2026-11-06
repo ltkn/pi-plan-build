@@ -11,7 +11,7 @@ import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics
 import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
 import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, loadSpec, pauseBuild, pruneSession, rememberStall, resetLimit, runtime, specOfSession, stop, tree, unfinishedPhase } from "./kit.ts";
-import { pastCheckpoint, stateSummary } from "./flow.ts";
+import { buildResetDue, stateSummary } from "./flow.ts";
 
 export function registerHooks(pi: ExtensionAPI) {
   /**
@@ -241,18 +241,19 @@ export function registerHooks(pi: ExtensionAPI) {
 
     if (!wasBoundary || p.phase !== "building" || !p.current) return;
     const loaded = loadSpec(store, name);
-    const percent = pastCheckpoint(ctx, store);
-    if (percent === undefined) return;
+    const due = buildResetDue(ctx, store);
+    if (!due) return;
     const cp = cps.find((c) => c.id === p.current);
     if (cp) {
       cp.pendingReset = true;
       store.saveCheckpoints(name, cps);
     }
-    store.event(name, { type: "reset", task: p.current, percent });
+    const when = due.percent === undefined ? "" : ` (it was ${due.percent}% full)`;
+    store.event(name, { type: "reset", task: p.current, ...(due.percent === undefined ? {} : { percent: due.percent }) });
     return {
       entries: [
         { type: "compaction" as const, summary: stateSummary(ctx, store, p, "reset"), firstKeptEntryId: null, details: { pb: "build-reset", task: p.current } },
-        { type: "custom_message" as const, customType: "pb", content: `**Context reset** before ${p.current} (it was ${percent}% full): the build goes on from its state and the spec.`, display: true },
+        { type: "custom_message" as const, customType: "pb", content: `**Context reset** before ${p.current}${when}: the build goes on from its state and the spec.`, display: true },
       ],
     };
   });

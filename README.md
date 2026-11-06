@@ -84,10 +84,13 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 
 ## Why it's built this way
 
-- **The build stays in the conversation.** Nothing you discussed is lost and
-  the prompt cache keeps working; the spec on disk carries decisions and
-  rejected ideas through compaction to the reviewer. pb recommends a fresh
-  session above `freshAbove`, or when building on another model.
+- **The build stays in one session, but not one context.** Nothing you
+  discussed is lost — the session keeps it — while each task after the first
+  starts from a reset to the spec, the done tasks and their changed files; the
+  agent reads the code instead of inheriting the previous task's conversation. The spec on
+  disk carries decisions and rejected ideas through every reset to the
+  reviewer. pb still recommends a fresh session above `freshAbove`, or when
+  building on another model.
 - **The harness decides when it's done.** `pb_task_done` hands out tasks in one
   uninterrupted run; after the last one the harness runs the full suite, sends
   a failure back to fix, and pauses after `maxAttempts`. The agent's word never
@@ -112,11 +115,13 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   approval. No dialog, no timeout, nothing to babysit.
 - **A lean context.** Broad questions go to `pb_explore`, a separate read-only
   context (on a cheaper model if you like). The baseline runs in the harness,
-  in its own worktree, and a build resets between tasks to a summary pb writes
-  from its own state, naming the spec rather than copying it.
+  in its own worktree, and every task after the first starts from a reset to a
+  summary pb writes from its own state: the tasks already done, the files they
+  changed, and the spec to read — not a copy of the conversation before it.
 - **Undo means undo.** `/pb:undo` restores the files and rewinds the
   conversation to before the task, so a discarded attempt doesn't anchor the
-  next one, and the cache stays warm.
+  next one. When that point lies before a task-boundary reset, it restores the
+  files only and says so; the build carries on from the spec and the state.
 - **The human view says what happened.** Each phase ends with a consistent header —
   `**<marker> <Phase> — <spec>**` with the facts that summarize it
   (`**✅ Build complete — order-cancellation** · 3/3 tasks · 25m`) — then a `**Next:**` line
@@ -262,7 +267,8 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |
 | `notify` | true | a desktop notification when pb asks you something, when a build pauses or finishes, or when a spec review finishes while you're elsewhere |
 | `extra` | unset | your instructions added to a role's prompt: `{"plan", "spec", "build", "review", "adversarial", "map"}`; also read from `~/.pi/agent/pb/config.json`, applied first |
-| `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build is reset at the next task boundary; 0 = never |
+| `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build uses it only when `buildReset` is `"threshold"`; 0 turns both off |
+| `buildReset` | `"task"` | what a build does between tasks: `"task"` resets at every boundary (the summary carries the done tasks, and the next task's prompt names their changed files and directs it to inspect what it depends on); `"threshold"` only past `checkpointAt`; `"never"` leaves compaction to Pi |
 
 ## On disk
 
@@ -306,12 +312,13 @@ Xihao Sun, Juhyun Lee, Ethan Tran and Simon (Sang Won) Lee
 three ideas: decomposition into small tasks, a verifier whose verdict outranks
 the model's own "done", and fresh eyes against anchoring.
 
-pb has since deviated a long way: it plans and builds in one conversation to
-keep the discussion and the prompt cache, checks by default once after the last
-task, and keeps a fresh context only for the explorer and the review. The spec
-as checkpoint, the planning reset and most of the rest are pb's own. The paper's
-evaluation says nothing about pb: it is an independent tool for interactive work
-in Pi, not an implementation of the paper.
+pb has since deviated a long way: it plans and builds in one session, resets
+the build's context at every task boundary so each later task reads the code
+instead of the previous conversation, checks by default once after the last
+task, and keeps a separate fresh context for the explorer, the spec review and
+the code review. The spec as checkpoint, the planning reset and most of the
+rest are pb's own. The paper's evaluation says nothing about pb: it is an
+independent tool for interactive work in Pi, not an implementation of the paper.
 
 Built on [Pi](https://pi.dev) by Earendil.
 

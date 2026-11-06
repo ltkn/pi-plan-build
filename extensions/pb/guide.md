@@ -49,11 +49,13 @@ only what its events already carry (the build's own start and end).
    Fix them right there, `/pb:review` again (it looks only at what changed),
    commit, and `/pb:archive`.
 
-The build stays in the conversation that planned it: nothing you discussed is
-lost, and the prompt cache keeps working. The spec is written to disk so it
-survives compaction and reaches the reviewer. For a large feature after a long,
-messy discussion, build in a fresh session from the spec alone; pb recommends
-that itself when the session is over half full or the build runs on another model.
+The build stays in the session that planned it: nothing you discussed is lost.
+Each later task then starts from a fresh context reset to the build's state, so
+the agent reads the spec and the code instead of inheriting the previous task's
+conversation. The spec is written to disk so it survives every reset and reaches
+the reviewer. For a large feature after a long, messy discussion, build in a
+fresh session from the spec alone; pb recommends that itself when the session is
+over half full or the build runs on another model.
 
 For a small change, you don't need the whole flow: work with Pi as usual and
 run `/pb:review` on the uncommitted change.
@@ -582,8 +584,10 @@ revised spec and a new approval.
 1. **The tasks.** Each task is built the same way: tests first, then the
    behaviour, then `pb_task_done` — reporting what changed plus the caveats,
    rejections and open items later tasks can catch on — which hands out the
-   next one, naming the spec to read. The whole
-   build is one uninterrupted run, so the prompt cache stays warm. How the shape
+   next one, naming the spec to read. The build runs uninterrupted, but each
+   task after the first starts from a fresh context reset to the build's state,
+   so the agent reads the code it builds on instead of inheriting the previous
+   task's conversation. How the shape
    is arrived at is the build's: the compiler and the tests give the feedback,
    task by task, where each step is checked by something real. The first task
    that settles a shape the later ones build on records it in the spec's
@@ -627,9 +631,12 @@ bind the build. How to build it is the build's: a better way found while coding
 is taken, and a change to the Design goes in Decisions. Every task handout,
 check retry, coherence pass and fix lap names the spec file and those sections;
 the finished tasks' caveats, rejections and open items reach the model through
-the reset and compaction summaries. The spec is never
-pasted: it would be shortened, stale or too big for the model reading it, so
-the model reads the one file that is the source of truth.
+the reset and compaction summaries, and each task's changed files are listed
+from its checkpoint; the next task's handoff directs it to inspect the parts it
+depends on and to treat code as evidence, not approval, when it conflicts with
+the spec. The spec is never pasted: it would be shortened, stale or too big
+for the model reading it, so the model reads the one file that is the source
+of truth.
 
 **The build never stops to ask.** Where the spec is ambiguous, contradicts
 itself or doesn't match the code, Pi takes the sensible reading, records it in
@@ -648,14 +655,22 @@ pauses.
 paused, or between your messages) compacts it the same way: the summary is the
 build's state, written by pb, not by a model.
 
-**A full build session.** When a task finishes and the session is past
-`checkpointAt` (75% of its window, always before Pi would compact), pb resets it
-right there, between two tasks, where nothing is half-done. The build goes on
-from a summary pb writes itself: the build's rules, every task with its
-report (what changed, and the caveats, rejections and open items later tasks can catch on), the spec's path with the sections that bind the build, and the next task. No summarizing model call,
-and nothing of the finished task is needed any more. Should a single task still
-run into Pi's own compaction, pb writes that summary too, adding the files the
-task has changed so far and the files read before, so it carries on instead of
+**A fresh context per task.** When a task finishes, pb resets the session right
+there, between two tasks, where nothing is half-done. The next task starts from
+a summary pb writes itself: the build's rules, every finished task with its
+report (what changed, and the caveats, rejections and open items later tasks can
+catch on), the spec's path with the sections that bind the build, and the next
+task — its prompt naming the changed files each earlier task left (from
+checkpoints, not the model's word), directing it to inspect the parts it
+depends on, and treating code as evidence rather than approval when it
+conflicts with the spec.
+No summarizing model call. The point is focus: the next task reads the code it
+builds on instead of inheriting a long conversation about the previous ones.
+`buildReset: "threshold"` restores the older behaviour (reset only past
+`checkpointAt`, 75% of the window and always before Pi would compact);
+`buildReset: "never"` leaves compaction to Pi. Should a single task still run
+into Pi's own compaction, pb writes that summary too, adding the files the task
+has changed so far and the files read before, so it carries on instead of
 starting over. `/pb:undo` to a task from before a reset restores the files only
 (the old conversation would bring the whole context back) and says what was
 undone.
@@ -912,8 +927,9 @@ and picking one restores the spec text and phase from before that lap. Either
 way the **conversation** goes back too: the discarded attempt drops out of the
 context (a short note says what was undone, and repeats what
 you said meanwhile so your guidance isn't lost), so it doesn't anchor the next
-try, and everything before that point is still in the prompt cache.
-`/pb:undo u1` reverses an undo, conversation included. If you committed
+try. When the rewind point lies before a task-boundary reset, only the files and
+task list go back, and the result says so. `/pb:undo u1` reverses an undo,
+conversation included. If you committed
 in between, the undone work shows up as uncommitted changes (you're warned).
 <!-- /pb -->
 

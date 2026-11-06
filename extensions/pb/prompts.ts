@@ -296,13 +296,14 @@ export function specReference(name: string): string {
 /**
  * check: the command pb_task_done will run for this task, if any. red: its new tests must be seen failing first.
  * reference: the spec file and the sections that bind the task; read at the source, never pasted.
+ * handoff: where the finished tasks left their code (a later task starts from the code, not from memory).
  */
-export function taskPrompt(task: SpecTask, attempt: number, max: number, check: string | null, red = false, reference = ""): string {
+export function taskPrompt(task: SpecTask, attempt: number, max: number, check: string | null, red = false, reference = "", handoff = ""): string {
   return `[pb:build] Task ${task.id}${attempt > 1 ? ` (attempt ${attempt} of ${max})` : ""}. Do only this task:
 
 ${task.text}
 
-${reference ? `${reference}\n\n` : ""}Keep the change to this task: if it has grown into several changes, finish the smallest coherent part and report the rest as open. Don't run the full suite — the harness runs it after the last task. ${STRUCTURED_EDIT_RULE}
+${reference ? `${reference}\n\n` : ""}${handoff ? `${handoff}\n\n` : ""}Keep the change to this task: if it has grown into several changes, finish the smallest coherent part and report the rest as open. Don't run the full suite — the harness runs it after the last task. ${STRUCTURED_EDIT_RULE}
 
 ${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}(Comments: describe the code as it is, never its history — no dates or decisions.) When done, call pb_task_done with task "${task.id}"${check ? `: it runs \`${check}\` itself, so don't run that just before` : task.test ? ` once \`${task.test}\` passes` : ""} plus changed/caveat/rejected/open (each required: what changed, what the next task must respect, what was tried and discarded, what is still unchecked — "none" where there is genuinely nothing). If the Goal or a Contract cannot be built as written, status "blocked" with the evidence: the build stops for a revised spec and a new approval.`;
 }

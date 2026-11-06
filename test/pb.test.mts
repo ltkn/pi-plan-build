@@ -3483,7 +3483,7 @@ test("build: past checkpointAt, the session is reset at the next task boundary; 
     if (text.includes("Task T2")) x.runtime().usage = 5;
     return diligent(text, tool);
   };
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", buildReset: "threshold" });
   await written(t);
   t.agent.script = filling(t);
   await t.run("build");
@@ -3507,21 +3507,37 @@ test("build: past checkpointAt, the session is reset at the next task boundary; 
   assert.ok(!fs.existsSync(path.join(t.repo, "T1.txt")));
   assert.match(t.posts.at(-1)!, /The conversation wasn't rewound \(that point is before a context reset or compaction\)/);
 
-  const u = setup({ verify: "true", checkpointAt: 0 }); // off: Pi compacts when full, with pb's summary
+  const u = setup({ verify: "true", buildReset: "never" }); // Pi compacts when full, with pb's summary
   await written(u);
   u.agent.script = filling(u);
   await u.run("build");
   assert.equal(u.resets.length, 0);
 });
 
-test("reset: the build resets at checkpointAt, or before Pi's compaction reserve", async () => {
+test("build: every task starts from a fresh context by default, with the done tasks' files and a pointer to the code", async () => {
+  const t = setup({ verify: "true" }); // usage stays low, far below checkpointAt
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.equal(t.resets.length, 1); // T1 -> T2
+  assert.equal(t.resets[0].firstKeptEntryId, null);
+  assert.match(t.resets[0].summary, /^\[pb build state: order-cancellation\] The build session was reset between two tasks/);
+  assert.match(t.resets[0].summary, /Already done: T1 \(T1\.txt\)\. This is a pointer, not the truth: before editing, inspect the earlier tasks' code this task depends on/); // harness-computed, not the model's report
+  assert.match(t.resets[0].summary, /If it matches, extend it rather than duplicating it/); // not a mandate to copy it
+  assert.match(t.resets[0].summary, /--- next ---\n\[pb:build\] Task T2\./);
+  assert.doesNotMatch(t.context(), /\[pb:build order-cancellation\] Build/); // T1's conversation is gone
+  assert.ok(t.events("order-cancellation").some((e) => e.type === "reset" && e.task === "T2" && e.percent === 10));
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("reset: buildReset threshold uses checkpointAt, and never leaves compaction to Pi", async () => {
   /** The context is this full by the time T1 finishes. */
   const filledTo = (x: ReturnType<typeof setup>, percent: number): Script => async (text, tool) => {
     if (text.includes("Task T1")) x.runtime().usage = percent;
     return diligent(text, tool);
   };
   const build = async (percent: number, config = {}) => {
-    const x = setup({ verify: "true", ...config });
+    const x = setup({ verify: "true", buildReset: "threshold", ...config });
     await written(x);
     x.agent.script = filledTo(x, percent);
     await x.run("build");
@@ -3546,6 +3562,10 @@ test("reset: the build resets at checkpointAt, or before Pi's compaction reserve
   const at = await build(62, { checkpointAt: 60 });
   assert.equal(at.resets.length, 1);
   assert.ok(at.events("order-cancellation").some((e) => e.type === "reset" && e.task === "T2" && e.percent === 62));
+
+  // Never: even a full context is left to Pi.
+  const never = await build(90, { buildReset: "never" });
+  assert.equal(never.resets.length, 0);
 });
 
 /* ------------------------------------- undo -------------------------------------- */
@@ -3562,9 +3582,10 @@ test("undo restores the files and tasks to before a task, rewinds the conversati
   assert.ok(!fs.existsSync(path.join(t.repo, "T2.txt")) && fs.existsSync(path.join(t.repo, "T1.txt")));
   assert.deepEqual(t.progress("order-cancellation").tasks.map((x: any) => [x.id, x.status]), [["T1", "done"], ["T2", "todo"]]);
   assert.match(t.posts.at(-1)!, /Undone to before T2\*\* — 1 file\(s\) restored, the conversation rewound/);
-  // Back to where T2 was handed out, with pb's own summary of what was undone.
+  // Back to where T2 was handed out: the reset that starts it, with pb's own summary of what was undone.
   const nav = t.navigations.at(-1)!;
-  assert.match(t.text(nav.target), /✓ T1 done[\s\S]*Task T2\. Do only this task/);
+  assert.equal(t.entry(nav.target)!.type, "compaction");
+  assert.match(t.text(nav.target), /- T1 first file: done[\s\S]*Task T2\. Do only this task/);
   assert.match(nav.summary!, /The human undid the work from T2 on[\s\S]*T2 ✓ · 1 files · did T2[\s\S]*What the human said meanwhile, still valid unless they say otherwise: "name files in lower case from now on"/);
 
   await t.run("undo", "u1");
