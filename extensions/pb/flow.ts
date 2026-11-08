@@ -881,8 +881,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       return undefined;
     }
     if (spec.dependsOn) {
-      const dep = store.progress(spec.dependsOn)?.phase;
-      if (dep !== "built" && dep !== "reviewed") {
+      if (!store.finishedPhase(spec.dependsOn)) {
         if (!(await agree(ctx, store, `${name} depends on ${spec.dependsOn}, which isn't built yet. Build ${name} anyway?`, notes))) return undefined;
       }
     }

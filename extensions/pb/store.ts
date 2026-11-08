@@ -692,7 +692,15 @@ export class Store {
   }
 
   progress(name: string): Progress | undefined {
-    const p = readJson<Progress>(path.join(this.specDir(name), "progress.json"));
+    // A read, not a write: an invalid name (e.g. prose a parser took verbatim) sees no progress,
+    // it doesn't throw. Writes (saveProgress) keep specDir's refusal.
+    let file: string;
+    try {
+      file = path.join(this.specDir(name), "progress.json");
+    } catch {
+      return undefined;
+    }
+    const p = readJson<Progress>(file);
     if (p && (p.phase as string) === "checking") p.phase = "paused"; // the gap check of earlier versions
     // The skeleton step is gone: a build caught mid-skeleton resumes at its first unfinished task.
     if (p && (p.tasks ?? []).some((t) => t.id === "skeleton")) {
@@ -706,8 +714,38 @@ export class Store {
     writeFileAtomic(path.join(this.specDir(p.spec), "progress.json"), `${JSON.stringify(p, null, 2)}\n`);
   }
 
+  /**
+   * Whether a dependency counts as finished: live first, then the archive. Archiving renames a
+   * built spec out of .pi/pb/specs/, so store.progress alone would stop seeing it and every
+   * dependent would warn "isn't built yet" after a correct archive. A live progress record wins:
+   * rewriting a name after archiving starts that spec over, it doesn't inherit the archived phase.
+   * Archived folders match on the progress record's own spec, not the stamped folder name.
+   */
+  finishedPhase(name: string): "built" | "reviewed" | undefined {
+    const live = this.progress(name);
+    if (live) return live.phase === "built" || live.phase === "reviewed" ? live.phase : undefined;
+    if (!fs.existsSync(this.archiveRoot)) return undefined;
+    let dirs: string[];
+    try {
+      dirs = fs.readdirSync(this.archiveRoot);
+    } catch {
+      return undefined;
+    }
+    for (const d of dirs) {
+      const p = readJson<Progress>(path.join(this.archiveRoot, d, "progress.json"));
+      if (p?.spec === name && (p.phase === "built" || p.phase === "reviewed")) return p.phase;
+    }
+    return undefined;
+  }
+
   checkpoints(name: string): Checkpoint[] {
-    return readJson<Checkpoint[]>(path.join(this.specDir(name), "checkpoints.json")) ?? [];
+    let file: string;
+    try {
+      file = path.join(this.specDir(name), "checkpoints.json");
+    } catch {
+      return [];
+    }
+    return readJson<Checkpoint[]>(file) ?? [];
   }
   saveCheckpoints(name: string, list: Checkpoint[]): void {
     writeFileAtomic(path.join(this.specDir(name), "checkpoints.json"), `${JSON.stringify(list, null, 2)}\n`);

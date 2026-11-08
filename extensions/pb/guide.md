@@ -299,7 +299,7 @@ says why. The header tells the build how to check the work:
 ```
 # Order cancellation
 Status: ready                  (planning: a checkpoint — no tasks yet)
-Depends on: none
+Depends on: none               (or: <spec name> — an optional note)
 Verification: tests            (or: build — why · none — why)
 New tests: yes                 (or: no — why)
 ```
@@ -508,7 +508,8 @@ plan that is checkable but aimed at the wrong outcome.
   spec of its own that the feature `Depends on:`.
 - **Several features from one conversation?** One spec each: each is built,
   reviewed and committed on its own. `Depends on:` orders them; building one
-  before its dependency asks you first. Write them all while the discussion is
+  before its dependency asks you first (an archived, finished dependency counts
+  as built). Write them all while the discussion is
   fresh; when a later build finds the code has moved on, it resolves the
   difference and lists what it chose.
 - **Small related changes** can share a spec.

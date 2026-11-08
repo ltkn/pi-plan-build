@@ -5,7 +5,7 @@
  *
  *   # <title>
  *   Status: planning | ready                 (optional; ready by default)
- *   Depends on: <spec name> | none (a trailing note in parens is ignored)
+ *   Depends on: <spec name> | none (an optional note may follow a dash or sit in parentheses)
  *   Verification: tests | build | none — <why, unless tests>
  *   New tests: yes | no — <why, if no>
  *
@@ -22,6 +22,7 @@
  */
 import { createHash } from "node:crypto";
 import { blankFenced, escapeRegExp, headerBlock, sectionHeading, sectionOf, setSection, unfenced } from "./markdown.ts";
+import { KEBAB_NAME } from "./names.ts";
 import type { AcceptanceCriterion, Gate } from "./store.ts";
 
 export { sectionHeading, sectionOf, setSection };
@@ -90,7 +91,13 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
   }
 
   const dep = header(md, "Depends on");
-  const dependsOn = dep && !/^none(\s*\(|$)/i.test(dep) ? dep : undefined;
+  // A spec name is one kebab-case token; a note may follow it after a dash or in parentheses and is
+  // never part of the name — every consumer turns this bare name into the spec directory.
+  const depName = dep?.split(/\s+/, 1)[0];
+  const depNote = dep && depName ? dep.slice(depName.length).trim() : "";
+  if (depName && depName !== "none" && (!KEBAB_NAME.test(depName) || (depNote !== "" && !/^(?:[—–-]|\()/.test(depNote))))
+    errors.push(`"Depends on: ${dep}" must name a spec (short kebab-case, e.g. order-cancellation) or none; a note may follow after a dash or in parentheses`);
+  const dependsOn = depName && depName !== "none" ? depName : undefined;
 
   for (const s of REQUIRED_SECTIONS) {
     const found = blanked.filter((l) => sectionHeading(s).test(l));

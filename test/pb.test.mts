@@ -2748,6 +2748,18 @@ test("spec: Status: ready can't have Open questions; planning can", async () => 
   assert.equal((await t.callTool("pb_write_spec", { name: "y", content: `${SPEC()}## Open questions\n` })).error, undefined);
 });
 
+test("spec: Depends on names a spec; a note after the name is not part of it", () => {
+  const withDep = (line: string) => parseSpec(SPEC().replace("Depends on: none", `Depends on: ${line}`));
+  assert.equal(withDep("order-cancellation").spec!.dependsOn, "order-cancellation");
+  assert.equal(withDep("order-cancellation (built; its endpoints are unchanged)").spec!.dependsOn, "order-cancellation");
+  assert.equal(withDep("order-cancellation — implemented and on HEAD; this spec consumes its endpoints unchanged").spec!.dependsOn, "order-cancellation");
+  assert.equal(withDep("none (nothing to order before this)").spec!.dependsOn, undefined);
+  assert.equal(withDep("none — nothing to order before this").spec!.dependsOn, undefined);
+  const bad = withDep("the live trains spec — implemented and on HEAD");
+  assert.equal(bad.spec, undefined);
+  assert.match(bad.errors.join("; "), /"Depends on: the live trains spec — implemented and on HEAD" must name a spec \(short kebab-case, e\.g\. order-cancellation\) or none/);
+});
+
 test("spec: a behaviour task without Test:, or with a no-op one, warns — refactors stay quiet", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -6170,6 +6182,58 @@ test("/pb:build rejects a readable file under an invalid spec name instead of bu
   assert.match(t.notes.at(-1)!, /isn't a valid spec name/);
   assert.ok(!fs.existsSync(path.join(t.repo, ".pi/docs/foo/progress.json"))); // no state written outside .pi/pb/
   assert.equal(t.instructions.length, before); // nothing started
+});
+
+test("/pb:build reads a Depends on note as the spec name, not the whole line", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "tempo-gtfs-live-trains", content: SPEC() });
+  const dependent = SPEC().replace("Depends on: none", "Depends on: tempo-gtfs-live-trains — implemented and on HEAD; this spec consumes its endpoints unchanged");
+  assert.equal((await t.callTool("pb_write_spec", { name: "live-trains", content: dependent })).error, undefined);
+  t.selects.push("No, stop here"); // the dependency has no build yet: the human can decline
+  await t.run("build", "live-trains");
+  assert.match(t.selectTitles.at(-1)!, /live-trains depends on tempo-gtfs-live-trains, which isn't built yet/);
+  assert.equal(t.instructions.length, 0);
+});
+
+test("store: reads of an invalid spec name see nothing instead of throwing, and an archived dependency counts as built", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  const phrase = "tempo-gtfs-live-trains — implemented and on HEAD; this spec consumes its endpoints unchanged";
+  assert.equal(store.progress(phrase), undefined);
+  assert.deepEqual(store.checkpoints(phrase), []);
+  assert.equal(store.readSpec(phrase), undefined); // already safe, pinned beside the two above
+  assert.equal(store.finishedPhase(phrase), undefined);
+
+  await t.callTool("pb_write_spec", { name: "archived-dep", content: SPEC() });
+  store.saveProgress({ ...store.progress("archived-dep")!, phase: "built" });
+  assert.equal(store.finishedPhase("archived-dep"), "built");
+  store.archive("archived-dep");
+  assert.equal(store.progress("archived-dep"), undefined); // the folder moved away
+  assert.equal(store.finishedPhase("archived-dep"), "built"); // the gate still sees it as finished
+
+  await t.callTool("pb_write_spec", { name: "archived-dep", content: SPEC() }); // rewritten after archiving
+  assert.equal(store.finishedPhase("archived-dep"), undefined); // a live record wins over the archive
+});
+
+test("/pb:build asks nothing about an archived dependency", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  const store = new Store(t.repo);
+  await t.callTool("pb_write_spec", { name: "platform-core", content: SPEC() });
+  store.saveProgress({ ...store.progress("platform-core")!, phase: "built" });
+  store.archive("platform-core");
+  await t.callTool("pb_write_spec", { name: "platform-feature", content: SPEC().replace("Depends on: none", "Depends on: platform-core") });
+  t.agent.script = diligent;
+  await t.run("build", "platform-feature");
+  assert.ok(!t.selectTitles.some((s) => /depends on platform-core/.test(s)), `no dependency prompt, got ${JSON.stringify(t.selectTitles)}`);
+  assert.ok(t.instructions.length > 0, "the build started");
 });
 
 test("/pb:build near-miss spec names redirect instead of building the wrong spec", async () => {

@@ -136,7 +136,7 @@ ${tip("plan.next")}`;
 /** The format, and what earns a place in a spec: shared by writing, finishing and checkpointing. */
 const SPEC_FORMAT = `# <title>
 Status: ready | planning
-Depends on: <spec name> | none
+Depends on: <spec name> | none (a note may follow, after a dash or in parentheses)
 Verification: tests | build — <why> | none — <why>
 New tests: yes | no — <why>
 

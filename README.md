@@ -177,7 +177,7 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 ```
 # Order cancellation
 Status: ready                       # planning: a checkpoint, no tasks yet
-Depends on: none
+Depends on: none                    # or: <spec name> — an optional note
 Verification: tests                 # or: build — why  ·  none — why
 New tests: yes                      # or: no — why
 
