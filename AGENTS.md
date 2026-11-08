@@ -115,7 +115,7 @@
 - `BINDING_SECTIONS` (`spec.ts`) is the single list every build prompt names for the model to read (`specReference`), and the guide and README must state it in the exported order (test "binding: the guide and README list the binding sections in the exported order"). Nothing renders or shortens the sections any more: the spec file is one read away.
 
 ### Tests + build
-- `npm test` → `node --test test/pb.test.mts` (385 tests, ~170s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
+- `npm test` → `node --test test/pb.test.mts` (386 tests, ~170s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
 - `node scripts/verify-test.mjs [--file <file>] "<exact test name>" ...` is the per-task proof: it exits 0 only when every name has a TAP `ok N - <name>` line and the report says `# fail 0` (a `# SKIP` is not a proof), because `node --test --test-name-pattern=<zero-match>` itself exits 0. Names are regex-escaped; default file `test/pb.test.mts`; dev-only (outside `package.json` `files`).
 - `test/verify-fixture.test.mjs` is deliberately **not** run by `npm test` (the suite names pb.test.mts alone); the prover's tests drive it through `--file`, so they never nest the real suite.
 - Peer ranges must stay identical in `package.json` and `package-lock.json` or `npm ci` refuses in CI: after touching a peer, run `npm install --package-lock-only`. Pinned by "deps: the lockfile peer ranges match package.json".

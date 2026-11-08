@@ -39,9 +39,9 @@ only what its events already carry (the build's own start and end).
    pb sends a **desktop notification** — those are the moments you've reliably
    walked away from (`"notify": false` turns it off).
 3. **`/pb:spec-harden`** (only when the review's list is longer than you want to
-   type through): the model repairs the **plan** — it runs the probes that need
-   measuring, decides what it can defend, argues in `## Decisions` when it thinks
-   a finding is wrong — and brings you only what two answers genuinely differ on.
+   type through): the model repairs the **plan** — it measures what needs
+   measuring, settles what it can defend, rebuts a finding it can prove wrong in
+   `## Decisions` — and asks you only where two defensible answers differ.
    `/pb:spec-fix [name] [ids]` runs one such lap on your say-so. See
    `/pb:help spec-harden`.
 4. **`/pb:review`**: a fresh reviewer compares the change with the spec and
@@ -527,7 +527,7 @@ named under the findings — it is a reading of the code as it stands.
 
 When that review comes back with a list you don't want to type through, that's
 what the repair doors are for. Both doors make the model repair the **plan**, not
-the code, and both bind it to the same four legal moves per item:
+the code, and both give it the same four ways to settle each item:
 
 - **point it at evidence** — it runs the probe itself (`pb_try`, read-only) and
   writes what the probe returned into `## Findings`;
@@ -547,23 +547,25 @@ finding by default, or the numbers you name. After the lap it runs a claim check
 reports. It does not re-review: the text changed, so the old verdict doesn't cover
 it and `/pb:spec-review` decides that on the new bytes.
 
-**`/pb:spec-harden [name]`** drives the whole loop: repair lap → claim check →
-one confirming review → one last lap over what it brought back → digest. It prints
-its plan first and one confirm starts it. Budget: `specFix.maxLaps` laps and
-`specFix.maxReviews` review passes (defaults 3 and 2). It stops on facts it can
-check — nothing left un-evidenced, budget spent, or a lap that changed nothing —
-because a fresh full pass never runs out of subjects, so "no findings" would never
-stop. What is left un-evidenced is listed for you, with its cost.
+**`/pb:spec-harden [name]`** drives the whole loop: a review if the text has no
+verdict yet, repair lap → claim check → one confirming review → one last lap over
+what that review finds → digest. It prints the plan first and one confirm starts
+it. Budget: `specFix.maxLaps` repair laps and `specFix.maxReviews` review passes
+(defaults 3 and 2). A lap is added only while the claim check or the confirming
+review still finds something and the budget lasts; a lap that changes nothing ends
+the run. That is the stop rule, not "no findings" — a fresh full pass never runs
+out of subjects. Every claim left without evidence is listed for you, with what
+settling it would take.
 
-Either way the run brings you only what it would not decide itself: a question, its
-recommendation, and what it would do unattended (that goes on the record as decided
-without you). The lap's pen is the ordinary one, so the format gates and your
-standards still bind it: it writes through `pb_write_spec` and `pb_try` writes
-nothing. Each lap is an undo point — `/pb:undo` restores the spec text and the
-phase it had before the lap, and drops the lap whole. Repair and build never
-overlap: `/pb:build` waits while a lap is open, and a build that starts anyway
-drops the open lap rather than build a plan that is mid-edit — harden before
-`/pb:build`, not during it.
+Either way the run asks you only the calls it won't make: each question comes with
+its recommendation and with what it would do if you don't answer (that goes on
+the record as decided without you). The lap's pen is the ordinary one, so the
+format gates and your standards still bind it: it writes through `pb_write_spec`
+and `pb_try` writes nothing. Each lap is an undo point — `/pb:undo` restores the
+spec text and the phase it had before the lap, and drops the lap whole. Repair and
+build never overlap: `/pb:build` waits while a lap is open, and a build that
+starts anyway drops the open lap rather than build a plan that is mid-edit —
+harden before `/pb:build`, not during it.
 
 **If a spec keeps finding things**: read the P1s, and let the laps decide what
 only the business can decide — you keep the calls, the model does the clerking.

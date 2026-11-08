@@ -1927,7 +1927,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
    */
 
   pi.registerCommand(cmd("spec-harden"), {
-    description: "Auto-pilot for a written spec: repair laps over the review's findings, a claim check after each lap, one confirming review, one last lap over what it brings back. It probes what needs measuring, applies the fix it recommends and argues in Decisions when a finding is wrong; it brings you only what two defensible answers differ on. Optional: which spec",
+    description: "Auto-pilot for a written spec: a review if this text has no verdict, then repair laps with a claim check after each, one confirming review, and a last lap over what it finds. Each finding is settled with evidence, a cut, a decision or an `assumed:` tag; a wrong finding is rebutted in `## Decisions`; only genuinely open calls come back to you. Optional: which spec",
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
@@ -1954,13 +1954,22 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
 
       let findings = recordedFindings(store, name, loaded.md);
       let reviews = 0;
+      const verdict = verdictOn(store, name, loaded.md);
       post([
         `\u25b6 **Spec harden** — **${name}**`,
         "",
-        `- ${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} already recorded against this text` : "no verdict on this text yet: pb runs one review pass first to find the work"}`,
+        `- ${
+          findings.length
+            ? `${findings.length} finding${findings.length === 1 ? "" : "s"} already recorded against this text`
+            : verdict
+              ? `a ${verdict} is on record for this text; pb reuses it`
+              : "no verdict on this text yet: pb runs one review pass first to find the work"
+        }`,
         `- budget: at most ${cfg.specFix.maxLaps} repair laps and ${cfg.specFix.maxReviews} review pass${cfg.specFix.maxReviews === 1 ? "" : "es"} in total`,
-        `- each lap may only: point a claim at evidence (it runs the probe), delete it, decide it in Decisions with the alternative it rejected, or tag it \`assumed\`; it argues back in Decisions when it thinks a finding is wrong`,
-        `- it stops early when nothing is left un-evidenced or a lap changes nothing, and brings you whatever it would not decide, with its recommendation`,
+        `- a lap settles each finding one of four ways: with evidence (it runs the read-only probe and writes the command and result beside the claim), by cutting a claim that nothing supports or needs, by a decision in the spec that says why and names the alternative it rejected, or by an \`assumed:\` tag that says what would prove it wrong`,
+        `- a finding it can prove wrong is rebutted in \`## Decisions\` with a \`path:line\` citation, never silently dropped`,
+        `- after each lap, a quick check names the claims still standing on nothing; the run adds a lap while that check or the confirming review finds something and the budget lasts, and a lap that changes nothing ends it`,
+        `- the calls it won't make come back as questions, each with its recommendation (if you don't answer in time, it takes the recommendation and records that)`,
       ].join("\n"));
       if (!(await agree(ctx, store, `Harden ${name} now?`, notes))) return;
 

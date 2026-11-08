@@ -64,8 +64,9 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
      reads it before the first task (P0 findings stop the build until amended;
      the result header is ✅ PASS or ❌ FAIL with the review's time;
      /pb:spec-review runs that same pass on a spec you aren't building yet)
-   → a long list of findings? /pb:spec-harden repairs the plan (probes what needs measuring,
-     decides what it can defend, argues in Decisions) and brings you only the calls;
+   → a long list of findings? /pb:spec-harden repairs the plan (measures what needs
+     measuring, settles what it can defend, rebuts a wrong finding in `## Decisions`)
+     and asks you only where two defensible answers differ;
      /pb:spec-fix [ids] runs one such lap on your say-so
    → one run: T1 → T2 → … (each: its tests seen failing, then passing)
      → coherence (3+ tasks) → full suite → fix → full suite ✓

@@ -1954,7 +1954,12 @@ test("spec-harden: plan, review, lap, claim check, confirming review, last lap �
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
   }
-  assert.match(t.posts.find((p) => p.startsWith("▶ **Spec harden"))!, /no verdict on this text yet: pb runs one review pass first[\s\S]*at most 3 repair laps and 2 review passes/);
+  const intro = t.posts.find((p) => p.startsWith("▶ **Spec harden"))!;
+  assert.match(intro, /no verdict on this text yet: pb runs one review pass first[\s\S]*at most 3 repair laps and 2 review passes/);
+  assert.match(intro, /a lap settles each finding one of four ways[\s\S]*by an `assumed:` tag that says what would prove it wrong/);
+  assert.match(intro, /a finding it can prove wrong is rebutted in `## Decisions` with a `path:line` citation/);
+  assert.match(intro, /adds a lap while that check or the confirming review finds something and the budget lasts/);
+  assert.match(intro, /the calls it won't make come back as questions, each with its recommendation/);
   assert.match(t.posts.find((p) => p.includes("A repair may do only one of four things")) ?? t.instructions.find((i) => i.includes("[pb:spec-fix]"))!, /.+/);
   const laps = t.instructions.filter((i) => i.includes("[pb:spec-fix]"));
   assert.equal(laps.length, 2, `expected a findings lap and a lap over what the confirming review brought back: ${laps.length}`);
@@ -1972,6 +1977,19 @@ test("spec-harden: plan, review, lap, claim check, confirming review, last lap �
   assert.match(digest, /2 repair laps · 2 reviews/);
   assert.equal(t.progress("order-cancellation").fix, undefined);
   assert.equal(t.progress("order-cancellation").phase, "written", "hardening never starts a build");
+});
+
+test("spec-harden: a clean pass on record is named as a pass, not 'no verdict'", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("spec-review", "order-cancellation"); // a pass with no findings
+  t.selects.push("Yes, go on");
+  await t.run("spec-harden", "order-cancellation");
+  const intro = t.posts.find((p) => p.startsWith("▶ **Spec harden"))!;
+  assert.match(intro, /a pass is on record for this text; pb reuses it/);
+  assert.doesNotMatch(intro, /no verdict on this text yet/);
+  assert.match(t.posts.at(-1)!, /Spec hardened[\s\S]*nothing to repair/);
 });
 
 test("spec-harden: the budget is the stop rule — claims keep coming, the run still ends", async () => {
