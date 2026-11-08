@@ -249,7 +249,9 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `build` | `"auto"` | compile/typecheck command: for `Verification: build`, a task without a `Test:` line, and the per-task compile under `taskChecks: "end"` |
 | `lint` | `"auto"` | lint command from package.json's `lint` script (other stacks set it explicitly); runs at the final gate after the suite |
 | `extraChecks` | `[]` | extra project commands (e.g. standards scripts), run at the final gate after lint |
-| `verifyTimeoutSec` | 900 | |
+| `verifyTimeoutSec` | 900 | how long the build's own test/compile/lint run may take; raise it together with `commandTimeoutSec` when the suite legitimately takes longer |
+| `commandTimeoutSec` | 1800 | cap on one `bash`/`powershell` command the agent runs, applied before Pi executes it (a shorter timeout the model set stays); raise it together with `verifyTimeoutSec` when builds or the suite legitimately take longer; 0 = no limit |
+| `probeTimeoutSec` | 900 | how long one `pb_try` probe may run before pb kills it; 0 = no limit |
 | `maxAttempts` | 3 | failed checks (the final one, or a task's) before the build pauses |
 | `maxConcurrent` | 0 (uncapped) | cap on concurrent fresh runs (explorer, try, spec-review, map, verifier share one engine); extra runs queue FIFO; `~/.pi/agent/pb/config.json` caps every project, and `PI_PB_MAX_CONCURRENT` outranks both |
 | `taskChecks` | `"end"` | `"end"`: the full check after the last task; `"each"`: also a check after every task |

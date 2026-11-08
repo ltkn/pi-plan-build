@@ -1047,19 +1047,57 @@ test("pb_try probes by running in a separate context; project changes are put ba
   await assert.rejects(t.runtime().tools.pb_try.execute("call", { goal: "Is it still fast?" }, stopped.signal, undefined, t.runtime().ctx), /Split the goal/);
 });
 
+test("pb_try stops a probe that outlives probeTimeoutSec and says how to bound the rerun", async () => {
+  const t = setup({ verify: "true", probeTimeoutSec: 1 });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  process.env.MOCK_HOLD_MS = "10000"; // the trier would run four times past the limit
+  const started = Date.now();
+  const r = await t.callTool("pb_try", { goal: "Run until stopped" }).finally(() => {
+    delete process.env.MOCK_HOLD_MS;
+  });
+  assert.ok(Date.now() - started < 8000, `the probe was stopped after ${Date.now() - started}ms`);
+  assert.match(r.error!, /Probe stopped after 1s \(probeTimeoutSec\)/);
+  assert.match(r.error!, /size the input[\s\S]*`timeout <seconds>`/);
+});
+
+test("a shell call in a pb session is capped by commandTimeoutSec", async () => {
+  const { Store } = await import("../extensions/pb/store.ts");
+  assert.equal(new Store(setup({ verify: "true" }).repo).config().commandTimeoutSec, 1800); // 30 minutes by default
+  const t = setup({ verify: "true", commandTimeoutSec: 5 });
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  const silent = { command: "true" };
+  await t.callTool("bash", silent);
+  assert.equal((silent as { timeout?: number }).timeout, 5); // no timeout: pb sets the cap
+  const shorter = { command: "true", timeout: 2 };
+  await t.callTool("bash", shorter);
+  assert.equal(shorter.timeout, 2); // the model's stricter bound stays
+  const longer = { command: "true", timeout: 60 };
+  await t.callTool("bash", longer);
+  assert.equal(longer.timeout, 5); // a longer one is clamped, not trusted
+  const off = setup({ verify: "true", commandTimeoutSec: 0 });
+  process.chdir(off.repo);
+  await off.run("plan", "cancel orders");
+  const unlimited = { command: "true", timeout: 60 };
+  await off.callTool("bash", unlimited);
+  assert.equal(unlimited.timeout, 60); // 0 turns the cap off
+});
+
 test("explorer and trier check the project map before reading code", async () => {
   const { EXPLORER_SYSTEM, TRY_SYSTEM } = await import("../extensions/pb/prompts.ts");
   assert.match(EXPLORER_SYSTEM, /project map in AGENTS\.md/);
   assert.match(TRY_SYSTEM, /project map in AGENTS\.md/);
 });
 
-test("map: area headings carry a path prefix; sessions read Security plus covering headings", async () => {
+test("map: whole-project headings carry no path; sessions read them plus covering area headings", async () => {
   const { CARTOGRAPHER_SYSTEM } = await import("../extensions/pb/map.ts");
-  assert.match(CARTOGRAPHER_SYSTEM, /area heading carries its path prefix/);
+  assert.match(CARTOGRAPHER_SYSTEM, /The whole-project headings — "### Security invariants", "### Layout", "### Tests \+ build", "### Docs", "### Known gaps" — carry no path and are read in every session/);
+  assert.match(CARTOGRAPHER_SYSTEM, /every other heading is an area heading and carries its path prefix/);
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   await t.run("plan", "cancel orders");
-  assert.match(t.instructions.at(-1)!, /From the map, read Security invariants in full and only the area headings covering the touched paths/);
+  assert.match(t.instructions.at(-1)!, /From the map, read the whole-project headings \(Security invariants, Layout, Tests \+ build, Docs, Known gaps\) in full and only the area headings covering the touched paths/);
 });
 
 test("/pb:deps investigates dependencies as a change of its own, in planning mode", async () => {
@@ -7034,7 +7072,23 @@ test("map: the cartographer is told the budget the view warns at", async () => {
   const { CARTOGRAPHER_SYSTEM, MAP_TOKENS } = await import("../extensions/pb/map.ts");
   assert.ok(CARTOGRAPHER_SYSTEM.includes(`about ${MAP_TOKENS.toLocaleString("en-US")} tokens at most`));
   assert.match(CARTOGRAPHER_SYSTEM, /### Security invariants[\s\S]*Known gaps[\s\S]*Never write a verdict/);
-  assert.match(CARTOGRAPHER_SYSTEM, /capable models that explore fast[\s\S]*Layout, only where exploring misleads[\s\S]*No module-by-module tour[\s\S]*Start with the security invariants/);
+  assert.match(CARTOGRAPHER_SYSTEM, /capable models that explore fast[\s\S]*Under "### Layout", only where exploring misleads[\s\S]*No module-by-module tour[\s\S]*Start with the security invariants/);
+});
+
+test("map: the cartographer reads and preserves; no builds, snapshots, routes-as-paths or secrets", async () => {
+  const { CARTOGRAPHER_SYSTEM, cartographerBrief } = await import("../extensions/pb/map.ts");
+  assert.match(CARTOGRAPHER_SYSTEM, /bash only to read/);
+  assert.match(CARTOGRAPHER_SYSTEM, /Never run the build, the tests, the package manager, an install, a server, a network call or a script/);
+  assert.match(CARTOGRAPHER_SYSTEM, /snapshots \(current version ranges, counts, inventories, pass\/fail or measured results\)/);
+  assert.ok(CARTOGRAPHER_SYSTEM.includes("write an HTTP route with its verb (`GET /api/orders/{id}`) or as prose"));
+  assert.match(CARTOGRAPHER_SYSTEM, /name a repo or file outside this project in prose, never as a backticked path/);
+  assert.match(CARTOGRAPHER_SYSTEM, /Never put a secret, credential, token, key, connection string or personal data in the map/);
+  assert.match(CARTOGRAPHER_SYSTEM, /keep every line that is still true exactly as it is/);
+  assert.match(CARTOGRAPHER_SYSTEM, /If nothing changed, report the map as it is with an empty changes list/);
+  assert.match(CARTOGRAPHER_SYSTEM, /Read the project's engineering standards[\s\S]*don't restate the standards/);
+  assert.match(CARTOGRAPHER_SYSTEM, /A test proves an invariant only after you have read its assertion, not from its name/);
+  const brief = cartographerBrief({ current: "- `README`: readme", proposed: "### Layout\n- `GET /api/orders`: the orders route", unresolved: [{ path: "../ui/src/App.vue", line: "- `../ui/src/App.vue`: the UI" }] });
+  assert.match(brief, /If it is an HTTP route or something outside this project[\s\S]*give a route its verb, name an outside repo in prose/);
 });
 
 test("map: every map write strips markers and tabs", async () => {

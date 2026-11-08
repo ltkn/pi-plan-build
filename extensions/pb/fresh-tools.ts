@@ -5,6 +5,7 @@ import { StringEnum, Type } from "./schema.ts";
 import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
 import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
+import { duration } from "./format.ts";
 import { runFresh, usageOf } from "./runner.ts";
 import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
 import { commands, revertFreshRun, sessionModel, tail, text, tree, warnLater } from "./kit.ts";
@@ -104,7 +105,7 @@ export function registerFreshTools(pi: ExtensionAPI) {
     name: "pb_try",
     label: "Try",
     description:
-      "When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. Prefer local code, docs and local/test data first; a read-only production query only when local data cannot answer it (state why, table, row cap at most ~500 rows); never write, never notify. Several calls can run in parallel.",
+      "When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. Prefer local code, docs and local/test data first; a read-only production query only when local data cannot answer it (state why, table, row cap at most ~500 rows); never write, never notify. Bound the goal: a probe is stopped at `probeTimeoutSec` (15 minutes by default), so one that cannot settle in that time is the wrong probe. Several calls can run in parallel.",
     parameters: Type.Object({
       goal: Type.String({ description: "the question to settle by running, specific enough to probe in one go" }),
     }),
@@ -156,6 +157,7 @@ export function registerFreshTools(pi: ExtensionAPI) {
         model: cfg.explorer.model ?? sessionModel(ctx),
         thinking: cfg.explorer.thinking ?? "max",
         maxConcurrent: cfg.maxConcurrent,
+        timeoutMs: cfg.probeTimeoutSec > 0 ? cfg.probeTimeoutSec * 1000 : undefined,
         signal,
         onActivity: (line, call) => {
           steps.push(line);
@@ -178,6 +180,7 @@ export function registerFreshTools(pi: ExtensionAPI) {
       const after = snapshot(cwd, "pb: after try");
       revertFreshRun(cwd, (m) => warnLater(ctx, m), "the trier", before, after);
       store.exploreEvent({ session: sessionFile, ...res.tokens, cost: res.cost, ms: res.ms });
+      if (res.timedOut) throw new Error(`Probe stopped after ${duration(cfg.probeTimeoutSec * 1000)} (probeTimeoutSec). Bound the work before rerunning: size the input and the loop first, cap the rows, and wrap anything that could hang in \`timeout <seconds>\`; a probe that needs longer is the wrong probe.`);
       if (res.aborted) throw new Error("Probe stopped. Split the goal into smaller steps or bound it (fewer rows, less work); rerun the smaller probe.");
       if (!res.text.trim()) throw new Error(`The trier produced no answer${res.error ? `: ${res.error}` : ""}`);
       const t = res.tokens;

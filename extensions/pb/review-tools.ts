@@ -31,7 +31,7 @@ export default function reviewTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "report_map",
     label: "Report map",
-    description: "Report the whole new project map (its body, without a top heading) and what changed, one line each.",
+    description: "Report the whole new project map (its body, without a top heading) and what changed, one line each; an empty list when nothing changed.",
     parameters: Type.Object({
       map: Type.String({ description: "the whole map, markdown" }),
       changes: Type.Array(Type.String(), { description: "what changed, one line each" }),

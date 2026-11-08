@@ -202,11 +202,17 @@ lowers it.
 or limits, performance, a read-only query), Pi calls `pb_try` with the goal: a
 separate context that reads the project but writes scratch files only outside
 it (anything it changes in the project is put back) and hands back Commands /
-Result / Conclusion. Trivial checks stay in the planning session.
+Result / Conclusion. It is told to bound every command, and pb stops a probe
+that outlives `probeTimeoutSec` (15 minutes by default), so a runaway loop
+cannot hold the session for an hour. Trivial checks stay in the planning
+session.
 
 **Investigating is free, changing the project isn't.** Pi can read, search, run
 the build and tests, curl an API, and write and run one-off scripts or programs
-(Python, Java, …) in a temporary directory. Editing or writing any file inside
+(Python, Java, …) in a temporary directory. Every shell command it runs is
+capped at `commandTimeoutSec` (30 minutes by default), so a runaway loop stops
+instead of holding the session for hours; raise it if the project's builds
+legitimately take longer. Editing or writing any file inside
 the project is blocked in this session until you build here (`/pb:build` lifts
 it). Commands can still write files, so pb snapshots the project when planning
 starts. A turn that changes a project file is named in the chat right away, and
@@ -943,9 +949,11 @@ from the standards and from what you wrote) with what stays true across
 features: the layout and the role of each module, the patterns to follow (by
 path), constraints the code doesn't make obvious, test and build quirks. Pi
 loads AGENTS.md into every session, so every plan, build, review and
-exploration starts with it instead of rediscovering it. Area headings carry
-their path prefix (Security invariants carries none: read it in full every
-time); sessions read only the headings covering the paths they touch.
+exploration starts with it instead of rediscovering it. The whole-project
+headings (Security invariants, Layout, Tests + build, Docs, Known gaps) carry
+no path and are read in every session; every other heading is an area heading
+with its path prefix, and sessions read only those covering the paths they
+touch.
 
 - **When a feature is done**, `/pb:archive` updates it from what the feature
   established: its spec's Findings, the design the build settled on, the files
@@ -980,10 +988,12 @@ finds `…/auth/Login.java`), or in a gitignored file of the working tree outsid
 the project root counts as found, and a name that walks there (`../old/Ctrl`)
 is reported like a missing file. The one price of a warning worth trusting: a
 stale name written bare (`gone.md`) is left alone. The names that still don't
-resolve go back to it once to be corrected, and so does a map over the budget,
-to be trimmed. Then the map is written and the change is shown. It asks you
-first only when something looks off: paths that still don't resolve, or a
-large part of the existing map removed; unanswered, the current map stays.
+resolve go back to it once to be corrected or rewritten so they no longer read
+as paths here (a route gets its verb; an outside repo is prose), and so does a
+map over the budget, to be trimmed. Then the map is written and the change is
+shown. It asks you first only when something looks off: paths that still don't
+resolve, or a large part of the existing map removed; unanswered, the current
+map stays.
 `/pb:plan` warns when paths in the map no longer exist (a cheap check, no
 model call).
 

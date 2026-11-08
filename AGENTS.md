@@ -15,7 +15,7 @@
 <!-- pb:map -->
 ## Project map
 
-### Module layout
+### Layout
 - `index.ts` is the composition root; `kit.ts` holds the shared machinery and the trust boundaries (the approval gate, `driftStop`, the spec guards). Roles live in their own files: `plan.ts` (`/pb:plan` & friends), `flow.ts` (the spec tools, the spec review and its repair laps, the build machinery, `/pb:build`, `/pb:spec`, `/pb:spec-review`, `/pb:spec-fix`, `/pb:spec-harden`), `review-flow.ts` (`/pb:review`, `pb_report_findings`), `hooks.ts` (pi's hooks: compaction, checkpoints, planning protections, per-session cleanup), `fix.ts`, `ask.ts` (`pb_ask`), `fresh-tools.ts` (`pb_explore`, `pb_try`), `archive.ts`, `undo.ts`, `map-flow.ts`, `misc.ts` (stats, standards, status, help).
 
 ### Security invariants
@@ -102,6 +102,8 @@
 - The claim check is a fresh run too: `runClaimCheck` passes `maxConcurrent`, `--no-mcp` and a
   `tools:` list naming `report_findings`, like every other fresh role.
 - All fresh runs funnel through `runFresh`, whose FIFO slot cap is `config.maxConcurrent` (the project's `config.json`, else the user-level pb config merged in by `Store.config` under Pi's agent dir) overridable by `PI_PB_MAX_CONCURRENT`; new roles must pass the cap through or they bypass it.
+- A fresh run can carry `timeoutMs`: the clock starts once it holds a slot (queue time is not probe time), expiry kills the whole process group like an abort, and the result says `timedOut` so a caller can name the limit. `pb_try` passes `config.probeTimeoutSec` (default 900 s, `0` = no limit); a trier's `bash` has no default timeout of its own, so this is the only bound on a runaway probe.
+- Pi's own `bash`/`powershell` calls have no default timeout either: `hooks.ts`'s `tool_call` guard sets `input.timeout` to `config.commandTimeoutSec` (default 1800 s; `0` = off) before Pi runs the call, keeping a shorter timeout the model asked for and clamping a longer one; the build task prompt and the `/pb:fix` seed tell the model to stop and report a timeout instead of retrying it. Pi applies no validation after a hook mutation, so the value must stay a positive finite number.
 - A fresh role names its reporting tool in `tools:` (`--tools` replaces the whole selection, **extension tools included**, so an unnamed `report_findings` / `report_verdicts` / `report_map` is never declared and the run can never report). Fresh runs also pass `--no-mcp` (Pi 1.0.4+, gated on the exported `VERSION`): MCP is a built-in extension `--no-extensions` does not stop, so the user's servers would otherwise be spawned — and since 1.0.4 their tools kept by `--tools` — inside a process that is meant to see only the brief. `test/mock-pi.mjs` refuses calls to tools `--tools` does not name, because the mock otherwise cannot see this class at all. (security)
 
 ### Stats and the machine report (extensions/pb/stats.ts, extensions/pb/report.ts)
@@ -112,8 +114,8 @@
 - `guide.md` is parsed at runtime: ` pb:tip key ` regions are the only source of "What now" text (`tip()`, defined in help.ts, used across the phase modules), and `pb:topic` regions are `/pb:help` sections. Using `tip("x")` without the region fails the test "help: every What-now block the code uses exists in the guide".
 - `BINDING_SECTIONS` (`spec.ts`) is the single list every build prompt names for the model to read (`specReference`), and the guide and README must state it in the exported order (test "binding: the guide and README list the binding sections in the exported order"). Nothing renders or shortens the sections any more: the spec file is one read away.
 
-### Tests and commands (test/, scripts/verify-test.mjs, package.json)
-- `npm test` → `node --test test/pb.test.mts` (371 tests, ~165s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
+### Tests + build
+- `npm test` → `node --test test/pb.test.mts` (385 tests, ~170s); `npm run typecheck`; `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
 - `node scripts/verify-test.mjs [--file <file>] "<exact test name>" ...` is the per-task proof: it exits 0 only when every name has a TAP `ok N - <name>` line and the report says `# fail 0` (a `# SKIP` is not a proof), because `node --test --test-name-pattern=<zero-match>` itself exits 0. Names are regex-escaped; default file `test/pb.test.mts`; dev-only (outside `package.json` `files`).
 - `test/verify-fixture.test.mjs` is deliberately **not** run by `npm test` (the suite names pb.test.mts alone); the prover's tests drive it through `--file`, so they never nest the real suite.
 - Peer ranges must stay identical in `package.json` and `package-lock.json` or `npm ci` refuses in CI: after touching a peer, run `npm install --package-lock-only`. Pinned by "deps: the lockfile peer ranges match package.json".

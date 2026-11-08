@@ -27,6 +27,10 @@ export interface Config {
   /** Extra project commands (e.g. standards scripts): explicit commands only, run at the final gate after lint. */
   extraChecks: string[];
   verifyTimeoutSec: number;
+  /** How long one shell command the agent runs may take before Pi kills it (seconds; 0 = no limit). */
+  commandTimeoutSec: number;
+  /** How long one `pb_try` probe may run before pb stops it (seconds; 0 = no limit). */
+  probeTimeoutSec: number;
   /** Fix attempts per task (or for the final check) before the build pauses for you. */
   maxAttempts: number;
   /**
@@ -107,6 +111,8 @@ export const DEFAULT_CONFIG: Config = {
   lint: "auto",
   extraChecks: [],
   verifyTimeoutSec: 900,
+  commandTimeoutSec: 1800,
+  probeTimeoutSec: 900,
   maxAttempts: 3,
   taskChecks: "end",
   askTimeoutSec: 300,
@@ -144,6 +150,8 @@ function sanitizeConfig(raw: Partial<Config>): Config {
       ? ((raw as { extraChecks: unknown[] }).extraChecks.filter((x): x is string => typeof x === "string").slice(0, 10))
       : [],
     verifyTimeoutSec: num((raw as { verifyTimeoutSec?: unknown }).verifyTimeoutSec, DEFAULT_CONFIG.verifyTimeoutSec),
+    commandTimeoutSec: num((raw as { commandTimeoutSec?: unknown }).commandTimeoutSec, DEFAULT_CONFIG.commandTimeoutSec),
+    probeTimeoutSec: num((raw as { probeTimeoutSec?: unknown }).probeTimeoutSec, DEFAULT_CONFIG.probeTimeoutSec),
     maxAttempts: Math.max(1, Math.floor(num((raw as { maxAttempts?: unknown }).maxAttempts, DEFAULT_CONFIG.maxAttempts))),
     maxConcurrent: num((raw as { maxConcurrent?: unknown }).maxConcurrent, 0), // unset or 0 = uncapped; the runner still floors non-integers
     taskChecks: (raw as { taskChecks?: unknown }).taskChecks === "each" ? "each" : "end",

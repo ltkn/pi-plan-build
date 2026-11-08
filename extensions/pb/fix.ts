@@ -106,7 +106,7 @@ export function registerFix(pi: ExtensionAPI) {
     const seed =
       `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings}\n\n` +
       `${reference ? `${reference}\n\n` : ""}` +
-      `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line yourself before and after the change (it must fail before, pass after), and the full suite once at the end. ${STRUCTURED_EDIT_RULE} ` +
+      `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line yourself before and after the change (it must fail before, pass after), and the full suite once at the end. Shell calls are capped at commandTimeoutSec (30 minutes by default); if one legitimately needs longer, don't retry it with a bigger timeout — say so in your reply and stop, so the human can raise it (or set it to 0). ${STRUCTURED_EDIT_RULE} ` +
       `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
       `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +
       `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), and test results; then stop.`;

@@ -38,6 +38,13 @@ export interface RunOptions {
   thinking?: string;
   /** Cap on concurrent fresh runs, from the config's `maxConcurrent` (0 = uncapped); the PI_PB_MAX_CONCURRENT env var outranks it; unset = uncapped. */
   maxConcurrent?: number;
+  /**
+   * Wall-clock limit for the spawned run, from the config's `probeTimeoutSec` (0/unset = no limit).
+   * The clock starts once the run holds a concurrency slot, not while it queues: a probe waiting
+   * behind a sibling has not run yet. On expiry the process group is killed like an abort, but the
+   * result says `timedOut` so the caller can name the limit instead of reading as a user stop.
+   */
+  timeoutMs?: number;
   signal?: AbortSignal;
   /** Each tool call the fresh model makes, as it happens: a one-line preview and the call itself. */
   onActivity?: (line: string, call: ToolCall) => void;
@@ -66,6 +73,8 @@ export interface RunResult {
   /** wall-clock duration of the call */
   ms: number;
   aborted: boolean;
+  /** stopped because `timeoutMs` passed, not because the caller aborted */
+  timedOut: boolean;
   /** the saved session file (with sessionDir) */
   sessionFile?: string;
 }
@@ -210,6 +219,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, peakContext: 0 },
     ms: 0,
     aborted: false,
+    timedOut: false,
   };
 
   try {
@@ -220,6 +230,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
       let buf = "";
       let stderr = "";
       let closed = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
 
       const onLine = (line: string) => {
         if (!line.trim()) return;
@@ -276,6 +287,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
       });
       proc.on("close", (code, signal) => {
         closed = true;
+        if (timer) clearTimeout(timer);
         if (o.signal) o.signal.removeEventListener("abort", kill);
         if (buf.trim()) onLine(buf);
         if (res.aborted) return resolve(1);
@@ -288,11 +300,16 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
       });
       proc.on("error", (e) => {
         closed = true;
+        if (timer) clearTimeout(timer);
         if (o.signal) o.signal.removeEventListener("abort", kill);
         res.error = e.message;
         resolve(1);
       });
       const kill = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
         if (closed) return;
         res.aborted = true;
         try {
@@ -316,6 +333,12 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
       if (o.signal) {
         if (o.signal.aborted) kill();
         else o.signal.addEventListener("abort", kill, { once: true });
+      }
+      if (o.timeoutMs && o.timeoutMs > 0 && !o.signal?.aborted) {
+        timer = setTimeout(() => {
+          res.timedOut = true;
+          kill();
+        }, o.timeoutMs);
       }
     });
   } finally {
@@ -364,6 +387,7 @@ export async function runFresh(o: RunOptions): Promise<RunResult> {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, peakContext: 0 },
       ms: 0,
       aborted: true,
+      timedOut: false,
     };
   }
   try {
