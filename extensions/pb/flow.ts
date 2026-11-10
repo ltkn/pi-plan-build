@@ -8,7 +8,7 @@ import type {
  } from "@earendil-works/pi-coding-agent";
 import { addedDeclarations, changedPaths, inspectChanges, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { tip } from "./help.ts";
-import { buildIntro, buildMechanics, claimCheckBrief, buildStateSummary, coherePrompt, continuePrompt, extraBlock, findingLine, finishSpecPrompt, fixText, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, specFixPrompt } from "./prompts.ts";
+import { buildIntro, buildMechanics, claimCheckBrief, buildStateSummary, coherePrompt, continuePrompt, extraBlock, findingLine, finishSpecPrompt, fixText, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, SPEC_CHECK_NAMES, specFixPrompt } from "./prompts.ts";
 import { REVIEW_TOOLS } from "./review.ts";
 import { runFresh, runUsage } from "./runner.ts";
 import { notifyDesktop } from "./notify.ts";
@@ -602,9 +602,12 @@ export function registerFlow(pi: ExtensionAPI) {
  * reaching the human as something they cannot act on. Shared by the spec review and the claim check, so a
  * report is read the same way wherever it comes from.
  */
+/** A finding's check tag, as SPEC_CHECK_NAMES spells it; a name outside the list counts as Other rather than minting a category from model text. */
+const checkName = (tag: string) => SPEC_CHECK_NAMES.find((n) => n.toLowerCase() === tag.trim().toLowerCase()) ?? "Other";
+
 const toFindings = (raw: unknown[] | undefined): Finding[] =>
   (raw ?? []).flatMap((item) => {
-    const f = item as { priority?: unknown; title?: unknown; file?: unknown; line?: unknown; fix?: unknown };
+    const f = item as { priority?: unknown; title?: unknown; file?: unknown; line?: unknown; fix?: unknown; check?: unknown };
     if (typeof f.title !== "string" || !f.title.trim() || (f.priority !== "P0" && f.priority !== "P1" && f.priority !== "P2" && f.priority !== "P3")) return [];
     // Sanitised and bounded — but the bound is generous: the human reads this to decide, and a
     // clipped report is one they can't fully act on. Pathological output still can't fill the ledger.
@@ -616,6 +619,7 @@ const toFindings = (raw: unknown[] | undefined): Finding[] =>
       ...(typeof f.file === "string" && f.file.trim() ? { file: field(f.file.trim(), 300) } : {}),
       ...(typeof f.line === "number" && Number.isFinite(f.line) ? { line: f.line } : {}),
       ...(typeof f.fix === "string" && f.fix.trim() ? { fix: field(f.fix.trim(), FINDING_FIELD_CAP) } : {}),
+      ...(typeof f.check === "string" && f.check.trim() ? { check: checkName(f.check) } : {}),
     }];
   });
 
@@ -2021,6 +2025,35 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
    * decided: the human already chose where (the spec-approval dialog).
    */
 
+  const specReviewCount = (store: Store, name: string) => readEvents(path.join(store.specDir(name), "events.jsonl")).filter((e) => e.type === "spec-review").length;
+
+  /**
+   * A P1 the spec review raised on this text is a known risk, not a gate: before T1 the human decides
+   * whether to build on it, repair first, or stop. A recorded pass is reused silently at this door, so its
+   * P1s are shown here; a text already approved (a restart or resume) was decided before. Nobody to ask:
+   * the build goes on, as it always has, and says so.
+   */
+  const weighP1s = async (ctx: ExtensionContext, store: Store, name: string, md: string, reused: boolean, notes: string[]): Promise<boolean> => {
+    if (store.progress(name)?.approval?.hash === specHash(md)) return true;
+    const p1 = recordedFindings(store, name, md).filter(({ f }) => f.priority === "P1");
+    if (!p1.length) return true;
+    const count = `${p1.length} P1 finding${p1.length === 1 ? "" : "s"}`;
+    if (reused) post([`**The spec review of this text raised ${count}** — not blocking, but the build would carry ${p1.length === 1 ? "it" : "them"}:`, "", ...p1.map(({ id, f }) => `- ${findingLine(f, id)}`)].join("\n"));
+    const BUILD = "Build anyway: they stay known risks";
+    const REPAIR = `Repair first: /${cmd("spec-harden")} ${name} works through them`;
+    const STOP = "Stop here";
+    const choice = await choose(ctx, store, `Spec review raised ${count} on ${name}. Build on ${p1.length === 1 ? "it" : "them"}?`, [BUILD, REPAIR, STOP], BUILD, notes);
+    if (choice === BUILD) {
+      if (!ctx.hasUI) notes.push(`built with ${count} from the spec review unaddressed (no one to ask)`);
+      return true;
+    }
+    if (choice === REPAIR) {
+      ctx.ui.setEditorText(`/${cmd("spec-harden")} ${name}`);
+      ctx.ui.notify(`Press Enter to repair ${name}; /${cmd("build")} ${name} afterwards reviews the repaired text.`, "info");
+    }
+    return false;
+  };
+
   const startBuild = async (
     ctx: ExtensionContext,
     store: Store,
@@ -2037,7 +2070,9 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     if (!checked) return;
     const { spec, md, cfg } = checked;
 
+    const reviewsBefore = specReviewCount(store, name);
     if ((await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "build"))) !== "pass") return;
+    if (!(await weighP1s(ctx, store, name, md, specReviewCount(store, name) === reviewsBefore, notes))) return;
     const buildModel = cfg.buildModel ? findModel(ctx, cfg.buildModel) : undefined;
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
     const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";

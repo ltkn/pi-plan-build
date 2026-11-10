@@ -30,7 +30,8 @@ only what its events already carry (the build's own start and end).
    first. Then Pi writes a short **spec** from the discussion (goal, findings,
    decisions, tasks); every spec gets one independent review before the first
    task — fresh eyes, read-only — and a P0 stops it for you to amend or rebut;
-   P1-P3 are shown and the build goes on (see `/pb:help spec`). `/pb:spec-review
+   a P1 is shown and you choose whether to build on it; P2-P3 are shown and the
+   build goes on (see `/pb:help spec`). `/pb:spec-review
    [name]` is that same review on its own, for a spec you want judged before
    deciding to build. Run `/pb:build` again to go on after a block. A clean or advisory-only review
    starts by itself, so you can walk away. The
@@ -421,8 +422,8 @@ review pays for it:
 
 - **Claims**: each claim about existing code says what the cited line says; Pi
   re-opens the line instead of trusting its memory of the discussion.
-- **Values**: unit, range, sign and the empty case; a time names its clock and
-  what happens when the day changes while it runs.
+- **Values**: unit, range, sign and the empty case; a time names its clock or
+  zone.
 - **Proof**: each Acceptance line has a test its task's `Test:` selects, and
   that test can fail before the change.
 - **Coverage**: each Contract and each behaviour-changing Decision has an
@@ -508,8 +509,15 @@ such as the implementer, to validate the plan.
 
 Only a **P0** blocks the build: a security or authorization hole, data loss or
 corruption, or a contract contradiction that cannot be built as written. P1-P3
-are advisory: they are shown to you and the build carries on. A finding has a
-priority, a one-sentence title naming what goes wrong and where, and optionally
+are advisory, but a **P1** is a known risk the build would carry, so before T1
+you choose: build anyway, repair first (`/pb:spec-harden`), or stop. This
+applies to a pass recorded earlier too: its P1s are shown again at the build,
+since you may not have seen them. You're asked once per text, never again on a
+restart or resume of an approved build; with nobody to ask, the build goes on
+and says so. P2-P3 are shown and the build carries on. A finding has a
+priority, the check it fails (Claims, Values, Proof, Coverage, Reach,
+Consistency, Evidence or Other; `/pb:stats` counts findings per check), a
+one-sentence title naming what goes wrong and where, and optionally
 its file, line and the single fix the reviewer would make. If it weighed
 another fix and rejected it, that reason belongs in the same fix line, not as
 an either/or handed back to you. The reviewer has no shell at all: it reads the
@@ -664,8 +672,9 @@ model, uncached); `/pb:build --fresh` asks for one directly: a new session
 named "build: <spec>", seeded with the spec, on your model and thinking level.
 
 Before the first task, every spec gets one independent fresh-eyes review (see
-`/pb:help spec`): only a P0 stops the build there for you to read; P1-P3 are
-shown as advisory findings and the build carries on. Once T1 starts the build
+`/pb:help spec`): only a P0 stops the build there for you to read; a P1 asks
+whether to build on it; P2-P3 are shown as advisory findings and the build
+carries on. Once T1 starts the build
 asks nothing: an unclear detail is a reading it records as an assumption, and
 only a Goal or a Contract that cannot be built as written stops it, for a
 revised spec and a new approval.

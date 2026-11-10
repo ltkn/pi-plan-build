@@ -251,6 +251,8 @@ export interface Finding {
   line?: number;
   title: string;
   fix?: string;
+  /** in a spec review: the check the finding fails, one of SPEC_CHECK_NAMES (prompts.ts) */
+  check?: string;
   /** a pre-existing problem outside the change under review: still reported and pickable; the P2 cap is the reviewer's rule, and a serious one keeps its priority */
   outside?: boolean;
 }

@@ -135,8 +135,9 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   times; those parts of the line simply don't appear.
 - **Fresh eyes on the plan.** Every spec gets one independent read before T1:
   its Decisions are attacked, every "Not doing X" re-tested, unmeasured numbers
-  flagged. Only a P0 (unsafe to build) stops the build; P1-P3 are shown as
-  advisory findings and the build proceeds. There are no review rounds: editing
+  flagged. Only a P0 (unsafe to build) stops the build; a P1 is shown and you
+  choose to build anyway, repair first or stop; P2-P3 are shown as advisory
+  findings and the build proceeds. There are no review rounds: editing
   the spec makes the next build start review the new text. Every acceptance
   line is proven by its task's `Test:`.
 - **Fresh eyes on the build.** A spec pass in a fresh read-only session you

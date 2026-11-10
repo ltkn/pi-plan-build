@@ -1302,6 +1302,8 @@ test("planner role: who it is, the problem before the solution, expertise as evi
   assert.match(PLANNER_ROLE, /- Data: the model and who owns it, how existing records and API clients survive the change, what personal data is kept, for how long, and who can see it\./);
   assert.match(PLANNER_ROLE, /- Security: who can reach it and with what \(a stolen session, another user's, replayed or automated requests\), what could leak \(secrets, personal data\), what a new dependency brings in\./);
   assert.match(PLANNER_ROLE, /- Verification: how we'll prove it works, what no test can show, what test data it needs\./);
+  // Time is planned, not discovered in review.
+  assert.match(PLANNER_ROLE, /- Input and state: [^\n]*time zones and day boundaries when it handles time\./);
   assert.match(PLANNER_ROLE, /A question outside engineering \(legal, compliance, licensing\) is flagged for the right person, not answered\./);
   assert.match(PLANNER_ROLE, /- Design: where does this belong, what does it couple, what does it make harder later, what already does part of it, what generality does nobody need\?/);
   assert.match(PLANNER_ROLE, /- Operations: how it ships \(a flag, migration order, rollback\), how we'd see it fail in production \(logs, metrics, alerts\), its latency and cost at the expected scale\./);

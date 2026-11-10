@@ -109,6 +109,53 @@ test("spec review: P1 and P2 are advisory and the build proceeds", async () => {
   assert.match(t.posts.find((p) => p.startsWith("**✅ Build complete"))!, / · (?:<1s|\d+s)/);
 });
 
+test("spec review: a P1 is weighed before T1 — build anyway, repair first or stop — and a reused pass shows it again", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    // A review on its own: the verdict is recorded, nothing is built.
+    await t.run("spec-review", "order-cancellation");
+    const posted = t.posts.length;
+    // The build door reuses that pass silently, so its P1 is shown here, and the human chooses.
+    t.selects.push("Stop here");
+    await t.run("build", "order-cancellation");
+    const shown = t.posts.slice(posted).join("\n");
+    assert.match(shown, /\*\*The spec review of this text raised 1 P1 finding\*\* — not blocking, but the build would carry it:\n\n- 1\. \[P1\]/);
+    assert.ok(t.selectTitles.includes("Spec review raised 1 P1 finding on order-cancellation. Build on it?"));
+    assert.deepEqual(t.selectOptions.at(-1), ["Build anyway: they stay known risks", "Repair first: /pb:spec-harden order-cancellation works through them", "Stop here"]);
+    assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved, nothing built");
+    assert.equal(t.progress("order-cancellation").approval, undefined);
+    // Repair first hands over the command instead of building.
+    t.selects.push("Repair first: /pb:spec-harden order-cancellation works through them");
+    await t.run("build", "order-cancellation");
+    assert.equal(t.stat.editorText, "/pb:spec-harden order-cancellation");
+    assert.equal(t.progress("order-cancellation").phase, "written");
+    // Build anyway: the build goes on, and a restart of an approved text is not asked again.
+    t.selects.push("Build anyway: they stay known risks");
+    await t.run("build", "order-cancellation");
+    assert.equal(t.progress("order-cancellation").phase, "built");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.selectTitles.filter((x) => x.startsWith("Spec review raised")).length, 3, "asked once per attempt, never after the approval");
+});
+
+test("spec review: only a P1 is weighed; P2 and P3 alone build without asking", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  process.env.MOCK_SPEC_REVIEW = "minor";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.ok(!t.selectTitles.some((x) => x.startsWith("Spec review raised")));
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
 test("spec review: an unchanged spec re-posts the block without a second run; an edit reviews again", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -1944,6 +1991,29 @@ test("spec stats: reviews, their findings by priority, claim checks, laps and th
   assert.equal(summarize({ ...stats, events: [] }).spec, undefined); // no spec phase ran: no line
 });
 
+test("spec review: each finding names the check it fails, and the stats count findings per check", async () => {
+  const { SPEC_CHECK_NAMES, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  const { renderCard, summarize } = await import("../extensions/pb/stats.ts");
+  // The tags are the writer's checks by name, read off the one list, plus the evidence rule and a catch-all.
+  assert.deepEqual(SPEC_CHECK_NAMES, ["Claims", "Values", "Proof", "Coverage", "Reach", "Consistency", "Evidence", "Other"]);
+  assert.match(SPEC_REVIEWER_SYSTEM, /Give each finding the check it fails in its check field: one of the names above, Evidence when it breaks the evidence rule below, or Other\./);
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "tagged";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const review = t.events("order-cancellation").find((e: any) => e.type === "spec-review");
+  // Spelled as the list spells it; a name outside the list is Other, never a new category; no tag stays none.
+  assert.deepEqual(review.reported.map((f: any) => f.check), ["Values", "Claims", "Other", undefined]);
+  assert.match(t.posts.at(-1)!, /- \[P1 · Values\] src\/order\.ts:42 — Context — the transition has no guard/);
+  const stats = { name: "order-cancellation", phase: "written", events: t.events("order-cancellation"), explore: [], progress: t.progress("order-cancellation") } as any;
+  assert.deepEqual(summarize(stats).spec!.byCheck, { Claims: 1, Other: 1, Values: 1 });
+  assert.match(renderCard(stats), /findings P0 0 P1 1 P2 3 P3 0 · by check Claims 1 Other 1 Values 1 ·/);
+});
+
 test("spec checks: the writer runs the spec reviewer's checks before writing, from one list", async () => {
   const { specPrompt, finishSpecPrompt, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
   const names = ["Claims", "Values", "Proof", "Coverage", "Reach", "Consistency"];
@@ -1954,7 +2024,7 @@ test("spec checks: the writer runs the spec reviewer's checks before writing, fr
   const [claims, values, proof, coverage, reach] = reviewer.map(String);
   // The classes real spec reviews kept raising, each a line of its own.
   assert.match(claims, /open the line, because a fact remembered from the discussion is not evidence/);
-  assert.match(values, /a time names its clock .* and what happens when the day changes while it runs/);
+  assert.match(values, /a time names its clock or zone;/);
   assert.match(proof, /that test can fail before the change/);
   assert.match(coverage, /each Contract and each Decision that changes behaviour has an Acceptance line that pins it/);
   assert.match(reach, /the existing tests, callers, links and docs that assert the behaviour being changed/);

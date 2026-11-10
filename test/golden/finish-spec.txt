@@ -1,4 +1,4 @@
-words: 1484
+words: 1469
 
 [pb:spec order-cancellation] Finish the spec .pi/pb/specs/order-cancellation/spec.md for building: ask me with pb_ask, all at once, about each open question; write answered ones into Decisions; add the Tasks and the Verification line, leave no Open questions, and set Status: ready. Anything still unanswered stays Open and the spec stays Status: planning — never decide for me. (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
 
@@ -43,8 +43,8 @@ Add "## Out of scope" only when it helps. When you include a section that does n
 
 Before writing, run these checks (the spec reviewer runs the same ones) and fix what they find in the spec; tell me briefly what you changed:
   - Claims: each claim about existing code or a service says what the line it cites says; open the line, because a fact remembered from the discussion is not evidence.
-  - Values: every value the spec introduces has its unit, range, sign and empty or missing case; a time names its clock (server, browser, UTC or a named zone) and what happens when the day changes while it runs; a rule chosen by a classification says which class wins for an input that matches more than one class.
-  - Proof: each Acceptance line is pinned by a test its task's Test: command selects (a runner and test file the project has, or the new file it names), and that test can fail before the change; when what makes it observable isn't obvious (a fake clock, a set timezone, a mode that skips the code), say so.
+  - Values: every value the spec introduces has its unit, range, sign and empty or missing case; a time names its clock or zone; a rule chosen by a classification says which class wins for an input that matches more than one class.
+  - Proof: each Acceptance line is pinned by a test its task's Test: command selects (a runner and test file the project has, or the new file it names), and that test can fail before the change; when what makes it observable isn't obvious (a fake clock, a fixed seed, a mode that skips the code), say so.
   - Coverage: each Contract and each Decision that changes behaviour has an Acceptance line that pins it; what no line pins is not built.
   - Reach: the existing tests, callers, links and docs that assert the behaviour being changed are named, and a task owns updating each.
   - Consistency: Goal, Decisions, Contracts, Migration, Threats and Tasks say the same thing.

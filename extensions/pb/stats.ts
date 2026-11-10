@@ -170,6 +170,8 @@ export interface SpecPhase {
   blocked: number;
   /** findings the reviews reported, P0 to P3 */
   findings: [number, number, number, number];
+  /** the same findings by the spec check they fail (untagged ones are not counted), most first */
+  byCheck: Record<string, number>;
   claimChecks: number;
   /** un-evidenced claims the claim checks reported */
   claims: number;
@@ -194,10 +196,13 @@ function specPhase(e: Ev[]): SpecPhase | undefined {
   const runs = e.filter((x) => x.type === "spec-review" || x.type === "spec-check");
   if (!runs.length && !laps.length) return undefined;
   const findings: [number, number, number, number] = [0, 0, 0, 0];
+  const byCheck = new Map<string, number>();
   for (const r of reviews) {
     for (const f of Array.isArray(r.reported) ? r.reported : []) {
       const i = PRIORITIES.indexOf(String((f as { priority?: unknown }).priority));
       if (i >= 0) findings[i] += 1;
+      const check = (f as { check?: unknown }).check;
+      if (typeof check === "string" && check) byCheck.set(check, (byCheck.get(check) ?? 0) + 1);
     }
   }
   const items = (key: string) => laps.reduce((n, l) => n + (Array.isArray(l[key]) ? (l[key] as unknown[]).length : 0), 0);
@@ -205,6 +210,7 @@ function specPhase(e: Ev[]): SpecPhase | undefined {
     reviews: reviews.length,
     blocked: reviews.filter((r) => r.verdict === "block").length,
     findings,
+    byCheck: Object.fromEntries([...byCheck].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))),
     claimChecks: checks.length,
     claims: checks.reduce((n, c) => n + num(c.findings), 0),
     laps: laps.length,
@@ -325,6 +331,7 @@ const specLine = (s: SpecPhase): string =>
   [
     `Spec      ${s.reviews} review${s.reviews === 1 ? "" : "s"}${s.blocked ? ` (${s.blocked} blocked)` : ""}`,
     s.reviews ? `findings ${s.findings.map((n, i) => `P${i} ${n}`).join(" ")}` : "",
+    Object.keys(s.byCheck).length ? `by check ${Object.entries(s.byCheck).map(([k, n]) => `${k} ${n}`).join(" ")}` : "",
     s.claimChecks ? `${s.claimChecks} claim check${s.claimChecks === 1 ? "" : "s"}: ${s.claims} claim${s.claims === 1 ? "" : "s"}` : "",
     s.laps ? `${s.laps} lap${s.laps === 1 ? "" : "s"}: ${s.applied} applied, ${s.rebutted} rebutted, ${s.parked} parked, ${s.assumed} assumed` : "",
     `in ${human(s.prompt)} · out ${human(s.output)} · $${s.cost.toFixed(2)}${s.ms ? ` · ${duration(s.ms)}` : ""}`,

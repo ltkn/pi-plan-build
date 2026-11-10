@@ -68,7 +68,7 @@ Before a plan is settled, walk what applies and skip what doesn't; a small chang
 - Design: where does this belong, what does it couple, what does it make harder later, what already does part of it, what generality does nobody need?
 - Data: the model and who owns it, how existing records and API clients survive the change, what personal data is kept, for how long, and who can see it.
 - Security: who can reach it and with what (a stolen session, another user's, replayed or automated requests), what could leak (secrets, personal data), what a new dependency brings in.
-- Input and state: bad sizes, duplicates, order, concurrent calls; first run, empty state, restart.
+- Input and state: bad sizes, duplicates, order, concurrent calls; first run, empty state, restart; time zones and day boundaries when it handles time.
 - Verification: how we'll prove it works, what no test can show, what test data it needs.
 - Operations: how it ships (a flag, migration order, rollback), how we'd see it fail in production (logs, metrics, alerts), its latency and cost at the expected scale.
 Each that applies is answered, or asked via pb_ask. Planning is finished when they are and no Open questions remain. A question outside engineering (legal, compliance, licensing) is flagged for the right person, not answered.
@@ -177,11 +177,17 @@ const EVIDENCE_RULE = `${LOAD_BEARING} Each one carries its evidence beside it: 
  * before writing and the spec reviewer checks the same ones, so a miss is caught where it costs least.
  */
 const SPEC_CHECKS = `- Claims: each claim about existing code or a service says what the line it cites says; open the line, because a fact remembered from the discussion is not evidence.
-- Values: every value the spec introduces has its unit, range, sign and empty or missing case; a time names its clock (server, browser, UTC or a named zone) and what happens when the day changes while it runs; a rule chosen by a classification says which class wins for an input that matches more than one class.
-- Proof: each Acceptance line is pinned by a test its task's Test: command selects (a runner and test file the project has, or the new file it names), and that test can fail before the change; when what makes it observable isn't obvious (a fake clock, a set timezone, a mode that skips the code), say so.
+- Values: every value the spec introduces has its unit, range, sign and empty or missing case; a time names its clock or zone; a rule chosen by a classification says which class wins for an input that matches more than one class.
+- Proof: each Acceptance line is pinned by a test its task's Test: command selects (a runner and test file the project has, or the new file it names), and that test can fail before the change; when what makes it observable isn't obvious (a fake clock, a fixed seed, a mode that skips the code), say so.
 - Coverage: each Contract and each Decision that changes behaviour has an Acceptance line that pins it; what no line pins is not built.
 - Reach: the existing tests, callers, links and docs that assert the behaviour being changed are named, and a task owns updating each.
 - Consistency: Goal, Decisions, Contracts, Migration, Threats and Tasks say the same thing.`;
+
+/**
+ * What a spec-review finding is tagged with: each check by its name, Evidence for the evidence rule, Other for
+ * the rest. Read off SPEC_CHECKS, so a check added there is a tag here; the stats count findings per tag.
+ */
+export const SPEC_CHECK_NAMES: readonly string[] = [...[...SPEC_CHECKS.matchAll(/^- (\w+):/gm)].map((m) => m[1]), "Evidence", "Other"];
 
 /** The writer's pass over the checks, before the spec is written: shared by writing and finishing a spec. */
 const SPEC_SELF_CHECK = `Before writing, run these checks (the spec reviewer runs the same ones) and fix what they find in the spec; tell me briefly what you changed:
@@ -584,7 +590,7 @@ const oneLine = (s: string) => s.replace(/\s*\n\s*/g, " ");
 export const findingDetails = (f: Finding) => `${f.fix ? `\n   Fix: ${oneLine(f.fix)}` : ""}`;
 
 export const findingLine = (f: Finding, n?: number) =>
-  `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${oneLine(f.file)}${f.line ? `:${f.line}` : ""} — ` : ""}${oneLine(f.title)}${findingDetails(f)}`;
+  `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.check ? ` · ${f.check}` : ""}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${oneLine(f.file)}${f.line ? `:${f.line}` : ""} — ` : ""}${oneLine(f.title)}${findingDetails(f)}`;
 
 /**
  * How much of the frozen diff a review brief carries. Most changes fit; past the cap the reviewer
@@ -793,7 +799,7 @@ No P0 means pass, however many P1-P3 findings you report.
 Check the spec against the code: every path:line resolves, and every load-bearing claim carries the evidence the rule below asks for, and that evidence says what the claim says. The writer ran these checks before writing; a spec that fails one is a finding:
 ${SPEC_CHECKS}
 
-Attack the Decisions and each rejected alternative; probe undefined empty paths. A point the spec marks decided is settled: check for new evidence, and comment only when you find it. Do not reward length or polish. No findings is a valid result.
+Give each finding the check it fails in its check field: one of the names above, Evidence when it breaks the evidence rule below, or Other. Attack the Decisions and each rejected alternative; probe undefined empty paths. A point the spec marks decided is settled: check for new evidence, and comment only when you find it. Do not reward length or polish. No findings is a valid result.
 
 The evidence rule the spec was written to: ${EVIDENCE_RULE} A claim that is not load-bearing and carries no evidence is not a finding.
 
