@@ -530,8 +530,21 @@ test("explorer and trier check the project map before reading code", async () =>
 test("/pb:deps investigates dependencies as a change of its own, in planning mode", async () => {
   const t = setup();
   process.chdir(t.repo);
+  fs.writeFileSync(path.join(t.repo, "pom.xml"), "<project/>\n");
+  fs.writeFileSync(path.join(t.repo, "package.json"), "{}\n");
+  fs.writeFileSync(path.join(t.repo, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n");
   await t.run("deps", "jackson");
-  assert.match(t.instructions.at(-1)!, /\[pb:deps\] jackson[\s\S]*latest stable[\s\S]*Don't change the project's files/);
+  const prompt = t.instructions.at(-1)!;
+  assert.match(prompt, /^\[pb:deps\] jackson\n\nReview these dependencies: jackson: versions, deprecated APIs we call, known vulnerabilities, and the runtime itself/);
+  assert.match(prompt, /don't change the project's files: that is blocked until \/pb:build\. Never install, update or "fix" anything into the project/);
+  // The stack's own read-only commands, for every ecosystem the manifests show.
+  assert.match(prompt, /- Node \(pnpm\): `pnpm outdated` · `pnpm audit`\n- Java \(Maven\): `mvn -q versions:display-dependency-updates versions:display-plugin-updates` · `mvn -q org\.owasp:dependency-check-maven:check` \(the audit downloads/);
+  // Planning's frame: investigation, the evidence rule, the reply shape built for upgrades, and the next step.
+  assert.match(prompt, /How to investigate:\n1\. Check the project map/);
+  assert.match(prompt, /cites its source \(the changelog or migration-guide entry\) and our call site \(path:line\)[\s\S]*whether our code reaches the vulnerable path/);
+  assert.match(prompt, /- Proposed changes — the upgrades grouped into changes I would merge on their own, in order \(patch and minor together, each major alone, a framework before its plugins\)/);
+  assert.match(prompt, /- Pinned by a host — [\s\S]*never upgraded on their own/);
+  assert.match(prompt, /\/pb:build writes one spec per chosen change and builds the first\. End your first reply with this block, verbatim:\n\n\*\*What now\*\*/);
   assert.match((await t.callTool("write", { path: "pom.xml", content: "x" })).error!, /Planning mode/);
 });
 
@@ -1415,4 +1428,13 @@ test("pb_explore and pb_try run guarded: the guard is loaded with each tool's li
     delete process.env.MOCK_EXPLORE_HANG;
     fs.rmSync(out, { force: true });
   }
+});
+
+test("/pb:deps runs the suite in the background for a baseline, as /pb:plan does: an upgrade is judged against today's suite", async () => {
+  const t = setup({ verify: "true", baseline: true });
+  process.chdir(t.repo);
+  await t.run("deps");
+  assert.match(t.posts.find((p) => p.startsWith("▶ /pb:deps"))!, /running `true` in the background for a baseline/);
+  assert.match(t.instructions.at(-1)!, /Baseline: The harness is running `true` in the background[\s\S]*a suite already red is not the upgrade's fault/);
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
 });

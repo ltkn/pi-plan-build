@@ -8,6 +8,38 @@ import * as path from "node:path";
 import { packageScript } from "./manifest.ts";
 import { type VerifyResult, cap, now } from "./store.ts";
 
+/**
+ * The read-only commands that answer "what is outdated" and "what is known to be vulnerable", for every ecosystem
+ * the project's manifests show (a repository can hold several). Each is the ecosystem's own tool; one that needs
+ * a plugin or an extra install says so, and none of them changes the project. Empty when no manifest is known.
+ */
+export interface DependencyCommands {
+  ecosystem: string;
+  outdated: string;
+  /** the vulnerability check, when the ecosystem has a command for one */
+  audit?: string;
+  /** what the commands need (a plugin, a tool to install outside the project) or cost */
+  note?: string;
+}
+
+export function dependencyCommands(cwd: string): DependencyCommands[] {
+  const has = (f: string) => fs.existsSync(path.join(cwd, f));
+  const out: DependencyCommands[] = [];
+  if (has("package.json")) {
+    const pm = has("pnpm-lock.yaml") ? "pnpm" : has("yarn.lock") ? "yarn" : has("bun.lockb") || has("bun.lock") ? "bun" : "npm";
+    out.push(pm === "bun" ? { ecosystem: "Node (bun)", outdated: "bun outdated", note: "no built-in audit: check advisories on osv.dev" } : { ecosystem: `Node (${pm})`, outdated: `${pm} outdated`, audit: `${pm} audit` });
+  }
+  if (has("Cargo.toml")) out.push({ ecosystem: "Rust", outdated: "cargo outdated", audit: "cargo audit", note: "the cargo-outdated and cargo-audit tools" });
+  if (has("pom.xml")) {
+    const mvn = has("mvnw") ? "./mvnw" : "mvn";
+    out.push({ ecosystem: "Java (Maven)", outdated: `${mvn} -q versions:display-dependency-updates versions:display-plugin-updates`, audit: `${mvn} -q org.owasp:dependency-check-maven:check`, note: "the audit downloads its vulnerability database: slow the first time" });
+  }
+  if (has("build.gradle") || has("build.gradle.kts")) out.push({ ecosystem: "Java/Kotlin (Gradle)", outdated: `${has("gradlew") ? "./gradlew" : "gradle"} dependencyUpdates`, note: "needs the gradle-versions plugin; for vulnerabilities, the OWASP dependency-check plugin or osv.dev" });
+  if (has("go.mod")) out.push({ ecosystem: "Go", outdated: "go list -u -m all", audit: "govulncheck ./...", note: "the govulncheck tool" });
+  if (has("pyproject.toml") || has("requirements.txt") || has("setup.cfg")) out.push({ ecosystem: "Python", outdated: "pip list --outdated", audit: "pip-audit", note: "in the project's environment; pip-audit is a separate tool" });
+  return out;
+}
+
 export function detectVerify(cwd: string): string | null {
   const has = (f: string) => fs.existsSync(path.join(cwd, f));
   const win = process.platform === "win32";

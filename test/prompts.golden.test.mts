@@ -56,7 +56,7 @@ const RENDERED: Record<string, () => string> = {
   "planner-role": () => prompts.PLANNER_ROLE,
   "plan": () => prompts.planPrompt("Let customers cancel pending orders", "npm test", "", "running"),
   "approach": () => prompts.approachPrompt("", ""),
-  "deps": () => prompts.depsPrompt(""),
+  "deps": () => prompts.depsPrompt("", { testCmd: "npm test", standards: "", baseline: "running", tools: [{ ecosystem: "Node (npm)", outdated: "npm outdated", audit: "npm audit" }, { ecosystem: "Rust", outdated: "cargo outdated", audit: "cargo audit", note: "the cargo-outdated and cargo-audit tools" }] }),
   "spec": () => prompts.specPrompt("", ["order-export"]),
   "finish-spec": () => prompts.finishSpecPrompt("order-cancellation"),
   "checkpoint": () => prompts.checkpointPrompt(72, ["order-cancellation"]),

@@ -134,10 +134,47 @@ When I'm ready I'll run /pb:build (or /pb:spec to write the spec first). End you
 ${tip("plan.next")}`;
 }
 
-export function depsPrompt(scope: string): string {
+/**
+ * A dependency review: planning's frame (investigation, baseline, standards, the next step) with the questions an
+ * upgrade needs answered, and its result grouped into the changes the spec phase writes one spec each for.
+ */
+export function depsPrompt(scope: string, o: { testCmd: string | null; standards: string; baseline: "running" | "none"; tools: { ecosystem: string; outdated: string; audit?: string; note?: string }[] }): string {
+  const tests =
+    o.baseline === "running" && o.testCmd
+      ? `The harness is running \`${o.testCmd}\` in the background; its result shows up here when it's done, so don't run the full suite for a baseline yourself. An upgrade is judged against it: a suite already red is not the upgrade's fault.`
+      : `${o.testCmd ? `Run \`${o.testCmd}\` once` : "Find and run the tests once"} so we know the baseline an upgrade is judged against.`;
+  const tools = o.tools.length
+    ? o.tools.map((t) => `- ${t.ecosystem}: \`${t.outdated}\`${t.audit ? ` · \`${t.audit}\`` : ""}${t.note ? ` (${t.note})` : ""}`).join("\n")
+    : "- No manifest pb recognises: find the project's manifests and use each ecosystem's own read-only outdated and audit commands.";
   return `[pb:deps]${scope ? ` ${scope}` : ""}
 
-Check ${scope ? `these dependencies: ${scope}` : "this project's dependencies"}: the versions in use against the latest stable ones, deprecated APIs we call, and what an upgrade would break. Don't change the project's files. Then propose the upgrades worth doing, each with its benefit and risk. If I agree, /pb:build turns them into a spec of their own.`;
+Review ${scope ? `these dependencies: ${scope}` : "this project's dependencies"}: versions, deprecated APIs we call, known vulnerabilities, and the runtime itself; then propose the upgrades worth doing, each as a change of its own. Investigate as you like (read the code, run read-only commands, curl, one-off scripts in a temp directory), but don't change the project's files: that is blocked until /pb:build. Never install, update or "fix" anything into the project (an install, an update, an audit fix): those change the lockfile and the installed packages, and an upgrade is a build.
+
+How to investigate:
+${INVESTIGATION}
+
+The ecosystems' own read-only commands (a tool that isn't installed is noted, not installed into the project):
+${tools}
+
+Baseline: ${tests}
+
+Evidence: a claim that an upgrade breaks something, or that we call a deprecated API, cites its source (the changelog or migration-guide entry) and our call site (path:line); what nothing settles yet is tagged ${ASSUMED_TAG}. A vulnerability says whether our code reaches the vulnerable path, with the call site.
+
+Reply with exactly:
+
+- Summary — what is worth doing, most valuable first, in a few lines.
+- Dependencies — a table, one row per dependency worth a look: current, latest, patch/minor/major, deprecated APIs we call (path:line), advisories (severity, and whether we reach them), breaking changes (with their source), recommendation. Leave out what is current and clean.
+- Runtime and toolchain — the language runtime and build tools in use against their supported versions (end of life, long-term support).
+- Pinned by a host — versions a host or a peer decides (a plugin's host-provided packages, a framework's managed versions): what they allow; never upgraded on their own.
+- Proposed changes — the upgrades grouped into changes I would merge on their own, in order (patch and minor together, each major alone, a framework before its plugins), each with its benefit, its risk and the tests that would prove it.
+- Assumptions — each marked as such, with what would settle it.
+- Then call pb_ask: which changes to do now (2–4 options, your recommendation marked).
+
+Small project, small reply: keep it in proportion.${standardsBlock(o.standards)}
+
+When I have chosen, /pb:build writes one spec per chosen change and builds the first. End your first reply with this block, verbatim:
+
+${tip("plan.next")}`;
 }
 
 /* ================================== approach ================================== */

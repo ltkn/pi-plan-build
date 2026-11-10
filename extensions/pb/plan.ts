@@ -12,7 +12,7 @@ import { parseSpec, setStatus } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { agentDir, findStandards, isUserTemplate, projectStack, sectionFor, usesDatabase, writeStandards } from "./standards.ts";
 import { type VerifyResult, Store, cap, gitHead, now } from "./store.ts";
-import { runVerify } from "./verify.ts";
+import { dependencyCommands, runVerify } from "./verify.ts";
 import { MODEL_ARG_CAP, baselineSessions, cmd, commands, instruct, liftPlanning, noSnapshotWarning, normSpecArg, planTitle, post, reviewPlanningChanges, runtime, sessionGone, sessionModel, specCompletions, stackLabel, standardsFor, syncTasks, applyPlanner, plannerSettings } from "./kit.ts";
 import { unfinishedPhase } from "./phase.ts";
 
@@ -314,7 +314,14 @@ export function registerPlan(pi: ExtensionAPI) {
       pi.setSessionName(`deps: ${planTitle(args.trim()) || "all"}`);
       // Same staleness check as /pb:plan: the investigation starts from the map.
       warnStaleMap(ctx);
-      instruct(`▶ /${cmd("deps")}${args.trim() ? ` — ${planTitle(args.trim())}` : ""} (the project's files stay untouched)`, depsPrompt(args.trim()));
+      // Same baseline as /pb:plan: an upgrade is judged against the suite as it is today, run at no token cost.
+      const { cfg, testCmd } = commands(ctx.cwd, store);
+      const baseline = cfg.baseline && !!testCmd;
+      const started = baseline ? startBaseline(ctx, store, testCmd!) : false;
+      instruct(
+        `▶ /${cmd("deps")}${args.trim() ? ` — ${planTitle(args.trim())}` : ""} (the project's files stay untouched)${baseline ? (started ? ` · running \`${testCmd}\` in the background for a baseline` : " · baseline already running — its result lands here") : ""}`,
+        depsPrompt(cap(args.trim(), MODEL_ARG_CAP), { testCmd, standards: standardsFor(ctx), baseline: baseline ? "running" : "none", tools: dependencyCommands(ctx.cwd) }),
+      );
     },
   });
 

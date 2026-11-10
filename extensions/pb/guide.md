@@ -333,9 +333,17 @@ first, or it comes back at full size.
 
 `/pb:plan off` lifts the block for this session without building anything.
 
-**Dependencies** are planned on their own: `/pb:deps [which]` checks the
-versions in use, deprecations and what an upgrade would break, and proposes the
-upgrades worth doing; `/pb:build` turns them into a spec.
+**Dependencies** are planned on their own: `/pb:deps [which]` is a planning
+session like `/pb:plan` (the same investigation, background baseline and next
+step) that reviews versions, the deprecated APIs you call, known
+vulnerabilities and whether your code reaches them, and the runtime itself. It
+names your stack's own read-only commands (`npm outdated`/`audit`, `cargo
+outdated`/`audit`, the Maven versions plugin, `go list -u`, `govulncheck`,
+`pip-audit`…) and never installs or updates anything into the project. A claim
+that an upgrade breaks something cites the changelog and your call site. The
+reply groups the upgrades into changes you would merge on their own (patch and
+minor together, each major alone, a framework before its plugins); you choose
+which, and `/pb:build` writes one spec per change and builds the first.
 
 **Finding your sessions again.** `/pb:plan` names the session "plan: <what you
 asked>", and a fresh build session is named "build: <spec>". Both show up by

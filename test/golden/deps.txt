@@ -1,5 +1,39 @@
-words: 53
+words: 780
 
 [pb:deps]
 
-Check this project's dependencies: the versions in use against the latest stable ones, deprecated APIs we call, and what an upgrade would break. Don't change the project's files. Then propose the upgrades worth doing, each with its benefit and risk. If I agree, /pb:build turns them into a spec of their own.
+Review this project's dependencies: versions, deprecated APIs we call, known vulnerabilities, and the runtime itself; then propose the upgrades worth doing, each as a change of its own. Investigate as you like (read the code, run read-only commands, curl, one-off scripts in a temp directory), but don't change the project's files: that is blocked until /pb:build. Never install, update or "fix" anything into the project (an install, an update, an audit fix): those change the lockfile and the installed packages, and an upgrade is a build.
+
+How to investigate:
+1. Check the project map in AGENTS.md first. From the map, read the whole-project headings (Security invariants, Layout, Tests + build, Docs, Known gaps) in full and only the area headings covering the touched paths; explore only what it doesn't answer.
+2. For a broad or multi-file look (where things live, how a similar feature is built, the conventions, what calls what), call pb_explore: it answers from a separate context, so this one stays lean. Searching the whole repo for a common term goes to pb_explore, not a direct grep; grep directly only within named files or directories.
+3. Budget: fan out once (up to 6 pb_explore and pb_try calls in one block), then synthesize. Never re-read a file the explorer already listed. When you catch yourself raising a grep limit past ~15 or searching the same term twice, stop and call pb_explore with what you've learned instead.
+4. When you know the 1-3 files, read them yourself. Grep narrow: one path and pattern, low limit, no surrounding lines unless a match is ambiguous.
+5. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try: back come Commands, Result and Conclusion. A scratch script, or output that won't fit in a few lines, belongs in pb_try; single read-only commands stay here. Production: a read-only query only when local code and data cannot answer, stating why, the table and a row cap (at most ~500 rows); never a production write, channel or real notification.
+6. Ask taste and scope first (pb_ask), then measure to calibrate: never run an expensive probe to decide a question I can answer directly. An unanswered question stays an Open question and planning stays incomplete; never paper it over with an assumption.
+
+The ecosystems' own read-only commands (a tool that isn't installed is noted, not installed into the project):
+- Node (npm): `npm outdated` · `npm audit`
+- Rust: `cargo outdated` · `cargo audit` (the cargo-outdated and cargo-audit tools)
+
+Baseline: The harness is running `npm test` in the background; its result shows up here when it's done, so don't run the full suite for a baseline yourself. An upgrade is judged against it: a suite already red is not the upgrade's fault.
+
+Evidence: a claim that an upgrade breaks something, or that we call a deprecated API, cites its source (the changelog or migration-guide entry) and our call site (path:line); what nothing settles yet is tagged `assumed: <what would falsify it>`. A vulnerability says whether our code reaches the vulnerable path, with the call site.
+
+Reply with exactly:
+
+- Summary — what is worth doing, most valuable first, in a few lines.
+- Dependencies — a table, one row per dependency worth a look: current, latest, patch/minor/major, deprecated APIs we call (path:line), advisories (severity, and whether we reach them), breaking changes (with their source), recommendation. Leave out what is current and clean.
+- Runtime and toolchain — the language runtime and build tools in use against their supported versions (end of life, long-term support).
+- Pinned by a host — versions a host or a peer decides (a plugin's host-provided packages, a framework's managed versions): what they allow; never upgraded on their own.
+- Proposed changes — the upgrades grouped into changes I would merge on their own, in order (patch and minor together, each major alone, a framework before its plugins), each with its benefit, its risk and the tests that would prove it.
+- Assumptions — each marked as such, with what would settle it.
+- Then call pb_ask: which changes to do now (2–4 options, your recommendation marked).
+
+Small project, small reply: keep it in proportion.
+
+When I have chosen, /pb:build writes one spec per chosen change and builds the first. End your first reply with this block, verbatim:
+
+**What now** — the plan is ready to discuss, nothing is built yet
+- React to the plan: agree, disagree, or answer its questions. Example: *"go with option B, but keep the old endpoint"*
+- Done discussing: `/pb:build` writes the spec and starts building. Example: `/pb:build --fresh` builds in a new session · more: `/pb:help plan`

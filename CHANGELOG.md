@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`/pb:deps` is a full dependency review.** It now gets planning's frame (the investigation steps, the background baseline, your standards, and the What-now block) and asks what an upgrade review needs: known vulnerabilities and whether your code reaches them, deprecated APIs you call, the runtime and toolchain against their supported versions, and versions a host pins. It names your stack's own read-only commands for outdated packages and advisories, and forbids installing or updating anything into the project. A breaking change cites its changelog entry and your call site. The reply groups the upgrades into changes you would merge on their own, in order, and asks which to do; `/pb:build` writes one spec per chosen change.
+
 - **`pb_explore` and `pb_try` can't reach production.** Both ran with an unrestricted shell and your whole environment, guarded only by their prompt. Now:
   - the explorer's shell runs read-only inspection commands only (ls, find, cat, head, tail, wc, rg, grep, git status/log/diff/show), enforced: a database client, a network call or a script is refused;
   - a probe's commands that write to a system outside this machine are refused (database writes, cluster, cloud and infrastructure changes, HTTP writes, remote shells, pushes);
