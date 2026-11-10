@@ -279,7 +279,16 @@ as a dialog (`pb_ask`) with its recommendation marked. If you're away, it counts
 down (`askTimeoutSec`, 5 minutes of idle time — any key you press restarts it),
 and nothing is decided: the question stays open, waiting for your answer.
 Picking "Something else (type it)" keeps the
-options in the chat, lettered, so you can write your answer from them.
+options in the chat, lettered, so you can write your answer from them; a letter
+("B", or "A and C") reaches Pi as the options it names. Independent questions
+come together, one after another ("Question 1 of 3"), with one notification;
+if you don't answer one in time, the rest wait in the chat instead of in more
+dialogs. A question where several options can apply is a checklist: tick each
+one, then Done. What you answer while planning is kept with the planning
+session and handed to `/pb:spec`, so the spec carries every answer even after a
+long discussion or a reset. Laps never ask: a fix lap reports a finding that
+needs your decision as skipped, and a hardening lap parks its question with a
+recommendation for pb to ask you after the lap.
 
 A question you didn't answer (it timed out, or you closed the dialog) **stays in
 the chat** with its options lettered: type your answer whenever you're back ("A"

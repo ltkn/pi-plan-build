@@ -472,7 +472,23 @@ export interface PlanningRecord {
   snapshot?: string;
   request?: string;
   planner?: PlannerSettings;
+  /** what the human answered through pb_ask while planning: the spec transcribes it, so a reset can't lose it */
+  answers?: PlanningAnswer[];
 }
+
+export interface PlanningAnswer {
+  question: string;
+  answer: string;
+}
+
+/** The answers kept per planning session, newest last: enough for any discussion, bounded for a runaway one. */
+const MAX_PLANNING_ANSWERS = 40;
+
+const answersOf = (raw: unknown): PlanningAnswer[] | undefined => {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw.flatMap((a) => (a && typeof a === "object" && typeof (a as PlanningAnswer).question === "string" && typeof (a as PlanningAnswer).answer === "string" ? [{ question: (a as PlanningAnswer).question, answer: (a as PlanningAnswer).answer }] : []));
+  return out.length ? out : undefined;
+};
 
 const plannerSettingsOf = (raw: unknown): PlannerSettings | undefined => {
   if (!raw || typeof raw !== "object") return undefined;
@@ -901,10 +917,12 @@ export class Store {
     }
     for (const f of files) {
       if (!f.endsWith(".json")) continue;
-      const rec = readJson<{ session?: unknown; snapshot?: unknown; request?: unknown; planner?: unknown }>(path.join(this.planningDir(), f));
+      const rec = readJson<{ session?: unknown; snapshot?: unknown; request?: unknown; planner?: unknown; answers?: unknown }>(path.join(this.planningDir(), f));
       if (typeof rec?.session !== "string" || !rec.session) continue;
       const planner = plannerSettingsOf(rec.planner);
+      const answers = answersOf(rec.answers);
       out[rec.session] = {
+        ...(answers ? { answers } : {}),
         ...(typeof rec.snapshot === "string" ? { snapshot: rec.snapshot } : {}),
         ...(typeof rec.request === "string" ? { request: rec.request } : {}),
         ...(planner ? { planner } : {}),
@@ -925,15 +943,26 @@ export class Store {
       fs.rmSync(file, { force: true });
       return;
     }
-    const prev = readJson<{ snapshot?: unknown; request?: unknown; planner?: unknown }>(file) ?? {};
+    const prev = readJson<{ snapshot?: unknown; request?: unknown; planner?: unknown; answers?: unknown }>(file) ?? {};
     const rec: Record<string, unknown> = { session: sessionFile };
     const planner = plannerSettingsOf(prev.planner);
     if (planner) rec.planner = planner;
+    const answers = answersOf(prev.answers);
+    if (answers) rec.answers = answers;
     const snap = snapshot ?? (typeof prev.snapshot === "string" ? prev.snapshot : undefined);
     if (snap !== undefined) rec.snapshot = snap;
     const req = request ?? (typeof prev.request === "string" ? prev.request : undefined);
     if (req !== undefined) rec.request = req;
     writeFileAtomic(file, `${JSON.stringify(rec, null, 2)}\n`);
+  }
+
+  /** Keep an answer the human gave through pb_ask in this planning session; nothing when planning is off. */
+  recordPlanningAnswer(sessionFile: string, a: PlanningAnswer): void {
+    const file = this.planningFile(sessionFile);
+    const prev = readJson<Record<string, unknown>>(file);
+    if (!prev) return;
+    const answers = [...(answersOf(prev.answers) ?? []), { question: cap(a.question, 400), answer: cap(a.answer, 600) }].slice(-MAX_PLANNING_ANSWERS);
+    writeFileAtomic(file, `${JSON.stringify({ ...prev, answers }, null, 2)}\n`);
   }
 
   /** Record what planning changed in this session's model and thinking, so its end can put them back. */

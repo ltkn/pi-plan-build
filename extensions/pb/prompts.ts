@@ -283,7 +283,11 @@ Add "## Out of scope" only when it helps. When you include a section that does n
 - Evidence: ${EVIDENCE_RULE}
 - Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.`;
 
-export function specPrompt(which: string, existing: string[], current?: { name: string; markdown: string }, extra = ""): string {
+/** What the human answered through pb_ask while planning: each one reaches the spec, so a reset or a long discussion can't lose it. */
+const answersBlock = (answers: { question: string; answer: string }[] = []) =>
+  answers.length ? `\n\nAnswers I gave while planning (each one is in Decisions, or the spec says why it no longer applies):\n${answers.map((a) => `- ${a.question.replace(/\s+/g, " ")} → ${a.answer.replace(/\s+/g, " ")}`).join("\n")}` : "";
+
+export function specPrompt(which: string, existing: string[], current?: { name: string; markdown: string }, extra = "", answers: { question: string; answer: string }[] = []): string {
   return `[pb:spec]${which ? ` ${which}` : ""}
 
 Write the spec${which ? ` for: ${which}` : ""} from our discussion with the pb_write_spec tool (one call per spec; pb_update_spec changes single sections of an existing one). The build follows it, the reviewer checks against it, and a fresh or reset session starts from it alone: put in what it needs and nothing it doesn't.
@@ -296,7 +300,7 @@ ${SPEC_FORMAT}
 - The approach follows the engineering standards (AGENTS.md).
 - Status: ready only if nothing is left open. Transcribe the conversation's ledger: what was decided goes into Decisions with its reason (an objection I overruled stays beside its decision as the risk), and anything undecided goes under Open questions and the spec stays Status: planning; never invent a decision to close a gap. Ask me (pb_ask, all independent questions at once) only about a choice that changes behaviour, an API or data and that we didn't settle.
 - Verification defaults to tests; "New tests: no" only if I said so.
-- Name: short kebab-case.${existing.length ? ` Existing: ${existing.join(", ")} (reusing a name rewrites it; read its spec.md first, it may differ from what you remember).` : ""}${extraBlock(extra)}${current ? `\n\n--- current ${P}/specs/${current.name}/spec.md (revise this) ---\n\n${current.markdown}` : ""}
+- Name: short kebab-case.${existing.length ? ` Existing: ${existing.join(", ")} (reusing a name rewrites it; read its spec.md first, it may differ from what you remember).` : ""}${answersBlock(answers)}${extraBlock(extra)}${current ? `\n\n--- current ${P}/specs/${current.name}/spec.md (revise this) ---\n\n${current.markdown}` : ""}
 
 Then tell me where it is. End your reply with this block, verbatim:
 
@@ -342,12 +346,12 @@ ${tip("plan.next")}`;
 }
 
 /** A spec still marked planning: finish it before building. */
-export function finishSpecPrompt(name: string, extra = ""): string {
+export function finishSpecPrompt(name: string, extra = "", answers: { question: string; answer: string }[] = []): string {
   return `[pb:spec ${name}] Finish the spec ${P}/specs/${name}/spec.md for building: ask me with pb_ask, all at once, about each open question; write answered ones into Decisions; add the Tasks and the Verification line, leave no Open questions, and set Status: ready. Anything still unanswered stays Open and the spec stays Status: planning — never decide for me. (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
 
 ${SPEC_FORMAT}
 
-${SPEC_SELF_CHECK}${extraBlock(extra)}`;
+${SPEC_SELF_CHECK}${answersBlock(answers)}${extraBlock(extra)}`;
 }
 
 /* ================================== build ================================== */

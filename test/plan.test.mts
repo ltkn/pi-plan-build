@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { briefOf, diligent, PLANNING, setup, SPEC, until, written } from "./harness.mts";
+import { briefOf, diligent, PLANNING, setup, SPEC, until, written, repairLap } from "./harness.mts";
 
 test("plan: investigation is free, project files are protected until /pb:plan off; spec asks for pb_write_spec", async () => {
   const t = setup({ verify: "true" });
@@ -1437,4 +1437,100 @@ test("/pb:deps runs the suite in the background for a baseline, as /pb:plan does
   assert.match(t.posts.find((p) => p.startsWith("▶ /pb:deps"))!, /running `true` in the background for a baseline/);
   assert.match(t.instructions.at(-1)!, /Baseline: The harness is running `true` in the background[\s\S]*a suite already red is not the upgrade's fault/);
   await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
+});
+
+test("pb_ask: a recommendation is found however it is written, and typed letters come back as the options they name", async () => {
+  const { recommendedIndex, resolveAnswer } = await import("../extensions/pb/ask.ts");
+  const options = ["mail", "events", "a webhook"];
+  assert.deepEqual(["events", "B", "b.", "Events", "webhook", "", "push"].map((r) => recommendedIndex(r, options)), [1, 1, 1, 1, 2, -1, -1]);
+  assert.equal(recommendedIndex("D", options), -1, "a letter past the options names nothing");
+  assert.equal(resolveAnswer("b", options), "B — events");
+  assert.equal(resolveAnswer("A and C", options), "A and C — mail; a webhook");
+  assert.equal(resolveAnswer("a, c", options), "A and C — mail; a webhook");
+  assert.equal(resolveAnswer("events, but batched", options), "events, but batched", "the human's own words stay theirs");
+  assert.equal(resolveAnswer("Z", options), "Z");
+});
+
+test("pb_ask: several questions in one call, a checklist where several apply, and every answer reaches the spec", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  const asked = t.selectTitles.length;
+  t.selects.push("events (recommended)", "[ ] A. orders", "[ ] C. refunds", "Done — A, C", "Something else (type it)", "b");
+  const r = await t.callTool("pb_ask", {
+    questions: [
+      { question: "Mail or event?", options: ["mail", "events"], recommended: "B" },
+      { question: "Which flows notify?", options: ["orders", "users", "refunds"], multiple: true },
+      { question: "Retry how?", options: ["never", "with backoff"] },
+    ],
+  });
+  assert.deepEqual(t.selectTitles.slice(asked), [
+    "Question 1 of 3: Mail or event?",
+    "Question 2 of 3: Which flows notify? (pick all that apply)",
+    "Question 2 of 3: Which flows notify? (pick all that apply)",
+    "Question 2 of 3: Which flows notify? (pick all that apply)",
+    "Question 3 of 3: Retry how?",
+  ]);
+  assert.deepEqual(t.selectOptions[asked], ["mail", "events (recommended)", "Something else (type it)"], "the letter B marks events");
+  assert.deepEqual(t.selectOptions[asked + 2], ["[x] A. orders", "[ ] B. users", "[ ] C. refunds", "Done — A", "Something else (type it)"]);
+  assert.equal(r.content![0].text, "The human's answers:\n1. Mail or event? — events\n2. Which flows notify? — A and C — orders; refunds\n3. Retry how? — B — with backoff");
+  // Kept with the planning session, then handed to the spec writer: nothing answered is lost to a reset.
+  await t.run("spec");
+  assert.match(t.instructions.at(-1)!, /Answers I gave while planning \(each one is in Decisions, or the spec says why it no longer applies\):\n- Mail or event\? → events\n- Which flows notify\? → A and C — orders; refunds\n- Retry how\? → B — with backoff/);
+});
+
+test("pb_ask: when nobody answers in time, the rest of a batch is not asked — it waits in the chat", async () => {
+  const t = setup({ verify: "true", askTimeoutSec: 1 });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  const asked = t.selectTitles.length;
+  t.selects.push("<timeout>");
+  const r = await t.callTool("pb_ask", { questions: [{ question: "Mail or event?", options: ["mail", "events"] }, { question: "Retry how?", options: ["never", "backoff"] }] });
+  assert.equal(t.selectTitles.length - asked, 1, "one dialog, then nobody is there");
+  assert.match(t.posts.at(-1)!, /^\*\*Unanswered questions\*\* \(nothing was decided — they stay open\):[\s\S]*Mail or event\?[\s\S]*\(no answer within 1 min\)[\s\S]*Retry how\?[\s\S]*\(not asked: the question before it got no answer in time\)/);
+  assert.match(r.content![0].text, /1\. Mail or event\? — OPEN[\s\S]*2\. Retry how\? — OPEN/);
+});
+
+test("pb_ask in a lap: a fix lap and a hardening lap never ask; a manual repair lap asks, with the timeout", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+  fs.writeFileSync(progressFile, JSON.stringify({ spec: "order-cancellation", phase: "paused", session: t.runtime().ctx.sessionManager.getSessionFile(), tasks: [], review: { at: "2026-10-01 10:00:00", verdict: "changes", findings: [{ priority: "P2", title: "x" }] }, updatedAt: "2026-10-01 10:00:00" }));
+  const said: string[] = [];
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    said.push(String((await tool("pb_ask", { question: "Which way?", options: ["a", "b"] })).content?.[0]?.text ?? ""));
+    await tool("pb_fix_done", { fixed: [], skipped: [1], tests: "none" });
+  };
+  t.selects.push("Later");
+  await t.run("fix");
+  assert.match(said[0], /^A fix lap doesn't ask: a finding that needs a decision is reported as skipped/);
+
+  const h = setup({ verify: "true" });
+  await written(h);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  const lapSaid: string[] = [];
+  const lap = repairLap(h, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled" });
+  h.agent.script = async (text, tool) => {
+    if (text.includes("[pb:spec-fix]")) lapSaid.push(String((await tool("pb_ask", { question: "Which way?", options: ["a", "b"] })).content?.[0]?.text ?? ""));
+    return lap(text, tool);
+  };
+  try {
+    await h.run("spec-review", "order-cancellation");
+    h.selects.push("Yes, go on");
+    await h.run("spec-harden", "order-cancellation");
+    assert.match(lapSaid[0], /^A hardening lap doesn't ask: park the question in your pb_spec_fix_done report/);
+    // A manual lap runs on your say-so, so it may ask — but never without the timeout, in a session of its own.
+    await h.run("spec-review", "order-cancellation");
+    const before = h.dialogTimeouts.length;
+    h.selects.push("a");
+    await h.run("spec-fix", "order-cancellation");
+    assert.ok(lapSaid.at(-1)!.startsWith("The human answered: a"));
+    assert.equal(h.dialogTimeouts.slice(before).find((x) => x !== undefined), 300_000, "askTimeoutSec applies");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
 });

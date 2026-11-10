@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A lap never waits on a question forever.** Since laps run in sessions of their own, a `/pb:spec-harden` or `/pb:fix` lap that called `pb_ask` opened a dialog with no timeout, so an unattended run could hang. A fix lap and a hardening lap now never ask (a fix reports the finding as skipped, a hardening lap parks the question with its recommendation); a manual `/pb:spec-fix` lap still asks, with the timeout.
+- **`pb_ask` is easier to answer.** Independent questions come in one call, "Question 1 of 3", with one notification; if one goes unanswered in time, the rest wait in the chat. A question where several options apply is a checklist. A typed letter reaches Pi as the option it names ("B — events"), and a recommendation is marked however the model wrote it (its letter, or part of its text).
+- **Every answer reaches the spec.** What you answer while planning is kept with the planning session, and `/pb:spec` lists it for the writer to put in Decisions, so a long discussion or a reset can't lose one.
+
 - **`/pb:deps` is a full dependency review.** It now gets planning's frame (the investigation steps, the background baseline, your standards, and the What-now block) and asks what an upgrade review needs: known vulnerabilities and whether your code reaches them, deprecated APIs you call, the runtime and toolchain against their supported versions, and versions a host pins. It names your stack's own read-only commands for outdated packages and advisories, and forbids installing or updating anything into the project. A breaking change cites its changelog entry and your call site. The reply groups the upgrades into changes you would merge on their own, in order, and asks which to do; `/pb:build` writes one spec per chosen change.
 
 - **`pb_explore` and `pb_try` can't reach production.** Both ran with an unrestricted shell and your whole environment, guarded only by their prompt. Now:

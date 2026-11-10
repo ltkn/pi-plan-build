@@ -1,18 +1,15 @@
-words: 2045
+words: 2140
 
 ## pb_ask
 
-Ask the human one question and wait for the answer: a choice between options, or an open question. Use it while planning; a pb build never asks — it takes the sensible reading, records it as an assumption, and stops only when the Goal or a Contract cannot be built as written. Ask only what you can't sensibly decide yourself. Ask independent questions together; ask a question that depends on another's answer only after you have that answer. Phrase every question in plain words a non-expert can follow: one line per option with its trade-off, and your recommendation with one plain reason why — short enough to read in a dialog.
+Ask the human one question and wait for the answer: a choice between options, or an open question. Use it while planning; a pb build never asks — it takes the sensible reading, records it as an assumption, and stops only when the Goal or a Contract cannot be built as written. Ask only what you can't sensibly decide yourself. Ask independent questions together, in one call (questions); ask a question that depends on another's answer only after you have that answer. When several options may apply at once, say so (multiple). Phrase every question in plain words a non-expert can follow: one line per option with its trade-off, and your recommendation with one plain reason why — short enough to read in a dialog.
 
 {
   "type": "object",
-  "required": [
-    "question"
-  ],
   "properties": {
     "question": {
       "type": "string",
-      "description": "one precise question"
+      "description": "one precise question (or use questions for several)"
     },
     "options": {
       "type": "array",
@@ -23,7 +20,38 @@ Ask the human one question and wait for the answer: a choice between options, or
     },
     "recommended": {
       "type": "string",
-      "description": "your recommendation: one of the options, or a suggested answer"
+      "description": "your recommendation: one of the options (or its letter), or a suggested answer"
+    },
+    "multiple": {
+      "type": "boolean",
+      "description": "true when several options may apply together: the human ticks all that do"
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "recommended": {
+            "type": "string"
+          },
+          "multiple": {
+            "type": "boolean"
+          }
+        }
+      },
+      "description": "several independent questions in one call (at most 8): shown one after another, answered together"
     }
   }
 }

@@ -501,7 +501,7 @@ export function registerFlow(pi: ExtensionAPI) {
       const md = which && KEBAB_NAME.test(which) ? store.readSpec(which) : undefined;
       const session = ctx.sessionManager.getSessionFile();
       if (session) specStarted.set(session, Date.now());
-      instruct(`▶ /${cmd("spec")}${which ? ` — ${which}` : ""}`, specPrompt(which, store.specNames(), md ? { name: which, markdown: md } : undefined, store.extra("spec")));
+      instruct(`▶ /${cmd("spec")}${which ? ` — ${which}` : ""}`, specPrompt(which, store.specNames(), md ? { name: which, markdown: md } : undefined, store.extra("spec"), session ? store.planning(session)?.answers : undefined));
     },
   });
 
@@ -2587,7 +2587,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         const planning = !!session && store.planningSessions().includes(session);
         if (!mine.length && (planning || !offered.length)) {
           // No spec from this discussion yet: write it first, then build it.
-          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec")));
+          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec"), session ? store.planning(session)?.answers : undefined));
         }
         const pool = mine.length ? mine : offered;
         const labelOf = (n: string) => {
@@ -2608,7 +2608,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       if (!(await confirmLiveBuild(ctx, store, name, ["building"], "Restart it here — finished tasks stay done?"))) return;
       if (loadSpec(store, name)?.spec.status === "planning") {
         // A checkpoint of an unfinished discussion: finish it (tasks, verification), then build it.
-        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec")).replace(/\s*After writing it, stop:[^\n]*/, ""));
+        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec"), session ? store.planning(session)?.answers : undefined).replace(/\s*After writing it, stop:[^\n]*/, ""));
       }
       if (words[0] === name && words.length > 1) {
         // Trailing words with a named spec are guidance (as on resume); without a name
