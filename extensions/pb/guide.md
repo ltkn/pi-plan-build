@@ -56,7 +56,10 @@ complete with what each one is.
 4. **`/pb:review`**: a fresh reviewer compares the change with the spec and
    your standards; blocking findings get a second look before you see them.
    Fix them right there, `/pb:review` again (it looks only at what changed),
-   commit, and `/pb:archive`.
+   `/pb:commit`, and `/pb:archive`. Commit whenever you like — after the
+   build, the fixes, the review or the archive: `/pb:commit` opens the change's
+   files and a message built from the spec in an editor, for you to adjust and
+   confirm; pb never commits on its own.
 
 The build stays in the session that planned it: nothing you discussed is lost.
 Each later task then starts from a fresh context reset to the build's state, so
@@ -1186,6 +1189,16 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - **`pb-report`**: the report without Pi, for scripts and dashboards:
   `pb-report [--cwd dir] [--stats] [--review]`. The `schema` field is
   `pb.report/2`; a breaking change gets a new one (pb.report/1 lost its dead `context.asks` count).
+- **`/pb:commit [spec]`**: commits the work whenever you choose. It opens an
+  editor with the message and, below it, every uncommitted file since the
+  build began (never pb's own state or the spec file): edit the message, delete
+  a file's line to leave that file out (your own unrelated edits, say), clear
+  the message to cancel. Only the paths left are committed — never `git add -A`. The message comes from the
+  spec, not a model: the first commit carries the title, goal and tasks, a
+  later one the review fixes since, and a map-only commit after `/pb:archive`
+  the map's changes. Your hooks run; whatever else you had staged stays staged
+  and out of the commit. Nothing changed since the last commit: it says so and
+  stops. It refuses while a build or a repair lap is still writing files.
 - **`/pb:archive`**: moves a finished spec to `.pi/pb-archive/` (which git
   ignores), so `/pb:build` and `/pb:status` only show live work, and offers to
   update the project map (`/pb:help map`). A spec with work left (a build not
@@ -1261,13 +1274,13 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 <!-- pb:tip build.done -->
 **What now** — the build finished, every check passed
 - Review it: `/pb:review` here in this session, so you can fix findings right away.
-- Then commit (the message above is ready to paste), and `/pb:archive` · more: `/pb:help review`
+- Then `/pb:commit` (you see the files and the message first), and `/pb:archive` · more: `/pb:help review`
 <!-- /pb -->
 
 ### Review passed
 <!-- pb:tip review.pass -->
 **What now** — the review passed, the change is ready to merge
-- Minor findings? Ask Pi to fix them here ("fix finding 2"), then commit with the message above.
+- Minor findings? Ask Pi to fix them here ("fix finding 2"), then `/pb:commit`.
 - Done: `/pb:archive` files the spec away; the next feature starts with `/pb:build` from its planning session.
 <!-- /pb -->
 

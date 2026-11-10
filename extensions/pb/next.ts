@@ -49,7 +49,12 @@ export function whereNext(store: Store, name: string): Where {
   }
   if (phase === "building") return { spec: name, state: `building ${p?.current ?? ""}`.trim(), next: "the build is running: it says when it needs you" };
   if (phase === "paused") return { spec: name, state: `paused${p?.pause ? `: ${p.pause.replace(/\s+/g, " ").slice(0, 80)}` : ""}`, next: `/${cmd("build")} ${name} resumes`, command: `/${cmd("build")} ${name}` };
-  if (phase === "reviewed") return { spec: name, state: "reviewed: PASS", next: `commit, then /${cmd("archive")} ${name}`, command: `/${cmd("archive")} ${name}` };
+  if (phase === "reviewed") {
+    // Committed since the review: archiving is next; otherwise the commit is.
+    const events = readEvents(path.join(store.specDir(name), "events.jsonl")).map((e) => e.type);
+    if (events.lastIndexOf("commit") > events.lastIndexOf("review")) return { spec: name, state: "reviewed and committed", next: `/${cmd("archive")} ${name}`, command: `/${cmd("archive")} ${name}` };
+    return { spec: name, state: "reviewed: PASS", next: `/${cmd("commit")} ${name}, then /${cmd("archive")} ${name}`, command: `/${cmd("commit")} ${name}` };
+  }
   // built: the review is next, or what the last review asked for.
   const review = p?.review;
   if (!review) return { spec: name, state: "built", next: `/${cmd("review")} ${name}`, command: `/${cmd("review")} ${name}` };

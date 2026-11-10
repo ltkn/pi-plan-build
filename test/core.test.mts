@@ -946,7 +946,10 @@ test("what's next: one derivation names every state a spec can be in and the com
   const review = (verdict: string, findings: object[] = []) => ({ at: "2026-10-01 10:00:00", verdict, findings });
   assert.equal(at({ phase: "built", review: review("changes_needed", [{ priority: "P1", title: "x" }, { priority: "P3", title: "nit" }]) }), "review: CHANGES NEEDED (1 open) | /pb:fix order-cancellation");
   assert.equal(at({ phase: "built", review: review("unverified") }), "review: UNVERIFIED | /pb:review order-cancellation");
-  assert.equal(at({ phase: "reviewed", review: review("pass") }), "reviewed: PASS | /pb:archive order-cancellation");
+  assert.equal(at({ phase: "reviewed", review: review("pass") }), "reviewed: PASS | /pb:commit order-cancellation");
+  store.event(name, { type: "review", verdict: "pass" });
+  store.event(name, { type: "commit", sha: "abc", files: 2, subject: "Order cancellation" });
+  assert.equal(at({ phase: "reviewed", review: review("pass") }), "reviewed and committed | /pb:archive order-cancellation", "committed since the review: archiving is next");
   // Fixes after the last review: the follow-up review is next, not the fixes again.
   store.event(name, { type: "review", verdict: "changes_needed" });
   store.event(name, { type: "fix", fixed: ["x"], skipped: [] });

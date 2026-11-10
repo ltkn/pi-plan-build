@@ -57,7 +57,8 @@ export function setup(config: object = {}) {
   const confirms: string[] = [];
   const dialogTimeouts: (number | undefined)[] = [];
   const terminalInput: ((d: string) => void)[] = [];
-  const editors: (string | undefined)[] = [];
+  /** what the editor dialog returns, in order: a text, or a function of the text pb prefilled (an edit of it) */
+  const editors: (string | undefined | ((prefill: string) => string | undefined))[] = [];
   const views: { customType: string; data: any }[] = [];
   const navigations: { target: string; summary?: string }[] = [];
   const resets: { summary: string; firstKeptEntryId: string | null }[] = [];
@@ -250,7 +251,10 @@ export function setup(config: object = {}) {
           return scripted ?? true;
         },
         input: async () => selects.shift() ?? "",
-        editor: async () => editors.shift(),
+        editor: async (_title: string, prefill?: string) => {
+          const next = editors.shift();
+          return typeof next === "function" ? next(prefill ?? "") : next;
+        },
       },
       navigateTree: async (target: string, o: { summarize?: boolean } = {}) => {
         const [r] = (await fire("session_before_tree", { preparation: { targetId: target } })) as { summary?: { summary: string } }[];

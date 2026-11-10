@@ -831,6 +831,24 @@ export class Store {
     return undefined;
   }
 
+  /**
+   * The most recently archived spec (named, or any), as its folder: archive folders start with their timestamp,
+   * so the newest sorts last. What /pb:commit reads when the work it commits was archived first.
+   */
+  newestArchived(name?: string): { name: string; dir: string } | undefined {
+    let dirs: string[];
+    try {
+      dirs = fs.readdirSync(this.archiveRoot).filter((d) => !d.startsWith(".")).sort();
+    } catch {
+      return undefined;
+    }
+    for (const d of dirs.reverse()) {
+      const spec = readJson<Progress>(path.join(this.archiveRoot, d, "progress.json"))?.spec;
+      if (typeof spec === "string" && (!name || spec === name) && fs.existsSync(path.join(this.archiveRoot, d, "spec.md"))) return { name: spec, dir: path.join(this.archiveRoot, d) };
+    }
+    return undefined;
+  }
+
   checkpoints(name: string): Checkpoint[] {
     let file: string;
     try {

@@ -13,14 +13,14 @@ import { REVIEW_TOOLS } from "./review.ts";
 import { runFresh, runUsage } from "./runner.ts";
 import { notifyDesktop } from "./notify.ts";
 import { renderBuildToolCall, renderBuildToolResult } from "./render.ts";
-import { type ParsedSpec, type SpecTask, specAssumptions, acceptanceCriteria, buildTask, commitMessage, contractHash, earlierProof, needsRed, parseSpec, setSection, setStatus, specHash, specLosses, specTextBlocks, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, specAssumptions, acceptanceCriteria, buildTask, contractHash, earlierProof, needsRed, parseSpec, setSection, setStatus, specHash, specLosses, specTextBlocks, tokensOf } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { buildTimeLabel, buildTiming } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, COHERE_TASK_ID, Store, appendCheckpoint, cap, diffStat, gitHead, now, pathExists, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
 import { safeLine } from "./markdown.ts";
-import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specFixCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
+import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specFixCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
 import { enterStep, finishBuild, lintsEachStep, nextPhase, nextStep, nextTodo, unfinishedPhase } from "./phase.ts";
 
 const DRY_RUN_TIMEOUT_SEC = 120;
@@ -855,8 +855,6 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         changedFiles ? `\n${changedFiles}` : "",
         redNotes(spec, p).length ? `\nNew tests never seen failing (the review judges each):\n${redNotes(spec, p).map((n) => `- ${n}`).join("\n")}` : "",
         stale.length ? `\nPossibly stale prose references (renamed or deleted identifiers still cited — intentional history is fine):\n${stale.map((s) => `- ${s.symbol}: ${s.referrers.join(", ")}`).join("\n")}` : "",
-        "",
-        commitBlock(commitMessage(store.readSpec(p.spec) ?? "")),
         "",
         tip("build.done", { spec: p.spec }),
         ...rest.map((n, i) => `${i ? "" : "\nStill to build, from the same plan:\n"}- ${n}: \`/${cmd("build")} ${n}\``),
@@ -2234,7 +2232,6 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
   };
 
   /** The spec that was just written: its tasks in the session, the whole of it as a view (not sent to the model: it wrote it). */
-  /** A commit message to paste, shown wherever the work may end: after the build, the review and the archive. */
 
   const baselineApplies = (ctx: ExtensionContext, store: Store, testCmd: string | null | undefined) => {
     const b = store.baseline(ctx.sessionManager.getSessionFile() ?? undefined);

@@ -4,10 +4,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { dropCheckpoints } from "./checkpoint.ts";
 import { findingsOf, readMap } from "./map.ts";
-import { commitMessage, parseSpec, sectionOf } from "./spec.ts";
-import { type Progress, Store, changedSince, readEvents, reviewLedger } from "./store.ts";
+import { sectionOf } from "./spec.ts";
+import { type Progress, Store, changedSince, now, readEvents, reviewLedger } from "./store.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { cmd, commitBlock, nextLine, post, specCompletions } from "./kit.ts";
+import { cmd, nextLine, post, specCompletions } from "./kit.ts";
 import { updateMap } from "./map-flow.ts";
 
 /**
@@ -78,17 +78,11 @@ export function registerArchive(pi: ExtensionAPI) {
       } else if (willMap) {
         mapChanges = await updateMap(ctx, store, { spec: { name, findings }, changed, reviewFindings });
       }
-      // What's left to commit: the feature itself if it wasn't committed yet, and the map.
-      const feature = changedSince(ctx.cwd).some((f) => f !== "AGENTS.md" && !f.startsWith(".pi/"));
-      const title = parseSpec(markdown).spec?.title ?? name;
-      const mapNote = mapChanges ? ["Update the project map in AGENTS.md", ...(mapChanges.length ? ["", ...mapChanges.map((c) => `- ${c}`)] : [])] : [];
-      const message = feature
-        ? [commitMessage(markdown) ?? title, ...(mapChanges ? ["", "Also updates the project map in AGENTS.md."] : [])].join("\n")
-        : mapChanges
-          ? [`${mapNote[0]} after ${title}`, ...mapNote.slice(1)].join("\n")
-          : undefined;
-      // Archiving ends a feature: what's left is the commit, and the next feature.
-      post([...(message ? [commitBlock(message), ""] : []), nextLine(`${message ? "commit with the message above, then " : ""}\`/${cmd("plan")} <feature>\` for the next one.`)].join("\n"));
+      // What the map gained is kept with the archived spec: a later /pb:commit of the map names it.
+      if (mapChanges) fs.appendFileSync(path.join(dest, "events.jsonl"), `${JSON.stringify({ at: now(), type: "map", changes: mapChanges })}\n`);
+      // Archiving ends a feature: what's left is the commit (the feature if it wasn't yet, and the map), and the next feature.
+      const uncommitted = changedSince(ctx.cwd).length > 0;
+      post(nextLine(`${uncommitted ? `\`/${cmd("commit")} ${name}\` commits what's left (the feature and the map update), then ` : ""}\`/${cmd("plan")} <feature>\` for the next one.`));
     },
   });
 

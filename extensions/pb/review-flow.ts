@@ -13,12 +13,12 @@ import { tip } from "./help.ts";
 import { acceptanceDrift, designProvenance, extraBlock, findingLine, isNone, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief } from "./prompts.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
 import { runFresh } from "./runner.ts";
-import { acceptanceCriteria, commitMessage } from "./spec.ts";
+import { acceptanceCriteria } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { P_ORDER, approvalDrift, cmd, commands, commitBlock, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, watchable, withChecking } from "./kit.ts";
+import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, watchable, withChecking } from "./kit.ts";
 import { markReviewed, unfinishedPhase } from "./phase.ts";
 
 import { confirmLiveBuild } from "./flow.ts";
@@ -351,7 +351,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
               ? midBuild.length
                 ? `\`/${cmd("build")}\` continues the build${midBuildView.length ? `; ${midBuildView.join(", ")} still to do` : ""}.`
                 : run.name
-                  ? `commit with the message below, then \`/${cmd("archive")}\`.`
+                  ? `\`/${cmd("commit")} ${run.name}\` (you see the files and the message first), then \`/${cmd("archive")} ${run.name}\`.`
                   : "commit when ready."
               : `\`/${cmd("review")}\` again, or read the sessions below.`;
     const tipKey = verdict === "pass" ? (midBuild.length ? "review.mid-build" : "review.pass") : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
@@ -403,7 +403,6 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       ...(failed.length ? ["", `⚠ The adversarial pass failed (${failed.join("; ")}): its findings are missing, so this result is incomplete. Run \`/${cmd("review")}\` again.`] : []),
       ...(o.verificationFailed ? ["", `⚠ The second look at the blocking findings couldn't run (${o.verificationFailed}): they are reported unconfirmed.`] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
-      ...(run.name && !o.partial ? ["", commitBlock(commitMessage(new Store(run.cwd).readSpec(run.name) ?? ""))] : []),
       "",
       tip(tipKey, { spec: run.label }),
     ].join("\n");

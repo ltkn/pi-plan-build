@@ -882,7 +882,6 @@ export const rememberStall = (session: string, stall: { task?: string; changed: 
 };
 export const baselineSessions = new Set<string>();
 
-export const commitBlock = (message: string | undefined) => (message ? `**Commit message**, to paste:\n\n\`\`\`text\n${message}\n\`\`\`` : "");
 
 /** A hung task command must not stall approval: the dry-run caps each well below a real check. */
 

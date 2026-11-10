@@ -33,7 +33,7 @@
  *   fix.ts        pb_fix_done, the fix-lap loop and /pb:fix
  *   hooks.ts      pi's event hooks (compaction, checkpoints, planning protections) and /pb:compact
  *   ask.ts        pb_ask (the one question tool); fresh-tools.ts pb_explore and pb_try
- *   undo.ts       /pb:undo; archive.ts /pb:archive; map-flow.ts the project map
+ *   undo.ts       /pb:undo; archive.ts /pb:archive; commit.ts /pb:commit; map-flow.ts the project map
  *   misc.ts       /pb:stats, /pb:standards, /pb:status, /pb:help
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -41,6 +41,7 @@ import { bindKit, refreshAfterCommands, registerNextShortcut } from "./kit.ts";
 import { registerRenderers } from "./render.ts";
 import { registerAsk } from "./ask.ts";
 import { registerArchive } from "./archive.ts";
+import { registerCommit } from "./commit.ts";
 import { registerFix } from "./fix.ts";
 import { registerFlow } from "./flow.ts";
 import { registerFreshTools } from "./fresh-tools.ts";
@@ -68,6 +69,7 @@ export default function pb(pi: ExtensionAPI) {
   registerFix(pi);
   registerMapFlow(pi);
   registerArchive(pi);
+  registerCommit(pi);
   registerUndo(pi);
   registerMisc(pi);
 }

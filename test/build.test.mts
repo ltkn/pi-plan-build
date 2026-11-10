@@ -1360,8 +1360,9 @@ test("stats: the Time line carries each phase that recorded a time, and old even
   assert.doesNotMatch(renderCard(spec([])), /\nTime /);
 });
 
-test("commit message: from the spec, after the build, the review and the archive, whichever you stop at", async () => {
-  const MESSAGE = "```text\nOrder cancellation\n\nCancel orders.\n\n- first file\n- second file\n```";
+test("/pb:commit: no phase writes a commit message any more; the command commits the change you confirm, with a message for the moment", async () => {
+  const log = (repo: string) => execSync("git log --format=%B%x00 -n 1", { cwd: repo, encoding: "utf8" }).split("\0")[0].trim();
+  const filesOf = (repo: string) => execSync("git show --name-only --format= HEAD", { cwd: repo, encoding: "utf8" }).trim().split("\n").sort();
   // The paths the mock cartographer's map names, so the map is written without asking.
   const project = (repo: string) => {
     fs.mkdirSync(path.join(repo, "src/auth"), { recursive: true });
@@ -1374,33 +1375,74 @@ test("commit message: from the spec, after the build, the review and the archive
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  assert.ok(t.posts.at(-1)!.includes(`**Commit message**, to paste:\n\n${MESSAGE}`)); // no task ids: they mean nothing in git
+  assert.doesNotMatch(t.posts.at(-1)!, /Commit message|```text/, "the build no longer posts a message to paste");
+  assert.match(t.posts.at(-1)!, /Then `\/pb:commit`/);
   await t.run("review");
-  assert.ok(t.posts.at(-1)!.includes(MESSAGE));
-
-  await t.run("archive"); // the feature isn't committed yet: its message, and the map it now includes
-  assert.ok(t.posts.at(-1)!.includes("```text\nOrder cancellation\n\nCancel orders.\n\n- first file\n- second file\n\nAlso updates the project map in AGENTS.md.\n```"));
-
-  const u = setup({ verify: "true" });
-  project(u.repo);
-  await written(u);
-  u.agent.script = diligent;
-  await u.run("build");
-  execSync("git add -A -- . ':(exclude).pi' && git commit -qm feature", { cwd: u.repo });
-  await u.run("archive"); // committed: only the map is left
-  assert.ok(u.posts.at(-1)!.includes("```text\nUpdate the project map in AGENTS.md after Order cancellation\n\n- added Orders\n- noted transactions\n```"));
-
-  const v = setup({ verify: "true", mapOnArchive: false });
+  assert.doesNotMatch(t.posts.at(-1)!, /Commit message|```text/, "nor does the review");
+  // Your own unrelated edit is offered too: you leave it out in the editor, as in git's own template.
+  fs.writeFileSync(path.join(t.repo, "notes.txt"), "mine\n");
+  let offered = "";
+  t.editors.push((prefill) => {
+    offered = prefill;
+    return prefill.replace("- notes.txt\n", "");
+  });
+  await t.run("commit");
+  assert.match(offered, /^Order cancellation\n\nCancel orders\.\n\n- first file\n- second file\n\n# Files to commit — delete a line to leave that file out\. Clear the message to cancel\.\n- T1\.txt\n- T2\.txt\n- notes\.txt\n$/);
+  assert.equal(log(t.repo), "Order cancellation\n\nCancel orders.\n\n- first file\n- second file", "the editor's comment lines are not the message");
+  assert.deepEqual(filesOf(t.repo), ["T1.txt", "T2.txt"], "only the files left in the editor; pb's state and the spec never");
+  assert.match(t.posts.at(-1)!, /^\*\*✅ Committed\*\* `[0-9a-f]{7}` — Order cancellation · 2 files · left out, still uncommitted: notes\.txt/);
+  assert.ok(fs.existsSync(path.join(t.repo, "notes.txt")), "a file left out is untouched");
+  // Nothing of the change left: it says so and stops.
+  fs.rmSync(path.join(t.repo, "notes.txt"));
+  const asked = t.editors.length;
+  await t.run("commit");
+  assert.equal(t.notes.at(-1), "Nothing to commit for order-cancellation: no change since the last commit.");
+  assert.equal(t.editors.length, asked, "no editor opened");
+  // After fixes, the next commit says what they fixed, not the whole feature again.
+  new (await import("../extensions/pb/store.ts")).Store(t.repo).event("order-cancellation", { type: "fix", fixed: ["name the constant"], skipped: [] });
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed\n");
+  t.editors.push((prefill) => prefill);
+  await t.run("commit");
+  assert.equal(log(t.repo), "Order cancellation: review fixes\n\n- name the constant");
+  // Archived, with the map updated: the map commit names what the map gained.
+  await t.run("archive");
+  assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:commit order-cancellation` commits what's left \(the feature and the map update\), then `\/pb:plan <feature>`/);
+  t.editors.push((prefill) => prefill);
+  await t.run("commit", "order-cancellation");
+  assert.equal(log(t.repo), "Update the project map after Order cancellation\n\n- added Orders\n- noted transactions");
+  assert.deepEqual(filesOf(t.repo), ["AGENTS.md"]);
+  // Clearing the message cancels.
+  const v = setup({ verify: "true" });
   await written(v);
   v.agent.script = diligent;
   await v.run("build");
-  execSync("git add -A -- . ':(exclude).pi' && git commit -qm feature", { cwd: v.repo });
-  const posted = v.posts.length;
-  await v.run("archive"); // nothing left to commit: no message, only the next step
-  assert.equal(v.posts.length, posted + 1);
-  assert.doesNotMatch(v.posts.at(-1)!, /```/);
-  assert.match(v.posts.at(-1)!, /^\*\*Next:\*\* `\/pb:plan <feature>` for the next one\.$/);
+  const head = execSync("git rev-parse HEAD", { cwd: v.repo, encoding: "utf8" });
+  v.editors.push(() => "\n# Files to commit — delete a line to leave that file out. Clear the message to cancel.\n- T1.txt\n");
+  await v.run("commit");
+  assert.equal(v.notes.at(-1), "Not committed.");
+  assert.equal(execSync("git rev-parse HEAD", { cwd: v.repo, encoding: "utf8" }), head);
 });
+
+test("/pb:commit: refused while a build is still writing files, and never without someone to confirm", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+  fs.writeFileSync(progressFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(progressFile, "utf8")), phase: "building", current: "T1" }));
+  await t.run("commit", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /order-cancellation is being built: commit when the build is done/);
+  fs.writeFileSync(progressFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(progressFile, "utf8")), phase: "built" }));
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "x\n");
+  const head = execSync("git rev-parse HEAD", { cwd: t.repo, encoding: "utf8" });
+  t.runtime().hasUI = false;
+  try {
+    await t.run("commit", "order-cancellation");
+  } finally {
+    t.runtime().hasUI = true;
+  }
+  assert.match(t.posts.at(-1)!, /^\*\*Not committed\*\* — nobody here to confirm\./);
+  assert.equal(execSync("git rev-parse HEAD", { cwd: t.repo, encoding: "utf8" }), head);
+});
+
 
 test("an unfinished build (e.g. after a crash) can be restarted in a new session; finished tasks stay done", async () => {
   const t = setup({ verify: "true" });

@@ -37,6 +37,8 @@ build. Your engineering standards live in AGENTS.md, written once.
                     auto-pilot over a written spec: repair laps over the P0-P2 findings, one claim check,
                     one confirming review, a lap kept for what it finds, then a digest naming what is left;
                     budgets specFix.maxLaps / specFix.maxReviews
+/pb:commit [spec]     commit the work now (after build, fixes, review or archive): the change's files and a
+                      message built from the spec, in an editor where you adjust both; pb never commits by itself
 /pb:undo · /pb:status [--json] · /pb:stats [--json] · /pb:archive · /pb:help
 alt+n                 the next step's command into the editor; the footer always shows where you are and what's next
 pb-report [--cwd dir] [--stats] [--review]   # the same pb.report/2 JSON, for scripts
@@ -76,7 +78,7 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
    → one run: T1 → T2 → … (each: its tests seen failing, then passing)
      → coherence (3+ tasks) → full suite → fix → full suite ✓
    → **✅ Build complete — order-cancellation** · 3/3 tasks · 25m (elapsed in parentheses when pauses count)
-     **Next:** `/pb:review`, then commit and `/pb:archive`
+     **Next:** `/pb:review`, then `/pb:commit` and `/pb:archive`
 /pb:review
    → a spec pass in a fresh session: every acceptance criterion met with
      evidence, not met, or not verified (silence is not a pass), plus decisions,
