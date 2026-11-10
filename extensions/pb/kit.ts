@@ -432,8 +432,6 @@ export const guardSettings = (role: "explorer" | "trier", cwd: string, store: St
     longCommands: explorer ? [] : longCommands(cwd, store),
     runSec: explorer ? cfg.explorer.timeoutSec : cfg.probeTimeoutSec,
     runKey: explorer ? "explorer.timeoutSec" : "probeTimeoutSec",
-    drop: cfg.probeEnv.drop,
-    keep: cfg.probeEnv.keep,
     configPath: store.rel("config.json"),
   };
 };

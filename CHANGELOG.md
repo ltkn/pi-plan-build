@@ -5,7 +5,7 @@
 - **`pb_explore` and `pb_try` can't reach production.** Both ran with an unrestricted shell and your whole environment, guarded only by their prompt. Now:
   - the explorer's shell runs read-only inspection commands only (ls, find, cat, head, tail, wc, rg, grep, git status/log/diff/show), enforced: a database client, a network call or a script is refused;
   - a probe's commands that write to a system outside this machine are refused (database writes, cluster, cloud and infrastructure changes, HTTP writes, remote shells, pushes);
-  - both shells run without database, cloud and cluster credentials, and the common tools' credential files point at nothing (`probeEnv` adds names or lets a local one through). Pi's own process keeps its model keys.
+  - both shells run without database, cloud and cluster credentials, and the common tools' credential files point at nothing. Pi's own process keeps its model keys.
 
   Fix laps now carry the production rule too.
 - **No genuine long command is cut short; a stuck explorer is.** The project's own long commands (suite, compile, lint, extra checks, every `Test:` line) get the larger of `commandTimeoutSec` and `verifyTimeoutSec` wherever they run; inside a probe, no command outlasts the probe. The explorer, which had no limit at all (real runs reached 3.5 hours), now stops after `explorer.idleSec` (10 min) without progress or `explorer.timeoutSec` (30 min) in all, and each of its commands after 2 minutes. Inside both tools, the per-command limit now applies too: before, it was only enforced in pb's own sessions. A stopped command or run says which limit fired and how to raise it, and each tool's brief states its limits up front.

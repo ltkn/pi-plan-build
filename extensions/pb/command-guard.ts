@@ -117,12 +117,10 @@ const matches = (name: string, pattern: string) =>
 /**
  * The shell prefix that runs a probe's command without the credentials above: Pi's own process keeps its model
  * provider keys (a Bedrock or Vertex setup needs AWS_* or Google credentials to reach the model), only the
- * model's shell loses them. `keep` wins over every drop.
+ * model's shell loses them. `also` adds names to drop (the guard's own settings variable).
  */
-export function scrubPrefix(env: Record<string, string | undefined>, drop: string[], keep: string[]): string {
-  const patterns = [...DEFAULT_DROPPED_ENV, ...drop];
-  const kept = (n: string) => keep.some((k) => matches(n, k));
-  const unset = Object.keys(env).filter((n) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && patterns.some((p) => matches(n, p)) && !kept(n));
-  const files = NEUTRALIZED_FILES.filter((n) => !kept(n));
-  return `${unset.length ? `unset ${unset.sort().join(" ")}; ` : ""}export ${files.map((n) => `${n}=${NO_FILE}`).join(" ")}; `;
+export function scrubPrefix(env: Record<string, string | undefined>, also: string[] = []): string {
+  const patterns = [...DEFAULT_DROPPED_ENV, ...also];
+  const unset = Object.keys(env).filter((n) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && patterns.some((p) => matches(n, p)));
+  return `${unset.length ? `unset ${unset.sort().join(" ")}; ` : ""}export ${NEUTRALIZED_FILES.map((n) => `${n}=${NO_FILE}`).join(" ")}; `;
 }

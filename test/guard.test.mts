@@ -70,12 +70,12 @@ test("probe: commands that write to a system outside this machine are refused; r
     assert.equal(remoteWriteRefusal(bad), why, bad);
 });
 
-test("probe environment: credentials leave the model's shell, a kept name stays, credential files point at nothing, other variables are untouched", () => {
-  const env = { DATABASE_URL: "postgres://prod", ORDERS_DATABASE_URL: "x", PGPASSWORD: "s", AWS_ACCESS_KEY_ID: "a", AWS_REGION: "eu", HOME: "/h", PATH: "/bin", LOCAL_DB: "postgres://localhost", ANTHROPIC_API_KEY: "k" };
-  const prefix = scrubPrefix(env, ["LOCAL_*"], ["AWS_REGION"]);
-  assert.match(prefix, /^unset AWS_ACCESS_KEY_ID DATABASE_URL LOCAL_DB ORDERS_DATABASE_URL PGPASSWORD; /);
+test("probe environment: credentials leave the model's shell, credential files point at nothing, other variables are untouched", () => {
+  const env = { DATABASE_URL: "postgres://prod", ORDERS_DATABASE_URL: "x", PGPASSWORD: "s", AWS_ACCESS_KEY_ID: "a", HOME: "/h", PATH: "/bin", ANTHROPIC_API_KEY: "k", PI_PB_GUARD: "{}" };
+  const prefix = scrubPrefix(env, ["PI_PB_GUARD"]);
+  assert.match(prefix, /^unset AWS_ACCESS_KEY_ID DATABASE_URL ORDERS_DATABASE_URL PGPASSWORD PI_PB_GUARD; /);
   assert.match(prefix, /export KUBECONFIG=\/dev\/null AWS_CONFIG_FILE=\/dev\/null AWS_SHARED_CREDENTIALS_FILE=\/dev\/null PGPASSFILE=\/dev\/null PGSERVICEFILE=\/dev\/null CLOUDSDK_CONFIG=\/dev\/null; $/);
-  for (const kept of ["AWS_REGION", "HOME", "PATH", "ANTHROPIC_API_KEY"]) assert.doesNotMatch(prefix.split(";")[0], new RegExp(`\\b${kept}\\b`), kept);
+  for (const kept of ["HOME", "PATH", "ANTHROPIC_API_KEY"]) assert.doesNotMatch(prefix.split(";")[0], new RegExp(`\\b${kept}\\b`), kept);
 });
 
 /** The guard as Pi loads it, against a stand-in that records its handlers. */
@@ -92,7 +92,7 @@ const loadGuard = (settings: GuardSettings | undefined) => {
   }
   return handlers;
 };
-const settings = (o: Partial<GuardSettings>): GuardSettings => ({ role: "trier", shellSec: 1800, shellKey: "commandTimeoutSec", longSec: 1800, longKey: "commandTimeoutSec", longCommands: ["npm test"], runSec: 900, runKey: "probeTimeoutSec", drop: [], keep: [], configPath: ".pi/pb/config.json", ...o });
+const settings = (o: Partial<GuardSettings>): GuardSettings => ({ role: "trier", shellSec: 1800, shellKey: "commandTimeoutSec", longSec: 1800, longKey: "commandTimeoutSec", longCommands: ["npm test"], runSec: 900, runKey: "probeTimeoutSec", configPath: ".pi/pb/config.json", ...o });
 
 test("guard: the explorer is refused anything but inspection, a probe any remote write; both shells lose credentials; a command never outlasts its run", () => {
   const explorer = loadGuard(settings({ role: "explorer", shellSec: 120, shellKey: "explorer.commandTimeoutSec", longCommands: [], runSec: 1800, runKey: "explorer.timeoutSec" }));

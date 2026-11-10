@@ -20,8 +20,6 @@ export interface GuardSettings {
   /** the whole run's limit (0 = none), and its config key */
   runSec: number;
   runKey: string;
-  drop: string[];
-  keep: string[];
   /** where the limits are set, for the note a timeout gets */
   configPath: string;
 }
@@ -59,7 +57,7 @@ export default function freshGuard(pi: ExtensionAPI) {
     if (cap !== undefined) ev.input.timeout = cap;
     const own = isLongCommand(command, settings.longCommands) ? settings.longKey : settings.shellKey;
     if (ev.toolCallId) keys.set(ev.toolCallId, runLeftSec !== undefined && cap !== undefined && cap >= Math.floor(runLeftSec) ? settings.runKey : own);
-    ev.input.command = `${scrubPrefix(process.env, [...settings.drop, GUARD_ENV], settings.keep)}${command}`;
+    ev.input.command = `${scrubPrefix(process.env, [GUARD_ENV])}${command}`;
   });
   // A command stopped at its limit says which limit, so the run's answer can name it instead of guessing.
   pi.on("tool_result", (ev) => {
