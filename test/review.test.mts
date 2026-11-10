@@ -219,6 +219,45 @@ test("fix: an unfinished lap starts the next one automatically", async () => {
   assert.match(t.posts.at(-1)!, /complete[\s\S]*\/pb:review/);
 });
 
+test("fix: a lap updates the spec's Design and Decisions to what it fixed, and nothing else", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  await t.callTool("pb_write_spec", { name: "other-spec", content: SPEC().replace("# Order cancellation", "# Other spec") });
+  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  const before = fs.readFileSync(specFile, "utf8");
+  const owner = JSON.parse(fs.readFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"), "utf8")).writtenIn;
+  pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 12, title: "today is frozen at mount" }]);
+  const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+  fs.writeFileSync(progressFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(progressFile, "utf8")), writtenIn: owner }));
+  const said: string[] = [];
+  const tried = async (tool: (name: string, params: object) => Promise<{ error?: string }>, name: string, params: object) => said.push((await tool(name, params)).error ?? "written");
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    await tried(tool, "pb_update_spec", { section: "Decisions", mode: "append", content: "- Today advances with the clock, because a tab left open past midnight must not show yesterday." });
+    await tried(tool, "pb_update_spec", { section: "Design", content: "- `today` is derived from a ticking clock." });
+    await tried(tool, "pb_update_spec", { section: "Contracts", content: "- T1 owns everything." });
+    await tried(tool, "pb_update_spec", { section: "Tasks", content: "### T1: other\n- Acceptance: x\n- Test: `true`" });
+    await tried(tool, "pb_update_spec", { status: "planning" });
+    await tried(tool, "pb_update_spec", { name: "other-spec", section: "Decisions", mode: "append", content: "- an unrelated spec edit, because." });
+    await tried(tool, "pb_write_spec", { name: "order-cancellation", content: SPEC() });
+    await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
+  };
+  await t.run("fix");
+  assert.deepEqual(said.slice(0, 2), ["written", "written"], "Design and Decisions follow the fix");
+  for (const refusal of said.slice(2, 6)) assert.match(refusal, /This fix lap may change only order-cancellation's Design and Decisions[\s\S]*reported as skipped, for a spec revision/);
+  assert.match(said[6]!, /This fix lap for order-cancellation can't rewrite a spec/);
+  const after = fs.readFileSync(specFile, "utf8");
+  assert.match(after, /Today advances with the clock/);
+  assert.match(after, /## Design\n- `today` is derived from a ticking clock\./);
+  assert.equal(contractHash(after), contractHash(before), "the approved contract is untouched, so nothing needs re-approval");
+  assert.doesNotMatch(fs.readFileSync(path.join(t.repo, ".pi/pb/specs/other-spec/spec.md"), "utf8"), /an unrelated spec edit/);
+  // The spec stays owned by the session that wrote it, not the lap that edited it.
+  assert.equal(JSON.parse(fs.readFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"), "utf8")).writtenIn, owner);
+  const { fixSeedPrompt } = await import("../extensions/pb/prompts.ts");
+  assert.match(fixSeedPrompt("order-cancellation", []), /update those lines in this lap with pb_update_spec, so the spec says what the code now does; only Design and Decisions/);
+});
+
 test("fix: a report names findings by the number in the brief; a number outside it is refused", async () => {
   const t = setup();
   process.chdir(t.repo);
@@ -266,7 +305,8 @@ test("fix: a lap that revises the approved contract says re-approve before revie
   );
   t.agent.script = async (text, tool) => {
     if (!text.startsWith("[pb:fix")) return;
-    await tool("pb_write_spec", { name: "order-cancellation", content: approved.replace("Cancel orders.", "Cancel pending orders.") });
+    // The lap itself can't touch the contract, but the human can edit the spec while it runs.
+    fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md"), approved.replace("Cancel orders.", "Cancel pending orders."));
     await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
   };
   await t.run("fix");
@@ -411,7 +451,7 @@ test("fix: a lap opens a fenced session seeded with the findings", async () => {
   const seed = t.instructions.find((x) => x.startsWith("[pb:fix"))!;
   assert.match(seed, /Fix exactly the review findings below/);
   assert.match(seed, /name the constant/);
-  assert.match(seed, /Do not commit, archive, or write under \.pi\//);
+  assert.match(seed, /Do not commit or archive, and write nothing else under \.pi\//);
   assert.match(seed, /Before reporting, re-read your diff and fix what it shows: duplicated or dead code/);
   assert.match(seed, /Edit structured files .*exact literal replacement or line-based edits, never a backtracking regex/);
   assert.match(seed, /call pb_fix_done/);

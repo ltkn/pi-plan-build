@@ -225,6 +225,11 @@ export function registerFlow(pi: ExtensionAPI) {
       const repair = store.fixOfSession(session);
       if (repair && params.name !== repair.name)
         throw new Error(`A repair lap for ${repair.name} is open in this session: it may write that spec only, not ${params.name}. Finish the lap, or /${cmd("undo")} to drop it.`);
+      const fixLap = store.fixSession(session);
+      if (fixLap)
+        throw new Error(
+          `This fix lap for ${fixLap.spec} can't rewrite a spec. Only its Design and Decisions may change (pb_update_spec), to say what the fix changed; a finding that needs its Goal, Contracts or Acceptance changed is reported as skipped, for a spec revision.`,
+        );
       const building = liveBuildOfSession(ctx, store);
       if (building)
         throw new Error(
@@ -281,7 +286,8 @@ export function registerFlow(pi: ExtensionAPI) {
       const mine = store.specForSession(session);
       const live = mine ? store.progress(mine) : undefined;
       const building = live?.phase === "building" ? live : undefined;
-      const name = params.name ?? repair?.name ?? mine;
+      const fixLap = store.fixSession(session);
+      const name = params.name ?? repair?.name ?? fixLap?.spec ?? mine;
       if (!name) throw new Error("Which spec? Give its name.");
       if (repair && name !== repair.name)
         throw new Error(`A repair lap for ${repair.name} is open in this session: it may write that spec only, not ${name}. Finish the lap, or /${cmd("undo")} to drop it.`);
@@ -294,6 +300,14 @@ export function registerFlow(pi: ExtensionAPI) {
         if (sectionName !== "design" && sectionName !== "decisions")
           throw new Error(
             `The build of ${building.spec} is running: only its Design and Decisions may change, not ${sectionName ? `"${params.section!.replace(/^#+\s*/, "").trim()}"` : "the spec"}. A contract change pauses the build and /${cmd("build")} re-approves the revision.`,
+          );
+      }
+      if (fixLap) {
+        // A fix lap keeps the spec true to the code it fixed, as a build does; its contract is not the lap's to change.
+        const sectionName = params.section?.replace(/^#+\s*/, "").trim().toLowerCase();
+        if (name !== fixLap.spec || params.status || (sectionName !== "design" && sectionName !== "decisions"))
+          throw new Error(
+            `This fix lap may change only ${fixLap.spec}'s Design and Decisions, to say what the fix changed. A finding that needs its Goal, Contracts, Acceptance or Status changed is reported as skipped, for a spec revision.`,
           );
       }
       let md = store.readSpec(name);
@@ -329,7 +343,8 @@ export function registerFlow(pi: ExtensionAPI) {
       if (specMs !== undefined && session) specStarted.delete(session);
       // A live build's task list is its approved one: a Design or Decisions edit never resyncs it
       // from the live file, and the build that owns the spec keeps its writtenIn.
-      const buildingNow = !!building;
+      // A fix lap's edit is the same kind: the spec stays owned by the session that wrote it.
+      const buildingNow = !!building || !!fixLap;
       store.saveProgress({
         ...(prev ?? { spec: name, phase: "written" }),
         spec: name,

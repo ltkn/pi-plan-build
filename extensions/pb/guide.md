@@ -938,7 +938,11 @@ The findings land in the session you ran it from; run it **in the build
 session** and fix them right there: that session knows the code it just wrote.
 Or fix them in a fresh fenced session: `/pb:fix [ids]` takes P0–P2 finding
 ids (no ids = all open ones); P3 nits never block and are fixed by hand or
-ignored. If the fixes change the approved contract, `/pb:build` must re-approve
+ignored. A fix lap keeps the spec true to what it fixed: when a fix changes
+behaviour the spec's Design or Decisions describe, the lap updates those lines
+itself, and it can change nothing else in the spec. A finding that needs the
+Goal, Contracts or Acceptance changed is reported as skipped, for you to revise
+with `/pb:spec`. If the fixes change the approved contract, `/pb:build` must re-approve
 it before the review runs; otherwise the next `/pb:review` is a **follow-up**:
 it checks the previous findings and looks only at what changed since
 (`--full` reviews everything again). If nothing changed, it says so and costs

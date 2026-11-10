@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A fix keeps the spec true to the code.** A `/pb:fix` lap now updates the spec's Design and Decisions when its fix changes the behaviour they describe. Before, a lap was told to write nothing under `.pi/`, so after a fix the spec still described the old behaviour, and the follow-up review spent a finding saying so. The lap can change only those two sections of its own spec: neither is part of the approved contract, so nothing needs re-approval. A finding that needs the Goal, Contracts or Acceptance changed is still reported as skipped. This is enforced by the spec tools, not just the prompt: before, nothing stopped a fix lap from rewriting any spec.
+
 ## 1.39.0
 
 - **Planning is led by a senior engineer, for the whole conversation.** What planning asks of the model is now a role, set in the system prompt on every turn of a planning session. Before, it was a paragraph in the first message: it faded as the discussion grew, and a checkpoint reset dropped it entirely. The role:

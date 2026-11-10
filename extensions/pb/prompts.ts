@@ -410,7 +410,7 @@ export function fixSeedPrompt(spec: string, findings: Finding[], reference = "")
     `${reference ? `${reference}\n\n` : ""}` +
     `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line yourself before and after the change (it must fail before, pass after), and the full suite once at the end. ${TIMEOUT_RULE} ${STRUCTURED_EDIT_RULE} ` +
     `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
-    `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ${SELF_REVIEW_RULE} ` +
+    `When a fix changes behaviour the spec's Design or Decisions describe, update those lines in this lap with pb_update_spec, so the spec says what the code now does; only Design and Decisions — a finding that needs its Goal, Contracts or Acceptance changed is skipped instead. Reply shape, one block per finding: files changed, test command, result. Do not commit or archive, and write nothing else under .pi/. ${SELF_REVIEW_RULE} ` +
     `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), and test results; then stop.`
   );
 }
