@@ -6,21 +6,22 @@ import type {
   ExtensionCommandContext,
   ExtensionContext
  } from "@earendil-works/pi-coding-agent";
-import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
-import { HELP_PATH, tip, topic, topics } from "./help.ts";
-import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, claimCheckBrief, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, specFixPrompt, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
-import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
-import { runFresh, usageOf } from "./runner.ts";
+import { addedDeclarations, changedPaths, inspectChanges, snapshot, staleProseRefs } from "./checkpoint.ts";
+import { tip } from "./help.ts";
+import { buildIntro, buildMechanics, claimCheckBrief, buildStateSummary, coherePrompt, continuePrompt, extraBlock, findingLine, finishSpecPrompt, fixText, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, specFixPrompt } from "./prompts.ts";
+import { REVIEW_TOOLS } from "./review.ts";
+import { runFresh } from "./runner.ts";
 import { notifyDesktop } from "./notify.ts";
 import { renderBuildToolCall, renderBuildToolResult } from "./render.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, specTextBlocks, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, acceptanceCriteria, buildTask, commitMessage, contractHash, earlierProof, needsRed, parseSpec, sectionHeading, setSection, setStatus, specHash, specTextBlocks, tokensOf } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { buildTimeLabel, buildTiming, loadStats, renderAll, renderCard } from "./stats.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, appendCheckpoint, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, pathExists, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
+import { buildTimeLabel, buildTiming } from "./stats.ts";
+import { type Checkpoint, type Finding, type Progress, COHERE_TASK_ID, Store, appendCheckpoint, cap, diffStat, gitHead, now, pathExists, readEvents } from "./store.ts";
+import { runVerify } from "./verify.ts";
 import { safeLine } from "./markdown.ts";
-import { COHERE_MIN_TASKS, P_ORDER, SYNTHETIC_TASKS, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, mark, nextLine, nextTodo, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unfinishedPhase, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
+import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
+import { enterStep, finishBuild, nextPhase, nextStep, nextTodo, unfinishedPhase } from "./phase.ts";
 
 const DRY_RUN_TIMEOUT_SEC = 120;
 
@@ -189,7 +190,7 @@ export const buildResetDue = (ctx: ExtensionContext, store: Store): { percent?: 
 /** The build's state as a summary, for a reset at a task boundary or a compaction in the middle of a task. */
 export const stateSummary = (ctx: ExtensionContext, store: Store, p: Progress, reason: "reset" | "compaction", extra: { changed?: string[]; read?: string[]; previous?: string } = {}) => {
   const loaded = loadBuildSpec(store, p);
-  const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+  const { cfg, buildCmd } = commands(ctx.cwd, store);
   const each = cfg.taskChecks === "each";
   const tp = p.tasks.find((t) => t.id === p.current);
   const task = loaded ? buildTask(loaded.spec, p.current) : undefined;
@@ -541,9 +542,7 @@ export function registerFlow(pi: ExtensionAPI) {
     tp.status = "doing";
     if (o.countAttempt ?? true) tp.attempts += 1;
     tp.attempts = Math.max(tp.attempts, 1);
-    p.current = taskId;
-    p.pause = undefined;
-    p.phase = "building";
+    enterStep(p, taskId);
     store.saveProgress(p);
     showProgress(ctx, p);
     return {
@@ -572,9 +571,7 @@ export function registerFlow(pi: ExtensionAPI) {
       }
     }
     p.tasks.push({ id: COHERE_TASK_ID, title: "Coherence pass: consolidate what slicing split apart", status: "doing", attempts: 1 });
-    p.current = COHERE_TASK_ID;
-    p.phase = "building";
-    p.pause = undefined;
+    enterStep(p, COHERE_TASK_ID);
     store.saveProgress(p);
     showProgress(ctx, p);
     runtime.boundary = true;
@@ -630,6 +627,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     const others = new Set(cps.filter((c) => c.task && c.task !== p.current).flatMap((c) => c.files ?? []));
     const flags = inspectChanges(ctx.cwd, entry, after, start, others);
     entry.files = changedPaths(ctx.cwd, entry.commit, after.commit);
+    entry.declarations = addedDeclarations(ctx.cwd, entry.commit, after.commit);
     store.saveCheckpoints(p.spec, cps);
     const tests = flags.filter((f) => f.kind === "tampering").map((f) => `${p.current}: ${f.detail}`);
     if (tests.length) p.testChanges = [...(p.testChanges ?? []).filter((c) => !c.startsWith(`${p.current}: `)), ...tests];
@@ -668,7 +666,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     p: Progress,
     spec: ParsedSpec,
     signal: AbortSignal | undefined,
-    o: { suiteDone?: boolean } = {},
+    o: { suiteDone?: boolean; lintDone?: boolean } = {},
   ): Promise<ReturnType<typeof reply> | ReturnType<typeof stop>> => {
     const final = p.current === "final";
     const { cfg, testCmd, buildCmd, lintCmd, extraCmds } = commands(ctx.cwd, store);
@@ -697,28 +695,31 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         what = `\`${ran}\``;
       }
     }
-    if (!failure && final) {
-      // Lint and the project's own checks gate the end of the build, after the suite: a style,
-      // unused or type finding then fails the final check like any other failure. lastVerify
-      // keeps the suite's result, so the completion summary still names it.
-      for (const cmd of finalExtras(lintCmd, extraCmds)) {
-        showProgress(ctx, p, `checking final: ${cmd}`);
-        const r = await withChecking(() => runVerify(cmd, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
-        if (signal?.aborted) {
-          pauseBuild(ctx, store, p, `you stopped the check of ${p.current}.`, "build.paused", "stopped");
-          return stop("The check was stopped: the build is paused. Stop here.");
-        }
-        store.event(p.spec, { type: "check", task: "final", attempt: tp?.attempts ?? 1, ok: r.ok !== false, command: cmd, notices: [] });
-        if (r.ok === false) {
-          p.lastVerify = r;
-          store.saveProgress(p);
-          failure = r.summary;
-          what = `\`${cmd}\``;
-          break;
-        }
+    // Lint gates every step after its own check, so a style, unused-code or type finding fails the
+    // task that caused it while that task's context is still loaded. The final step adds the
+    // project's own checks, and skips lint when the step it follows just passed it (o.lintDone).
+    // lastVerify keeps the step's own check, so the completion summary still names it.
+    const gates = final ? finalExtras(o.lintDone ? null : lintCmd, extraCmds) : lintCmd ? [lintCmd] : [];
+    let lint: boolean | undefined;
+    for (const cmd of failure ? [] : gates) {
+      showProgress(ctx, p, `checking ${final ? "final" : p.current}: ${cmd}`);
+      const r = await withChecking(() => runVerify(cmd, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
+      if (signal?.aborted) {
+        pauseBuild(ctx, store, p, `you stopped the check of ${p.current}.`, "build.paused", "stopped");
+        return stop("The check was stopped: the build is paused. Stop here.");
+      }
+      if (cmd === lintCmd) lint = r.ok !== false;
+      if (final) store.event(p.spec, { type: "check", task: "final", attempt: tp?.attempts ?? 1, ok: r.ok !== false, command: cmd, notices: [] });
+      if (r.ok === false) {
+        p.lastVerify = r;
+        store.saveProgress(p);
+        failure = r.summary;
+        what = `\`${cmd}\``;
+        break;
       }
     }
-    store.event(p.spec, { type: "check", task: p.current, attempt: tp?.attempts ?? 1, ok: !failure, command: ran, notices: found });
+    // A task records one event per attempt (stats count attempts from them); its lint result rides along.
+    store.event(p.spec, { type: "check", task: p.current, attempt: tp?.attempts ?? 1, ok: !failure, command: ran, notices: found, ...(!final && lint !== undefined ? { lint } : {}) });
 
     if (failure) return failedCheck(ctx, store, p, what, failure);
     return advanceAfterCheck(ctx, store, p, spec, signal, found, ran);
@@ -740,7 +741,6 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
   ): Promise<ReturnType<typeof reply> | ReturnType<typeof stop>> => {
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     const each = cfg.taskChecks === "each";
-    const final = p.current === "final";
     const tp = p.tasks.find((t) => t.id === p.current);
     // Passed: close the task and move on.
     if (tp) tp.status = "done";
@@ -761,9 +761,11 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       return stop(`${passed}\n\nThe spec's contract changed while ${p.current} was checked: the build is paused. Stop here.`);
     }
 
-    const next = nextTodo(p);
-    if (next) {
-      const t = beginTask(ctx, store, p, next.id, { inTool: true });
+    const endCmd = checkCommand(spec, undefined, testCmd, buildCmd, true, each);
+    const { lintCmd, extraCmds } = commands(ctx.cwd, store);
+    const step = nextStep(p, { cohere: needsCohere(spec), endCommand: endCmd, ran, extraChecks: extraCmds.length > 0 });
+    if (step.kind === "task") {
+      const t = beginTask(ctx, store, p, step.id, { inTool: true });
       if (!t) {
         pauseBuild(ctx, store, p, `${store.rel("specs", p.spec, "spec.md")} no longer parses; fix it, then /${cmd("build")}.`, "build.paused", "spec");
         return stop("The spec no longer parses: the build is paused. Stop here.");
@@ -771,28 +773,19 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       runtime.boundary = true;
       return reply(`${passed}\n\n${t.prompt}`);
     }
-    // Every spec task done: on builds big enough to drift, one coherence pass before the final check.
-    if (!final && p.current !== COHERE_TASK_ID && !p.tasks.some((t) => t.id === COHERE_TASK_ID) && needsCohere(spec)) {
+    if (step.kind === "cohere") {
       beginCohereEntry(ctx, store, p);
       return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(p.spec))}`);
     }
-    // Every task done: one full check, unless the last task's check was that already.
-    // With extra final gates (lint, project checks) the final step still runs even then.
-    const endCmd = checkCommand(spec, undefined, testCmd, buildCmd, true, each);
-    const { lintCmd, extraCmds } = commands(ctx.cwd, store);
-    const extras = finalExtras(lintCmd, extraCmds);
-    if (!final && ((endCmd && ran !== endCmd) || extras.length)) {
-      p.current = "final";
+    if (step.kind === "final") {
+      // The project's own checks still run; lint does not, since the step that just passed ran it.
       p.tasks.push({ id: "final", title: `Final check: ${spec.gate === "tests" ? "full suite" : "compile"}`, status: "doing", attempts: 1 });
+      enterStep(p, "final");
       store.saveProgress(p);
-      const suiteDone = !!endCmd && ran === endCmd;
-      const r = await checkAndAdvance(ctx, store, p, spec, signal, { suiteDone });
-      return { ...r, content: text(`${passed}\nRunning \`${endCmd ?? extras[0]}\`…\n\n${r.content[0].text}`) };
+      const r = await checkAndAdvance(ctx, store, p, spec, signal, { suiteDone: step.suiteDone, lintDone: true });
+      return { ...r, content: text(`${passed}\nRunning \`${endCmd ?? extraCmds[0]}\`…\n\n${r.content[0].text}`) };
     }
-    p.tasks = p.tasks.filter((t) => t.id !== "final");
-    p.phase = "built";
-    p.current = undefined;
-    p.nudged = undefined;
+    finishBuild(p);
     store.saveProgress(p);
     store.event(p.spec, { type: "built" });
     showProgress(ctx, p);
@@ -810,6 +803,9 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     for (const e of events) {
       if (e.type === "check" && e.task === "final" && typeof e.command === "string") gates.set(e.command, e.ok === true);
     }
+    // Lint passed on the last step and was not run again at the end: that step's result is the gate's.
+    const lastLint = events.filter((e) => e.type === "check" && typeof e.lint === "boolean").at(-1);
+    if (lintCmd && !gates.has(lintCmd) && lastLint) gates.set(lintCmd, lastLint.lint === true);
     if (p.lastVerify?.command && p.lastVerify.ok !== null) gates.set(p.lastVerify.command, p.lastVerify.ok);
     const gateLabel = (c: string) => (c === testCmd ? "suite" : c === buildCmd ? "build" : c === lintCmd ? "lint" : `\`${c}\``);
     const gateFacts = [...gates].map(([c, ok]) => `${gateLabel(c)} ${ok ? "PASS" : "FAIL"}`);
@@ -906,7 +902,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     const p: Progress = {
       ...prev,
       spec: name,
-      phase: "building",
+      phase: nextPhase(prev?.phase ?? "written", "building"),
       baseCommit: restart ? (prev!.baseCommit ?? gitHead(ctx.cwd)) : gitHead(ctx.cwd),
       // A task's tests seen failing stay proven: only /pb:undo takes that back, with the files.
       // Attempts are preserved on restart: a crash must not grant a fresh budget. A fresh set comes
@@ -980,7 +976,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
   /** Fresh session: seeded with the spec, on the model and thinking level you planned with. */
 
   const launchBuildFresh = async (o: LaunchBuild): Promise<void> => {
-    const { ctx, store, name, spec, md, p, first, restart, buildModel, switching, session } = o;
+    const { ctx, store, name, spec, md, p, first, restart, buildModel, session } = o;
     const { cfg, buildCmd } = commands(ctx.cwd, store);
     const cctx = ctx as ExtensionCommandContext;
     const carried = { model: buildModel ? cfg.buildModel : sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined };
@@ -2340,8 +2336,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
           resetExhausted(fin, cfg.maxAttempts);
           const attempt = (fin?.attempts ?? 0) + 1;
           if (fin) fin.attempts = attempt;
-          p.phase = "building";
-          p.pause = undefined;
+          enterStep(p, "final");
           store.saveProgress(p);
           showProgress(ctx, p);
           const finalFiles = changedFilesSection(store, p);
@@ -2356,8 +2351,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
           resetExhausted(cc, cfg.maxAttempts);
           const attempt = cc.attempts + 1;
           cc.attempts = attempt;
-          p.phase = "building";
-          p.pause = undefined;
+          enterStep(p, COHERE_TASK_ID);
           store.saveProgress(p);
           showProgress(ctx, p);
           return instruct("▶ coherence pass", `${coherePrompt(p.baseCommit, attempt, cfg.maxAttempts, specReference(p.spec))}${from}`);

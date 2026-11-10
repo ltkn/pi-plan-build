@@ -9,6 +9,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type Declaration, declarationsIn } from "./declarations.ts";
 
 const REF = "refs/pb/checkpoints";
 const LEDGER_EXCLUDE = ":(exclude).pi/pb";
@@ -216,6 +217,12 @@ export function dropCheckpoints(cwd: string): void {
 
 export function changedPaths(cwd: string, a: string, b: string, paths: string[] = []): string[] {
   return split0(tryRun(cwd, ["diff", "-z", "--name-only", "--no-renames", a, b, "--", ...paths]));
+}
+
+/** The names the change from `a` to `b` declares, outside test files and pb's own state. */
+export function addedDeclarations(cwd: string, a: string, b: string): Declaration[] {
+  const diff = tryRun(cwd, ["-c", "core.quotePath=false", "diff", "-U0", "--no-renames", "--no-color", a, b, "--", ".", ":(exclude).pi"]);
+  return diff ? declarationsIn(diff, (file) => TEST_FILE.test(file)) : [];
 }
 
 export interface StaleRef {

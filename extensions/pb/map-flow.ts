@@ -2,16 +2,15 @@
 import * as path from "node:path";
 import type {
   ExtensionAPI,
-  ExtensionCommandContext,
   ExtensionContext
- } from "@earendil-works/pi-coding-agent";
-import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
-import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findingsOf, ignoredPathsFor, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
-import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
-import { runFresh, usageOf } from "./runner.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { appendEntry, choose, cmd, revertFreshRun, safely, sessionModel, stop, text, warnLater } from "./kit.ts";
+} from "@earendil-works/pi-coding-agent";
+import { snapshot } from "./checkpoint.ts";
+import { extraBlock } from "./prompts.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
+import { REVIEW_TOOLS } from "./review.ts";
+import { runFresh } from "./runner.ts";
+import { type ReviewLedgerEntry, Store } from "./store.ts";
+import { appendEntry, choose, cmd, revertFreshRun, safely, sessionModel, warnLater } from "./kit.ts";
 
 export const mapRefusal = (cwd: string): string => {
   const defect = mapDefect(cwd);

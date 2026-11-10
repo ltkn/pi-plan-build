@@ -1,0 +1,5 @@
+words: 53
+
+[pb:deps]
+
+Check this project's dependencies: the versions in use against the latest stable ones, deprecated APIs we call, and what an upgrade would break. Don't change the project's files. Then propose the upgrades worth doing, each with its benefit and risk. If I agree, /pb:build turns them into a spec of their own.

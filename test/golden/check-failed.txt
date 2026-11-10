@@ -1,0 +1,9 @@
+words: 66
+
+The check for T1 failed (attempt 1 of 3): `npm test -- order-cancel`
+
+1 failing: expected 409, got 200
+
+The spec that binds this work is .pi/pb/specs/order-cancellation/spec.md: read "Goal", "Out of scope", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse", "Threats" before you change anything, and the sections a task names when it needs them.
+
+Fix the cause, then call pb_task_done again with task "T1".

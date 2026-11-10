@@ -1,14 +1,14 @@
 /** pb_explore and pb_try: the two fresh-context research tools. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
-import { StringEnum, Type } from "./schema.ts";
-import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
-import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
-import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
+import { Type } from "./schema.ts";
+import { snapshot } from "./checkpoint.ts";
+import { EXPLORER_SYSTEM, PRODUCTION_RULE, TRY_SYSTEM, explorerBrief, tryBrief } from "./prompts.ts";
+import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
 import { duration } from "./format.ts";
 import { runFresh, usageOf } from "./runner.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { commands, revertFreshRun, sessionModel, tail, text, tree, warnLater } from "./kit.ts";
+import { Store } from "./store.ts";
+import { revertFreshRun, sessionModel, tail, text, tree, warnLater } from "./kit.ts";
 
 export function registerFreshTools(pi: ExtensionAPI) {
   pi.registerTool({
@@ -105,7 +105,7 @@ export function registerFreshTools(pi: ExtensionAPI) {
     name: "pb_try",
     label: "Try",
     description:
-      "When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. Prefer local code, docs and local/test data first; a read-only production query only when local data cannot answer it (state why, table, row cap at most ~500 rows); never write, never notify. Bound the goal: a probe is stopped at `probeTimeoutSec` (15 minutes by default), so one that cannot settle in that time is the wrong probe. Several calls can run in parallel.",
+      "When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. " + PRODUCTION_RULE + " Bound the goal: a probe is stopped at `probeTimeoutSec` (15 minutes by default), so one that cannot settle in that time is the wrong probe. Several calls can run in parallel.",
     parameters: Type.Object({
       goal: Type.String({ description: "the question to settle by running, specific enough to probe in one go" }),
     }),

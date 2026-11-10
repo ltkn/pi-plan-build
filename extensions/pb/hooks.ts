@@ -3,14 +3,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
   ExtensionAPI,
-  ExtensionCommandContext,
   ExtensionContext
- } from "@earendil-works/pi-coding-agent";
-import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
-import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, loadSpec, pauseBuild, pruneSession, rememberStall, resetLimit, runtime, specOfSession, stop, tree, unfinishedPhase } from "./kit.ts";
+} from "@earendil-works/pi-coding-agent";
+import { changedPaths, cleanupIndexes, snapshot } from "./checkpoint.ts";
+import { checkpointPrompt, checkpointSummary, reviewStateSummary, nudgePrompt } from "./prompts.ts";
+import { tokensOf } from "./spec.ts";
+import { Store, now } from "./store.ts";
+import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, pauseBuild, pruneSession, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
+import { unfinishedPhase } from "./phase.ts";
 import { buildResetDue, stateSummary } from "./flow.ts";
 
 export function registerHooks(pi: ExtensionAPI) {
@@ -159,7 +159,7 @@ export function registerHooks(pi: ExtensionAPI) {
   pi.registerCommand(cmd("compact"), {
     description:
       "pb's compaction. Planning: write the plan to its spec, then reset the session to it (e.g. before quitting). Build: compact to the build's state, no summarizing model call",
-    handler: async (args, ctx) => {
+    handler: async (_args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
@@ -248,7 +248,6 @@ export function registerHooks(pi: ExtensionAPI) {
     if (changed) store.saveCheckpoints(name, cps);
 
     if (!wasBoundary || p.phase !== "building" || !p.current) return;
-    const loaded = loadSpec(store, name);
     const due = buildResetDue(ctx, store);
     if (!due) return;
     const cp = cps.find((c) => c.id === p.current);

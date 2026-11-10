@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { safeLine } from "./markdown.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { agentDir } from "./standards.ts";
+import type { Declaration } from "./declarations.ts";
 
 export const PREFIX = "pb";
 export const PB_DIR = path.join(".pi", "pb");
@@ -22,9 +23,9 @@ export interface Config {
   verify: string | null;
   /** Compile/typecheck command: the check for a task without its own Test: line, and the "build" gate. "auto" detects; null disables. */
   build: string | null;
-  /** Lint command: "auto" uses package.json's lint script when present (other stacks set it explicitly); null disables. Runs at the final gate, after the suite. */
+  /** Lint command: "auto" uses package.json's lint script when present (other stacks set it explicitly); null disables. Runs after every task's check, failing that task like any check. */
   lint: string | null;
-  /** Extra project commands (e.g. standards scripts): explicit commands only, run at the final gate after lint. */
+  /** Extra project commands (e.g. standards scripts): explicit commands only, run at the final gate after the suite. */
   extraChecks: string[];
   verifyTimeoutSec: number;
   /** How long one shell command the agent runs may take before Pi kills it (seconds; 0 = no limit). */
@@ -363,6 +364,8 @@ export interface Checkpoint {
   tasks: TaskProgress[];
   task?: string;
   files?: string[];
+  /** the names the step's change declared (functions, types, constants): the next task's handoff names them */
+  declarations?: Declaration[];
   summary?: string;
   /** session entry to rewind the conversation to; set at the end of the turn when the task started mid-run */
   entry?: string;
@@ -395,7 +398,7 @@ export const appendCheckpoint = (list: Checkpoint[], row: Checkpoint): boolean =
   return true;
 };
 
-const VOLATILE_CHECKPOINT_FIELDS = new Set<string>(["at", "summary", "files"]);
+const VOLATILE_CHECKPOINT_FIELDS = new Set<string>(["at", "summary", "files", "declarations"]);
 const sameCheckpointState = (a: Checkpoint, b: Checkpoint) => {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof Checkpoint>;
   for (const key of keys) {

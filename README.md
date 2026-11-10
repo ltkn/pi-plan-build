@@ -21,7 +21,7 @@ build. Your engineering standards live in AGENTS.md, written once.
 /pb:deps [which]      check dependencies and propose upgrades, as a change of their own
 /pb:map [focus|undo]  refresh the project map in AGENTS.md (done at /pb:archive too); undo puts the previous back
 /pb:standards [stack] write the current standards into this project's AGENTS.md (created if missing; only pb's
-                      section is replaced); java, vue, plain or your own template, detected by default
+                      section is replaced); java, vue, rust, plain or your own template, detected by default
 /pb:spec [which]      write or revise a spec without building (optional)
 /pb:spec-review [name] [--fresh] the pre-build review on its own: one fresh reviewer reads the ready spec, nothing
                       is built; the verdict is recorded, so /pb:build starts at T1 without re-reviewing; --fresh bypasses the recorded verdict
@@ -231,8 +231,9 @@ produce several (`Depends on:` orders them).
 harness runs after the last task: `tests` (the full suite), `build` (compile or
 typecheck only) or `none`. With `taskChecks: "each"` it also runs each task's
 `Test:` command (a compile when it has none); with `"end"` each task is still
-compiled when done, when a compile command exists. After the suite the final
-gate also runs `lint` and `extraChecks`. `New tests: no` tells the build not to
+compiled when done, when a compile command exists. `lint` runs after every
+task's check and fails that task like any check, so a lint finding goes back to
+the task that caused it; after the suite the final gate runs `extraChecks`. `New tests: no` tells the build not to
 add tests while the existing ones still run.
 
 **Scripts read `pb.report/2`.** (pb.report/1 lost its dead `context.asks` count.) `/pb:status --json`, `/pb:stats --json` and
@@ -248,7 +249,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 |---|---|---|
 | `verify` | `"auto"` | test command; detects `./mvnw`/`mvn -B -q test`, gradle, npm, cargo, go, pytest; `null` disables |
 | `build` | `"auto"` | compile/typecheck command: for `Verification: build`, a task without a `Test:` line, and the per-task compile under `taskChecks: "end"` |
-| `lint` | `"auto"` | lint command from package.json's `lint` script (other stacks set it explicitly); runs at the final gate after the suite |
+| `lint` | `"auto"` | lint command from package.json's `lint` script (other stacks set it explicitly); runs after each task's check, and again at the final gate only when the final check is retried |
 | `extraChecks` | `[]` | extra project commands (e.g. standards scripts), run at the final gate after lint |
 | `verifyTimeoutSec` | 900 | how long the build's own test/compile/lint run may take; raise it together with `commandTimeoutSec` when the suite legitimately takes longer |
 | `commandTimeoutSec` | 1800 | cap on one `bash`/`powershell` command the agent runs, applied before Pi executes it (a shorter timeout the model set stays); raise it together with `verifyTimeoutSec` when builds or the suite legitimately take longer; 0 = no limit |

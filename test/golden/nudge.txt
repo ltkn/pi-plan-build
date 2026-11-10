@@ -1,0 +1,3 @@
+words: 43
+
+[pb:build] You stopped without finishing T1. Carry on and finish with pb_task_done; if the Goal or a Contract cannot be built as written, pb_task_done with status "blocked" and the evidence; anything unclear is a reading you take and record with pb_record_decision (assumption: true).

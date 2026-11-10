@@ -1,0 +1,5 @@
+words: 136
+
+[pb:compact] This planning conversation is at 72% of its context. Write the plan as it stands to the spec now, while you still have the whole discussion: afterwards the conversation continues from the spec alone.
+
+Update .pi/pb/specs/order-cancellation/spec.md with pb_update_spec, only the sections that changed (or pb_write_spec if most of it did). Even if little is settled, the investigation isn't lost: record in Findings what was established and the dead ends (what was tried or ruled out, and why); in Decisions what is decided, with rejected ideas; in Open questions each option still being weighed, with what was found for and against it, and where the discussion stands. Leave out nothing the next step needs, and paste no code. Don't ask me anything now: what's undecided goes into Open questions. Then reply with one line, nothing else.

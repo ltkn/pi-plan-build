@@ -1,6 +1,41 @@
 # Changelog
 
-## Unreleased
+## 1.38.0
+
+- **The build's lifecycle is one table.** `phase.ts` holds the phase transitions:
+  - written → building;
+  - building → paused or built;
+  - paused → building;
+  - built → building or reviewed;
+  - reviewed → building.
+
+  Every phase change goes through it, and an impossible move (pausing a finished build, reviewing a paused one) throws instead of leaving a record no command can continue. `/pb:undo`'s restore is the one named exception. What follows a passed step (the next task, one coherence pass, the final check, or done) is now a pure `nextStep()` that `advanceAfterCheck` only executes. Both are unit-tested without the simulated Pi.
+- **The suite is split by area and runs in parallel.** The 8,600-line `pb.test.mts` is now one harness plus `plan`, `spec`, `build`, `review` and `core` test files. `npm test` runs `test/*.test.mts` and takes about 65 s instead of about 170 s; `verify-test` runs the whole suite unless given `--file`.
+- **No dead imports.** About 780 unused imports and a few dead locals, left over from splitting `index.ts`, are gone, and `noUnusedLocals`/`noUnusedParameters` keep them from coming back. Two tests whose assertion could never fail (a regex returned from a `.some()` callback instead of tested) now test the note they name.
+
+- **Every prompt has a snapshot, and prompt size is reviewed instead of capped.** `test/prompts.golden.test.mts` renders each prompt pb sends with fixed inputs into `test/golden/<name>.txt`:
+  - planning, spec, task, coherence pass, retry, nudge and fix seed;
+  - reviewer, attacker, verifier, spec reviewer, repair lap, claim check, explorer, trier and cartographer;
+  - every tool's description and parameter schema.
+
+  Each snapshot's first line is its word count. A change, direct or through a shared rule, fails the test until `UPDATE_GOLDEN=1 npm test` rewrites the snapshot, so it lands as a readable diff of what the model actually reads. The build-mechanics 1,300-character cap is gone: growth is a review question, not a number to squeeze under. The fix seed moved from `fix.ts` into `prompts.ts`, so every prompt is built in one place.
+- **Prompts say each rule once.**
+  - Five rules each had their own copy in several prompts; every one is now a single shared rule: the project-map reading order (4 copies), the production rule (5 copies, including `pb_try`'s description), the shell-timeout rule (task and fix seed), the planning investigation steps (plan and continued plan), and the spec-format bullets `/pb:spec` repeated.
+  - The planning stance (`CHALLENGE`) keeps every rule in about half the words.
+  - The Contracts guidance is a short paragraph plus one bullet per rule.
+  - The structured-edit rule drops its pom.xml regex example.
+  - Net effect, measured on the snapshots: plan −18%, spec −9%, finish-spec −5%, approach −14%, trier −22%. The continued plan grows by about 80 words because it now gets the full investigation steps rather than a condensed copy that had drifted.
+
+- **Standards fit the project, and Rust has its own.** pb's standards section is now assembled from parts:
+  - **A core every project gets.** It is stack-neutral and has a new **Simplicity** rule: no option, layer or abstraction without a second user or a stated reason, no near-copy of an existing helper, no code kept for a case nothing reaches.
+  - **The database rules**, only for a project that uses a SQL database. Before, every project got them. They are detected from a driver or ORM in package.json, Cargo.toml, pom.xml, Gradle, go.mod, pyproject.toml or requirements.txt, or from a migrations directory.
+  - **The stack's own lines.** Java 25 as before, and a new **Rust** part (detected from `Cargo.toml`): typed errors propagated with `?`, no `unwrap`/`expect`/`panic!` outside tests unless an invariant rules failure out, `unsafe` only with a `// SAFETY:` proof, newtypes for validated values, no blocking in async code and no lock held across `.await`, clippy and fmt clean.
+  - A project with a database under a shared core section is offered its own section, since the shared one must not carry database rules. Manifests are read as regular files only, up to 1 MB, so a pipe planted under a manifest's name cannot hang the offer.
+- **The reviewer looks for what the change could do without.** A new Simplicity lens reports an abstraction with one user, a near-copy of an existing helper (named), a check repeating what a type, constraint or earlier boundary already guarantees, and unreachable code. Each is a P2 whose fix is the deletion or the reuse. The reviewer is told that another guard is not the default fix and to prefer the invariant that makes it unnecessary, so a review pushes toward less code as well as safer code.
+- **Quality feedback reaches the task that needs it.** Three changes aimed at the code a build writes:
+  - **Lint runs after every task**, not only at the end. A style, unused-code or type finding fails the task that caused it while its context is still loaded, instead of piling up for one final repair. The final step skips lint when it follows a passed task directly, and re-runs it when the final check is retried.
+  - **The task handout says how to write the code**: match the conventions of the code that already solves the same problem (the spec's Findings name it) but never copy its flaws (where that code falls short of the standards, the new code meets them and the old pattern is reported as open), extend a helper rather than adding a near-copy, and make the smallest change that meets the Acceptance lines. Before `pb_task_done`, and before a fix lap's `pb_fix_done`, the agent re-reads its own diff for duplicated or dead code, debug output, unclear names, and comments that restate the code or tell its history.
+  - **A later task sees what the earlier ones declared.** Builds reset between tasks, so the handout's "Already done" list now shows each file with the names its task added (`src/orders.ts [cancelOrder, OrderState]`). The names are read from the task's checkpoint diff for TypeScript/JavaScript, Rust, Go, Python, Java, Kotlin, C# and Scala, with test files skipped.
 
 - **A `Depends on:` note no longer breaks the build, and an archived dependency counts as built.** The header parser took the whole line (`tempo-gtfs-live-trains — implemented and on HEAD; ...`) as the dependency name, so `/pb:build` called `store.progress()` with that phrase and `specDir()` threw `"not a valid spec name"`. The parser now takes the first token as the name and only allows a note after a dash or in parentheses. Reads (`store.progress`, `store.checkpoints`) now see nothing for an invalid name instead of throwing — writes keep the refusal. And the build gate checks `store.finishedPhase()`, which looks at the live record then the `.pi/pb-archive/` record (matched on the archived progress's own spec), so a dependency that was built and archived no longer warns "isn't built yet". A live rewrite of the same name starts over rather than inheriting the archived phase.
 

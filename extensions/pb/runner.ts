@@ -178,7 +178,7 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
 }
 
 /** One-line live activity for fresh runs: what is being searched, and where. */
-export function previewCall(name: string, args: Record<string, unknown>): string {
+export function previewCall(args: Record<string, unknown>): string {
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   const cmd = str(args.command).replace(/\s+/g, " ");
   if (cmd) return cmd.length > 120 ? `${cmd.slice(0, 119)}…` : cmd;
@@ -269,7 +269,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
           else if (part.type === "toolCall") {
             const call = { name: part.name, arguments: part.arguments ?? {} };
             res.toolCalls.push(call);
-            o.onActivity?.(`${part.name} ${previewCall(part.name, call.arguments)}`, call);
+            o.onActivity?.(`${part.name} ${previewCall(call.arguments)}`, call);
           }
         }
         // Every message's text is kept: answers routinely span turns (analysis, calls, conclusion).

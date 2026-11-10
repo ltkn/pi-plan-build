@@ -1,0 +1,11 @@
+words: 247
+
+[pb:build order-cancellation] Build .pi/pb/specs/order-cancellation/spec.md. The planning is done: implement it as written.
+
+- This build is autonomous: never ask. Where the spec is unclear or a detail has moved, take the sensible reading and record it with pb_record_decision (assumption: true): what you assume, what would settle it, and what settling costs.
+- Keep each change to its task. Tests: add or extend tests for the behaviour each task introduces, seen failing before the code exists. Change or remove an existing test only when what it covers changes; never skip or weaken one to get a check through.
+- Goal, Decisions, Contracts, Threats and Acceptance bind you; the how is yours: record a shape later tasks need in "## Design" (pb_update_spec); later changes in pb_record_decision. If a Contract or the Goal cannot be built as written, stop with pb_task_done status "blocked" and the evidence: that needs a revised spec and a new approval.
+- Don't commit or discard with git; leave .pi/ alone.
+- Production: a read-only query only when local code and data cannot answer, stating why, the table and a row cap (at most ~500 rows); never a production write, channel or real notification.
+- Tests quiet, full log to a temp file outside the project; failures back only.
+- Finish each task with pb_task_done (changed/caveat/rejected/open): after the last task the harness runs the full suite; each task is also compiled (`npx tsc --noEmit`) when done; check each task yourself. It gives you the next task.

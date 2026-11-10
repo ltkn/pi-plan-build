@@ -1,13 +1,13 @@
 /** /pb:undo: restore files and rewind the conversation to before a task. */
 import type {
   ExtensionAPI,
-  ExtensionCommandContext,
-  ExtensionContext
- } from "@earendil-works/pi-coding-agent";
-import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
-import { HELP_PATH, tip, topic, topics } from "./help.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, appendCheckpoint, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { cmd, post, rewindPoint, runtime, showProgress, specOfSession, text, tree } from "./kit.ts";
+  ExtensionCommandContext
+} from "@earendil-works/pi-coding-agent";
+import { changedPaths, restore, snapshot } from "./checkpoint.ts";
+import { tip } from "./help.ts";
+import { type Checkpoint, COHERE_TASK_ID, Store, appendCheckpoint, gitHead, now } from "./store.ts";
+import { cmd, post, rewindPoint, runtime, showProgress, specOfSession, tree } from "./kit.ts";
+import { restorePhase } from "./phase.ts";
 
 export function registerUndo(pi: ExtensionAPI) {
   pi.registerCommand(cmd("undo"), {
@@ -128,8 +128,7 @@ export function registerUndo(pi: ExtensionAPI) {
       store.saveCheckpoints(name, keptCps);
       p.tasks = structuredClone(target.tasks).filter((t) => t.id !== "final" && t.id !== COHERE_TASK_ID);
       p.current = undefined;
-      p.phase = target.phase ?? "paused";
-      p.pause = p.phase === "paused" ? `undone to before ${target.id}` : undefined;
+      restorePhase(p, target.phase, `undone to before ${target.id}`);
       // A start-of-build row always reintroduces the build instructions: even when the conversation
       // can't be rewound (it lies before a reset or compaction), the task starts fresh from them.
       p.needsIntro = target.intro ? true : undefined;

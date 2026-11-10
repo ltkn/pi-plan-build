@@ -1,0 +1,34 @@
+words: 180
+
+# The spec (.pi/pb/specs/order-cancellation/spec.md)
+
+Read it at that path before judging: its "Goal", "Out of scope", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse", "Threats" and each task's Acceptance lines are what the change must satisfy. The spec is the source of truth, not this brief.
+
+# Review: order-cancellation
+
+## Acceptance checklist
+
+Report every id below in the `acceptance` array of your report, with status met, not met, or not verified and evidence. An id left out counts as not verified: a criterion not checked is never met.
+
+- T1.1 (T1): cancelling a pending order sets it to CANCELLED
+- T1.2 (T1): cancelling a shipped order returns 409
+
+## How to see the change
+
+Base commit: abc1234. The diff below is from that commit to the tree the review started on. Read files with read/grep/find/ls for anything past the cut, and read the untracked files listed below.
+
+## The diff
+
+diff --git a/src/order.ts b/src/order.ts
++export function cancel() {}
+
+## Changed files
+
+src/order.ts
+
+ 1 file changed, 1 insertion(+)
+
+
+## The check the harness ran
+
+`npm test` → PASS in 3s

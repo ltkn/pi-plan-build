@@ -5,23 +5,26 @@ import type {
   ExtensionCommandContext,
   ExtensionContext
  } from "@earendil-works/pi-coding-agent";
-import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
-import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findingsOf, ignoredPathsFor, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
+import { inWorktree, snapshot } from "./checkpoint.ts";
+import { approachPrompt, continuePlanPrompt, depsPrompt, planPrompt } from "./prompts.ts";
+import { missingPaths, readMap } from "./map.ts";
+import { parseSpec, setStatus } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
-import { MODEL_ARG_CAP, baselineSessions, checkpointing, cmd, commands, instruct, liftPlanning, noSnapshotWarning, normSpecArg, planTitle, post, reviewPlanningChanges, runtime, sessionGone, sessionModel, specCompletions, stackLabel, standardsFor, syncTasks, text, tree, unfinishedPhase } from "./kit.ts";
+import { agentDir, findStandards, isUserTemplate, projectStack, sectionFor, usesDatabase, writeStandards } from "./standards.ts";
+import { type VerifyResult, Store, cap, gitHead, now } from "./store.ts";
+import { runVerify } from "./verify.ts";
+import { MODEL_ARG_CAP, baselineSessions, cmd, commands, instruct, liftPlanning, noSnapshotWarning, normSpecArg, planTitle, post, reviewPlanningChanges, runtime, sessionGone, sessionModel, specCompletions, stackLabel, standardsFor, syncTasks } from "./kit.ts";
+import { unfinishedPhase } from "./phase.ts";
 
 export const offerStandards = async (ctx: ExtensionContext, store: Store) => {
   if (!ctx.hasUI || store.asked("standards")) return;
   const found = findStandards(ctx.cwd);
   const stack = projectStack(ctx.cwd);
+  const database = usesDatabase(ctx.cwd);
   const shared = !!found && path.dirname(found.file) !== path.resolve(ctx.cwd);
-  // A shared section that this stack's own one merely extends (Java: pb's plus one line) is enough.
-  if (found && !(shared && stack && !sectionFor(stack).includes(found.text))) return;
+  // A shared section is enough unless this project's own adds to it (a stack's or the database's
+  // rules, which a shared section must never carry): then the project is offered its own.
+  if (found && !(shared && (stack || database) && !sectionFor(stack, database).includes(found.text))) return;
   store.markAsked("standards");
   const HERE =
     stack === "vue"
@@ -33,14 +36,14 @@ export const offerStandards = async (ctx: ExtensionContext, store: Store) => {
   const covers =
     stack && isUserTemplate(stack)
       ? `your ${stack} template`
-      : `quality, dependencies, comments without history, tests, security, ${stack === "vue" ? "the page's role, backend refusals, browser security, Vue" : "concurrency"}`;
+      : `quality, simplicity, dependencies, comments without history, tests, security${stack === "vue" ? ", the page's role, backend refusals, browser security, Vue" : `${database ? ", database consistency" : ""}${stack === "java" ? ", Java 25" : stack === "rust" ? ", Rust" : ""}`}`;
   const title = found
     ? `This project only gets the standards in ${found.file}, not its own (${stackLabel(stack)}). Pi loads both files, so that section stays in force next to this project's: keep the shared AGENTS.md free of stack-specific rules`
     : `Engineering standards (${covers})`;
-  const choice = await ctx.ui.select(title, stack ? [HERE, "No thanks"] : [HERE, ALL, "No thanks"]);
+  const choice = await ctx.ui.select(title, stack || database ? [HERE, "No thanks"] : [HERE, ALL, "No thanks"]);
   if (choice !== HERE && choice !== ALL) return;
   const file = choice === HERE ? path.join(ctx.cwd, "AGENTS.md") : path.join(agentDir(), "AGENTS.md");
-  writeStandards(file, stack);
+  writeStandards(file, stack, choice === HERE && database);
   ctx.ui.notify(`Added to ${file}${stack ? ` (${stackLabel(stack)})` : ""}: edit them there. Pi loads them into every session from now on.`, "info");
 };
 

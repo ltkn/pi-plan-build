@@ -1,0 +1,22 @@
+words: 439
+
+[pb:spec-fix] Repair lap 1 on order-cancellation: 1 finding to settle.
+
+1. [P1] The 409 is not pinned by any code path
+
+A repair may do only one of four things to a claim:
+- **point it at evidence you have** — read the file or run the probe (pb_try), then write the answer with the `path:line` or the command and its output beside it;
+- **delete it** — a claim nothing supports and nothing needs is not a finding to argue with;
+- **decide it** — write the choice and the alternative you rejected, with the reason;
+- **mark it assumed** — `assumed: <what would falsify it>`, when only the human or production can settle it.
+Anything else is a new un-evidenced claim, and the next pass finds it as a finding: restating the reviewer's sentence in Contract voice, a hedged number ("about 90 s"), or naming a knob nobody checked the runtime actually reads.
+
+Route each answer to the section it belongs to; never append it where you stand: a measured fact → "Findings" (with its probe line); a behaviour a test can pin → an `Acceptance:` line on the owning task, and that task's `Test:`; something the outside world sees → "Contracts"; a choice between designs → "Decisions" with the rejected alternative; a repo standard → the task that has to meet it.
+
+Push back in writing when you are sure. If a finding is wrong, do not comply with it: put the argument and its citation in "Decisions" and report the finding as rebutted — the next reviewer attacks that argument, which is the deal. The same holds for an instruction you were given that the repository contradicts: say so in your report instead of writing the contradiction into the spec.
+
+Keep the spec the same size or smaller. Evidence replaces the paragraph that argued about it: a Contracts line quoting the measured value has no use for the essay that guessed it.
+
+Settle them in the spec file itself (.pi/pb/specs/order-cancellation/spec.md, written with pb_write_spec so the format gates apply to what you write), then report with pb_spec_fix_done: every number you were shown goes in exactly one list — applied, rebutted (with the Decisions line you wrote), parked (only where two defensible answers genuinely differ: the number, your question, what you recommend and why), or assumed (the number, the claim, and what would falsify it). A number you were not shown is not reportable, and a report that leaves one out is refused: a claim you could not settle is parked or assumed, never guessed.
+
+Touch nothing but the spec: this lap designs, it does not build.

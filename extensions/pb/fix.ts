@@ -1,16 +1,15 @@
 /** The fixes: /pb:fix, pb_fix_done, and the fix-lap loop. */
 import * as path from "node:path";
-import { StringEnum, Type } from "./schema.ts";
+import { Type } from "./schema.ts";
 import type {
   ExtensionAPI,
-  ExtensionCommandContext,
-  ExtensionContext
- } from "@earendil-works/pi-coding-agent";
-import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
+  ExtensionCommandContext
+} from "@earendil-works/pi-coding-agent";
+import { fixSeedPrompt, reportRegister, specReference } from "./prompts.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { cmd, commands, evidenceLine, loadSpec, nextLine, phaseHeader, reply, specOfSession, stop, approvalDrift } from "./kit.ts";
+import { type Finding, Store, readEvents } from "./store.ts";
+import { cmd, evidenceLine, loadSpec, nextLine, phaseHeader, reply, specOfSession, approvalDrift } from "./kit.ts";
 
 /** One lap's report shape, normalized from its `fix` event. */
 export interface LapReport {
@@ -100,16 +99,7 @@ export function registerFix(pi: ExtensionAPI) {
     remaining: Finding[],
   ): Promise<{ live: ExtensionCommandContext; report?: { fixed: string[]; skipped: string[]; tests: string }; ms: number } | undefined> => {
     const started = Date.now();
-    const findings = remaining.map((f, i) => findingLine(f, i + 1)).join("\n");
-    const loaded = loadSpec(store, spec);
-    const reference = loaded ? specReference(spec) : "";
-    const seed =
-      `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings}\n\n` +
-      `${reference ? `${reference}\n\n` : ""}` +
-      `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line yourself before and after the change (it must fail before, pass after), and the full suite once at the end. Shell calls are capped at commandTimeoutSec (30 minutes by default); if one legitimately needs longer, don't retry it with a bigger timeout — say so in your reply and stop, so the human can raise it (or set it to 0). ${STRUCTURED_EDIT_RULE} ` +
-      `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
-      `Reply shape, one block per finding: files changed, test command, result. Do not commit, archive, or write under .pi/. ` +
-      `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), and test results; then stop.`;
+    const seed = fixSeedPrompt(spec, remaining, loadSpec(store, spec) ? specReference(spec) : "");
     let live: ExtensionCommandContext | undefined;
     // The lap owns only events appended after its own fix-start marker; `from` is the log
     // position captured right after that marker is written.

@@ -12,16 +12,21 @@
  * metacharacters in a test name match literally.
  *
  * Usage: node scripts/verify-test.mjs [--file <test-file>] "<exact test name>" ...
- * The test file (default test/pb.test.mts) resolves against the repo root.
+ * Without --file it runs the whole suite (every test/*.test.mts, as npm test does); a file
+ * resolves against the repo root.
  */
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-let testFile = "test/pb.test.mts";
+/** The suite npm test runs: every test/*.test.mts (the prover's own fixture is .mjs, so it stays out). */
+const SUITE = () => fs.readdirSync(path.join(ROOT, "test")).filter((f) => f.endsWith(".test.mts")).sort().map((f) => path.join("test", f));
+
+let testFile;
 const names = [];
 for (let i = 0; i < process.argv.length - 2; i++) {
   const arg = process.argv[2 + i];
@@ -51,7 +56,7 @@ delete env.NODE_TEST_CONTEXT;
 // A hung runner must fail the proof, not hang the loop that called it.
 const run = spawnSync(
   process.execPath,
-  ["--test", "--test-reporter=tap", "--test-name-pattern", unique.map(escapeRe).join("|"), path.resolve(ROOT, testFile)],
+  ["--test", "--test-reporter=tap", "--test-name-pattern", unique.map(escapeRe).join("|"), ...(testFile ? [testFile] : SUITE()).map((f) => path.resolve(ROOT, f))],
   { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 10 * 60_000, env }
 );
 const out = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;

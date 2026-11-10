@@ -8,17 +8,18 @@ import type {
   ExtensionCommandContext,
   ExtensionContext
  } from "@earendil-works/pi-coding-agent";
-import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
-import { HELP_PATH, tip, topic, topics } from "./help.ts";
-import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
+import { changedPaths, commitTime, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
+import { tip } from "./help.ts";
+import { acceptanceDrift, designProvenance, extraBlock, findingLine, isNone, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief } from "./prompts.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
-import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
+import { runFresh } from "./runner.ts";
+import { acceptanceCriteria, commitMessage } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
-import { P_ORDER, approvalDrift, cmd, commands, commitBlock, contentText, evidenceLine, loadSpec, mark, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, stop, text, tree, unfinishedPhase, watchable, withChecking } from "./kit.ts";
+import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
+import { runVerify } from "./verify.ts";
+import { P_ORDER, approvalDrift, cmd, commands, commitBlock, contentText, evidenceLine, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, tree, watchable, withChecking } from "./kit.ts";
+import { markReviewed, unfinishedPhase } from "./phase.ts";
 
 import { confirmLiveBuild } from "./flow.ts";
 import type { ReplacedSessionContext } from "./kit.ts";
@@ -472,7 +473,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings, acceptance: m.acceptance };
         // A pass only finishes a finished build: with tasks still open the phase stays,
         // or the next /pb:build strands and /pb:archive offers a half-built spec.
-        if (m.verdict === "pass" && !remaining.length) p.phase = "reviewed";
+        if (m.verdict === "pass" && !remaining.length) markReviewed(p);
       }
       p.reviewUnshown = true;
       store.saveProgress(p);

@@ -1,0 +1,11 @@
+words: 178
+
+[pb:build] Coherence pass. Do only this task:
+
+Read the whole change of this feature (`git diff abc1234 -- . ':(exclude).pi'`, plus untracked files from git status), looking only for what task slicing leaves behind: duplicated helpers or logic across tasks, dead code a slice made redundant, and inconsistent naming or error handling. Consolidate what is worth consolidating, strictly within what the spec's Goal, Decisions, Contracts, Threats and Acceptance allow: change no behaviour, API, or data, and never weaken an existing test.
+
+The spec that binds this work is .pi/pb/specs/order-cancellation/spec.md: read "Goal", "Out of scope", "Decisions", "Design", "Contracts", "Migration and rollback", "Threats and abuse", "Threats" before you change anything, and the sections a task names when it needs them.
+
+Edit structured files (XML, JSON, YAML) by exact literal replacement or line-based edits, never a backtracking regex.
+
+When done, call pb_task_done with task "cohere" plus changed/caveat/rejected/open ("none" where there is genuinely nothing). If the Goal or a Contract cannot be built as written, status "blocked" with the evidence. If there is nothing worth consolidating, say so and finish done anyway.

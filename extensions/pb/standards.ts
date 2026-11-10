@@ -10,9 +10,11 @@ import * as path from "node:path";
 const START = "<!-- pb:standards -->";
 const END = "<!-- /pb:standards -->";
 
-/* Bullets both sections share; the others differ because a page has no database and no business rules. */
+/* Bullets every section shares; the others differ because a page has no database and no business rules. */
 const QUALITY =
   "- Quality: the best current practice for this stack: clean, maintainable, secure; a proper fix, never a workaround. Use modern idioms and the latest stable language and platform features, even where the surrounding code doesn't. When outdated code stands in the way, refactor it to current practice, planned as a task of its own.";
+const SIMPLICITY =
+  "- Simplicity: the smallest design that meets the need. No option, layer or abstraction without a second user or a stated reason; no near-copy of an existing helper; no code kept for a case nothing reaches. Less code is the default; every addition earns its place.";
 const DEPENDENCIES = "- Dependencies: current, non-deprecated APIs and versions only. Upgrading dependencies is a change of its own, not part of a feature.";
 const TESTS =
   "- Tests: test behaviour, written to current best practice for this stack even where existing tests aren't; new test tooling is proposed as a task of its own. Never weaken an existing test. A test proves a fix only if it fails without it.";
@@ -23,17 +25,41 @@ const REREAD = (extra: string) =>
 
 const section = (lines: string[]) => `${START}\n## Engineering standards\n\n${lines.join("\n")}\n${END}\n`;
 
-export const DEFAULT_STANDARDS = section([
+/** The rules for any backend or library, whatever its language: the stack and database parts add to them. */
+const CORE = [
   QUALITY,
+  SIMPLICITY,
   DEPENDENCIES,
   `- Comments: concise, and only where they add what the code can't say (why, intent, constraints). They describe the code as it is, never its history: no dates, "decided", previous values or task ids; decisions stay in the spec.`,
   TESTS,
   SECURITY,
-  "- One source of truth: a rule or canonical form that already exists (in the database: normalization, uniqueness, constraints; or in a shared helper) is used, never re-implemented. Compare against the database's own form in SQL; a second copy of a rule drifts, and the gap between copies is a bypass.",
+  "- One source of truth: a rule or canonical form that already exists (a shared helper, a type, a constraint) is used, never re-implemented: a second copy of a rule drifts, and the gap between copies is a bypass.",
   "- Robustness: at a boundary, assume input is hostile or broken (sizes, ranges, encodings, duplicates, order, concurrent calls); business rules can't be bypassed by quantity, repetition, reordering or racing; every request's work is bounded; a failure halfway leaves consistent state. Values that will be stored, compared or sent (addresses, identifiers, URLs) are validated strictly: no control characters or whitespace, and nothing that Unicode normalization would change. Inside the boundary, rely on invariants (types, constraints, transactions), not repeated checks.",
+];
+
+/** Only for a project with a SQL database: where its rules and its consistency come from. */
+const DATABASE = [
+  "- Database rules: normalization, uniqueness and constraints live in the database; compare against the database's own form in SQL, never a copy of it in application code.",
   "- Consistency and concurrency come from the database: one request is one transaction on one connection. Use constraints, single atomic statements (`ON CONFLICT`, `UPDATE … RETURNING`) or row locks; not check-then-write in application code, retries, or extra transactions (`REQUIRES_NEW`), unless the reason is stated where it's used. State transitions are guarded by the current state (`WHERE status = …`), so repeating one is a no-op and a fact recorded once (a verification or creation time) is never overwritten.",
-  REREAD(""),
-]);
+];
+
+/** The stack-specific line added for a Java project (Maven or Gradle). */
+export const JAVA_STANDARDS = "- Java 25: records, sealed types, pattern matching, virtual threads and scoped values; no Lombok.";
+
+/** The stack-specific lines added for a Rust project (Cargo). */
+export const RUST_STANDARDS = [
+  "- Rust: stable toolchain, edition 2024. Errors are typed (`thiserror` enums in libraries; `anyhow` with context only at a binary's edge) and propagated with `?`. No `unwrap`, `expect` or `panic!` outside tests, unless an invariant makes failure impossible and the `expect` message states it. No `unsafe` without a `// SAFETY:` comment proving the invariants it relies on. A validated value is a newtype built only by a fallible constructor (parse, don't validate); borrow rather than clone to satisfy the borrow checker.",
+  "- Rust async and tooling: never block inside async code (`spawn_blocking` for blocking work) and never hold a lock across `.await`; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` stay clean.",
+];
+
+/**
+ * A backend section: the core, the database part when the project has one, the re-read, then the
+ * stack's lines — last, so a shared core section stays a prefix of every stack's own.
+ */
+const backend = (database: boolean, stack: string[] = []) => section([...CORE, ...(database ? DATABASE : []), REREAD(""), ...stack]);
+
+/** The section for a project with no stack detected and no database: the core alone. */
+export const DEFAULT_STANDARDS = backend(false);
 
 /** For a Vue project: the page renders what the backend decides. */
 export const FRONTEND_STANDARDS = section([
@@ -88,10 +114,7 @@ export function findStandards(cwd: string): { file: string; text: string } | und
   return undefined;
 }
 
-/** The stack-specific line added for a Java project (Maven or Gradle). */
-export const JAVA_STANDARDS = "- Java 25: records, sealed types, pattern matching, virtual threads and scoped values; no Lombok.";
-
-/** A stack's name: "java" and "vue" are built in; a template in templatesDir() can add any other. */
+/** A stack's name: "java", "vue" and "rust" are built in; a template in templatesDir() can add any other. */
 export type Stack = string;
 
 /** Your own sections: <name>.md, optionally starting with "detect: go.mod, package.json:react". */
@@ -100,13 +123,15 @@ export const templatesDir = () => path.join(agentDir(), "pb", "standards");
 interface Template {
   /** files at the project root, or "package.json:<dependency>"; none = never detected, only named */
   detect: string[];
-  section: string;
+  /** the section to write, given whether the project uses a SQL database (your templates ignore it) */
+  section: (database: boolean) => string;
 }
 
 const BUILT_IN: Record<string, Template> = {
-  java: { detect: ["pom.xml", "build.gradle", "build.gradle.kts"], section: DEFAULT_STANDARDS.replace(END, `${JAVA_STANDARDS}\n${END}`) },
-  vue: { detect: ["package.json:vue"], section: FRONTEND_STANDARDS },
-  plain: { detect: [], section: DEFAULT_STANDARDS },
+  java: { detect: ["pom.xml", "build.gradle", "build.gradle.kts"], section: (database) => backend(database, [JAVA_STANDARDS]) },
+  vue: { detect: ["package.json:vue"], section: () => FRONTEND_STANDARDS },
+  rust: { detect: ["Cargo.toml"], section: (database) => backend(database, RUST_STANDARDS) },
+  plain: { detect: [], section: (database) => backend(database) },
 };
 
 /** Your templates: a file's section is wrapped in pb's markers (and given a heading) unless it has them. */
@@ -125,7 +150,7 @@ function userTemplates(): Record<string, Template> {
     if (detect) text = text.slice(detect[0].length);
     const body = text.trim();
     const section = body.includes(START) ? `${body}\n` : `${START}\n${/^## /.test(body) ? "" : "## Engineering standards\n\n"}${body}\n${END}\n`;
-    out[name] = { detect: detect ? detect[1].split(",").map((d) => d.trim()).filter(Boolean) : (BUILT_IN[name]?.detect ?? []), section };
+    out[name] = { detect: detect ? detect[1].split(",").map((d) => d.trim()).filter(Boolean) : (BUILT_IN[name]?.detect ?? []), section: () => section };
   }
   return out;
 }
@@ -157,18 +182,76 @@ export function projectStack(cwd: string): Stack | undefined {
   return templates().find(([n, t]) => n !== "plain" && t.detect.some((d) => detects(cwd, d)))?.[0];
 }
 
-/** The section written for a stack; none = plain. */
-export const sectionFor = (stack?: Stack) => {
+/** npm packages that mean a SQL database. */
+const SQL_PACKAGES = new Set(["pg", "postgres", "mysql", "mysql2", "sqlite3", "better-sqlite3", "@prisma/client", "prisma", "typeorm", "sequelize", "knex", "drizzle-orm", "kysely", "mssql", "oracledb", "@neondatabase/serverless"]);
+
+/** Per manifest, the libraries that mean a SQL database (matched as whole names in the file's text). */
+const SQL_MANIFESTS: Array<[string, RegExp]> = [
+  ["Cargo.toml", /^\s*(?:sqlx|diesel|sea-orm|tokio-postgres|postgres|rusqlite|mysql_async|deadpool-postgres|bb8-postgres)\s*=/m],
+  ["pom.xml", /<artifactId>[^<]*(?:jdbc|jpa|hibernate|jooq|r2dbc|mybatis|flyway|liquibase|postgresql|mysql-connector|mariadb|sqlite-jdbc)[^<]*<\/artifactId>/i],
+  ["build.gradle", /(?:jdbc|jpa|hibernate|jooq|r2dbc|mybatis|flyway|liquibase|postgresql|mysql-connector|mariadb|sqlite-jdbc)/i],
+  ["build.gradle.kts", /(?:jdbc|jpa|hibernate|jooq|r2dbc|mybatis|flyway|liquibase|postgresql|mysql-connector|mariadb|sqlite-jdbc|exposed)/i],
+  ["go.mod", /(?:github\.com\/(?:lib\/pq|jackc\/pgx|go-sql-driver\/mysql|mattn\/go-sqlite3|jmoiron\/sqlx)|gorm\.io\/|entgo\.io\/|modernc\.org\/sqlite)/],
+  ["pyproject.toml", /\b(?:sqlalchemy|psycopg2?|asyncpg|django|sqlmodel|peewee|pymysql|aiosqlite|tortoise-orm)\b/i],
+  ["requirements.txt", /^(?:sqlalchemy|psycopg2?(?:-binary)?|asyncpg|django|sqlmodel|peewee|pymysql|aiosqlite|tortoise-orm)\b/im],
+];
+
+/** Directories that hold schema migrations, in the usual layouts. */
+const MIGRATION_DIRS = ["migrations", "db/migrate", "db/migrations", "src/main/resources/db/migration", "src/main/resources/db/changelog", "prisma/migrations"];
+
+/** A manifest is read only up to this size: enough for any real one, bounded for a hostile one. */
+const MANIFEST_BYTES = 1_000_000;
+
+/** A regular file's first MANIFEST_BYTES; never blocks on a FIFO or device planted under a manifest's name. */
+const readManifest = (file: string): string | undefined => {
+  try {
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+    try {
+      if (!fs.fstatSync(fd).isFile()) return undefined;
+      const buffer = Buffer.alloc(MANIFEST_BYTES);
+      return buffer.toString("utf8", 0, fs.readSync(fd, buffer, 0, MANIFEST_BYTES, 0));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return undefined; // missing or unreadable: no evidence either way
+  }
+};
+
+/** True when the project uses a SQL database: a driver or ORM in a manifest, or a migrations directory. */
+export function usesDatabase(cwd: string): boolean {
+  const pkg = readManifest(path.join(cwd, "package.json"));
+  if (pkg) {
+    try {
+      const json = JSON.parse(pkg) as Record<string, Record<string, unknown> | undefined>;
+      const names = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"].flatMap((k) => Object.keys(json[k] ?? {}));
+      if (names.some((n) => SQL_PACKAGES.has(n))) return true;
+    } catch {
+      /* not JSON: no evidence */
+    }
+  }
+  if (SQL_MANIFESTS.some(([file, pattern]) => pattern.test(readManifest(path.join(cwd, file)) ?? ""))) return true;
+  return MIGRATION_DIRS.some((dir) => {
+    try {
+      return fs.statSync(path.join(cwd, dir)).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** The section written for a stack (none = plain), with the database part when the project uses one. */
+export const sectionFor = (stack?: Stack, database = false) => {
   const all = Object.fromEntries(templates());
-  return (all[stack ?? "plain"] ?? all.plain).section;
+  return (all[stack ?? "plain"] ?? all.plain).section(database);
 };
 
 /**
  * Put the stack's section in a context file: created if missing, pb's section replaced if it has one,
  * else appended. Nothing else in the file changes. "broken": a start marker without its end, left alone.
  */
-export function writeStandards(file: string, stack?: Stack): "created" | "added" | "replaced" | "unchanged" | "broken" {
-  const section = sectionFor(stack);
+export function writeStandards(file: string, stack?: Stack, database = false): "created" | "added" | "replaced" | "unchanged" | "broken" {
+  const section = sectionFor(stack, database);
   const prev = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : undefined;
   const i = prev?.indexOf(START) ?? -1;
   if (prev !== undefined && i >= 0) {

@@ -5,31 +5,25 @@
  *  command and tool handlers live in their own modules.
  */
 
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { StringEnum, Type } from "./schema.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext
  } from "@earendil-works/pi-coding-agent";
-import { type Snapshot, changedPaths, cleanupIndexes, commitTime, dropCheckpoints, inWorktree, inspectChanges, restore, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
+import { type Snapshot, changedPaths, commitTime, restore, skippedLargeFiles, snapshot } from "./checkpoint.ts";
 import { notifyDesktop } from "./notify.ts";
-import { HELP_PATH, tip, topic, topics } from "./help.ts";
-import { EXPLORER_SYSTEM, TRY_SYSTEM, approachPrompt, buildIntro, buildMechanics, buildStateSummary, checkpointPrompt, checkpointSummary, coherePrompt, reviewStateSummary, acceptanceDrift, designProvenance, continuePlanPrompt, continuePrompt, depsPrompt, explorerBrief, tryBrief, extraBlock, findingDetails, findingLine, finishSpecPrompt, fixText, isNone, nudgePrompt, planPrompt, PI_RESERVE_TOKENS, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, STRUCTURED_EDIT_RULE, taskPrompt } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, findingsOf, ignoredPathsFor, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, missingPaths, normalizeMap, projectFiles, readMap, resolveProjectPath, unresolvedPaths, writeMap } from "./map.ts";
-import { type ExploreDetails, LIVE_FLUSH_MS, LIVE_STEPS, LIVE_WRITING_LINES, registerRenderers, renderExploreCall, renderExploreResult, renderTryCall, renderTryResult } from "./render.ts";
-import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
-import { runFresh, usageOf } from "./runner.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, addDecision, buildTask, commitMessage, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sectionHeading, sectionOf, setSection, setStatus, sharedTestCommands, specHash, specPathRefs, tokensOf } from "./spec.ts";
+import { tip } from "./help.ts";
+import { PI_RESERVE_TOKENS, specReference, taskPrompt } from "./prompts.ts";
+import { ignoredPathsFor, projectFiles, resolveProjectPath } from "./map.ts";
+import { type ParsedSpec, type SpecTask, addDecision, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sharedTestCommands, specHash, specPathRefs } from "./spec.ts";
 import { duration } from "./format.ts";
-import { KEBAB_NAME } from "./names.ts";
-import { buildReport } from "./report.ts";
-import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
-import { buildTimeLabel, buildTiming, loadStats, renderAll, renderCard } from "./stats.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { resolveBuild, resolveLint, resolveVerify, runVerify } from "./verify.ts";
+import { type Stack, findStandards, isUserTemplate, standardsLoaded } from "./standards.ts";
+import { buildTimeLabel, buildTiming } from "./stats.ts";
+import { type Checkpoint, type Progress, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, now, readEvents } from "./store.ts";
+import { pauseAt, unfinishedPhase } from "./phase.ts";
+import { resolveBuild, resolveLint, resolveVerify } from "./verify.ts";
 
 export const cmd = (verb: string) => `${PREFIX}:${verb}`;
 
@@ -495,21 +489,25 @@ export const doneHandoff = (store: Store, p: Progress, current: string): string 
     cps = store.checkpoints(p.spec);
   } catch {}
   const described = done.map((t) => {
-    const files = cps.find((c) => c.id === t.id)?.files ?? [];
+    const row = cps.find((c) => c.id === t.id);
+    const files = row?.files ?? [];
     if (!files.length) return t.id;
-    const shown = files.slice(0, 8);
+    const shown = files.slice(0, 8).map((f) => {
+      const names = (row?.declarations ?? []).filter((d) => d.file === f).map((d) => d.name);
+      return names.length ? `${f} [${names.slice(0, 10).join(", ")}${names.length > 10 ? `, +${names.length - 10} more` : ""}]` : f;
+    });
     return `${t.id} (${shown.join(", ")}${files.length > shown.length ? `, +${files.length - shown.length} more` : ""})`;
   });
-  return `Already done: ${described.join("; ")}. This is a pointer, not the truth: before editing, inspect the earlier tasks' code this task depends on (contracts, types, migrations, error handling and tests first; use pb_explore if you don't know where to start). If it conflicts with the spec, don't build on it silently: make the conflict explicit, and stop with blocked and the evidence if the Goal or a Contract cannot be built as written. If it matches, extend it rather than duplicating it. Design is the shared-shape contract: record any shape this task settles for later tasks there before you finish.`;
+  return `Already done: ${described.join("; ")}. This is a pointer, not the truth: before editing, inspect the earlier tasks' code this task depends on (contracts, types, migrations, error handling and tests first; use pb_explore if you don't know where to start). If it conflicts with the spec, don't build on it silently: make the conflict explicit, and stop with blocked and the evidence if the Goal or a Contract cannot be built as written. If it matches, extend it rather than duplicating it: reuse a name in brackets (what that file gained) before writing another that does the same. Design is the shared-shape contract: record any shape this task settles for later tasks there before you finish.`;
 };
 
 /** What the agent is told for a step: the task, the check it will run, and the spec to read. */
 
 export const stepPrompt = (ctx: ExtensionContext, store: Store, spec: ParsedSpec, p: Progress, task: SpecTask, attempts: number) => {
-  const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+  const { cfg, testCmd, buildCmd, lintCmd } = commands(ctx.cwd, store);
   const tp = p.tasks.find((t) => t.id === task.id);
   const red = needsRed(spec, task);
-  return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specReference(p.spec), doneHandoff(store, p, task.id));
+  return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specReference(p.spec), doneHandoff(store, p, task.id), lintCmd);
 };
 
 /**
@@ -596,10 +594,6 @@ export const buildOfSession = (ctx: ExtensionContext) => {
   if (progress.phase === "reviewed") throw new Error(`The build of ${name} is finished and reviewed, so there is nothing left to record.`);
   throw new Error(`The build of ${name} has not started. Run /${cmd("build")} ${name} to start it.`);
 };
-
-export const unfinishedPhase = (phase?: string) => ["building", "paused"].includes(phase ?? "");
-
-export const nextTodo = (p: Progress) => p.tasks.find((t) => t.status === "doing" || t.status === "todo");
 
 /** The build's task list above the editor while it runs. */
 
@@ -849,20 +843,17 @@ export const P_ORDER = ["P0", "P1", "P2", "P3"] as const;
 
 /** Which standards a stack gets, in words. */
 
+const BUILT_IN_STACK_LABELS: Record<string, string> = {
+  java: "the backend ones, with Java 25",
+  vue: "the frontend ones, for a Vue project",
+  rust: "the backend ones, with Rust",
+};
+
 export const stackLabel = (stack?: Stack) =>
-  stack && isUserTemplate(stack)
-    ? `your ${stack} template`
-    : stack === "java"
-      ? "the backend ones, with Java 25"
-      : stack === "vue"
-        ? "the frontend ones, for a Vue project"
-        : stack && stack !== "plain"
-          ? stack
-          : "the plain ones";
+  stack && isUserTemplate(stack) ? `your ${stack} template` : !stack || stack === "plain" ? "the plain ones" : (BUILT_IN_STACK_LABELS[stack] ?? stack);
 
 export const pauseBuild = (ctx: ExtensionContext, store: Store, p: Progress, reason: string, tipKey: string, why: string, vars: Record<string, string | number> = {}, say = post) => {
-  p.phase = "paused";
-  p.pause = reason;
+  pauseAt(p, reason);
   store.saveProgress(p);
   store.event(p.spec, { type: "pause", why, task: p.current });
   const cfg = store.config();

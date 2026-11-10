@@ -1,6 +1,6 @@
 /**
  * Fixture for scripts/verify-test.mjs: tiny tests with the shapes the prover must tell apart.
- * It is deliberately NOT part of `npm test` (that names test/pb.test.mts alone); the prover
+ * It is deliberately NOT part of `npm test` (its .mjs extension keeps it out of test/*.test.mts); the prover
  * runs it via --file so its own tests never spawn a nested run of the real suite.
  */
 import { test } from "node:test";

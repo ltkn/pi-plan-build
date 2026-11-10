@@ -1,0 +1,401 @@
+words: 1827
+
+## pb_ask
+
+Ask the human one question and wait for the answer: a choice between options, or an open question. Use it while planning; a pb build never asks — it takes the sensible reading, records it as an assumption, and stops only when the Goal or a Contract cannot be built as written. Ask only what you can't sensibly decide yourself. Ask independent questions together; ask a question that depends on another's answer only after you have that answer. Phrase every question in plain words a non-expert can follow: one line per option with its trade-off, and your recommendation with one plain reason why — short enough to read in a dialog.
+
+{
+  "type": "object",
+  "required": [
+    "question"
+  ],
+  "properties": {
+    "question": {
+      "type": "string",
+      "description": "one precise question"
+    },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "2 to 4 answers to choose from; the human can always type another"
+    },
+    "recommended": {
+      "type": "string",
+      "description": "your recommendation: one of the options, or a suggested answer"
+    }
+  }
+}
+
+## pb_explore
+
+Answer a question about the code from a separate, read-only context and get back only the answer: where things live, how a similar feature is built, the conventions, what calls what. It reads code only (no curl, scripts or builds: those stay in this session). Use it for broad or multi-file questions when you need the conclusion; when you know the 1-3 files, read them yourself. Several calls can run in parallel.
+
+{
+  "type": "object",
+  "required": [
+    "question"
+  ],
+  "properties": {
+    "question": {
+      "type": "string",
+      "description": "what to find out, specific enough to answer in a short report"
+    }
+  }
+}
+
+## pb_try
+
+When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. Production: a read-only query only when local code and data cannot answer, stating why, the table and a row cap (at most ~500 rows); never a production write, channel or real notification. Bound the goal: a probe is stopped at `probeTimeoutSec` (15 minutes by default), so one that cannot settle in that time is the wrong probe. Several calls can run in parallel.
+
+{
+  "type": "object",
+  "required": [
+    "goal"
+  ],
+  "properties": {
+    "goal": {
+      "type": "string",
+      "description": "the question to settle by running, specific enough to probe in one go"
+    }
+  }
+}
+
+## pb_write_spec
+
+Write or rewrite a pb feature spec (.pi/pb/specs/<name>/spec.md). Use it when the user runs /pb:spec or /pb:build asks for the spec. The content must follow the spec format the user's instructions give; the tool rejects a spec that doesn't parse and says why.
+
+{
+  "type": "object",
+  "required": [
+    "name",
+    "content"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "short kebab-case spec name (the folder under .pi/pb/specs/, not a path), e.g. order-cancellation"
+    },
+    "content": {
+      "type": "string",
+      "description": "the complete spec in markdown"
+    }
+  }
+}
+
+## pb_update_spec
+
+Change part of an existing pb spec instead of rewriting it: replace or append to one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, "none — <why>".
+
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "the spec's name; the one this session is building or writing, if omitted"
+    },
+    "section": {
+      "type": "string",
+      "description": "the \"## \" section to change, e.g. Decisions; created if missing"
+    },
+    "content": {
+      "type": "string",
+      "description": "the section's new body (without its heading), or the lines to append"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "replace",
+        "append"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "planning",
+        "ready"
+      ]
+    }
+  }
+}
+
+## pb_record_decision
+
+In a pb build session: record in the spec's Decisions a decision the human just made, or (assumption: true) a choice you made where the spec was ambiguous or didn't match the code, so it survives compaction and reaches the reviewer.
+
+{
+  "type": "object",
+  "required": [
+    "decision"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "description": "the decision or choice, self-contained, with its reason, in one or two sentences"
+    },
+    "assumption": {
+      "type": "boolean",
+      "description": "true when it is your choice, not the human's"
+    }
+  }
+}
+
+## pb_task_done
+
+In a pb build: finish the task the harness gave you. status done: the harness runs the task's check and answers with the failure to fix, or the next task — report changed (what you changed), caveat (what the next task must respect), rejected (what you tried and discarded) and open (what is still unchecked), each required, "none" where there is genuinely nothing. status blocked: the Goal or a Contract cannot be built as written (summary says why, with the evidence); the build stops for a revised spec and a new approval. Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.
+
+{
+  "type": "object",
+  "required": [
+    "task",
+    "status"
+  ],
+  "properties": {
+    "task": {
+      "type": "string",
+      "description": "the task id, e.g. \"T2\" (or \"final\" for the final check)"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "done",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "description": "blocked only: which Goal or Contract cannot be built as written, and the evidence"
+    },
+    "changed": {
+      "type": "string",
+      "description": "done only: what you changed"
+    },
+    "caveat": {
+      "type": "string",
+      "description": "done only: what the next task must respect (\"none\" when nothing)"
+    },
+    "rejected": {
+      "type": "string",
+      "description": "done only: what you tried and discarded (\"none\" when nothing)"
+    },
+    "open": {
+      "type": "string",
+      "description": "done only: what is still unchecked (\"none\" when nothing)"
+    }
+  }
+}
+
+## pb_tests_red
+
+In a pb build, for a task with a Test: line: after writing its tests and before the change, the harness runs the task's test command and requires it to FAIL, proving the tests check the behaviour that is missing. pb_task_done for that task needs it. Call it again after changing the tests: only the latest failed run counts.
+
+{
+  "type": "object",
+  "required": [
+    "task"
+  ],
+  "properties": {
+    "task": {
+      "type": "string",
+      "description": "the task id, e.g. \"T2\""
+    }
+  }
+}
+
+## pb_spec_fix_done
+
+At the end of a pb spec repair lap (started by /pb:spec-fix or /pb:spec-harden): report which numbered items you applied, which you rebutted (you wrote the argument in Decisions), which you park for the human (question + your recommendation), and which you marked assumed (the claim and what would falsify it), with one line on what the spec now says differently. Every number the brief showed you must appear in exactly one list. Then stop: pb checks the new text for un-evidenced claims and reviews it. Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.
+
+{
+  "type": "object",
+  "required": [
+    "applied",
+    "rebutted",
+    "parked",
+    "assumed",
+    "summary"
+  ],
+  "properties": {
+    "applied": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "the numbers this lap settled by evidence, decision or deletion, as shown in its brief"
+    },
+    "rebutted": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "the numbers you argued against, having written the argument and its citation into Decisions"
+    },
+    "parked": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "question",
+          "recommendation"
+        ],
+        "properties": {
+          "id": {
+            "type": "number",
+            "description": "the number this question is about, as shown in the brief"
+          },
+          "question": {
+            "type": "string",
+            "description": "one question only the human can answer, in a sentence"
+          },
+          "recommendation": {
+            "type": "string",
+            "description": "what you recommend, and why — it is what runs if nobody answers"
+          }
+        }
+      },
+      "description": "only where two defensible answers genuinely differ; not a place to park work you could have settled"
+    },
+    "assumed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "claim"
+        ],
+        "properties": {
+          "id": {
+            "type": "number",
+            "description": "the number this claim was shown as, from the brief"
+          },
+          "claim": {
+            "type": "string",
+            "description": "the claim as you tagged it assumed, and what would falsify it"
+          }
+        }
+      },
+      "description": "items only the human or production can settle; every one must name what would falsify it"
+    },
+    "summary": {
+      "type": "string",
+      "description": "one line: what the spec says differently now"
+    }
+  }
+}
+
+## pb_report_findings
+
+In a pb review session: report the review's findings and acceptance checklist, one call with all of them (empty lists when there are none). Call it again if they change.
+
+{
+  "type": "object",
+  "required": [
+    "findings"
+  ],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "priority",
+          "title"
+        ],
+        "properties": {
+          "priority": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "path relative to the repository root"
+          },
+          "line": {
+            "type": "number"
+          },
+          "title": {
+            "type": "string",
+            "description": "the problem, in one sentence"
+          },
+          "fix": {
+            "type": "string",
+            "description": "a concrete fix"
+          },
+          "outside": {
+            "type": "boolean",
+            "description": "true when the problem pre-dates this change (outside it): still a finding — give it the priority it deserves, and a serious one (P0/P1) still blocks"
+          }
+        }
+      }
+    },
+    "acceptance": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "criterion",
+          "status",
+          "evidence"
+        ],
+        "properties": {
+          "criterion": {
+            "type": "string",
+            "description": "the checklist id, e.g. \"T1.1\""
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "met",
+              "not met",
+              "not verified"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "description": "file:line, test name, or why it is not verified; required for met and not met"
+          }
+        }
+      }
+    }
+  }
+}
+
+## pb_fix_done
+
+In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Name each by the number it was shown as in the brief. Then stop: the home session runs the approved path after the fix — /pb:build to re-approve a revised contract, otherwise /pb:review to check the delta. Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.
+
+{
+  "type": "object",
+  "required": [
+    "fixed",
+    "skipped",
+    "tests"
+  ],
+  "properties": {
+    "fixed": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "the numbers of the findings this lap fixed, as shown in the brief (e.g. 1, 3)"
+    },
+    "skipped": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "the numbers of findings that need a design decision (spec revision), not an edit, as shown in the brief"
+    },
+    "tests": {
+      "type": "string",
+      "description": "test commands run and what each showed"
+    }
+  }
+}

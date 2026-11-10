@@ -1,9 +1,8 @@
 /** pb_ask: the one question tool; builds never ask. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { StringEnum, Type } from "./schema.ts";
+import { Type } from "./schema.ts";
 import { notifyDesktop } from "./notify.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
-import { ASK_DESCRIPTION, checkpointing, choose, patiently, post, reply, specOfSession, specWriting, stop } from "./kit.ts";
+import { ASK_DESCRIPTION, checkpointing, patiently, post, reply, specOfSession, specWriting, stop } from "./kit.ts";
 
 export function registerAsk(pi: ExtensionAPI) {
   pi.registerTool({

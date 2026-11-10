@@ -73,16 +73,19 @@ session by itself: planning, building, the reviewer's call, and your plain Pi
 sessions too. The first time you plan or build in a project, pb offers once to
 add its default section there (this project's `AGENTS.md`, or
 `~/.pi/agent/AGENTS.md` for all your projects), marked `<!-- pb:standards -->`.
-Edit it there. A Java or Vue project's section goes only in its own AGENTS.md:
-keep the shared one free of stack-specific rules, since Pi loads both. The
-default covers:
+Edit it there. The section is built from parts: a core every project gets,
+the database rules when the project uses a SQL database, and the stack's own
+lines. A Java, Rust or Vue project's section, and any project's with a database,
+goes only in its own AGENTS.md: keep the shared one free of stack-specific and
+database rules, since Pi loads both. The core covers:
 
 - **Quality**: the best current practice for the stack, a proper fix rather
   than a workaround; modern idioms and the latest stable language and platform
   features, even where the surrounding code is older. Outdated code in the way
   gets refactored to current practice, planned as a task of its own.
-- **Java** (added for Maven or Gradle projects): Java 25, records, sealed types,
-  pattern matching, virtual threads and scoped values; no Lombok.
+- **Simplicity**: the smallest design that meets the need; no option, layer or
+  abstraction without a second user or a stated reason, no near-copy of an
+  existing helper, no code kept for a case nothing reaches.
 - **Dependencies**: current, non-deprecated APIs. Upgrading is a change of its
   own (`/pb:deps`), not part of every feature.
 - **Comments**: concise, and only where they add what the code can't say;
@@ -98,9 +101,9 @@ default covers:
   proven; logic reused from another flow keeps that flow's preconditions;
   security-relevant changes get abuse-case tests, written from the attacker's
   side.
-- **One source of truth**: a rule or canonical form that already exists (in
-  the database or a shared helper) is used, never re-implemented; a second copy
-  drifts, and the gap between copies is a bypass.
+- **One source of truth**: a rule or canonical form that already exists (a
+  shared helper, a type, a constraint) is used, never re-implemented; a second
+  copy drifts, and the gap between copies is a bypass.
 - **Robustness**: at a boundary, input is assumed hostile or broken (sizes,
   ranges, encodings, duplicates, order, concurrent calls); business rules can't
   be bypassed by quantity, repetition, reordering or racing; every request's
@@ -108,11 +111,25 @@ default covers:
   stored, compared or sent are validated strictly. Inside the boundary:
   invariants (types, constraints, transactions), not repeated checks, so the
   code stays clean where the data is already trusted.
-- **Consistency and concurrency** come from the database: one transaction per
-  request, constraints, atomic statements or row locks, not check-then-write in
-  application code.
 - **Before calling it done**: the diff re-read as an attacker and as a race,
   and existing copies of any touched rule searched for.
+
+The other parts:
+
+- **Database** (when a SQL driver or ORM is in package.json, Cargo.toml,
+  pom.xml, Gradle, go.mod, pyproject.toml or requirements.txt, or a migrations
+  directory exists): normalization, uniqueness and constraints live in the
+  database and are compared in SQL; consistency and concurrency come from the
+  database: one transaction per request, constraints, atomic statements or row
+  locks, not check-then-write in application code.
+- **Java** (Maven or Gradle): Java 25, records, sealed types, pattern matching,
+  virtual threads and scoped values; no Lombok.
+- **Rust** (Cargo): stable toolchain, edition 2024; typed errors (`thiserror`
+  in libraries, `anyhow` only at a binary's edge) propagated with `?`; no
+  `unwrap`, `expect` or `panic!` outside tests unless an invariant rules failure
+  out; `unsafe` only with a `// SAFETY:` proof; newtypes for validated values;
+  no blocking in async code and no lock held across `.await`; clippy with
+  `-D warnings` and `cargo fmt --check` clean.
 
 A Vue project (`vue` in package.json, and no pom.xml or Gradle build) gets a
 frontend section instead, offered even when a shared AGENTS.md (a parent
@@ -147,7 +164,8 @@ short: every line is read in every session. A session that started before you
 added them gets them in pb's messages until it's restarted.
 
 **Your own templates.** Put a section in `~/.pi/agent/pb/standards/<name>.md`:
-a `java.md`, `vue.md` or `plain.md` there replaces pb's, and any other name adds
+a `java.md`, `vue.md`, `rust.md` or `plain.md` there replaces pb's (yours is
+written as it is, without the database part), and any other name adds
 a stack. An optional first line says when it applies, e.g.
 `detect: go.mod` or `detect: package.json:react` (files at the project root,
 or a dependency in one); yours are checked before pb's. pb adds its markers,
@@ -631,8 +649,9 @@ revised spec and a new approval.
 task's `Test:` command (a compile when it has none) when the task is done. It
 catches a broken task earlier, but makes every task leave the build green on
 its own, which slices work unnaturally and costs a run per task. With `"end"`
-each task is still compiled when done (when a compile command exists), and the
-final gate additionally runs `lint` and `extraChecks` when configured.
+each task is still compiled when done (when a compile command exists). `lint`
+runs after every task's check and fails that task like any check; the final
+gate additionally runs `extraChecks` when configured.
 
 The spec's Goal, Out of scope, Decisions, Design, Contracts, Migration and
 rollback, Threats and abuse (`Threats` reads as the same section) and Acceptance
@@ -741,7 +760,8 @@ the reviewer on whether its acceptance is genuinely untestable or docs-only.
 
 The commands come from `.pi/pb/config.json` (`"verify"` and `"build"`, `"auto"`
 detects Maven, Gradle, npm/TypeScript, Cargo, Go and pytest; `"lint"` uses
-package.json's `lint` script, `"extraChecks"` runs project commands after it).
+package.json's `lint` script and runs after every task, `"extraChecks"` runs
+project commands at the final gate).
 
 **New tests: whether tasks add tests.** `yes` by default. `New tests: no —
 <why>` is yours to set: the build adds no tests, the existing ones still run,

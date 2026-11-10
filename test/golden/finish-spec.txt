@@ -1,0 +1,41 @@
+words: 1096
+
+[pb:spec order-cancellation] Finish the spec .pi/pb/specs/order-cancellation/spec.md for building: ask me with pb_ask, all at once, about each open question; write answered ones into Decisions; add the Tasks and the Verification line, leave no Open questions, and set Status: ready. Anything still unanswered stays Open and the spec stays Status: planning — never decide for me. (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
+
+# <title>
+Status: ready | planning
+Depends on: <spec name> | none (a note may follow, after a dash or in parentheses)
+Verification: tests | build — <why> | none — <why>
+New tests: yes | no — <why>
+
+## Goal
+The outcome in a few sentences: what is true after the change, for whom, and how we'll know it worked — no implementation. Every task and acceptance line serves it; anything beyond it belongs in Out of scope.
+## Findings
+What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Each bullet says what makes it checkable — a path:line, a probe (probe: <what you ran>; conclusion: <what it showed>) or a constraint — never a bare conclusion. A path:line must point at a real line in the repo; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
+## Decisions
+Each decision with its reason, as it stands now: no dates, no history, not who decided. Say why in plain prose, not with a bare colon; rejected ideas as "Not doing X, because …", so they aren't reconsidered. Every quantitative claim (latencies, counts, windows) carries a measurement (command plus result) or is written as an Assumption.
+## Contracts
+Tasks are built one by one, so no later step sees the whole change: pin here every seam other code, clients or stored data depend on — public signatures, API requests and responses with their error types, the data model and migrations, events — and which task owns each side. A task that changes an external surface needs this section, and so do tasks sharing a seam (one Test: command or a shared file); independent internal tasks write "none — <why>". Pin these as they must end up; everything behind them is the build's.
+- An external outcome (an API return, a message send, a file write) must enumerate its real states, not a binary that conflates them; when the dependency doesn't report one, say so and design for the unknown.
+- Every observable value a Contract states — an HTTP status, error type, header, ordering, event name or stored value — cites the code path or test that pins it today (file:line), or is written as an Assumption. Open that code before writing the value: never infer a status or an order from what the design should do.
+- A formula or derived figure (a size, limit, count, threshold, window) shows its computed value for each case Acceptance pins, inputs and result together (a tenth of a 128k window = 12800).
+- A bound on how often something runs is a claim about a call site: name the code that owns it — a path:line, new: <path> when nothing performs it yet, or an Assumption.
+## Migration and rollback
+Only when the change persists or transforms data, a schema or a stored format: how existing data moves to the new shape, how the change is rolled back, and what old and new code do while both run. Say "none — <why>" when nothing outlives the change.
+## Threats and abuse
+Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks should carry this section: say "none — <why>" if none of those triggers applies. The task acceptance lines then include the abuse cases.
+## Open questions
+Only while Status is planning: what's undecided, the options still being weighed with what was found for and against each, and where the discussion stands.
+## Tasks
+### T1: <the outcome, e.g. "a pending order can be cancelled">
+What must be true when it's done, and anything the build must know; not how to build it.
+- Acceptance: <one behaviour, as a test would check it>   (one line each, abuse cases included: they are the tests to write; the task's Test: command is the proof)
+- Test: `<command that runs this task's tests>`   (for a task that adds behaviour)
+
+The spec pins what the change must do and how we'll know: Goal, Decisions, Contracts, Threats and Acceptance bind the build. How to build it is left to the build, which settles the shape task by task — the compiler and the tests giving feedback — and records what it settles on in "## Design". So don't write "## Design" yourself, and don't prescribe classes, methods or steps unless they are a Contract. Put what tasks share in Contracts: that is the shape the build must not invent.
+
+One task, unless a slice is worth reviewing on its own; then vertical slices, each leaving the code working and tested, never a split by layer or a closing "add tests" task. Keep each task narrow: one coherent change with its own targeted Test:. Split work that bundles several independent changes with a full-suite run: the harness runs the suite once, after the last task. A task that adds no behaviour (wiring, configuration, a "(refactor) …") has no Test: line. Name the prose that describes the behavior being changed (map sections, javadoc, schema comments, guides); updating it is a Task, never an afterthought. A doc-only task carries no Test: line — its acceptance lines still say what to check.
+
+Add "## Out of scope" only when it helps. When you include a section that does not apply, say so in one line ("none — <why>"), never an empty heading or TBD.
+
+- Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.

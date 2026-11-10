@@ -1,11 +1,11 @@
 /** The small commands: /pb:stats, /pb:standards, /pb:status, /pb:help. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
-import { HELP_PATH, tip, topic, topics } from "./help.ts";
+import { HELP_PATH, topic, topics } from "./help.ts";
 import { buildReport } from "./report.ts";
-import { type Stack, agentDir, findStandards, isUserTemplate, projectStack, sectionFor, stackNames, standardsLoaded, templatesDir, writeStandards } from "./standards.ts";
-import { buildTimeLabel, buildTiming, loadStats, renderAll, renderCard } from "./stats.ts";
-import { type AcceptanceCheck, type Checkpoint, type Finding, type Progress, type ReviewLedgerEntry, type ReviewRun, type ReviewSessionState, type TaskProgress, type VerifyResult, COHERE_TASK_ID, PREFIX, Store, cap, changedSince, diffStat, gitDiff, gitHead, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, reviewLedger, untrackedText } from "./store.ts";
+import { findStandards, isUserTemplate, projectStack, stackNames, templatesDir, usesDatabase, writeStandards } from "./standards.ts";
+import { loadStats, renderAll, renderCard } from "./stats.ts";
+import { Store } from "./store.ts";
 import { cmd, loadSpec, post, sessionIdOf, specCompletions, specOfSession, stackLabel, taskLine } from "./kit.ts";
 
 export function registerMisc(pi: ExtensionAPI) {
@@ -33,7 +33,7 @@ export function registerMisc(pi: ExtensionAPI) {
    */
 
   pi.registerCommand(cmd("standards"), {
-    description: `Write the current engineering standards into this project's AGENTS.md: created if missing, pb's section replaced, the rest untouched. Optional: which stack (java, vue, plain, or a template of yours in ${templatesDir()}); default: detected`,
+    description: `Write the current engineering standards into this project's AGENTS.md: created if missing, pb's section replaced, the rest untouched. Optional: which stack (java, vue, rust, plain, or a template of yours in ${templatesDir()}); default: detected`,
     getArgumentCompletions: (prefix: string) => stackNames().filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
@@ -41,13 +41,14 @@ export function registerMisc(pi: ExtensionAPI) {
       if (arg && !names.includes(arg)) return ctx.ui.notify(`/${cmd("standards")} takes ${names.join(", ")} (default: detected from the project). Your own go in ${templatesDir()}.`, "warning");
       const stack = arg ? (arg === "plain" ? undefined : arg) : projectStack(ctx.cwd);
       const file = path.join(ctx.cwd, "AGENTS.md");
-      const result = writeStandards(file, stack);
+      const database = usesDatabase(ctx.cwd);
+      const result = writeStandards(file, stack, database);
       new Store(ctx.cwd).markAsked("standards");
       if (result === "broken") return ctx.ui.notify(`${file} has "<!-- pb:standards -->" without its "<!-- /pb:standards -->": add the end marker where pb's section ends, then run /${cmd("standards")} again.`, "error");
       const what = { created: "Created", added: "Added pb's standards to", replaced: "Replaced pb's standards in", unchanged: "pb's standards are already current in" }[result];
       const shared = findStandards(path.dirname(ctx.cwd));
       ctx.ui.notify(
-        `${what} ${file} (${stackLabel(stack)})${result === "created" ? ", with pb's standards" : ""}.${result === "replaced" || result === "added" ? " The rest of the file is untouched." : ""}${result === "unchanged" ? "" : " Sessions already running keep the ones they loaded until restarted."}${shared ? ` ${shared.file} also has a pb section: Pi loads both.` : ""}`,
+        `${what} ${file} (${stackLabel(stack)}${database && stack !== "vue" && !(stack && isUserTemplate(stack)) ? ", with the database rules" : ""})${result === "created" ? ", with pb's standards" : ""}.${result === "replaced" || result === "added" ? " The rest of the file is untouched." : ""}${result === "unchanged" ? "" : " Sessions already running keep the ones they loaded until restarted."}${shared ? ` ${shared.file} also has a pb section: Pi loads both.` : ""}`,
         "info",
       );
     },
