@@ -1030,7 +1030,9 @@ test("extra instructions: added to each role's prompt, global ones first, pb's o
     process.chdir(t.repo);
     t.selects.push("No thanks");
     await t.run("plan", "x");
-    assert.match(t.instructions.at(-1)!, /Keep it in proportion to the change\.\n\nAlso, from your pb config:\nGlobal: think about rollout\.\nProject: mind the i18n keys\./);
+    // The planner's extra lives with its role, in the system section every planning turn carries.
+    assert.match(t.systemSections.at(-1)!.pb_planner, /no Open questions remain\.[\s\S]*\n\nAlso, from your pb config:\nGlobal: think about rollout\.\nProject: mind the i18n keys\.$/);
+    assert.doesNotMatch(t.instructions.at(-1)!, /Also, from your pb config/);
     await t.run("spec");
     assert.match(t.instructions.at(-1)!, /Name: short kebab-case\.[\s\S]*Also, from your pb config:\nAlways include a rollout task\./);
     await written(t);
@@ -1073,7 +1075,7 @@ test("pb_ask counts down while planning too: unanswered, the question stays open
   t.selects.push("<timeout>");
   const r = await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"], recommended: "event" });
   assert.equal(t.dialogTimeouts.at(-1), 1);
-  assert.match(r.content![0].text, /No answer in time: it stays open — do not take a reading or write it as an Assumption\. Record it under Open questions; planning stays incomplete until it is answered\./);
+  assert.match(r.content![0].text, /No answer in time: it stays open — do not take a reading or tag it assumed\. Record it under Open questions; planning stays incomplete until it is answered\./);
   assert.doesNotMatch(r.content![0].text, /recorded as an assumption/);
   // The dialog is gone, the question isn't: it stays in the chat with its options, lettered for a short answer — and nothing was decided.
   assert.equal(t.posts.at(-1), "**Unanswered question** (no answer within 1 min; nothing was decided — the question stays open):\n\nMail or event?\n\nA. mail\nB. event (recommended)\n\nTo answer, type it here any time (a letter is enough): if Pi is working, it reads it after its current step.");
@@ -1097,7 +1099,7 @@ test("pb_ask: a dialog closed before its time is kept in the chat too; an answer
   assert.equal(t.posts.length, posted);
   t.selects.push("<timeout>");
   const r = await t.callTool("pb_ask", { question: "Which name?", options: ["a", "b"] });
-  assert.match(r.content![0].text, /^The human dismissed the question: it stays open — do not take a reading or write it as an Assumption\.[\s\S]*The question stays in the chat/);
+  assert.match(r.content![0].text, /^The human dismissed the question: it stays open — do not take a reading or tag it assumed\.[\s\S]*The question stays in the chat/);
   assert.match(t.posts.at(-1)!, /^\*\*Unanswered question\*\* \(the dialog was closed; nothing was decided — the question stays open\):\n\nWhich name\?\n\nA\. a\nB\. b\n/);
 });
 
@@ -1274,27 +1276,105 @@ test("/pb:approach without an idea infers it from the discussion", async () => {
 });
 
 test("planning prompts push back like a senior engineer", async () => {
-  const { planPrompt, continuePlanPrompt, approachPrompt } = await import("../extensions/pb/prompts.ts");
-  for (const p of [planPrompt("x", "true", "", "none"), continuePlanPrompt("s", "# S", ""), approachPrompt("y", "")]) {
-    assert.match(p, /Push back like a senior engineer/);
-    assert.match(p, /disagree when the idea is second-best/);
-    assert.match(p, /never taste/);
-    assert.match(p, /blocker, suggestion, or nit/);
-    assert.match(p, /what would change your mind/);
-    assert.match(p, /When you know better, teach: the trade-off and the principle behind your alternative, and where this codebase already applies it/);
-    assert.match(p, /rabbit holes/);
-  }
-  // Plan adds the attack checklist, not a second copy of the shared stance.
-  assert.equal((planPrompt("x", "true", "", "none").match(/Push back like a senior engineer/g) ?? []).length, 1);
+  const { PLANNER_ROLE, planPrompt, continuePlanPrompt, approachPrompt } = await import("../extensions/pb/prompts.ts");
+  assert.match(PLANNER_ROLE, /Push back like a senior engineer/);
+  assert.match(PLANNER_ROLE, /disagree when the idea is second-best/);
+  assert.match(PLANNER_ROLE, /never taste/);
+  assert.match(PLANNER_ROLE, /blocker, suggestion, or nit/);
+  assert.match(PLANNER_ROLE, /what would change your mind/);
+  assert.match(PLANNER_ROLE, /When you know better, teach: the trade-off and the principle behind your alternative, and where this codebase already applies it/);
+  assert.match(PLANNER_ROLE, /rabbit holes/);
+  // The stance lives in the planner's system section only: no first message repeats it.
+  for (const p of [planPrompt("x", "true", "", "none"), continuePlanPrompt("s", "# S", ""), approachPrompt("y", "")]) assert.doesNotMatch(p, /Push back like a senior engineer/);
+});
+
+test("planner role: who it is, the problem before the solution, expertise as evidence, the whole system walked, and a ledger", async () => {
+  const { PLANNER_ROLE, planPrompt, specPrompt } = await import("../extensions/pb/prompts.ts");
+  assert.match(PLANNER_ROLE, /^You are the senior engineer who owns this change end to end, from the need behind it to running it in production\. Your job is the best plan for what I actually need, not agreement with what I first asked for\./);
+  // P2: the problem first, and a right idea gets one line, not a debate.
+  assert.match(PLANNER_ROLE, /Before any solution, state the goal in a line or two and how we'll know it worked\. Challenge the request itself when it deserves it: the need behind it, something that already does it, the simplest thing that would work\. When my idea is already right, say so in one line and move on\./);
+  assert.match(planPrompt("x", "true", "", "none"), /Reply with exactly:\n\n- Problem — the goal in a line or two, how we'll know it worked, and any challenge to the request itself/);
+  // P3: established practice counts, taste does not.
+  assert.match(PLANNER_ROLE, /Evidence is this code \(a path:line, a constraint found, a test that would fail\) or a named practice, standard or documented behaviour with its concrete consequence here; never taste\./);
+  // P4: the whole lifecycle is walked, in proportion; what isn't engineering goes to the right person.
+  assert.match(PLANNER_ROLE, /walk what applies and skip what doesn't; a small change touches one or two of these:/);
+  assert.match(PLANNER_ROLE, /- Users: what they see when it works and when it fails \(messages, empty states\); accessibility and languages when there is a UI\./);
+  assert.match(PLANNER_ROLE, /- Data: the model and who owns it, how existing records and API clients survive the change, what personal data is kept, for how long, and who can see it\./);
+  assert.match(PLANNER_ROLE, /- Security: who can reach it and with what \(a stolen session, another user's, replayed or automated requests\), what could leak \(secrets, personal data\), what a new dependency brings in\./);
+  assert.match(PLANNER_ROLE, /- Verification: how we'll prove it works, what no test can show, what test data it needs\./);
+  assert.match(PLANNER_ROLE, /A question outside engineering \(legal, compliance, licensing\) is flagged for the right person, not answered\./);
+  assert.match(PLANNER_ROLE, /- Design: where does this belong, what does it couple, what does it make harder later, what already does part of it, what generality does nobody need\?/);
+  assert.match(PLANNER_ROLE, /- Operations: how it ships \(a flag, migration order, rollback\), how we'd see it fail in production \(logs, metrics, alerts\), its latency and cost at the expected scale\./);
+  // P5: a ledger every reply; an overruled objection is recorded once, not re-argued; the spec transcribes it.
+  assert.match(PLANNER_ROLE, /end each reply with a short ledger: Decided \(each with its reason\) and Open \(each with your recommendation\)\. When I overrule you without new evidence, take my decision: put it under Decided with your objection and its risk, and don't argue it again unless something new turns up\./);
+  assert.match(specPrompt("", []), /Transcribe the conversation's ledger: what was decided goes into Decisions with its reason \(an objection I overruled stays beside its decision as the risk\)/);
+});
+
+test("planner role: every run of a planning session carries it, long after the first message; it leaves with planning", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  assert.match(t.systemSections.at(-1)!.pb_planner, /^You are the senior engineer who owns this change end to end/);
+  assert.doesNotMatch(t.instructions.at(-1)!, /You are the senior engineer/); // not pasted into the conversation
+  t.runtime().pi.sendUserMessage("and refunds?");
+  await t.settle();
+  assert.match(t.systemSections.at(-1)!.pb_planner, /^You are the senior engineer who owns this change end to end/); // a later turn still has it
+  await t.run("plan", "off");
+  t.runtime().pi.sendUserMessage("thanks");
+  await t.settle();
+  assert.equal(t.systemSections.at(-1)!.pb_planner, undefined);
+});
+
+test("planner settings: planning thinks at least at the planner's level and on its model; its end puts back what you didn't change", async () => {
+  const { plannerSettings } = await import("../extensions/pb/kit.ts");
+  assert.deepEqual(plannerSettings({ thinking: "low", model: "p/m" }, {}), { thinking: "low", model: "p/m", appliedThinking: "high" });
+  assert.deepEqual(plannerSettings({ thinking: "max", model: "p/m" }, {}), { thinking: "max", model: "p/m" }); // a floor, never lowered
+  assert.deepEqual(plannerSettings({ thinking: "high", model: "p/m" }, { thinking: "xhigh", model: "p/big" }), { thinking: "high", model: "p/m", appliedThinking: "xhigh", appliedModel: "p/big" });
+
+  const t = setup({ verify: "true", planner: { model: "p/big" } });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  assert.deepEqual([t.runtime().thinking, t.runtime().model.id], ["high", "big"]);
+  await t.run("plan", "off");
+  assert.deepEqual([t.runtime().thinking, t.runtime().model.id], ["off", "m"]);
+
+  const u = setup({ verify: "true" });
+  process.chdir(u.repo);
+  u.selects.push("No thanks");
+  await u.run("plan", "cancel orders");
+  assert.equal(u.runtime().thinking, "high");
+  u.runtime().pi.setThinkingLevel("xhigh"); // you chose differently mid-planning
+  await u.run("plan", "off");
+  assert.equal(u.runtime().thinking, "xhigh", "your own choice is kept");
+
+  const w = setup({ verify: "true", planner: { model: "p/nope" } });
+  process.chdir(w.repo);
+  w.selects.push("No thanks");
+  await w.run("plan", "cancel orders");
+  assert.equal(w.runtime().model.id, "m");
+  assert.ok(w.notes.some((n) => /planner\.model p\/nope isn't available here: planning stays on p\/m/.test(n)));
+});
+
+test("planner settings: a plan continued in a fresh session plans on them too, and its end puts back the original", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING });
+  t.runtime().thinking = "low";
+  await t.run("plan", "order-cancellation");
+  assert.equal(t.runtime().thinking, "high");
+  assert.match(t.systemSections.at(-1)!.pb_planner, /^You are the senior engineer/);
+  await t.run("plan", "off");
+  assert.equal(t.runtime().thinking, "low");
 });
 
 test("plan ends decided: the exit criteria demand answered attack questions and no open leftovers", async () => {
-  const { planPrompt } = await import("../extensions/pb/prompts.ts");
-  const p = planPrompt("x", "true", "", "none");
-  assert.match(p, /attack/i);
-  assert.match(p, /abuse|threat/i);
-  assert.match(p, /no open questions|nothing.*undecided|undecided.*nothing/i);
-  assert.match(p, /planning.*(not finished|incomplete)|not.*done until/i);
+  const { PLANNER_ROLE, planPrompt } = await import("../extensions/pb/prompts.ts");
+  assert.match(PLANNER_ROLE, /Before a plan is settled, walk what applies/);
+  assert.match(PLANNER_ROLE, /- Security: who can reach it/);
+  assert.match(PLANNER_ROLE, /Planning is finished when they are and no Open questions remain\./);
+  assert.match(planPrompt("x", "true", "", "none"), /planning.*(not finished|incomplete)|not.*done until/i);
 });
 
 test("deps: the lockfile peer ranges match package.json", async () => {

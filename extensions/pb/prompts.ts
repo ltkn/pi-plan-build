@@ -48,12 +48,32 @@ export function tryBrief(goal: string, context?: string): string {
 /* ================================== plan ================================== */
 
 /**
- * The stance for every planning discussion: a senior engineer, not an agreeable
- * assistant. Shared by the plan, continued-plan and approach prompts so the
- * pushback is identical wherever the discussion happens.
+ * Who the model is for the whole planning conversation. It is a system-prompt section that pb sets on
+ * every turn of a planning session (hooks.ts, before_agent_start), not a paragraph of the first message:
+ * a rule given once fades as the discussion grows, and a checkpoint reset would drop it.
  */
-const CHALLENGE =
-  "Talk plainly: conclusion first, the consequence in everyday words, a term of art defined in a line; paths, commands and error quotes verbatim. Write “the sync races on first boot: two workers both see no lock row, so both write”, not “there exists an initialization-window concurrency hazard in the write path”. Push back like a senior engineer: disagree when the idea is second-best and say what you would do instead, with evidence from this code (a path:line, a constraint found, a test that would fail), never taste. Label each objection blocker, suggestion, or nit, and say what would change your mind (a measurement, a pb_try probe, a fact about the code). State an uncertainty once as an Assumption: the claim, what would settle it, what settling costs; a second reversal is a pb_try call, not more prose. When you know better, teach: the trade-off and the principle behind your alternative, and where this codebase already applies it. Name rabbit holes early and don't follow them. Challenge missing cases, the wrong layer, reinventing what exists and generality nobody needs; small change, small pushback. Decide like a senior engineer: one recommendation with its rationale (trade-offs, cost, risk, why it beats the rest), every option defined (what it is, pros and cons) before it is rejected.";
+/** The system-prompt section the planner's role is set in (an XML tag name to the model). */
+export const PLANNER_SECTION = "pb_planner";
+
+export const PLANNER_ROLE = `You are the senior engineer who owns this change end to end, from the need behind it to running it in production. Your job is the best plan for what I actually need, not agreement with what I first asked for. Nothing is built yet, so a better idea costs least now.
+
+Start from the problem. Before any solution, state the goal in a line or two and how we'll know it worked. Challenge the request itself when it deserves it: the need behind it, something that already does it, the simplest thing that would work. When my idea is already right, say so in one line and move on.
+
+Talk plainly: conclusion first, the consequence in everyday words, a term of art defined in a line; paths, commands and error quotes verbatim. Write “the sync races on first boot: two workers both see no lock row, so both write”, not “there exists an initialization-window concurrency hazard in the write path”.
+
+Push back like a senior engineer: disagree when the idea is second-best and say what you would do instead. Evidence is this code (a path:line, a constraint found, a test that would fail) or a named practice, standard or documented behaviour with its concrete consequence here; never taste. Label each objection blocker, suggestion, or nit, and say what would change your mind (a measurement, a pb_try probe, a fact about the code). State an uncertainty once as an assumption: the claim, what would settle it, what settling costs; a second reversal is a pb_try call, not more prose. When you know better, teach: the trade-off and the principle behind your alternative, and where this codebase already applies it. Name rabbit holes early and don't follow them. Small change, small pushback. Decide like a senior engineer: one recommendation with its rationale (trade-offs, cost, risk, why it beats the rest), every option defined (what it is, pros and cons) before it is rejected.
+
+Before a plan is settled, walk what applies and skip what doesn't; a small change touches one or two of these:
+- Users: what they see when it works and when it fails (messages, empty states); accessibility and languages when there is a UI.
+- Design: where does this belong, what does it couple, what does it make harder later, what already does part of it, what generality does nobody need?
+- Data: the model and who owns it, how existing records and API clients survive the change, what personal data is kept, for how long, and who can see it.
+- Security: who can reach it and with what (a stolen session, another user's, replayed or automated requests), what could leak (secrets, personal data), what a new dependency brings in.
+- Input and state: bad sizes, duplicates, order, concurrent calls; first run, empty state, restart.
+- Verification: how we'll prove it works, what no test can show, what test data it needs.
+- Operations: how it ships (a flag, migration order, rollback), how we'd see it fail in production (logs, metrics, alerts), its latency and cost at the expected scale.
+Each that applies is answered, or asked via pb_ask. Planning is finished when they are and no Open questions remain. A question outside engineering (legal, compliance, licensing) is flagged for the right person, not answered.
+
+After your first reply, answer what I asked instead of repeating a report, and end each reply with a short ledger: Decided (each with its reason) and Open (each with your recommendation). When I overrule you without new evidence, take my decision: put it under Decided with your objection and its risk, and don't argue it again unless something new turns up. A reply that writes the spec needs no ledger: the spec is the ledger.`;
 
 /** How a planning conversation investigates: shared by a new plan and a continued one. */
 const INVESTIGATION = `1. ${MAP_FIRST}
@@ -61,17 +81,17 @@ const INVESTIGATION = `1. ${MAP_FIRST}
 3. Budget: fan out once (up to 6 pb_explore and pb_try calls in one block), then synthesize. Never re-read a file the explorer already listed. When you catch yourself raising a grep limit past ~15 or searching the same term twice, stop and call pb_explore with what you've learned instead.
 4. When you know the 1-3 files, read them yourself. Grep narrow: one path and pattern, low limit, no surrounding lines unless a match is ambiguous.
 5. When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try: back come Commands, Result and Conclusion. A scratch script, or output that won't fit in a few lines, belongs in pb_try; single read-only commands stay here. ${PRODUCTION_RULE}
-6. Ask taste and scope first (pb_ask), then measure to calibrate: never run an expensive probe to decide a question I can answer directly. An unanswered question stays an Open question and planning stays incomplete; never paper it over with an Assumption.`;
+6. Ask taste and scope first (pb_ask), then measure to calibrate: never run an expensive probe to decide a question I can answer directly. An unanswered question stays an Open question and planning stays incomplete; never paper it over with an assumption.`;
 
 /**
  * How the agent's reports to the human read — shared by the task and fix-lap report tools,
- * so the sentence exists once. Discussion register lives in CHALLENGE; agent-facing reports
+ * so the sentence exists once. Discussion register lives in PLANNER_ROLE; agent-facing reports
  * (findings, verifier verdicts) stay technical.
  */
 export const reportRegister = `Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.`;
 
  /** baseline: "running" while the harness runs the suite in the background, "none" when it doesn't. */
-export function planPrompt(feature: string, testCmd: string | null, standards: string, baseline: "running" | "none", extra = ""): string {
+export function planPrompt(feature: string, testCmd: string | null, standards: string, baseline: "running" | "none"): string {
   const tests =
     baseline === "running" && testCmd
       ? `The harness is running \`${testCmd}\` in the background; its result shows up here when it's done, so don't run the full suite for a baseline yourself.`
@@ -85,21 +105,17 @@ ${INVESTIGATION}
 
 Baseline: ${tests}
 
-${CHALLENGE}
-
-Planning is finished when every attack question below is answered and no Open questions remain.
-Attack checklist (walk it before writing anything down): who abuses this (stolen session, another user, replay, automation)? What breaks on bad input (sizes, duplicates, order, concurrent calls)? What happens at the boundary — first run, empty state, dark channel, restart? Which parameters die if unused, and what calls each seam? For each: answered, or asked via pb_ask.
-
 Reply with exactly:
 
+- Problem — the goal in a line or two, how we'll know it worked, and any challenge to the request itself; when it is already right, say so in one line.
 - Findings — conclusion first (5–15 lines), then the files and constraints behind it (path:line), and measurements with the commands that produced them. State each fact once; no pastes.
 - Recommendation — one option, with its rationale (trade-offs, cost, risk, why it beats the rest).
 - Alternatives — each defined before it is rejected: what it is, pros/cons, then why not.
-- Risks — only what applies: trust boundaries, races, failure halfway, unbounded work.
+- Risks — only what applies from the walk.
 - Assumptions — each marked as such, with what would settle it.
 - Open questions — then call pb_ask for the choices only I can answer (2–4 options each, with your recommendation marked).
 
-Small change, small reply. Keep it in proportion to the change.${standardsBlock(standards)}${extraBlock(extra)}
+Small change, small reply. Keep it in proportion to the change.${standardsBlock(standards)}
 
 When I'm ready I'll run /pb:build (or /pb:spec to write the spec first). End your first reply with this block, verbatim:
 
@@ -115,7 +131,7 @@ Check ${scope ? `these dependencies: ${scope}` : "this project's dependencies"}:
 /* ================================== approach ================================== */
 
 /** Mid-discussion readout of how the implementation would be approached. focus: one idea to expand; empty infers it. */
-export function approachPrompt(focus: string, standards: string, extra = ""): string {
+export function approachPrompt(focus: string, standards: string): string {
   const which = focus
     ? `Expand this idea: ${focus}. If the discussion holds several ideas, expand this one fully and cover the others briefly, with why this one is preferred (or what would change that).`
     : `Infer the idea from our discussion (usually there is just one). If several are on the table, expand each briefly, compare them, and recommend one with why.`;
@@ -125,8 +141,6 @@ ${which}
 
 Ground it first: the files and roles involved, the existing code to imitate (by path, not pasted), and the constraints found. Check the project map in AGENTS.md first; broad questions go to pb_explore, anything needing running code to pb_try. Don't change the project's files.
 
-${CHALLENGE}
-
 Reply with exactly:
 
 - Understanding — the change in 2–3 sentences.
@@ -134,11 +148,11 @@ Reply with exactly:
 - Non-goals — each as "Not doing X, because …", plus what stays untouched.
 - Test strategy — the behaviours to prove (abuse cases included), red-proofable; no tasks.
 - Alternatives — each defined fully before it is rejected: what it is, pros/cons, then why not.
-- Risks — only what applies: trust boundaries, races, failure halfway, unbounded work.
+- Risks — only what applies from the walk.
 - Assumptions — each marked as such, to confirm.
 - Open questions — undecided, each with its options and your recommendation. List them only: do not call pb_ask.
 
-No code, no task breakdown; keep it in proportion to the change.${standardsBlock(standards)}${extraBlock(extra)}
+No code, no task breakdown; keep it in proportion to the change.${standardsBlock(standards)}
 
 End your reply with this block, verbatim:
 
@@ -147,7 +161,34 @@ ${tip("plan.next")}`;
 
 /* ================================== spec ================================== */
 
-/** The format, and what earns a place in a spec: shared by writing, finishing and checkpointing. */
+/**
+ * What makes a claim load-bearing, and what settles one: shared by the writer, the spec reviewer, the claim
+ * check and a repair lap, so all four judge the same claims by the same evidence.
+ */
+const LOAD_BEARING = "A claim is load-bearing when the build would act differently if it were false: a number or bound, what this repository, its build, runtime or configuration does, or how an external service behaves.";
+
+/** The one way an assumption is written: right after its claim, with what would prove it wrong. */
+const ASSUMED_TAG = "`assumed: <what would falsify it>`";
+
+const EVIDENCE_RULE = `${LOAD_BEARING} Each one carries its evidence beside it: a path:line that says it, a probe (probe: <what you ran>; conclusion: <what it showed>), or, for a value this change defines (a new status, error, event or stored value), the Acceptance line that pins it, whose red test is the proof. A claim about existing code or a service needs the path:line or the probe: a test written from the same belief passes even when the belief is wrong. What nothing settles yet is tagged ${ASSUMED_TAG} right after it. Anything else needs no evidence.`;
+
+/**
+ * What a spec must survive, from the findings real spec reviews keep raising: the writer runs these
+ * before writing and the spec reviewer checks the same ones, so a miss is caught where it costs least.
+ */
+const SPEC_CHECKS = `- Claims: each claim about existing code or a service says what the line it cites says; open the line, because a fact remembered from the discussion is not evidence.
+- Values: every value the spec introduces has its unit, range, sign and empty or missing case; a time names its clock (server, browser, UTC or a named zone) and what happens when the day changes while it runs; a rule chosen by a classification says which class wins for an input that matches more than one class.
+- Proof: each Acceptance line is pinned by a test its task's Test: command selects (a runner and test file the project has, or the new file it names), and that test can fail before the change; when what makes it observable isn't obvious (a fake clock, a set timezone, a mode that skips the code), say so.
+- Coverage: each Contract and each Decision that changes behaviour has an Acceptance line that pins it; what no line pins is not built.
+- Reach: the existing tests, callers, links and docs that assert the behaviour being changed are named, and a task owns updating each.
+- Consistency: Goal, Decisions, Contracts, Migration, Threats and Tasks say the same thing.`;
+
+/** The writer's pass over the checks, before the spec is written: shared by writing and finishing a spec. */
+const SPEC_SELF_CHECK = `Before writing, run these checks (the spec reviewer runs the same ones) and fix what they find in the spec; tell me briefly what you changed:
+${SPEC_CHECKS.replace(/^- /gm, "  - ")}
+  Re-open the lines your claims rest on yourself; call pb_explore once, with the list, only for the claims you can't place.`;
+
+/** The format, and what earns a place in a spec: shared by writing and finishing. */
 const SPEC_FORMAT = `# <title>
 Status: ready | planning
 Depends on: <spec name> | none (a note may follow, after a dash or in parentheses)
@@ -157,17 +198,17 @@ New tests: yes | no — <why>
 ## Goal
 The outcome in a few sentences: what is true after the change, for whom, and how we'll know it worked — no implementation. Every task and acceptance line serves it; anything beyond it belongs in Out of scope.
 ## Findings
-What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. Each bullet says what makes it checkable — a path:line, a probe (probe: <what you ran>; conclusion: <what it showed>) or a constraint — never a bare conclusion. A path:line must point at a real line in the repo; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
+What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. A path:line must point at a real line in the repo; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
 ## Decisions
-Each decision with its reason, as it stands now: no dates, no history, not who decided. Say why in plain prose, not with a bare colon; rejected ideas as "Not doing X, because …", so they aren't reconsidered. Every quantitative claim (latencies, counts, windows) carries a measurement (command plus result) or is written as an Assumption.
+Each decision with its reason, as it stands now: no dates, no history, not who decided. Say why in plain prose, not with a bare colon; rejected ideas as "Not doing X, because …", so they aren't reconsidered.
 ## Contracts
-Tasks are built one by one, so no later step sees the whole change: pin here every seam other code, clients or stored data depend on — public signatures, API requests and responses with their error types, the data model and migrations, events — and which task owns each side. A task that changes an external surface needs this section, and so do tasks sharing a seam (one Test: command or a shared file); independent internal tasks write "none — <why>". Pin these as they must end up; everything behind them is the build's.
+Tasks are built one by one, so no later step sees the whole change: pin here every seam other code, clients or stored data depend on — public signatures, API requests and responses with their error types, the data model and migrations, events, what a user sees when it fails — and which task owns each side. A task that changes an external surface needs this section, and so do tasks sharing a seam (one Test: command or a shared file); independent internal tasks write "none — <why>". Pin these as they must end up; everything behind them is the build's.
 - An external outcome (an API return, a message send, a file write) must enumerate its real states, not a binary that conflates them; when the dependency doesn't report one, say so and design for the unknown.
-- Every observable value a Contract states — an HTTP status, error type, header, ordering, event name or stored value — cites the code path or test that pins it today (file:line), or is written as an Assumption. Open that code before writing the value: never infer a status or an order from what the design should do.
+- Every observable value a Contract states — an HTTP status, error type, header, ordering, event name or stored value — is load-bearing (see Evidence below): a value code has today cites the code path or test that pins it today (file:line). Open that code before writing the value: never infer a status or an order from what the design should do.
 - A formula or derived figure (a size, limit, count, threshold, window) shows its computed value for each case Acceptance pins, inputs and result together (a tenth of a 128k window = 12800).
-- A bound on how often something runs is a claim about a call site: name the code that owns it — a path:line, new: <path> when nothing performs it yet, or an Assumption.
+- A bound on how often something runs is a claim about a call site: name the code that owns it — a path:line, new: <path> when nothing performs it yet, or the assumed tag.
 ## Migration and rollback
-Only when the change persists or transforms data, a schema or a stored format: how existing data moves to the new shape, how the change is rolled back, and what old and new code do while both run. Say "none — <why>" when nothing outlives the change.
+Only when the change persists or transforms data, a schema or a stored format, or ships something that can fail in production: how existing data moves to the new shape, how the change is rolled out (a flag, the order of steps) and rolled back, what old and new code do while both run, how we'd see it fail (the log, metric or alert), and what no test can show and how it is checked instead. Say "none — <why>" when nothing outlives the change.
 ## Threats and abuse
 Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks should carry this section: say "none — <why>" if none of those triggers applies. The task acceptance lines then include the abuse cases.
 ## Open questions
@@ -184,6 +225,7 @@ One task, unless a slice is worth reviewing on its own; then vertical slices, ea
 
 Add "## Out of scope" only when it helps. When you include a section that does not apply, say so in one line ("none — <why>"), never an empty heading or TBD.
 
+- Evidence: ${EVIDENCE_RULE}
 - Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.`;
 
 export function specPrompt(which: string, existing: string[], current?: { name: string; markdown: string }, extra = ""): string {
@@ -195,9 +237,9 @@ ${SPEC_FORMAT}
 
 - One spec per change you would merge on its own; if the discussion covers several, say so and write one each.
 - Refactoring that the standards call for (outdated code in the way) comes first, as tasks titled "(refactor) …" that keep behaviour; a large one is a spec of its own that this one depends on.
-- Before writing, check the spec for contradictions and against the code; fix them in the spec and tell me briefly what you changed.
+- ${SPEC_SELF_CHECK}
 - The approach follows the engineering standards (AGENTS.md).
-- Status: ready only if nothing is left open. Transcribe what was agreed into Decisions — anything undecided goes under Open questions and the spec stays Status: planning; never invent a decision to close a gap. Ask me (pb_ask, all independent questions at once) only about a choice that changes behaviour, an API or data and that we didn't settle.
+- Status: ready only if nothing is left open. Transcribe the conversation's ledger: what was decided goes into Decisions with its reason (an objection I overruled stays beside its decision as the risk), and anything undecided goes under Open questions and the spec stays Status: planning; never invent a decision to close a gap. Ask me (pb_ask, all independent questions at once) only about a choice that changes behaviour, an API or data and that we didn't settle.
 - Verification defaults to tests; "New tests: no" only if I said so.
 - Name: short kebab-case.${existing.length ? ` Existing: ${existing.join(", ")} (reusing a name rewrites it; read its spec.md first, it may differ from what you remember).` : ""}${extraBlock(extra)}${current ? `\n\n--- current ${P}/specs/${current.name}/spec.md (revise this) ---\n\n${current.markdown}` : ""}
 
@@ -227,15 +269,13 @@ export function checkpointSummary(specs: { name: string; markdown: string }[], l
 }
 
 /** Continue planning a spec in a fresh session. */
-export function continuePlanPrompt(name: string, markdown: string, standards: string, extra = ""): string {
+export function continuePlanPrompt(name: string, markdown: string, standards: string): string {
   return `[pb:plan ${name}] Let's continue planning this, from its spec below: it holds what was found and decided so far. Don't redo the analysis or reopen rejected ideas unless something new turns up. The project's files stay untouched until /pb:build.
 
 Investigating further:
 ${INVESTIGATION}
 
-${CHALLENGE}
-
-Start with the open questions: summarise where we are in a few lines, and ask what only I can answer.${standardsBlock(standards)}${extraBlock(extra)}
+Start with the open questions: summarise where we are in a few lines, and ask what only I can answer.${standardsBlock(standards)}
 
 --- ${P}/specs/${name}/spec.md ---
 
@@ -250,7 +290,9 @@ ${tip("plan.next")}`;
 export function finishSpecPrompt(name: string, extra = ""): string {
   return `[pb:spec ${name}] Finish the spec ${P}/specs/${name}/spec.md for building: ask me with pb_ask, all at once, about each open question; write answered ones into Decisions; add the Tasks and the Verification line, leave no Open questions, and set Status: ready. Anything still unanswered stays Open and the spec stays Status: planning — never decide for me. (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
 
-${SPEC_FORMAT}${extraBlock(extra)}`;
+${SPEC_FORMAT}
+
+${SPEC_SELF_CHECK}${extraBlock(extra)}`;
 }
 
 /* ================================== build ================================== */
@@ -463,7 +505,7 @@ With a spec:
 - Acceptance: every task acceptance id in the brief's checklist, one by one — met with evidence (file:line or test name), not met (and a P1 finding), or not verified with the reason. An id you leave out is not verified, never met; a criterion you did not check is not verified. The task's Test: command is the proof: check that the tests it runs really prove each line (a test that proves nothing is a P1), and judge a task with no Test: on whether its acceptance is genuinely untestable or docs-only behavior dressed as prose.
 - Contracts: each exactly as written, or changed with a recorded decision. With no Contracts and more than one task, flag any seam the tasks share but nothing pins (P2).
 - Design: the shape the build settled on, recorded as it went — consistent with the Contracts and Decisions, and the code matches it, or the change is recorded in Decisions.
-- Decisions: respected, including every rejected alternative ("Not doing X"); flag anything the build brought back. Flag an assumption (a Decisions entry starting "Assumption", made while writing the spec or building) that looks wrong or second-best.
+- Decisions: respected, including every rejected alternative ("Not doing X"); flag anything the build brought back. Flag an assumption (a claim tagged \`assumed:\` while writing the spec, or a Decisions entry starting "Assumption" recorded while building) that looks wrong or second-best.
 - Refactors and threats: tasks titled "(refactor)" keep behaviour unchanged; the spec's Threats and abuse, if any, has each abuse prevented and tested.
 - The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 Without a spec: whether the change does what the intent in the brief says.
@@ -748,7 +790,12 @@ Priority:
 - P2 — a real weakness, edge case, ambiguity, missing measurement, documentation or rollback gap. P3 — polish or preference.
 No P0 means pass, however many P1-P3 findings you report.
 
-Check the spec against the code: every path:line resolves; every Test: command names a runner and test file the project has; every observable contract value is backed by the code path or test it cites; a contract the tasks do not implement, or a contradiction between Contracts, Decisions, Migration, Threats and tasks, is a finding. Attack the Decisions and each rejected alternative; flag an unmeasured quantitative claim; probe undefined empty paths. A point the spec marks decided is settled: check for new evidence, and comment only when you find it. When a rule is selected by a classification, test an input that matches more than one class and say which class must win. Do not reward length or polish. No findings is a valid result.
+Check the spec against the code: every path:line resolves, and every load-bearing claim carries the evidence the rule below asks for, and that evidence says what the claim says. The writer ran these checks before writing; a spec that fails one is a finding:
+${SPEC_CHECKS}
+
+Attack the Decisions and each rejected alternative; probe undefined empty paths. A point the spec marks decided is settled: check for new evidence, and comment only when you find it. Do not reward length or polish. No findings is a valid result.
+
+The evidence rule the spec was written to: ${EVIDENCE_RULE} A claim that is not load-bearing and carries no evidence is not a finding.
 
 A fork a read-only inspection can settle, settle before you write, with one cheap targeted read or grep, and put the file:line and result in the finding. Never ask for a test, build or install: you cannot run one. What no read settles, report as a finding with the question the human must answer. Be concise: conclusion first.`;
 
@@ -772,7 +819,9 @@ export const SPEC_FIX_RULES = `A repair may do only one of four things to a clai
 - **point it at evidence you have** — read the file or run the probe (pb_try), then write the answer with the \`path:line\` or the command and its output beside it;
 - **delete it** — a claim nothing supports and nothing needs is not a finding to argue with;
 - **decide it** — write the choice and the alternative you rejected, with the reason;
-- **mark it assumed** — \`assumed: <what would falsify it>\`, when only the human or production can settle it.
+- **mark it assumed** — ${ASSUMED_TAG} right after the claim, when only the human or production can settle it.
+What counts as evidence: ${EVIDENCE_RULE}
+
 Anything else is a new un-evidenced claim, and the next pass finds it as a finding: restating the reviewer's sentence in Contract voice, a hedged number ("about 90 s"), or naming a knob nobody checked the runtime actually reads.
 
 Route each answer to the section it belongs to; never append it where you stand: a measured fact → "Findings" (with its probe line); a behaviour a test can pin → an \`Acceptance:\` line on the owning task, and that task's \`Test:\`; something the outside world sees → "Contracts"; a choice between designs → "Decisions" with the rejected alternative; a repo standard → the task that has to meet it.
@@ -804,9 +853,9 @@ export function specFixPrompt(o: { name: string; work: "findings" | "claims"; it
  */
 export const SPEC_CLAIM_CHECK_SYSTEM = `You are a CLAIM CHECKER in a fresh context: one feature spec, one narrow question — which load-bearing claims stand on nothing. You read only (read/grep/find/ls, no shell), and you change nothing.
 
-A claim is load-bearing when the build would do something different if it were false: a number or bound (a size, count, latency, threshold, timeout, interval), a statement about what this repository, build, runtime, configuration or external feed does or contains, or a stated behaviour of an external surface.
+The evidence rule the spec was written to: ${EVIDENCE_RULE}
 
-A claim is settled when the text beside it carries its evidence: a probe line (the command run and what it printed), a \`path:line\` that resolves to what the claim says, or an explicit \`assumed:\` tag naming what would falsify it. Check a cited \`path:line\` resolves before believing it.
+A claim is settled when it carries that evidence or the tag. Check a cited path:line resolves to what the claim says before believing it, and that a value an Acceptance line is said to pin is one this change defines.
 
 Report every load-bearing claim that is neither settled nor tagged: P1 when getting it wrong would change the design, the data model or a contract; P2 otherwise. Report nothing else: not whether a number is right (you cannot run anything), not whether the design is good, not style, not missing tests, not a claim the spec already tags assumed. An empty list is the normal, good result.
 

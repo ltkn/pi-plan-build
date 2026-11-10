@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { type Result, type Script, briefOf, contractHash, diligent, parseSpec, PLANNING, repairLap, setup, SPEC, specRel, taskOf, TASKS_PLAIN, TASKS_WITH_A_REFACTOR, THREE_TASKS, withCohere, written } from "./harness.mts";
+import { type Result, type Script, briefOf, contractHash, diligent, parseSpec, PLANNING, repairLap, setup, SPEC, specRel, taskOf, TASKS_PLAIN, TASKS_WITH_A_REFACTOR, THREE_TASKS, until, withCohere, written } from "./harness.mts";
 
 test("snapshot: works when .pi is gitignored wholesale (the recommended setup)", async () => {
   const t = setup();
@@ -453,6 +453,89 @@ test("declarations: the names a diff adds, per language, from added lines only",
     "Svc.kt:second",
   ]);
   assert.deepEqual(declarationsIn(file("src/a.test.ts", "export function helper() {}"), (f) => /\.test\./.test(f)), []);
+});
+
+test("lint: a Cargo project is linted with clippy unless package.json names its own lint", async () => {
+  const { detectLint } = await import("../extensions/pb/verify.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-clippy-"));
+  fs.writeFileSync(path.join(dir, "Cargo.toml"), '[package]\nname = "x"\n');
+  assert.equal(detectLint(dir), "cargo clippy -q --all-targets -- -D warnings");
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { lint: "eslint ." } }));
+  assert.equal(detectLint(dir), "npm run lint --silent");
+});
+
+/** A project whose auto-detected lint counts its runs and fails while bad.txt is committed. */
+const autoLintProject = (config: object, bad: boolean) => {
+  const t = setup({ verify: "true", ...config });
+  fs.writeFileSync(path.join(t.repo, "package.json"), JSON.stringify({ scripts: { lint: "echo lint >> lint.log && test ! -f bad.txt" } }));
+  if (bad) fs.writeFileSync(path.join(t.repo, "bad.txt"), "debt");
+  execSync("git add -A && git commit -qm project", { cwd: t.repo }); // the baseline runs on the commit
+  return t;
+};
+const lintRuns = (t: ReturnType<typeof setup>) => (fs.existsSync(path.join(t.repo, "lint.log")) ? fs.readFileSync(path.join(t.repo, "lint.log"), "utf8").split("\n").filter(Boolean).length : 0);
+
+test("lint gate: an auto-detected lint the baseline ran clean gates every task", async () => {
+  const t = autoLintProject({ baseline: true }, false);
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  const p = t.progress("order-cancellation");
+  assert.equal(p.lintGate, "task");
+  assert.equal(p.phase, "built");
+  assert.ok(t.events("order-cancellation").some((e: any) => e.type === "check" && e.task === "T1" && e.lint === true));
+  assert.match(t.instructions.find((i) => /Task T1/.test(i))!, /it runs `npm run lint --silent` itself/);
+  assert.ok(!t.notes.some((n) => /gates only the final check/.test(n)));
+});
+
+test("lint gate: an auto-detected lint already red at baseline leaves the tasks alone and fails only the final check", async () => {
+  const t = autoLintProject({ baseline: true }, true);
+  process.chdir(t.repo);
+  await t.run("plan", "cancel orders");
+  await until(() => t.posts.some((p) => p.startsWith("**Baseline**")));
+  await written(t);
+  const said: string[] = [];
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text);
+    if (!task) return;
+    if (task !== "final") {
+      await tool("pb_tests_red", { task });
+      fs.writeFileSync(`${task}.txt`, "x");
+    }
+    said.push((await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: "none" })).content![0].text);
+  };
+  await t.run("build");
+  const p = t.progress("order-cancellation");
+  assert.equal(p.lintGate, "final");
+  assert.ok(t.notes.some((n) => /Lint `npm run lint --silent` gates only the final check of this build: it already failed when planning began/.test(n)));
+  assert.match(said[0], /✓ T1/); // the debt does not fail the first task
+  assert.doesNotMatch(t.instructions.find((i) => /Task T1/.test(i))!, /npm run lint/);
+  assert.ok(!t.events("order-cancellation").some((e: any) => e.type === "check" && e.task === "T1" && "lint" in e));
+  assert.ok(said.some((s) => /The final check failed[\s\S]*`npm run lint --silent`/.test(s)));
+  assert.equal(p.phase, "paused");
+});
+
+test("lint gate: without a baseline on this commit an auto-detected lint waits for the final check; a configured one never does", async () => {
+  const t = autoLintProject({}, false);
+  process.chdir(t.repo);
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").lintGate, "final");
+  assert.ok(t.notes.some((n) => /gates only the final check of this build: no planning baseline ran it on this commit/.test(n)));
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.equal(lintRuns(t), 1); // once, at the end
+  assert.match(t.posts.find((p) => p.includes("Build complete"))!, /lint PASS/);
+
+  const u = autoLintProject({ lint: "npm run lint --silent" }, false); // the same command, configured
+  process.chdir(u.repo);
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  assert.equal(u.progress("order-cancellation").lintGate, "task");
+  assert.equal(lintRuns(u), 2); // after T1 and after T2, not again at the end
 });
 
 test("lint: auto-detects package.json's lint script; explicit and none resolve", async () => {

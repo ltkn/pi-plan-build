@@ -193,6 +193,34 @@ formats and tools the harness relies on.
 `/pb:plan let admins cancel an order while it is still pending, and notify the
 customer`.
 
+**Who you plan with.** For the whole planning conversation, Pi is the senior
+engineer who owns the change end to end, from the need behind it to running it
+in production, whose job is the best plan for what you need, not agreement with
+what you first asked.
+It starts from the problem: the goal and how you'll know it worked, and a
+challenge to the request itself when it deserves one (the need behind it,
+something that already does it, the simplest thing that would work); a request
+that is already right gets one line. It pushes back with evidence — this code,
+or a named practice, standard or documented behaviour and what it means here,
+never taste — and walks what applies before a plan is settled, one or two
+lenses for a small change: users (what they see when it works and when it
+fails), design (where it belongs, what it couples), data (ownership, existing
+records and clients, personal data), security (who can reach it, what could
+leak, what a new dependency brings), input and state, verification (how it will
+be proven, what no test shows) and operations (how it ships, how you'd see it
+fail in production, latency and cost at scale). Legal, compliance and licensing
+questions are flagged for the right person rather than answered. After its
+first reply every answer ends with a short ledger, Decided and Open; overrule it
+without new evidence and it records your choice with its objection and the risk,
+then stops arguing. `/pb:spec` writes that ledger into the spec. This role is
+part of the system prompt on every planning turn, so it holds through a long
+discussion and a checkpoint reset, and it leaves when planning ends.
+
+**What it thinks with.** Planning raises the session's thinking level to at
+least `"high"` and, when `"planner": {"model": "provider/id"}` is set, switches
+to that model; `"planner": {"thinking": "xhigh"}` raises the floor. Both are put
+back when planning ends, unless you changed them yourself meanwhile.
+
 **The baseline.** When a test command is known, the harness runs the suite on
 the last commit as planning starts, in a separate git worktree (so it can't
 collide with a build in your working copy, e.g. Maven's `target/`), in the
@@ -345,15 +373,29 @@ Then the sections:
   checks each. A single task that changes an external surface
   should have Contracts too; only truly independent internal tasks can omit it.
   A bullet that bounds how often something runs should name the code whose call
-  it bounds — a `path:line`, or `new: <path>` when nothing performs it yet, or an
-  `Assumption: … settles by …` when nothing in the project enforces the cadence
-  (a third party's webhook, another service's cron); the reviewer checks it, and
-  a backticked command is a measurement, not an owner. A bare count or duration
-  keeps its own answer: a measurement. A section that does not apply is one line,
-  "none — why", never an empty heading or TBD.
+  it bounds — a `path:line`, or `new: <path>` when nothing performs it yet, or
+  the `assumed:` tag when nothing in the project enforces the cadence (a third
+  party's webhook, another service's cron); a backticked command is a
+  measurement, not an owner. A section that does not apply is one
+  line, "none — why", never an empty heading or TBD.
+- **Evidence**, one rule for the whole spec, and the same one the spec reviewer,
+  the claim check and a repair lap judge by. A claim is *load-bearing* when the
+  build would act differently if it were false: a number or bound, what this
+  repository, its build, runtime or configuration does, or how an external
+  service behaves. Each load-bearing claim carries its evidence beside it: a
+  `path:line` that says it, a probe line, or — for a value this change itself
+  defines, like a new status code — the Acceptance line that pins it, since its
+  red test proves it. A claim about code or a service that exists today still
+  needs the citation or the probe: a test written from the same belief would
+  pass even if the belief were wrong. Whatever nothing settles yet is tagged
+  `assumed: <what would falsify it>` right after the claim, and every such tag
+  is listed for you before the build. Everything else needs no evidence.
 - **Migration and rollback**: only when data, a schema or a stored format
-  outlives the change: how existing data moves, how it is rolled back, and what
-  old and new code do while both run. "none — why" when nothing persists.
+  outlives the change, or it ships something that can fail in production: how
+  existing data moves, how it is rolled out (a flag, the order of steps) and
+  rolled back, what old and new code do while both run, how you'd see it fail
+  (the log, metric or alert), and what no test can show and how it is checked
+  instead. "none — why" when nothing outlives the change.
 - **Open questions**: only while `Status: planning`.
 - **Tasks**: each as `### T1: <outcome>`, what must be true when it's done
   rather than how to build it, with `- Acceptance:` lines and, when it adds
@@ -372,6 +414,26 @@ Then the sections:
   The reviewer checks the code against it, and `/pb:archive` hands it to the
   project map. Contracts are the shape the build must not invent; Design is the
   one it arrived at.
+
+**Before writing, Pi runs the spec reviewer's own checks** on its draft, one
+list shared word for word, so what a review would find is fixed before the
+review pays for it:
+
+- **Claims**: each claim about existing code says what the cited line says; Pi
+  re-opens the line instead of trusting its memory of the discussion.
+- **Values**: unit, range, sign and the empty case; a time names its clock and
+  what happens when the day changes while it runs.
+- **Proof**: each Acceptance line has a test its task's `Test:` selects, and
+  that test can fail before the change.
+- **Coverage**: each Contract and each behaviour-changing Decision has an
+  Acceptance line; what no line pins is not built.
+- **Reach**: the existing tests, callers, links and docs that assert the old
+  behaviour are named, and a task updates each.
+- **Consistency**: the sections agree.
+
+When a rewrite or a section update removes a section, an Acceptance line or a
+Decisions entry from the previous text, the tool's answer lists what is gone, so
+nothing a review lap added disappears unnoticed.
 
 The spec pins what the change must do and how you'll know; how to build it is
 left to the build, where the compiler and the tests give feedback. When a
@@ -414,9 +476,9 @@ discussion left open stays open: it goes under Open questions and the spec
 stays `Status: planning` until you answer — Pi never invents a decision to
 close a gap. It asks you only about a choice that changes behaviour,
 an API or data that you didn't settle, all at once, and when `/pb:build` is
-writing the spec those questions count down too. (Assumptions are recorded
-later, by the build, for the small readings it takes there — the reviewer
-checks them.) A checkpoint asks nothing at
+writing the spec those questions count down too. (A claim nothing settles is
+tagged `assumed:` and listed for you before the build; the build records its own
+small readings as it goes — the reviewer checks both.) A checkpoint asks nothing at
 all: what's undecided goes under Open questions.
 
 When `/pb:build` writes it, it asks first: **build here**, **build in a fresh
@@ -650,8 +712,11 @@ task's `Test:` command (a compile when it has none) when the task is done. It
 catches a broken task earlier, but makes every task leave the build green on
 its own, which slices work unnaturally and costs a run per task. With `"end"`
 each task is still compiled when done (when a compile command exists). `lint`
-runs after every task's check and fails that task like any check; the final
-gate additionally runs `extraChecks` when configured.
+runs after every task's check and fails that task like any check. An
+auto-detected lint gates every task only when the planning baseline ran it
+clean on this commit; otherwise it runs at the final gate alone, so existing
+warnings never stall the first task (set `"lint"` to gate every task anyway).
+The final gate additionally runs `extraChecks` when configured.
 
 The spec's Goal, Out of scope, Decisions, Design, Contracts, Migration and
 rollback, Threats and abuse (`Threats` reads as the same section) and Acceptance
@@ -760,7 +825,7 @@ the reviewer on whether its acceptance is genuinely untestable or docs-only.
 
 The commands come from `.pi/pb/config.json` (`"verify"` and `"build"`, `"auto"`
 detects Maven, Gradle, npm/TypeScript, Cargo, Go and pytest; `"lint"` uses
-package.json's `lint` script and runs after every task, `"extraChecks"` runs
+package.json's `lint` script, else clippy for a Cargo project, `"extraChecks"` runs
 project commands at the final gate).
 
 **New tests: whether tasks add tests.** `yes` by default. `New tests: no —

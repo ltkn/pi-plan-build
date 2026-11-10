@@ -1,4 +1,4 @@
-words: 439
+words: 576
 
 [pb:spec-fix] Repair lap 1 on order-cancellation: 1 finding to settle.
 
@@ -8,7 +8,9 @@ A repair may do only one of four things to a claim:
 - **point it at evidence you have** — read the file or run the probe (pb_try), then write the answer with the `path:line` or the command and its output beside it;
 - **delete it** — a claim nothing supports and nothing needs is not a finding to argue with;
 - **decide it** — write the choice and the alternative you rejected, with the reason;
-- **mark it assumed** — `assumed: <what would falsify it>`, when only the human or production can settle it.
+- **mark it assumed** — `assumed: <what would falsify it>` right after the claim, when only the human or production can settle it.
+What counts as evidence: A claim is load-bearing when the build would act differently if it were false: a number or bound, what this repository, its build, runtime or configuration does, or how an external service behaves. Each one carries its evidence beside it: a path:line that says it, a probe (probe: <what you ran>; conclusion: <what it showed>), or, for a value this change defines (a new status, error, event or stored value), the Acceptance line that pins it, whose red test is the proof. A claim about existing code or a service needs the path:line or the probe: a test written from the same belief passes even when the belief is wrong. What nothing settles yet is tagged `assumed: <what would falsify it>` right after it. Anything else needs no evidence.
+
 Anything else is a new un-evidenced claim, and the next pass finds it as a finding: restating the reviewer's sentence in Contract voice, a hedged number ("about 90 s"), or naming a knob nobody checked the runtime actually reads.
 
 Route each answer to the section it belongs to; never append it where you stand: a measured fact → "Findings" (with its probe line); a behaviour a test can pin → an `Acceptance:` line on the owning task, and that task's `Test:`; something the outside world sees → "Contracts"; a choice between designs → "Decisions" with the rejected alternative; a repo standard → the task that has to meet it.

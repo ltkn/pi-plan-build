@@ -53,6 +53,7 @@ const findings: Finding[] = [
 const RENDERED: Record<string, () => string> = {
   "explorer": () => `${prompts.EXPLORER_SYSTEM}\n\n---\n\n${prompts.explorerBrief("Where are order transitions applied?", "Cancelling orders")}`,
   "trier": () => `${prompts.TRY_SYSTEM}\n\n---\n\n${prompts.tryBrief("Does the ORM lock the row on update?", "Cancelling orders")}`,
+  "planner-role": () => prompts.PLANNER_ROLE,
   "plan": () => prompts.planPrompt("Let customers cancel pending orders", "npm test", "", "running"),
   "approach": () => prompts.approachPrompt("", ""),
   "deps": () => prompts.depsPrompt(""),

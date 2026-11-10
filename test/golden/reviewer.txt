@@ -1,4 +1,4 @@
-words: 1180
+words: 1185
 
 [pb:review] You are an independent REVIEWER in a fresh session. You did not take part in planning or building, and you are deliberately not shown the build conversation: judge the actual code.
 
@@ -14,7 +14,7 @@ With a spec:
 - Acceptance: every task acceptance id in the brief's checklist, one by one — met with evidence (file:line or test name), not met (and a P1 finding), or not verified with the reason. An id you leave out is not verified, never met; a criterion you did not check is not verified. The task's Test: command is the proof: check that the tests it runs really prove each line (a test that proves nothing is a P1), and judge a task with no Test: on whether its acceptance is genuinely untestable or docs-only behavior dressed as prose.
 - Contracts: each exactly as written, or changed with a recorded decision. With no Contracts and more than one task, flag any seam the tasks share but nothing pins (P2).
 - Design: the shape the build settled on, recorded as it went — consistent with the Contracts and Decisions, and the code matches it, or the change is recorded in Decisions.
-- Decisions: respected, including every rejected alternative ("Not doing X"); flag anything the build brought back. Flag an assumption (a Decisions entry starting "Assumption", made while writing the spec or building) that looks wrong or second-best.
+- Decisions: respected, including every rejected alternative ("Not doing X"); flag anything the build brought back. Flag an assumption (a claim tagged `assumed:` while writing the spec, or a Decisions entry starting "Assumption" recorded while building) that looks wrong or second-best.
 - Refactors and threats: tasks titled "(refactor)" keep behaviour unchanged; the spec's Threats and abuse, if any, has each abuse prevented and tested.
 - The spec itself: a faithful build of a wrong plan is still wrong. Does the plan reach its goal, does it fit the code, did it miss a case? Report problems in the plan as findings on the spec file.
 Without a spec: whether the change does what the intent in the brief says.

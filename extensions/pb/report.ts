@@ -5,7 +5,7 @@
  * needs a new one.
  */
 import { acceptanceCriteria, parseSpec } from "./spec.ts";
-import { loadStats, summarize, type SpecStats } from "./stats.ts";
+import { type SpecPhase, type SpecStats, loadStats, summarize } from "./stats.ts";
 import type { AcceptanceStatus, Finding, Gate, Phase, Priority, Store } from "./store.ts";
 
 export const REPORT_SCHEMA = "pb.report/2";
@@ -62,6 +62,8 @@ export interface ReportStats {
   cost: { build: number; review: number; explore: number };
   context: { compactions: number; resets: number; nudges: number };
   ms: number;
+  /** the spec phase (reviews, claim checks, repair laps and the fresh runs' cost); null before any ran */
+  spec: SpecPhase | null;
 }
 
 export interface ReportReview {
@@ -165,6 +167,7 @@ const reportStats = (spec: SpecStats): ReportStats => {
     cost: { build: x.build.cost, review: x.review.cost, explore: x.explorer.cost },
     context: x.context,
     ms: x.ms,
+    spec: x.spec ?? null,
   };
 };
 

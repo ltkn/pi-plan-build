@@ -23,7 +23,11 @@ export interface Config {
   verify: string | null;
   /** Compile/typecheck command: the check for a task without its own Test: line, and the "build" gate. "auto" detects; null disables. */
   build: string | null;
-  /** Lint command: "auto" uses package.json's lint script when present (other stacks set it explicitly); null disables. Runs after every task's check, failing that task like any check. */
+  /**
+   * Lint command: "auto" uses package.json's lint script, else clippy for a Cargo project (other stacks set
+   * it explicitly); null disables. Gates every task's check when set explicitly, or when auto-detected and the
+   * planning baseline ran it clean on this commit; otherwise only the final check (see Progress.lintGate).
+   */
   lint: string | null;
   /** Extra project commands (e.g. standards scripts): explicit commands only, run at the final gate after the suite. */
   extraChecks: string[];
@@ -77,6 +81,11 @@ export interface Config {
   baseline: boolean;
   /** Model and thinking level of pb_explore and the project map; unset model = your session's, unset thinking = max (Pi clamps it to the model). */
   explorer: { model?: string; thinking?: string };
+  /**
+   * The planning conversation's model and least thinking level, applied when planning starts and put back
+   * when it ends: unset model = your session's; thinking is a floor (default "high"), never lowered.
+   */
+  planner: { model?: string; thinking?: ThinkingLevel };
   /** Build on this model ("provider/id") instead of the planning session's; unset = the same model. */
   buildModel?: string;
   /**
@@ -126,6 +135,7 @@ export const DEFAULT_CONFIG: Config = {
   freshAbove: 50,
   baseline: true,
   explorer: {},
+  planner: {},
   checkpointAt: 75,
   buildReset: "task",
   mapOnArchive: true,
@@ -142,6 +152,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
   const specReviewerRaw = typeof raw.specReviewer === "object" && raw.specReviewer !== null ? raw.specReviewer : {};
   const specFixRaw = typeof raw.specFix === "object" && raw.specFix !== null ? raw.specFix : {};
   const explorerRaw = typeof raw.explorer === "object" && raw.explorer !== null ? raw.explorer : {};
+  const plannerRaw = typeof raw.planner === "object" && raw.planner !== null ? raw.planner : {};
   const security = (reviewerRaw as { security?: unknown }).security;
   return {
     verify: strOrNull((raw as { verify?: unknown }).verify, DEFAULT_CONFIG.verify),
@@ -181,6 +192,10 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     },
     freshAbove: num((raw as { freshAbove?: unknown }).freshAbove, DEFAULT_CONFIG.freshAbove),
     baseline: bool((raw as { baseline?: unknown }).baseline, true),
+    planner: {
+      model: typeof (plannerRaw as { model?: unknown }).model === "string" ? (plannerRaw as { model: string }).model : undefined,
+      thinking: THINKING_LEVELS.find((l) => l === (plannerRaw as { thinking?: unknown }).thinking),
+    },
     explorer: {
       model: typeof (explorerRaw as { model?: unknown }).model === "string" ? (explorerRaw as { model: string }).model : undefined,
       thinking: typeof (explorerRaw as { thinking?: unknown }).thinking === "string" ? (explorerRaw as { thinking: string }).thinking : undefined,
@@ -347,6 +362,12 @@ export interface Progress {
   pause?: string;
   /** the conversation was rewound to before the build's first message: a resume sends it again */
   needsIntro?: boolean;
+  /**
+   * Where lint gates this build, decided once at its start: "task" after every step, "final" only at
+   * the end (an auto-detected lint the planning baseline did not show clean on this commit). Absent
+   * on builds started before the choice existed: they keep the per-task gate.
+   */
+  lintGate?: "task" | "final";
   /** the task and attempt the agent was already reminded to finish (once each) */
   nudged?: string;
   lastVerify?: VerifyResult;
@@ -408,6 +429,36 @@ const sameCheckpointState = (a: Checkpoint, b: Checkpoint) => {
     if (av !== bv) return false;
   }
   return true;
+};
+
+/** Pi's thinking levels, lowest first: the planner's floor is compared by this order. */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+/**
+ * What planning changed in a session: what it ran on before (`thinking`, `model`) and what planning set
+ * (`appliedThinking`, `appliedModel`). The end of planning puts back only what is still as planning set it.
+ */
+export interface PlannerSettings {
+  thinking?: string;
+  model?: string;
+  appliedThinking?: string;
+  appliedModel?: string;
+}
+
+/** One session's planning record. */
+export interface PlanningRecord {
+  snapshot?: string;
+  request?: string;
+  planner?: PlannerSettings;
+}
+
+const plannerSettingsOf = (raw: unknown): PlannerSettings | undefined => {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: PlannerSettings = {};
+  for (const key of ["thinking", "model", "appliedThinking", "appliedModel"] as const) if (typeof r[key] === "string") out[key] = r[key] as string;
+  return out;
 };
 
 export interface Baseline extends VerifyResult {
@@ -817,7 +868,7 @@ export class Store {
     }
     fs.rmSync(legacy, { force: true });
   }
-  private planningMap(): Record<string, { snapshot?: string; request?: string }> {
+  private planningMap(): Record<string, PlanningRecord> {
     const out = this.legacyPlanningMap();
     let files: string[] = [];
     try {
@@ -827,11 +878,13 @@ export class Store {
     }
     for (const f of files) {
       if (!f.endsWith(".json")) continue;
-      const rec = readJson<{ session?: unknown; snapshot?: unknown; request?: unknown }>(path.join(this.planningDir(), f));
+      const rec = readJson<{ session?: unknown; snapshot?: unknown; request?: unknown; planner?: unknown }>(path.join(this.planningDir(), f));
       if (typeof rec?.session !== "string" || !rec.session) continue;
+      const planner = plannerSettingsOf(rec.planner);
       out[rec.session] = {
         ...(typeof rec.snapshot === "string" ? { snapshot: rec.snapshot } : {}),
         ...(typeof rec.request === "string" ? { request: rec.request } : {}),
+        ...(planner ? { planner } : {}),
       };
     }
     return out;
@@ -839,7 +892,7 @@ export class Store {
   planningSessions(): string[] {
     return Object.keys(this.planningMap());
   }
-  planning(sessionFile: string): { snapshot?: string; request?: string } | undefined {
+  planning(sessionFile: string): PlanningRecord | undefined {
     return this.planningMap()[sessionFile];
   }
   setPlanning(sessionFile: string, on: boolean, snapshot?: string, request?: string): void {
@@ -849,13 +902,23 @@ export class Store {
       fs.rmSync(file, { force: true });
       return;
     }
-    const prev = readJson<{ snapshot?: unknown; request?: unknown }>(file) ?? {};
+    const prev = readJson<{ snapshot?: unknown; request?: unknown; planner?: unknown }>(file) ?? {};
     const rec: Record<string, unknown> = { session: sessionFile };
+    const planner = plannerSettingsOf(prev.planner);
+    if (planner) rec.planner = planner;
     const snap = snapshot ?? (typeof prev.snapshot === "string" ? prev.snapshot : undefined);
     if (snap !== undefined) rec.snapshot = snap;
     const req = request ?? (typeof prev.request === "string" ? prev.request : undefined);
     if (req !== undefined) rec.request = req;
     writeFileAtomic(file, `${JSON.stringify(rec, null, 2)}\n`);
+  }
+
+  /** Record what planning changed in this session's model and thinking, so its end can put them back. */
+  setPlannerSettings(sessionFile: string, planner: PlannerSettings): void {
+    const file = this.planningFile(sessionFile);
+    const prev = readJson<Record<string, unknown>>(file);
+    if (!prev) return; // planning is off: nothing to restore later
+    writeFileAtomic(file, `${JSON.stringify({ ...prev, planner }, null, 2)}\n`);
   }
 
   /**

@@ -10,10 +10,10 @@ import { addedDeclarations, changedPaths, inspectChanges, snapshot, staleProseRe
 import { tip } from "./help.ts";
 import { buildIntro, buildMechanics, claimCheckBrief, buildStateSummary, coherePrompt, continuePrompt, extraBlock, findingLine, finishSpecPrompt, fixText, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, specFixPrompt } from "./prompts.ts";
 import { REVIEW_TOOLS } from "./review.ts";
-import { runFresh } from "./runner.ts";
+import { runFresh, runUsage } from "./runner.ts";
 import { notifyDesktop } from "./notify.ts";
 import { renderBuildToolCall, renderBuildToolResult } from "./render.ts";
-import { type ParsedSpec, type SpecTask, acceptanceCriteria, buildTask, commitMessage, contractHash, earlierProof, needsRed, parseSpec, sectionHeading, setSection, setStatus, specHash, specTextBlocks, tokensOf } from "./spec.ts";
+import { type ParsedSpec, type SpecTask, specAssumptions, acceptanceCriteria, buildTask, commitMessage, contractHash, earlierProof, needsRed, parseSpec, setSection, setStatus, specHash, specLosses, specTextBlocks, tokensOf } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { buildTimeLabel, buildTiming } from "./stats.ts";
@@ -21,7 +21,7 @@ import { type Checkpoint, type Finding, type Progress, COHERE_TASK_ID, Store, ap
 import { runVerify } from "./verify.ts";
 import { safeLine } from "./markdown.ts";
 import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
-import { enterStep, finishBuild, nextPhase, nextStep, nextTodo, unfinishedPhase } from "./phase.ts";
+import { enterStep, finishBuild, lintsEachStep, nextPhase, nextStep, nextTodo, unfinishedPhase } from "./phase.ts";
 
 const DRY_RUN_TIMEOUT_SEC = 120;
 
@@ -82,11 +82,6 @@ const dryRunTests = async (ctx: ExtensionContext, store: Store, name: string): P
   }
 };
 
-const assumptionsOf = (md: string) => {
-  const decisions = md.split(sectionHeading("Decisions"))[1]?.split(/^##\s+(?!#)/m)[0] ?? "";
-  return [...decisions.matchAll(/^\s*-\s*(Assumption(?! \(build)[^\n]*)/gm)].map((m) => m[1].trim());
-};
-
 const readySpecs = (store: Store, session: string | undefined, since = "") => {
   const names = store
     .specNames()
@@ -111,7 +106,7 @@ const showSpec = (store: Store, name: string, o: { names?: string[]; next: strin
   const names = o.names ?? [name];
   const specMs = recordedMs(store, name, "spec");
   const criteria = acceptanceCriteria(loaded.md, loaded.spec).length;
-  const assumptions = assumptionsOf(loaded.md);
+  const assumptions = specAssumptions(loaded.md);
   const others = names.filter((n) => n !== name);
   post(
     [
@@ -127,8 +122,6 @@ const showSpec = (store: Store, name: string, o: { names?: string[]; next: strin
   );
   appendEntry("pb-spec", { name, markdown: loaded.md });
 };
-
-/** The spec's recorded assumptions (Decisions lines starting "Assumption"), as written while writing it. */
 
 export const staleness = (updatedAt?: string): string => {
   const ms = updatedAt ? Date.now() - new Date(`${updatedAt.replace(" ", "T")}Z`).getTime() : NaN;
@@ -208,6 +201,12 @@ export const stateSummary = (ctx: ExtensionContext, store: Store, p: Progress, r
 
 import { offerStandards } from "./plan.ts";
 
+/** A write's note on what it removed from the previous text, when it removed anything. */
+const lossNote = (before: string | undefined, after: string): string | undefined => {
+  const lost = before ? specLosses(before, after) : [];
+  return lost.length ? `this write removed ${lost.join("; ")} — if that wasn't meant, put it back` : undefined;
+};
+
 export function registerFlow(pi: ExtensionAPI) {
   pi.registerTool({
     name: "pb_write_spec",
@@ -243,6 +242,8 @@ export function registerFlow(pi: ExtensionAPI) {
       const warnings = specWarnings(params.content, spec);
       const rw = rewriteWarning(params.name, prev, spec);
       if (rw) warnings.push(rw);
+      const lost = lossNote(store.readSpec(params.name), params.content);
+      if (lost) warnings.push(lost);
       const notes = warnings.map((w) => `\nNote: ${w}.`);
       const started = session ? specStarted.get(session) : undefined;
       const specMs = spec.status === "ready" && started !== undefined ? Math.max(0, Date.now() - started) : undefined;
@@ -297,6 +298,7 @@ export function registerFlow(pi: ExtensionAPI) {
       }
       let md = store.readSpec(name);
       if (!md) throw new Error(`No spec "${name}": write it with pb_write_spec.`);
+      const before = md;
       if (params.section) {
         if (params.content === undefined) throw new Error("content is required with section.");
         // An empty body under replace would leave the heading standing over nothing, and an empty
@@ -318,7 +320,8 @@ export function registerFlow(pi: ExtensionAPI) {
       const prev = store.progress(name);
       const isTasks = sectionName === "tasks";
       const rw = isTasks ? rewriteWarning(name, prev, spec) : undefined;
-      const notes = (isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])] : []).map((w) => `\nNote: ${w}.`);
+      const lost = lossNote(before, md);
+      const notes = [...(isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])] : []), ...(lost ? [lost] : [])].map((w) => `\nNote: ${w}.`);
       const started = session ? specStarted.get(session) : undefined;
       const specMs = !building && spec.status === "ready" && started !== undefined ? Math.max(0, Date.now() - started) : undefined;
       // Answer built from pre-write values above; what follows is the file and its two ledger records.
@@ -699,7 +702,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     // task that caused it while that task's context is still loaded. The final step adds the
     // project's own checks, and skips lint when the step it follows just passed it (o.lintDone).
     // lastVerify keeps the step's own check, so the completion summary still names it.
-    const gates = final ? finalExtras(o.lintDone ? null : lintCmd, extraCmds) : lintCmd ? [lintCmd] : [];
+    const gates = final ? finalExtras(o.lintDone ? null : lintCmd, extraCmds) : lintCmd && lintsEachStep(p) ? [lintCmd] : [];
     let lint: boolean | undefined;
     for (const cmd of failure ? [] : gates) {
       showProgress(ctx, p, `checking ${final ? "final" : p.current}: ${cmd}`);
@@ -763,7 +766,9 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
 
     const endCmd = checkCommand(spec, undefined, testCmd, buildCmd, true, each);
     const { lintCmd, extraCmds } = commands(ctx.cwd, store);
-    const step = nextStep(p, { cohere: needsCohere(spec), endCommand: endCmd, ran, extraChecks: extraCmds.length > 0 });
+    // Lint left to the end is a final-gate check like the project's own.
+    const lintAtEnd = !!lintCmd && !lintsEachStep(p);
+    const step = nextStep(p, { cohere: needsCohere(spec), endCommand: endCmd, ran, extraChecks: extraCmds.length > 0 || lintAtEnd });
     if (step.kind === "task") {
       const t = beginTask(ctx, store, p, step.id, { inTool: true });
       if (!t) {
@@ -778,12 +783,12 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(p.spec))}`);
     }
     if (step.kind === "final") {
-      // The project's own checks still run; lint does not, since the step that just passed ran it.
+      // The project's own checks still run; lint only when it was left to the end (the passed step ran it otherwise).
       p.tasks.push({ id: "final", title: `Final check: ${spec.gate === "tests" ? "full suite" : "compile"}`, status: "doing", attempts: 1 });
       enterStep(p, "final");
       store.saveProgress(p);
-      const r = await checkAndAdvance(ctx, store, p, spec, signal, { suiteDone: step.suiteDone, lintDone: true });
-      return { ...r, content: text(`${passed}\nRunning \`${endCmd ?? extraCmds[0]}\`…\n\n${r.content[0].text}`) };
+      const r = await checkAndAdvance(ctx, store, p, spec, signal, { suiteDone: step.suiteDone, lintDone: !lintAtEnd });
+      return { ...r, content: text(`${passed}\nRunning \`${endCmd ?? (lintAtEnd ? lintCmd : extraCmds[0])}\`…\n\n${r.content[0].text}`) };
     }
     finishBuild(p);
     store.saveProgress(p);
@@ -921,6 +926,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       ctx.ui.notify(`Every task of ${name} is done. Next: /${cmd("review")} ${name}.`, "info");
       return undefined;
     }
+    // A restart keeps the gate its build started with; one from before the choice existed stays per-task.
+    p.lintGate = restart ? prev!.lintGate : lintGateFor(ctx, store);
     return { p, first, restart };
   };
 
@@ -1163,13 +1170,13 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     const session = res.sessionFile;
     if (raw === undefined) {
       const prose = cap(res.text || res.error || "the reviewer returned no findings", 12000);
-      store.event(name, { type: "spec-review", verdict: "error", hash: specHash(md), head: gitHead(cwd), findings: 0, reported: [], model: reviewModel, thinking: cfg.specReviewer.thinking, session, prose, ms: res.ms });
+      store.event(name, { type: "spec-review", verdict: "error", hash: specHash(md), head: gitHead(cwd), findings: 0, reported: [], model: reviewModel, thinking: cfg.specReviewer.thinking, session, prose, ms: res.ms, ...runUsage(res) });
       // The reviewer's own words are the only thing the human can act on: a pass that wrote its whole
       // report as prose did the work, and losing it would leave a dead end with nothing to read.
       return { findings: [], block: true, session, ms: res.ms, ...(prose.trim() ? { prose: cap(prose.trim(), 2000) } : {}) };
     }
     const block = findings.some((f) => f.priority === "P0");
-    store.event(name, { type: "spec-review", verdict: block ? "block" : "pass", hash: specHash(md), head: gitHead(cwd), findings: findings.length, reported: findings, model: reviewModel, thinking: cfg.specReviewer.thinking, session, ms: res.ms });
+    store.event(name, { type: "spec-review", verdict: block ? "block" : "pass", hash: specHash(md), head: gitHead(cwd), findings: findings.length, reported: findings, model: reviewModel, thinking: cfg.specReviewer.thinking, session, ms: res.ms, ...runUsage(res) });
     return { findings, block, session, ms: res.ms };
   };
 
@@ -1194,7 +1201,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     };
     const parsed = parseSpec(md).spec;
     const criteria = acceptanceCriteria(md, parsed).length;
-    const assumptions = assumptionsOf(md).length;
+    const assumptions = specAssumptions(md).length;
     const scope = [parsed ? `${parsed.tasks.length} task${parsed.tasks.length === 1 ? "" : "s"}` : "", criteria ? `${criteria} acceptance line${criteria === 1 ? "" : "s"}` : "", assumptions ? `${assumptions} assumption${assumptions === 1 ? "" : "s"}` : ""];
     const last = readEvents(path.join(store.specDir(name), "events.jsonl"))
       .filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block") && e.hash === hash)
@@ -1504,11 +1511,11 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     const call = res.toolCalls.filter((c) => c.name === "report_findings").at(-1);
     const raw = call && Array.isArray(call.arguments.findings) ? call.arguments.findings : undefined;
     if (raw === undefined) {
-      store.event(name, { type: "spec-check", verdict: "error", hash: specHash(md), findings: 0, reported: [], model, thinking, ms: res.ms });
+      store.event(name, { type: "spec-check", verdict: "error", hash: specHash(md), findings: 0, reported: [], model, thinking, ms: res.ms, ...runUsage(res) });
       return { claims: [], reported: false, ms: res.ms };
     }
     const claims = toFindings(raw);
-    store.event(name, { type: "spec-check", verdict: "pass", hash: specHash(md), findings: claims.length, reported: claims, model, thinking, session: res.sessionFile, ms: res.ms });
+    store.event(name, { type: "spec-check", verdict: "pass", hash: specHash(md), findings: claims.length, reported: claims, model, thinking, session: res.sessionFile, ms: res.ms, ...runUsage(res) });
     return { claims, reported: true, ms: res.ms, session: res.sessionFile };
   };
 
@@ -2080,6 +2087,25 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
    * Lint/project checks red at baseline warn only, never block: the baseline alone must not stop
    * a build — only an actual final-gate failure sends the agent back. Same-commit only, like the suite.
    */
+
+  /**
+   * Where lint gates a build that starts now. A lint you configured gates every step. An auto-detected
+   * one does only when the planning baseline ran it clean on this commit: otherwise warnings already in
+   * the code would fail the first task for debt it did not create, so it gates the final check alone.
+   */
+  const lintGateFor = (ctx: ExtensionContext, store: Store): "task" | "final" | undefined => {
+    const { cfg, testCmd, lintCmd } = commands(ctx.cwd, store);
+    if (!lintCmd) return undefined;
+    if (cfg.lint !== "auto") return "task";
+    const b = store.baseline(ctx.sessionManager.getSessionFile() ?? undefined);
+    const current = !!b && b.command === testCmd && (!b.head || b.head === gitHead(ctx.cwd));
+    if (current && b.lint?.command === lintCmd && b.lint.ok === true) return "task";
+    ctx.ui.notify(
+      `Lint \`${lintCmd}\` gates only the final check of this build: ${current && b.lint?.command === lintCmd ? "it already failed when planning began" : "no planning baseline ran it on this commit"}, so it can't tell this build's findings from the code's. Set "lint" in .pi/pb/config.json to gate every task.`,
+      "info",
+    );
+    return "final";
+  };
 
   const baselineExtraWarning = (ctx: ExtensionContext, store: Store, testCmd: string | null | undefined) => {
     const b = store.baseline(ctx.sessionManager.getSessionFile() ?? undefined);

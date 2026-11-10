@@ -159,6 +159,64 @@ export interface Summary {
   specReviewMs?: number;
   /** the latest code review's duration */
   reviewMs?: number;
+  /** What getting the spec ready cost: its reviews, claim checks and repair laps. Present once any ran. */
+  spec?: SpecPhase;
+}
+
+/** The spec phase in numbers: the data a change to the spec's evidence rules is judged by. */
+export interface SpecPhase {
+  reviews: number;
+  /** reviews that blocked the build on a P0 */
+  blocked: number;
+  /** findings the reviews reported, P0 to P3 */
+  findings: [number, number, number, number];
+  claimChecks: number;
+  /** un-evidenced claims the claim checks reported */
+  claims: number;
+  laps: number;
+  applied: number;
+  rebutted: number;
+  parked: number;
+  assumed: number;
+  /** tokens and cost of the fresh review and claim-check runs (a lap runs in the planning session: not counted) */
+  prompt: number;
+  output: number;
+  cost: number;
+  ms: number;
+}
+
+const PRIORITIES = ["P0", "P1", "P2", "P3"];
+
+function specPhase(e: Ev[]): SpecPhase | undefined {
+  const reviews = e.filter((x) => x.type === "spec-review" && x.verdict !== "error");
+  const checks = e.filter((x) => x.type === "spec-check" && x.verdict !== "error");
+  const laps = e.filter((x) => x.type === "spec-fix");
+  const runs = e.filter((x) => x.type === "spec-review" || x.type === "spec-check");
+  if (!runs.length && !laps.length) return undefined;
+  const findings: [number, number, number, number] = [0, 0, 0, 0];
+  for (const r of reviews) {
+    for (const f of Array.isArray(r.reported) ? r.reported : []) {
+      const i = PRIORITIES.indexOf(String((f as { priority?: unknown }).priority));
+      if (i >= 0) findings[i] += 1;
+    }
+  }
+  const items = (key: string) => laps.reduce((n, l) => n + (Array.isArray(l[key]) ? (l[key] as unknown[]).length : 0), 0);
+  return {
+    reviews: reviews.length,
+    blocked: reviews.filter((r) => r.verdict === "block").length,
+    findings,
+    claimChecks: checks.length,
+    claims: checks.reduce((n, c) => n + num(c.findings), 0),
+    laps: laps.length,
+    applied: items("applied"),
+    rebutted: items("rebutted"),
+    parked: items("parked"),
+    assumed: items("assumed"),
+    prompt: runs.reduce((n, r) => n + num(r.input) + num(r.cacheRead) + num(r.cacheWrite), 0),
+    output: runs.reduce((n, r) => n + num(r.output), 0),
+    cost: runs.reduce((n, r) => n + num(r.cost), 0),
+    ms: runs.reduce((n, r) => n + num(r.ms), 0),
+  };
 }
 
 export function summarize(s: SpecStats): Summary {
@@ -258,8 +316,21 @@ export function summarize(s: SpecStats): Summary {
     specMs: lastMs("spec"),
     specReviewMs: lastMs("spec-review"),
     reviewMs: typeof lastReview?.ms === "number" ? lastReview.ms : undefined,
+    spec: specPhase(e),
   };
 }
+
+/** The spec phase on one card line: reviews and their findings, claim checks, laps, then what the fresh runs cost. */
+const specLine = (s: SpecPhase): string =>
+  [
+    `Spec      ${s.reviews} review${s.reviews === 1 ? "" : "s"}${s.blocked ? ` (${s.blocked} blocked)` : ""}`,
+    s.reviews ? `findings ${s.findings.map((n, i) => `P${i} ${n}`).join(" ")}` : "",
+    s.claimChecks ? `${s.claimChecks} claim check${s.claimChecks === 1 ? "" : "s"}: ${s.claims} claim${s.claims === 1 ? "" : "s"}` : "",
+    s.laps ? `${s.laps} lap${s.laps === 1 ? "" : "s"}: ${s.applied} applied, ${s.rebutted} rebutted, ${s.parked} parked, ${s.assumed} assumed` : "",
+    `in ${human(s.prompt)} · out ${human(s.output)} · $${s.cost.toFixed(2)}${s.ms ? ` · ${duration(s.ms)}` : ""}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
 export function renderCard(s: SpecStats): string {
   const x = summarize(s);
@@ -278,6 +349,7 @@ export function renderCard(s: SpecStats): string {
     "",
     `Tasks     ${x.done} of ${x.tasks} done · first try ${x.firstTry[0]}/${x.firstTry[1]} (${pct(...x.firstTry)}) · ${x.attempts} task checks${x.most ? ` · most: ${x.most[0]} (${x.most[1]})` : ""}`,
     `Checks    ${x.checks} run, ${x.failed} failed`,
+    ...(x.spec ? [specLine(x.spec)] : []),
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,
     `Review    ${x.reviews.length ? `${x.reviews.join(" → ")} · P0/P1 confirmed (latest): ${x.confirmed.p0 + x.confirmed.p1}` : "not run"}`,
     ...(x.precision ? [`Precision ${x.precision.reported} reported · ${x.precision.dismissed} dismissed (${pct(x.precision.dismissed, x.precision.reported)}) · ${x.precision.fixed} fixed`] : []),
@@ -300,7 +372,7 @@ export function renderAll(list: SpecStats[]): string {
   const lp = (v: string, n: number) => v.padStart(n);
   const rows = list.map((s) => {
     const x = summarize(s);
-    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 10)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost + x.explorer.cost).toFixed(2)}`, 9)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
+    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 10)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost + x.explorer.cost + (x.spec?.cost ?? 0)).toFixed(2)}`, 9)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
   });
   return ["```", `${pad("spec", 26)}${lp("tasks", 7)}${lp("1st try", 9)}${lp("failed", 8)}${lp("pauses", 8)}  ${pad("review", 10)}${lp("tokens", 9)}${lp("cache", 7)}${lp("cost", 9)}${lp("time", 9)}`, ...rows, "```"].join("\n");
 }

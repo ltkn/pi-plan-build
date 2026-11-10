@@ -185,7 +185,7 @@ New tests: yes                      # or: no — why
 ## Findings                          # what the analysis established: files, code to imitate, constraints, baseline
 ## Decisions                         # each with its reason, as it stands now; rejected ideas too
 ## Contracts                         # external surfaces and shared seams: signatures, API and errors, data, events
-## Migration and rollback            # only when data or a stored format outlives the change; else "none — why"
+## Migration and rollback            # data that outlives the change, or a production rollout: how it ships, rolls back, is seen failing; else "none — why"
 ## Design                            # the shape the build settled on, recorded as it went — not by the plan
 ## Open questions                    # only while planning
 ## Tasks
@@ -233,7 +233,10 @@ typecheck only) or `none`. With `taskChecks: "each"` it also runs each task's
 `Test:` command (a compile when it has none); with `"end"` each task is still
 compiled when done, when a compile command exists. `lint` runs after every
 task's check and fails that task like any check, so a lint finding goes back to
-the task that caused it; after the suite the final gate runs `extraChecks`. `New tests: no` tells the build not to
+the task that caused it. An auto-detected lint does so only when the planning
+baseline ran it clean on this commit; otherwise it gates just the final check,
+so warnings already in the code never stall the first task. After the suite the
+final gate runs `extraChecks`. `New tests: no` tells the build not to
 add tests while the existing ones still run.
 
 **Scripts read `pb.report/2`.** (pb.report/1 lost its dead `context.asks` count.) `/pb:status --json`, `/pb:stats --json` and
@@ -249,7 +252,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 |---|---|---|
 | `verify` | `"auto"` | test command; detects `./mvnw`/`mvn -B -q test`, gradle, npm, cargo, go, pytest; `null` disables |
 | `build` | `"auto"` | compile/typecheck command: for `Verification: build`, a task without a `Test:` line, and the per-task compile under `taskChecks: "end"` |
-| `lint` | `"auto"` | lint command from package.json's `lint` script (other stacks set it explicitly); runs after each task's check, and again at the final gate only when the final check is retried |
+| `lint` | `"auto"` | lint command: package.json's `lint` script, else `cargo clippy -q --all-targets -- -D warnings` for a Cargo project (other stacks set it explicitly). Set explicitly, it runs after every task's check; auto-detected, only when the planning baseline ran it clean on this commit, else at the final gate only |
 | `extraChecks` | `[]` | extra project commands (e.g. standards scripts), run at the final gate after lint |
 | `verifyTimeoutSec` | 900 | how long the build's own test/compile/lint run may take; raise it together with `commandTimeoutSec` when the suite legitimately takes longer |
 | `commandTimeoutSec` | 1800 | cap on one `bash`/`powershell` command the agent runs, applied before Pi executes it (a shorter timeout the model set stays); raise it together with `verifyTimeoutSec` when builds or the suite legitimately take longer; 0 = no limit |
@@ -262,6 +265,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, and the planning and spec-review guards |
 | `baseline` | true | `/pb:plan` runs the test suite on the last commit, in a separate worktree, in the background |
+| `planner` | `{}` | `{"model": "provider/id", "thinking": "xhigh"}` for the planning conversation: applied when planning starts, put back when it ends unless you changed them meanwhile; thinking is a floor, default `"high"`, never lowered |
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
 | `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always` on every review; `off`) |
 | `specReviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the one fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. Only a P0 blocks; P1-P3 are advisory. Point it at `buildModel` to have the implementer model validate the plan |

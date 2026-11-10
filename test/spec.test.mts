@@ -1046,7 +1046,7 @@ test("spec: shared seams without Contracts warn, never reject; shared Test: warn
   // A Tasks edit re-warns on sharing; anything else stays quiet.
   const tasks = (await t.callTool("pb_update_spec", { name: "a", section: "Tasks", content: "### T1: a\n- Acceptance: a (tests: T1)\n- Test: `true`\n\n### T2: b\n- Acceptance: b (tests: T2)\n- Test: `true`\n\n### T3: c\n- Acceptance: c (tests: T3)\n- Test: `true`" })).content![0].text;
   assert.match(tasks, /Note: `true` is the Test: of T1, T2, T3/);
-  const decisions = (await t.callTool("pb_update_spec", { name: "a", section: "Decisions", content: "- d" })).content![0].text;
+  const decisions = (await t.callTool("pb_update_spec", { name: "a", section: "Decisions", content: "- Only PENDING orders can be cancelled, because the state machine only allows that transition.\n- Not doing soft delete, because audit lives elsewhere.\n- d" })).content![0].text;
   assert.doesNotMatch(decisions, /Note:/);
 });
 
@@ -1634,7 +1634,7 @@ test("/pb:spec <name> revises the spec from the file, not from memory", async ()
 
 test("spec writing leaves undecided questions open; the checkpoint asks nothing; questions while writing count down", async () => {
   const { specPrompt, checkpointPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
-  assert.match(specPrompt("", []), /Transcribe what was agreed[\s\S]*anything undecided goes under Open questions and the spec stays Status: planning[\s\S]*never invent a decision[\s\S]*only about a choice that changes behaviour, an API or data/);
+  assert.match(specPrompt("", []), /Transcribe the conversation's ledger[\s\S]*anything undecided goes under Open questions and the spec stays Status: planning[\s\S]*never invent a decision[\s\S]*only about a choice that changes behaviour, an API or data/);
   assert.match(finishSpecPrompt("x"), /ask me with pb_ask, all at once, about each open question[\s\S]*Anything still unanswered stays Open and the spec stays Status: planning/);
   assert.match(checkpointPrompt(80, []), /Don't ask me anything now: what's undecided goes into Open questions/);
 
@@ -1654,7 +1654,7 @@ test("spec writing leaves undecided questions open; the checkpoint asks nothing;
   t.selects.push("Build here as soon as the spec is written (keeps our discussion; the cache stays warm)", "<timeout>");
   await t.run("build");
   assert.equal(t.dialogTimeouts.at(-1), 1); // the question counted down, though no build was running yet
-  assert.match(answer!.content![0].text, /No answer in time: it stays open — do not take a reading or write it as an Assumption\. Record it under Open questions; planning stays incomplete until it is answered\./);
+  assert.match(answer!.content![0].text, /No answer in time: it stays open — do not take a reading or tag it assumed\. Record it under Open questions; planning stays incomplete until it is answered\./);
   assert.match(t.posts.find((p) => p.startsWith("**✅ Spec written"))!, /Settled without asking you \(the review checks them\):\n- Assumption: cancelling twice is a no-op/);
   assert.equal(t.progress("order-cancellation").phase, "built");
 
@@ -1767,7 +1767,7 @@ test("guide: the spec topic states the bound owner, the single fix per finding a
   for (const claim of [
     "bounds how often something runs should name the code whose call it bounds",
     "`new: <path>` when nothing performs it yet",
-    "`Assumption: … settles by …` when nothing in the project enforces the cadence",
+    "the `assumed:` tag when nothing in the project enforces the cadence",
     "a backticked command is a measurement, not an owner",
     "the single fix the reviewer would make",
     "that reason belongs in the same fix line",
@@ -1815,7 +1815,7 @@ test("spec: the format checklist asks for prose inventory, real states and measu
   for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
     assert.match(p, /prose that describes the behavior/);
     assert.match(p, /enumerate its real states/);
-    assert.match(p, /carries a measurement/);
+    assert.match(p, /Each one carries its evidence beside it: a path:line that says it, a probe/);
     assert.match(p, /## Migration and rollback/);
     assert.match(p, /path:line must point at a real line/);
     assert.match(p, /external surface/);
@@ -1828,13 +1828,13 @@ test("spec: every observable contract value cites the code or test that pins it"
   const { specPrompt, finishSpecPrompt, specReviewBrief, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
   for (const p of [specPrompt("", []), finishSpecPrompt("x")]) {
     assert.match(p, /Every observable value a Contract states/);
-    assert.match(p, /cites the code path or test that pins it today \(file:line\), or is written as an Assumption/);
+    assert.match(p, /is load-bearing \(see Evidence below\): a value code has today cites the code path or test that pins it today \(file:line\)/);
   }
   assert.match(specPrompt("", []), /never infer a status or an order from what the design should do/);
   const review = specReviewBrief("s", "# S\n\n## Contracts\n- 200\n");
   assert.match(review, /# Spec to review: s[\s\S]*## Contracts\n- 200/);
   assert.match(review, /one frozen draft[\s\S]*only a P0 blocks/);
-  assert.match(SPEC_REVIEWER_SYSTEM, /every observable contract value is backed by the code path or test it cites/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /every load-bearing claim carries the evidence the rule below asks for, and that evidence says what the claim says/);
   assert.match(SPEC_REVIEWER_SYSTEM, /one sentence a tired human can act on: what goes wrong, for whom, and where/);
   assert.match(SPEC_REVIEWER_SYSTEM, /supporting evidence and the single change/);
 });
@@ -1880,4 +1880,130 @@ test("spec: the format gives one acceptance form — task lines plus a Test: com
 test("spec review defers to points the spec marks decided, absent new evidence", async () => {
   const { SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
   assert.match(SPEC_REVIEWER_SYSTEM, /point the spec marks decided is settled: check for new evidence, and comment only when you find it/);
+});
+
+test("assumptions: one notation beside the claim; older Decisions entries still count; the build's own are listed by the build", async () => {
+  const { specAssumptions } = await import("../extensions/pb/spec.ts");
+  const md = [
+    "# S",
+    "## Decisions",
+    "- Use POST, because the router has no DELETE.",
+    "- Assumption: cancelling twice is a no-op, because the API is idempotent elsewhere.",
+    "- Assumption (build, T1): the queue is FIFO",
+    "## Contracts",
+    "- `POST /orders/{id}/cancel` returns 409 for a shipped order — assumed: falsified if the gateway remaps 4xx",
+    "- The order list is capped at 500 rows (assumed: a larger page times out)",
+    "```",
+    "assumed: inside a fence is code, not a claim",
+    "```",
+    "## Findings",
+    "- Assumption about nothing outside Decisions is prose, not an entry",
+  ].join("\n");
+  assert.deepEqual(specAssumptions(md), [
+    "Assumption: cancelling twice is a no-op, because the API is idempotent elsewhere.",
+    "`POST /orders/{id}/cancel` returns 409 for a shipped order — assumed: falsified if the gateway remaps 4xx",
+    "The order list is capped at 500 rows (assumed: a larger page times out)",
+  ]);
+});
+
+test("assumptions: a claim tagged by a repair lap is counted where the human decides, not only Decisions entries", async () => {
+  const t = setup({ verify: "true" });
+  const tagged = SPEC().replace(
+    "- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.",
+    "- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.\n- Each file is under 4 KB — assumed: falsified if a fixture writer pads it",
+  );
+  await written(t, tagged);
+  await t.run("spec-review", "order-cancellation");
+  assert.match(t.posts.at(-1)!, /1 assumption\b/);
+});
+
+test("spec stats: reviews, their findings by priority, claim checks, laps and the fresh runs' tokens are counted", async () => {
+  const { renderCard, summarize } = await import("../extensions/pb/stats.ts");
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory"; // a pass with a P1 and a P2
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const review = t.events("order-cancellation").find((e: any) => e.type === "spec-review");
+  assert.ok(review.input >= 3000 && review.output >= 400, "the run's usage is recorded on the event"); // the mock reports 3000/400 per message
+  const events = [
+    ...t.events("order-cancellation"),
+    { type: "spec-check", at: "2026-11-10 10:00:00", verdict: "pass", findings: 2, input: 1000, output: 100, cost: 0.01, ms: 4000 },
+    { type: "spec-check", at: "2026-11-10 10:01:00", verdict: "error", findings: 0, input: 500, output: 50, cost: 0.005, ms: 2000 },
+    { type: "spec-fix", at: "2026-11-10 10:02:00", applied: [1], rebutted: [], parked: [], assumed: [{ id: 2, claim: "x" }] },
+  ];
+  const stats = { name: "order-cancellation", phase: "written", events, explore: [], progress: t.progress("order-cancellation") } as any;
+  const phase = summarize(stats).spec!;
+  assert.deepEqual([phase.reviews, phase.blocked, phase.findings], [1, 0, [0, 1, 1, 0]]);
+  assert.deepEqual([phase.claimChecks, phase.claims, phase.laps, phase.applied, phase.assumed], [1, 2, 1, 1, 1]); // a failed check is not a check
+  assert.equal(phase.prompt, review.input + 1000 + 500); // every fresh run costs, reported or not
+  assert.match(renderCard(stats), /^Spec +1 review · findings P0 0 P1 1 P2 1 P3 0 · 1 claim check: 2 claims · 1 lap: 1 applied, 0 rebutted, 0 parked, 1 assumed · in [\d.]+k · out [\d.]+k? · \$/m);
+  assert.equal(summarize({ ...stats, events: [] }).spec, undefined); // no spec phase ran: no line
+});
+
+test("spec checks: the writer runs the spec reviewer's checks before writing, from one list", async () => {
+  const { specPrompt, finishSpecPrompt, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  const names = ["Claims", "Values", "Proof", "Coverage", "Reach", "Consistency"];
+  const checksIn = (prompt: string) => names.map((n) => prompt.match(new RegExp(`^\\s*- ${n}: [^\\n]+$`, "m"))?.[0].trim());
+  const reviewer = checksIn(SPEC_REVIEWER_SYSTEM);
+  assert.ok(reviewer.every(Boolean), "the reviewer checks every item");
+  for (const writer of [specPrompt("", []), finishSpecPrompt("x")]) assert.deepEqual(checksIn(writer), reviewer, "the writer runs the same list, word for word");
+  const [claims, values, proof, coverage, reach] = reviewer.map(String);
+  // The classes real spec reviews kept raising, each a line of its own.
+  assert.match(claims, /open the line, because a fact remembered from the discussion is not evidence/);
+  assert.match(values, /a time names its clock .* and what happens when the day changes while it runs/);
+  assert.match(proof, /that test can fail before the change/);
+  assert.match(coverage, /each Contract and each Decision that changes behaviour has an Acceptance line that pins it/);
+  assert.match(reach, /the existing tests, callers, links and docs that assert the behaviour being changed/);
+  // The writer verifies its own claims by targeted reads; the explorer is the fallback, not the default.
+  assert.match(specPrompt("", []), /Re-open the lines your claims rest on yourself; call pb_explore once, with the list, only for the claims you can't place/);
+});
+
+test("spec format: the planner's operations and user answers have a home in the spec", async () => {
+  const { specPrompt, PLANNER_ROLE } = await import("../extensions/pb/prompts.ts");
+  const prompt = specPrompt("", []);
+  assert.match(prompt, /## Migration and rollback\n[^\n]*ships something that can fail in production[^\n]*how we'd see it fail \(the log, metric or alert\), and what no test can show and how it is checked instead/);
+  assert.match(prompt, /## Contracts\n[^\n]*what a user sees when it fails/);
+  // The spec reply ends with the What-now block, not the planner's ledger.
+  assert.match(PLANNER_ROLE, /A reply that writes the spec needs no ledger: the spec is the ledger\./);
+});
+
+test("spec rewrite: the write reports what it removed from the previous text, and nothing when it removed nothing", async () => {
+  const t = setup();
+  await written(t);
+  const noteOf = (r: Result) => (r.content?.[0]?.text ?? "").match(/Note: this write removed [^\n]*/)?.[0];
+  const same = await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("Refunds.", "Refunds and chargebacks.") });
+  assert.equal(noteOf(same), undefined, "an edit that keeps everything says nothing");
+  const lossy = SPEC()
+    .replace("## Out of scope\nRefunds.\n", "")
+    .replace("- Not doing soft delete, because audit lives elsewhere.\n", "")
+    .replace("- Acceptance: T2.txt exists", "- Acceptance: T2.txt exists and is empty");
+  const note = noteOf(await t.callTool("pb_write_spec", { name: "order-cancellation", content: lossy }));
+  assert.ok(note, "a lossy rewrite is named");
+  assert.match(note!, /the "## Out of scope" section/);
+  assert.match(note!, /1 Acceptance line \("Acceptance: T2\.txt exists"\)/, "a reworded line counts: the old words are gone");
+  assert.match(note!, /1 Decisions entry \("Not doing soft delete, because audit lives elsewhere\."\)/);
+  // A section update reports the same facts.
+  const update = await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Only PENDING orders can be cancelled, because the state machine only allows that transition." });
+  assert.equal(noteOf(update), undefined, "replacing with the same entry loses nothing");
+  const dropped = await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: "- Cancel any order, because support asked." });
+  assert.match(noteOf(dropped) ?? "", /1 Decisions entry \("Only PENDING orders can be cancelled/);
+});
+
+test("evidence: the writer, the spec reviewer, the claim check and a repair lap judge claims by one rule", async () => {
+  const { specPrompt, finishSpecPrompt, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, SPEC_FIX_RULES } = await import("../extensions/pb/prompts.ts");
+  const rule = specPrompt("", []).match(/A claim is load-bearing when[^\n]*?Anything else needs no evidence\./)?.[0];
+  assert.ok(rule, "the writer's format states the rule");
+  for (const prompt of [finishSpecPrompt("x"), SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, SPEC_FIX_RULES]) assert.ok(prompt.includes(rule), "every role reads the same rule, word for word");
+  // A test proves what the change defines; a belief about code that exists today needs the code itself.
+  assert.match(rule, /for a value this change defines \(a new status, error, event or stored value\), the Acceptance line that pins it, whose red test is the proof/);
+  assert.match(rule, /A claim about existing code or a service needs the path:line or the probe: a test written from the same belief passes even when the belief is wrong/);
+  assert.match(rule, /tagged `assumed: <what would falsify it>` right after it/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /A claim that is not load-bearing and carries no evidence is not a finding\./);
+  assert.match(SPEC_CLAIM_CHECK_SYSTEM, /a value an Acceptance line is said to pin is one this change defines/);
+  // The rule is the one place evidence is asked for: no section repeats its own version.
+  assert.doesNotMatch(specPrompt("", []), /Every quantitative claim|never a bare conclusion|is written as an Assumption/);
 });

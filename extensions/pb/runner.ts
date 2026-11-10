@@ -177,6 +177,9 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
   return { command: "pi", args };
 }
 
+/** A fresh run's tokens and cost as an event records them, in the field names stats read for every role. */
+export const runUsage = (r: RunResult) => ({ input: r.tokens.input, output: r.tokens.output, cacheRead: r.tokens.cacheRead, cacheWrite: r.tokens.cacheWrite, cost: r.cost });
+
 /** One-line live activity for fresh runs: what is being searched, and where. */
 export function previewCall(args: Record<string, unknown>): string {
   const str = (v: unknown) => (typeof v === "string" ? v : "");

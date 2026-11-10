@@ -6,6 +6,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { dependencyNames, readJsonManifest, readManifest } from "./manifest.ts";
 
 const START = "<!-- pb:standards -->";
 const END = "<!-- /pb:standards -->";
@@ -169,12 +170,7 @@ export const isUserTemplate = (stack: string) => stack in userTemplates();
 const detects = (cwd: string, d: string) => {
   const [file, dep] = d.split(":");
   if (!dep) return fs.existsSync(path.join(cwd, file));
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(cwd, file), "utf8"));
-    return !!(pkg.dependencies?.[dep] || pkg.devDependencies?.[dep] || pkg.peerDependencies?.[dep] || pkg.optionalDependencies?.[dep]);
-  } catch {
-    return false; // missing or not JSON
-  }
+  return dependencyNames(readJsonManifest(cwd, file)).includes(dep);
 };
 
 /** The first stack whose detection matches, yours before pb's; Java before Vue: a backend that also builds its pages keeps the backend's rules. */
@@ -199,37 +195,9 @@ const SQL_MANIFESTS: Array<[string, RegExp]> = [
 /** Directories that hold schema migrations, in the usual layouts. */
 const MIGRATION_DIRS = ["migrations", "db/migrate", "db/migrations", "src/main/resources/db/migration", "src/main/resources/db/changelog", "prisma/migrations"];
 
-/** A manifest is read only up to this size: enough for any real one, bounded for a hostile one. */
-const MANIFEST_BYTES = 1_000_000;
-
-/** A regular file's first MANIFEST_BYTES; never blocks on a FIFO or device planted under a manifest's name. */
-const readManifest = (file: string): string | undefined => {
-  try {
-    const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
-    try {
-      if (!fs.fstatSync(fd).isFile()) return undefined;
-      const buffer = Buffer.alloc(MANIFEST_BYTES);
-      return buffer.toString("utf8", 0, fs.readSync(fd, buffer, 0, MANIFEST_BYTES, 0));
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return undefined; // missing or unreadable: no evidence either way
-  }
-};
-
 /** True when the project uses a SQL database: a driver or ORM in a manifest, or a migrations directory. */
 export function usesDatabase(cwd: string): boolean {
-  const pkg = readManifest(path.join(cwd, "package.json"));
-  if (pkg) {
-    try {
-      const json = JSON.parse(pkg) as Record<string, Record<string, unknown> | undefined>;
-      const names = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"].flatMap((k) => Object.keys(json[k] ?? {}));
-      if (names.some((n) => SQL_PACKAGES.has(n))) return true;
-    } catch {
-      /* not JSON: no evidence */
-    }
-  }
+  if (dependencyNames(readJsonManifest(cwd)).some((n) => SQL_PACKAGES.has(n))) return true;
   if (SQL_MANIFESTS.some(([file, pattern]) => pattern.test(readManifest(path.join(cwd, file)) ?? ""))) return true;
   return MIGRATION_DIRS.some((dir) => {
     try {

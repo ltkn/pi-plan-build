@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.39.0
+
+- **Planning is led by a senior engineer, for the whole conversation.** What planning asks of the model is now a role, set in the system prompt on every turn of a planning session. Before, it was a paragraph in the first message: it faded as the discussion grew, and a checkpoint reset dropped it entirely. The role:
+  - **Who it is:** the senior engineer who owns the change end to end, from the need behind it to running it in production; its job is the best plan for what you need, not agreement with your first idea.
+  - **Problem before solution:** it states the goal and how you'll know it worked, and challenges the request itself when it deserves it (the need behind it, an existing solution, the simplest thing that would work). A request that is already right gets one line. The first reply now opens with a **Problem** section.
+  - **Expertise counts as evidence:** a named practice, standard or documented behaviour, with its consequence here, now backs a pushback just like a `path:line`. Taste still doesn't.
+  - **The whole lifecycle is walked, in proportion:** a small change touches one or two of these lenses.
+    - users: what they see on success and failure, accessibility and languages for a UI;
+    - design: where it belongs, what it couples, what generality nobody needs;
+    - data: ownership, existing records and API clients, personal data and retention;
+    - security: access, leaks, new dependencies;
+    - input and state;
+    - verification: how it will be proven, what no test shows;
+    - operations: rollout, migration order, rollback, how you'd see it fail in production, latency and cost at scale.
+
+    Legal, compliance and licensing questions are flagged for the right person instead of answered.
+  - **A ledger:** after the first reply, every answer ends with Decided and Open. When you overrule it without new evidence, it records your choice with its objection and the risk, then stops arguing. `/pb:spec` writes that ledger into the spec.
+
+  The first planning message shrinks from about 850 to 600 words. Your `extra.plan` instructions move into the role, so they last as long as it does.
+- **Planning thinks harder, and can run on its own model.** Starting planning raises the session's thinking level to at least `"high"`, and to `planner.model` when one is configured (`"planner": {"model": "provider/id", "thinking": "xhigh"}`). Ending planning puts both back, unless you changed them yourself in the meantime. What planning changed is kept with the planning record, so a restart doesn't lose it, and a plan continued in a fresh session carries the same settings.
+
+- **One evidence rule, and only for claims that matter.** The spec format, the spec reviewer, the claim check and a repair lap now judge evidence by the same rule, word for word:
+  - **Only load-bearing claims need evidence**: those that would change the build if false (a number or bound, what this repository does, how an outside service behaves). Before, every observable value and every number needed a citation, while the claim check only looked at load-bearing ones; a spec written to the stricter rule grew, and a bigger text gave a fresh review more to flag.
+  - **A test can be the evidence.** A value this change itself defines, such as a new status code, is proven by the Acceptance line that pins it, since its red test checks it. A claim about code or a service that exists today still needs its `path:line` or a probe, because a test written from the same belief would pass even if the belief were wrong.
+- **An assumption is written one way, and you see every one.** A claim nothing settles yet is tagged `assumed: <what would falsify it>` right after it. Before, the writer was told to write "Assumption" entries in Decisions while repair laps used the inline tag, and only the Decisions form was read. So the assumptions a lap added never appeared in the "Settled without asking you" list shown before a build. One parser now reads both forms, and older specs keep working.
+- **The spec phase is measured.** Spec reviews and claim checks record their tokens and cost. `/pb:stats` adds a `Spec` line per spec (reviews and blocks, findings P0–P3, claim checks and the claims they found, repair laps with what they applied, rebutted, parked and assumed, tokens, cost and time), and `pb.report/2` carries the same numbers as `stats.spec`. These are the numbers a later change to the claim check will be judged by.
+
+- **The spec writer runs the spec reviewer's checks before writing.** One list, shared word for word by the writer and the reviewer, built from the findings real spec reviews kept raising:
+  - claims about existing code are re-read at their line, not remembered from the discussion (the writer reads the lines itself; `pb_explore` only for what it can't place);
+  - every new value has its unit, range, sign and empty case, and a time names its clock and what happens when the day changes;
+  - each Acceptance line has a test that can fail before the change;
+  - each Contract and each behaviour-changing Decision is pinned by an Acceptance line (a Decision no line pinned was the one bug that reached code review in the last real build);
+  - the tests, callers, links and docs that assert the old behaviour are named, with a task to update each;
+  - the sections agree.
+
+  Fixed before writing, these no longer cost a review, a repair lap and a claim check each. The `Spec` stats line shows whether first reviews find less.
+- **A rewrite says what it removed.** `pb_write_spec` and `pb_update_spec` now list every section, Acceptance line and Decisions entry the previous text had and the new one doesn't. A whole rewrite can no longer silently drop what a review lap added.
+- **The planner's answers have a place in the spec.** Migration and rollback also covers rollout, how you'd see it fail in production, and what no test can show; Contracts include what a user sees when it fails. A reply that writes the spec no longer ends with the planning ledger: the spec is the ledger.
+
+- **Rust projects get clippy, and auto-detected lint never stalls the first task.** `"lint": "auto"` now also detects `cargo clippy -q --all-targets -- -D warnings` for a Cargo project, after package.json's own `lint` script. Where lint gates a build is decided once, at its start:
+  - **every task**, when you set `"lint"` yourself, or when the planning baseline ran the auto-detected lint clean on this commit;
+  - **the final check only**, otherwise, with a notice saying why. A project with existing warnings then reaches the end of its build instead of failing T1 for debt it did not create.
+
+  A restarted build keeps its gate, and one started before this release stays per-task.
+- **No manifest read can hang pb.** Detecting the test, compile and lint commands, the project's stack and its database now reads package.json, Cargo.toml and the rest through one helper. It opens without blocking, reads regular files only and stops at 1 MB, so a pipe planted under a manifest's name can no longer hang `/pb:plan` or `/pb:build`. npm's "no test specified" placeholder still never counts as a command.
+
 ## 1.38.0
 
 - **The build's lifecycle is one table.** `phase.ts` holds the phase transitions:

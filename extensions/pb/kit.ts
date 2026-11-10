@@ -21,8 +21,8 @@ import { type ParsedSpec, type SpecTask, addDecision, contractHash, earlierProof
 import { duration } from "./format.ts";
 import { type Stack, findStandards, isUserTemplate, standardsLoaded } from "./standards.ts";
 import { buildTimeLabel, buildTiming } from "./stats.ts";
-import { type Checkpoint, type Progress, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, now, readEvents } from "./store.ts";
-import { pauseAt, unfinishedPhase } from "./phase.ts";
+import { type Checkpoint, type Progress, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, now, readEvents, type PlannerSettings, type ThinkingLevel, THINKING_LEVELS } from "./store.ts";
+import { lintsEachStep, pauseAt, unfinishedPhase } from "./phase.ts";
 import { resolveBuild, resolveLint, resolveVerify } from "./verify.ts";
 
 export const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -507,7 +507,7 @@ export const stepPrompt = (ctx: ExtensionContext, store: Store, spec: ParsedSpec
   const { cfg, testCmd, buildCmd, lintCmd } = commands(ctx.cwd, store);
   const tp = p.tasks.find((t) => t.id === task.id);
   const red = needsRed(spec, task);
-  return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specReference(p.spec), doneHandoff(store, p, task.id), lintCmd);
+  return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specReference(p.spec), doneHandoff(store, p, task.id), lintsEachStep(p) ? lintCmd : null);
 };
 
 /**
@@ -827,10 +827,58 @@ export const reviewPlanningChanges = async (ctx: ExtensionContext, store: Store,
  * parent's or the agent directory's, e.g. the backend's) is offered its frontend one next to it.
  */
 
+/**
+ * What planning sets in a session that runs on `before`: the planner's thinking floor (default "high") when
+ * the session thinks less, and the planner's model when one is configured. Pure: callers apply it.
+ */
+export const plannerSettings = (before: { thinking?: string; model?: string }, planner: { thinking?: ThinkingLevel; model?: string }): PlannerSettings => {
+  const floor = planner.thinking ?? "high";
+  const rank = (level?: string) => THINKING_LEVELS.indexOf(level as ThinkingLevel);
+  return {
+    ...(before.thinking ? { thinking: before.thinking } : {}),
+    ...(before.model ? { model: before.model } : {}),
+    ...(rank(floor) > rank(before.thinking) ? { appliedThinking: floor } : {}),
+    ...(planner.model && planner.model !== before.model ? { appliedModel: planner.model } : {}),
+  };
+};
+
+/** Planning started in this session: run it on the planner's settings, once per planning run, and record what changed. */
+export const applyPlanner = async (ctx: ExtensionContext, store: Store): Promise<void> => {
+  const session = ctx.sessionManager.getSessionFile();
+  if (!session || !PI || store.planning(session)?.planner) return;
+  const settings = plannerSettings({ thinking: PI.getThinkingLevel() as string | undefined, model: sessionModel(ctx) }, store.config().planner);
+  if (settings.appliedModel) {
+    const model = findModel(ctx, settings.appliedModel);
+    if (!model || !(await PI.setModel(model as Parameters<ExtensionAPI["setModel"]>[0]))) {
+      ctx.ui.notify(`planner.model ${settings.appliedModel} isn't available here: planning stays on ${settings.model ?? "this session's model"}.`, "warning");
+      delete settings.appliedModel;
+    }
+  }
+  if (settings.appliedThinking) {
+    PI.setThinkingLevel(settings.appliedThinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
+    settings.appliedThinking = PI.getThinkingLevel() as string; // Pi clamps the level to the model
+  }
+  store.setPlannerSettings(session, settings);
+};
+
+/** Planning ends: put back what it changed, unless you changed it yourself since. */
+const restorePlanner = async (ctx: ExtensionContext, store: Store, session: string): Promise<void> => {
+  const settings = store.planning(session)?.planner;
+  if (!settings || !PI) return;
+  if (settings.appliedModel && settings.model && sessionModel(ctx) === settings.appliedModel) {
+    const model = findModel(ctx, settings.model);
+    if (model) await PI.setModel(model as Parameters<ExtensionAPI["setModel"]>[0]);
+  }
+  if (settings.appliedThinking && settings.thinking && PI.getThinkingLevel() === settings.appliedThinking) {
+    PI.setThinkingLevel(settings.thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
+  }
+};
+
 export const liftPlanning = async (ctx: ExtensionContext, store: Store): Promise<boolean> => {
   const session = ctx.sessionManager.getSessionFile();
   if (!session || !store.planningSessions().includes(session)) return true;
   if (!(await reviewPlanningChanges(ctx, store))) return false;
+  await restorePlanner(ctx, store, session);
   store.setPlanning(session, false);
   ctx.ui.setWidget("pb-plan", undefined);
   return true;

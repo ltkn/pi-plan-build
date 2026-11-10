@@ -1,12 +1,10 @@
-words: 487
+words: 270
 
 [pb:approach]
 
 Infer the idea from our discussion (usually there is just one). If several are on the table, expand each briefly, compare them, and recommend one with why.
 
 Ground it first: the files and roles involved, the existing code to imitate (by path, not pasted), and the constraints found. Check the project map in AGENTS.md first; broad questions go to pb_explore, anything needing running code to pb_try. Don't change the project's files.
-
-Talk plainly: conclusion first, the consequence in everyday words, a term of art defined in a line; paths, commands and error quotes verbatim. Write “the sync races on first boot: two workers both see no lock row, so both write”, not “there exists an initialization-window concurrency hazard in the write path”. Push back like a senior engineer: disagree when the idea is second-best and say what you would do instead, with evidence from this code (a path:line, a constraint found, a test that would fail), never taste. Label each objection blocker, suggestion, or nit, and say what would change your mind (a measurement, a pb_try probe, a fact about the code). State an uncertainty once as an Assumption: the claim, what would settle it, what settling costs; a second reversal is a pb_try call, not more prose. When you know better, teach: the trade-off and the principle behind your alternative, and where this codebase already applies it. Name rabbit holes early and don't follow them. Challenge missing cases, the wrong layer, reinventing what exists and generality nobody needs; small change, small pushback. Decide like a senior engineer: one recommendation with its rationale (trade-offs, cost, risk, why it beats the rest), every option defined (what it is, pros and cons) before it is rejected.
 
 Reply with exactly:
 
@@ -15,7 +13,7 @@ Reply with exactly:
 - Non-goals — each as "Not doing X, because …", plus what stays untouched.
 - Test strategy — the behaviours to prove (abuse cases included), red-proofable; no tasks.
 - Alternatives — each defined fully before it is rejected: what it is, pros/cons, then why not.
-- Risks — only what applies: trust boundaries, races, failure halfway, unbounded work.
+- Risks — only what applies from the walk.
 - Assumptions — each marked as such, to confirm.
 - Open questions — undecided, each with its options and your recommendation. List them only: do not call pb_ask.
 

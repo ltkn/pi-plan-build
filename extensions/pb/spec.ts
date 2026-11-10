@@ -105,7 +105,7 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
     else if (found.length > 1) errors.push(`duplicate "## ${s}" section: keep one`);
   }
   if (status === "ready" && sectionOf(md, "Open questions").trim())
-    errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions ("Assumption: <claim> — settles by <how>, because <reason>") or ask with pb_ask');
+    errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions, tag the claim \`assumed: <what would falsify it>\`, or ask with pb_ask');
 
   // Tasks: fence-aware, line-based. ## Tasks allows a trailing colon; ### T1 is case-insensitive
   // and normalized to T1; a ### line that looks like a task but doesn't parse is an error, not silence.
@@ -200,6 +200,24 @@ export function addDecision(md: string, decision: string): string {
   return `${md.slice(0, end).trimEnd()}\n${line}\n\n${md.slice(end).trimStart()}`;
 }
 
+/**
+ * Every assumption the spec states, in order: each line carrying the `assumed:` tag (the one notation the
+ * writer and a repair lap are taught), plus the Decisions lines that start "Assumption" (the form specs used
+ * before the tag, kept readable). The build's own entries ("Assumption (build, T1): …") are left out: the
+ * build lists those itself. Fenced code is not prose and is skipped.
+ */
+export function specAssumptions(md: string): string[] {
+  const lines = blankFenced(md);
+  const decisions = new Set(sectionOf(md, "Decisions").split("\n").map((l) => l.trim()));
+  const found = lines.flatMap((line) => {
+    const text = line.trim().replace(/^[-*]\s+/, "");
+    if (/(^|[\s(`])assumed:/i.test(line)) return [text];
+    if (/^-\s*Assumption(?! \(build)/.test(line.trim()) && decisions.has(line.trim())) return [text];
+    return [];
+  });
+  return [...new Set(found)];
+}
+
 /** A commit message for the feature, from its spec: the title as subject, the goal, and what the tasks did. */
 export function commitMessage(md: string): string | undefined {
   const spec = parseSpec(md).spec;
@@ -257,6 +275,35 @@ export const buildTask = (spec: ParsedSpec, id: string | undefined) => spec.task
 const ACCEPTANCE_LINE = /^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/i;
 /** True for a task acceptance line; the task's `Test:` command is the proof, with no per-line marker. */
 export const isAcceptanceLine = (line: string): boolean => ACCEPTANCE_LINE.test(line);
+
+/**
+ * What a rewrite took away from the previous text: whole sections, Acceptance lines and Decisions
+ * entries no longer there word for word. A rewrite regenerates the whole spec, so content a review
+ * lap added can vanish without anyone saying so; this is the fact, not the writer's account of it.
+ */
+export function specLosses(before: string, after: string): string[] {
+  const norm = (line: string) => line.replace(/^\s*[-*]\s*/, "").replace(/\s+/g, " ").trim();
+  const headings = (md: string) => blankFenced(md).flatMap((l) => l.match(/^##\s+(?!#)(.+?)\s*:?\s*$/)?.[1] ?? []);
+  const gone = (lines: string[], kept: string[]) => {
+    const keep = new Set(kept.map(norm));
+    return [...new Set(lines.map(norm))].filter((l) => l && !keep.has(l));
+  };
+  const quote = (lines: string[]) => {
+    const shown = lines.slice(0, 3).map((l) => `"${l.length > 80 ? `${l.slice(0, 77)}...` : l}"`);
+    return `${shown.join(", ")}${lines.length > 3 ? ` and ${lines.length - 3} more` : ""}`;
+  };
+  const kept = new Set(headings(after).map((h) => h.toLowerCase()));
+  const sections = headings(before).filter((h) => !kept.has(h.toLowerCase()));
+  const acceptance = (md: string) => blankFenced(md).filter(isAcceptanceLine);
+  const decisions = (md: string) => sectionOf(md, "Decisions").split("\n").filter((l) => /^\s*[-*]\s/.test(l));
+  const lostAcceptance = gone(acceptance(before), acceptance(after));
+  const lostDecisions = gone(decisions(before), decisions(after));
+  return [
+    ...sections.map((h) => `the "## ${h}" section`),
+    ...(lostAcceptance.length ? [`${lostAcceptance.length} Acceptance line${lostAcceptance.length === 1 ? "" : "s"} (${quote(lostAcceptance)})`] : []),
+    ...(lostDecisions.length ? [`${lostDecisions.length} Decisions entr${lostDecisions.length === 1 ? "y" : "ies"} (${quote(lostDecisions)})`] : []),
+  ];
+}
 
 /* -------------------------------- citation grammar -------------------------------- */
 

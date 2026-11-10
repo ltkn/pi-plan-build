@@ -13,7 +13,7 @@ import { KEBAB_NAME } from "./names.ts";
 import { agentDir, findStandards, isUserTemplate, projectStack, sectionFor, usesDatabase, writeStandards } from "./standards.ts";
 import { type VerifyResult, Store, cap, gitHead, now } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { MODEL_ARG_CAP, baselineSessions, cmd, commands, instruct, liftPlanning, noSnapshotWarning, normSpecArg, planTitle, post, reviewPlanningChanges, runtime, sessionGone, sessionModel, specCompletions, stackLabel, standardsFor, syncTasks } from "./kit.ts";
+import { MODEL_ARG_CAP, baselineSessions, cmd, commands, instruct, liftPlanning, noSnapshotWarning, normSpecArg, planTitle, post, reviewPlanningChanges, runtime, sessionGone, sessionModel, specCompletions, stackLabel, standardsFor, syncTasks, applyPlanner, plannerSettings } from "./kit.ts";
 import { unfinishedPhase } from "./phase.ts";
 
 export const offerStandards = async (ctx: ExtensionContext, store: Store) => {
@@ -160,7 +160,12 @@ export function registerPlan(pi: ExtensionAPI) {
         ctx.ui.notify(`\`${name}\` was Status: ready; set back to planning while we replan it.`, "info");
       }
     }
-    store.setCarry({ model: sessionModel(ctx), thinking: pi.getThinkingLevel() as string | undefined, spec: name, parent: oldSession ?? undefined });
+    // The new session plans on the planner's settings: the old session's planning run already chose them;
+    // otherwise they are chosen now. The handover carries them over, and the new record what to put back.
+    const planner =
+      store.planning(oldSession ?? "")?.planner ??
+      plannerSettings({ thinking: pi.getThinkingLevel() as string | undefined, model: sessionModel(ctx) }, store.config().planner);
+    store.setCarry({ model: planner.appliedModel ?? sessionModel(ctx), thinking: planner.appliedThinking ?? (pi.getThinkingLevel() as string | undefined), spec: name, parent: oldSession ?? undefined });
     let newSessionFile: string | undefined;
     const result = await ctx.newSession({
       parentSession: oldSession,
@@ -175,7 +180,10 @@ export function registerPlan(pi: ExtensionAPI) {
         const snap = checkpoints ? snapshot(c.cwd, "pb: start of planning") : undefined;
         const session = c.sessionManager.getSessionFile();
         newSessionFile = session ?? undefined;
-        if (session) ns.setPlanning(session, true, snap?.commit, store.planning(oldSession ?? "")?.request);
+        if (session) {
+          ns.setPlanning(session, true, snap?.commit, store.planning(oldSession ?? "")?.request);
+          ns.setPlannerSettings(session, planner);
+        }
         if (session) c.ui.setWidget("pb-plan", ["planning · /pb:plan off"]);
         if (!snap?.commit) c.ui.notify(noSnapshotWarning(checkpoints), "warning");
         // Same staleness check as /pb:plan: the map may have rotted since the old session.
@@ -198,7 +206,7 @@ export function registerPlan(pi: ExtensionAPI) {
           },
           { triggerTurn: false },
         );
-        void c.sendMessage({ customType: "pb-instruction", content: continuePlanPrompt(name, md, "", ns.extra("plan")), display: false }, { triggerTurn: true });
+        void c.sendMessage({ customType: "pb-instruction", content: continuePlanPrompt(name, md, ""), display: false }, { triggerTurn: true });
       },
     }).catch((e) => {
       store.clearCarry(); // a throw must not leave the handover behind either
@@ -263,6 +271,7 @@ export function registerPlan(pi: ExtensionAPI) {
 
       // After the standards offer: its AGENTS.md isn't a change made while planning.
       if (!startPlanning(ctx, store, arg)) return;
+      await applyPlanner(ctx, store);
       pi.setSessionName(`plan: ${title}`);
       // A cheap staleness check of the project map, no model call: paths it names that are gone.
       warnStaleMap(ctx);
@@ -272,7 +281,7 @@ export function registerPlan(pi: ExtensionAPI) {
       const started = baseline ? startBaseline(ctx, store, testCmd!) : false;
       instruct(
         `▶ /${cmd("plan")} — ${title} (the project's files stay untouched)${baseline ? (started ? ` · running \`${testCmd}\` in the background for a baseline` : ` · baseline already running — its result lands here`) : ""}\nThis session: "plan: ${title}" · back to it any time with /resume, or \`pi --session ${ctx.sessionManager.getSessionId()}\` · \`/${cmd("plan")}\` off ends planning\n\n${arg.split("\n").map((l) => `> ${l}`).join("\n")}`,
-        planPrompt(cap(arg, MODEL_ARG_CAP), testCmd, standardsFor(ctx), baseline ? "running" : "none", store.extra("plan")),
+        planPrompt(cap(arg, MODEL_ARG_CAP), testCmd, standardsFor(ctx), baseline ? "running" : "none"),
       );
     },
   });
@@ -289,7 +298,7 @@ export function registerPlan(pi: ExtensionAPI) {
       const shown = planTitle(focus);
       instruct(
         `▶ /${cmd("approach")}${shown ? ` — ${shown}` : ""} (chat only: nothing is written)`,
-        approachPrompt(focus, standardsFor(ctx), store.extra("plan")),
+        approachPrompt(focus, standardsFor(ctx)),
       );
     },
   });
@@ -301,6 +310,7 @@ export function registerPlan(pi: ExtensionAPI) {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       await offerStandards(ctx, store);
       if (!startPlanning(ctx, store, args.trim() ? `/pb:deps ${args.trim()}` : "/pb:deps")) return;
+      await applyPlanner(ctx, store);
       pi.setSessionName(`deps: ${planTitle(args.trim()) || "all"}`);
       // Same staleness check as /pb:plan: the investigation starts from the map.
       warnStaleMap(ctx);

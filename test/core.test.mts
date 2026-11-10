@@ -872,3 +872,23 @@ test("stats: the session line no longer counts questions", async () => {
   const source = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "extensions", "pb", "stats.ts"), "utf8");
   assert.ok(!/\basks\s*:/.test(source) && !source.includes('count("ask")'), "the dead asks counter must not remain in stats.ts");
 });
+
+test("manifests: a pipe planted as package.json hangs no detection, and a script npm stubs out is not a command", async () => {
+  const { detectVerify, detectLint } = await import("../extensions/pb/verify.ts");
+  const { projectStack, usesDatabase } = await import("../extensions/pb/standards.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-manifest-"));
+  if (process.platform !== "win32") {
+    execSync("mkfifo package.json", { cwd: dir }); // opening it for reading would block until a writer appears
+    assert.equal(detectVerify(dir), null);
+    assert.equal(detectLint(dir), null);
+    assert.equal(projectStack(dir), undefined);
+    assert.equal(usesDatabase(dir), false);
+    fs.rmSync(path.join(dir, "package.json"));
+  }
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1', lint: "eslint ." }, devDependencies: { vue: "3" } }));
+  assert.equal(detectVerify(dir), null);
+  assert.equal(detectLint(dir), "npm run lint --silent");
+  assert.equal(projectStack(dir), "vue");
+  fs.writeFileSync(path.join(dir, "package.json"), "[1, 2]"); // JSON, but not a manifest
+  assert.equal(detectLint(dir), null);
+});

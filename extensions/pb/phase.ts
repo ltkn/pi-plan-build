@@ -59,6 +59,9 @@ export function restorePhase(p: Progress, phase: Phase | undefined, reason: stri
   p.pause = p.phase === "paused" ? reason : undefined;
 }
 
+/** Whether lint gates every step of this build, rather than only its final check. */
+export const lintsEachStep = (p: Progress): boolean => p.lintGate !== "final";
+
 /** The first spec task still to do, in list order. */
 export const nextTodo = (p: Progress): TaskProgress | undefined => p.tasks.find((t) => t.status === "doing" || t.status === "todo");
 

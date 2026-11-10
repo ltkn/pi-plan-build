@@ -6,7 +6,7 @@ import type {
   ExtensionContext
 } from "@earendil-works/pi-coding-agent";
 import { changedPaths, cleanupIndexes, snapshot } from "./checkpoint.ts";
-import { checkpointPrompt, checkpointSummary, reviewStateSummary, nudgePrompt } from "./prompts.ts";
+import { PLANNER_ROLE, PLANNER_SECTION, checkpointPrompt, checkpointSummary, extraBlock, reviewStateSummary, nudgePrompt } from "./prompts.ts";
 import { tokensOf } from "./spec.ts";
 import { Store, now } from "./store.ts";
 import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, pauseBuild, pruneSession, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
@@ -31,6 +31,17 @@ export function registerHooks(pi: ExtensionAPI) {
   };
   /** `target` is `dir` itself or below it. */
   const under = (target: string, dir: string) => target === dir || target.startsWith(dir + path.sep);
+
+  // The planner's role is a system-prompt section on every turn of a planning session, not a paragraph
+  // of its first message: it holds through a long discussion and a checkpoint reset, and leaves with
+  // planning. Pi patches only a changed section, so the cached prefix survives.
+  pi.on("before_agent_start", (e, ctx) => {
+    const sections = e.systemPromptOptions.sections;
+    const session = ctx.sessionManager.getSessionFile();
+    const store = new Store(ctx.cwd);
+    if (session && store.planningSessions().includes(session)) sections[PLANNER_SECTION] = PLANNER_ROLE + extraBlock(store.extra("plan"));
+    else delete sections[PLANNER_SECTION];
+  });
 
   pi.on("tool_call", (e, ctx) => {
     const ev = e as { toolName: string; input: { path?: string; timeout?: unknown } };

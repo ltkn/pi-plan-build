@@ -77,7 +77,7 @@ export function registerAsk(pi: ExtensionAPI) {
             `To answer, type it here any time${lettered.length ? ` (a letter is enough)` : ""}: if Pi is working, it reads it after its current step.`,
           ].join("\n"),
         );
-        return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: it stays open — do not take a reading or write it as an Assumption. Record it under Open questions; planning stays incomplete until it is answered.${KEPT}`);
+        return reply(`${timedOut ? "No answer in time" : "The human dismissed the question"}: it stays open — do not take a reading or tag it assumed. Record it under Open questions; planning stays incomplete until it is answered.${KEPT}`);
       }
       return reply(`The human answered: ${answer.trim()}`);
     },

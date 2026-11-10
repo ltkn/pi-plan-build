@@ -48,6 +48,8 @@ export function setup(config: object = {}) {
   const confirmAnswers: (boolean | undefined)[] = [];
   const widgets = new Map<string, string[] | undefined>();
   const instructions: string[] = [];
+  /** The system-prompt sections extensions set for each run, in run order (before_agent_start). */
+  const systemSections: Record<string, string>[] = [];
   const results: string[] = []; // every pb_task_done result, including the ones that end the run
   const selects: string[] = [];
   const selectTitles: string[] = [];
@@ -328,6 +330,10 @@ export function setup(config: object = {}) {
     queued++;
     running = running.then(async () => {
      try {
+      // As in Pi: every run starts by letting extensions shape its system prompt; the sections each run saw are kept.
+      const systemPromptOptions = { sections: {} as Record<string, string> };
+      await fire("before_agent_start", { type: "before_agent_start", messageType: "custom", systemPrompt: "", systemPromptOptions });
+      systemSections.push(systemPromptOptions.sections);
       const asked = [...first.matchAll(/^- ((?:A\d+|R\d+\.\d+|T\d+\.\d+))(?: \([^)]+\))?: /gm)].map((m) => m[1]);
       if (asked.length) reviewChecklists.set(rt.file(), asked);
       let input: string | undefined = first;
@@ -397,6 +403,7 @@ export function setup(config: object = {}) {
     confirmAnswers,
     widgets,
     instructions,
+    systemSections,
     results,
     selects,
     selectTitles,

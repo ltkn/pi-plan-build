@@ -5,6 +5,7 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { packageScript } from "./manifest.ts";
 import { type VerifyResult, cap, now } from "./store.ts";
 
 export function detectVerify(cwd: string): string | null {
@@ -13,14 +14,7 @@ export function detectVerify(cwd: string): string | null {
   if (has("pom.xml")) return has(win ? "mvnw.cmd" : "mvnw") ? (win ? "mvnw.cmd -B -q test" : "./mvnw -B -q test") : "mvn -B -q test";
   if (has("build.gradle") || has("build.gradle.kts"))
     return has(win ? "gradlew.bat" : "gradlew") ? (win ? "gradlew.bat test -q" : "./gradlew test -q") : "gradle test -q";
-  if (has("package.json")) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
-      if (pkg.scripts?.test && !/no test specified/.test(pkg.scripts.test)) return "npm test --silent";
-    } catch {
-      /* ignore */
-    }
-  }
+  if (packageScript(cwd, "test")) return "npm test --silent";
   if (has("Cargo.toml")) return "cargo test -q";
   if (has("go.mod")) return "go test ./...";
   if (has("pyproject.toml") || has("pytest.ini") || has("setup.cfg")) return "pytest -q";
@@ -51,16 +45,10 @@ export function resolveBuild(setting: string | null, cwd: string): string | null
   return setting;
 }
 
-/** Lint command: package.json's lint script when present (explicit `lint` covers every other stack). */
+/** Lint command: package.json's lint script, else clippy for a Cargo project (explicit `lint` covers every other stack). */
 export function detectLint(cwd: string): string | null {
-  const has = (f: string) => fs.existsSync(path.join(cwd, f));
-  if (!has("package.json")) return null;
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
-    if (pkg.scripts?.lint && !/no lint specified/.test(pkg.scripts.lint)) return "npm run lint --silent";
-  } catch {
-    /* ignore */
-  }
+  if (packageScript(cwd, "lint")) return "npm run lint --silent";
+  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) return "cargo clippy -q --all-targets -- -D warnings";
   return null;
 }
 
