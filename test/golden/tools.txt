@@ -1,4 +1,4 @@
-words: 1990
+words: 2045
 
 ## pb_ask
 
@@ -30,7 +30,7 @@ Ask the human one question and wait for the answer: a choice between options, or
 
 ## pb_explore
 
-Answer a question about the code from a separate, read-only context and get back only the answer: where things live, how a similar feature is built, the conventions, what calls what. It reads code only (no curl, scripts or builds: those stay in this session). Use it for broad or multi-file questions when you need the conclusion; when you know the 1-3 files, read them yourself. Several calls can run in parallel.
+Answer a question about the code from a separate, read-only context and get back only the answer: where things live, how a similar feature is built, the conventions, what calls what. It runs read-only inspection commands only — pb refuses anything else, so it never reaches a database, the network or production — and stops when it makes no progress for explorer.idleSec (10 minutes by default) or after explorer.timeoutSec (30) in all. Use it for broad or multi-file questions when you need the conclusion; when you know the 1-3 files, read them yourself. Several calls can run in parallel.
 
 {
   "type": "object",
@@ -47,7 +47,7 @@ Answer a question about the code from a separate, read-only context and get back
 
 ## pb_try
 
-When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. Production: a read-only query only when local code and data cannot answer, stating why, the table and a row cap (at most ~500 rows); never a production write, channel or real notification. Bound the goal: a probe is stopped at `probeTimeoutSec` (15 minutes by default), so one that cannot settle in that time is the wrong probe. Several calls can run in parallel.
+When a decision needs something only running code shows (library behaviour or limits, performance, a read-only query), call pb_try with the question to settle: back come Commands, Result and Conclusion. If settling it needs a scratch script file — or its output won't fit in a few lines — it belongs in pb_try; single read-only commands stay in this session. It reads the project but writes scratch files only outside it, and anything it changes in the project is put back. Production: a read-only query only when local code and data cannot answer, stating why, the table and a row cap (at most ~500 rows); never a production write, channel or real notification. pb refuses its commands that write to a system outside this machine, and its shell runs without database, cloud and cluster credentials. Bound the goal: a probe is stopped at `probeTimeoutSec` (15 minutes by default), and its commands never outlast it, so one that cannot settle in that time is the wrong probe. Several calls can run in parallel.
 
 {
   "type": "object",

@@ -125,6 +125,10 @@ if (sys.includes("ATTACKER")) {
   const map = `## Layout\n- \`src/\`: the application\n### Orders\n- \`src/order.ts\`: the order model and its transitions\n- Sign-in: follow \`auth/Login\`.${gone}\n- Services own transactions; controllers never call repositories.\n### Empty${big}`;
   report("report_map", { map, changes: ["added Orders", "noted transactions"] });
 } else if (sys.includes("EXPLORER")) {
+  // MOCK_FRESH_ARGS_OUT captures argv and the guard settings pb handed the process; MOCK_EXPLORE_HANG goes silent
+  // (no event at all) for that many ms, as a stuck explorer does.
+  if (process.env.MOCK_FRESH_ARGS_OUT) fs.writeFileSync(process.env.MOCK_FRESH_ARGS_OUT, `${argv.join("\n")}\n---\n${process.env.PI_PB_GUARD ?? ""}`);
+  if (process.env.MOCK_EXPLORE_HANG) await new Promise((r) => setTimeout(r, Number(process.env.MOCK_EXPLORE_HANG)));
   if (process.env.MOCK_EXPLORE_WRITE) fs.writeFileSync(process.env.MOCK_EXPLORE_WRITE, "explorer was here");
   const answer = `src/order/Order.java holds the model; OrderService applies transitions. (asked: ${brief.split("\n")[2]})`;
   if (process.env.MOCK_SPLIT_TEXT === "1") {
@@ -133,6 +137,7 @@ if (sys.includes("ATTACKER")) {
     say([{ type: "text", text: answer.slice(mid) }]);
   } else say([{ type: "text", text: answer }]);
 } else if (sys.includes("TRIER")) {
+  if (process.env.MOCK_FRESH_ARGS_OUT) fs.writeFileSync(process.env.MOCK_FRESH_ARGS_OUT, `${argv.join("\n")}\n---\n${process.env.PI_PB_GUARD ?? ""}`);
   if (process.env.MOCK_TRY_WRITE) fs.writeFileSync(process.env.MOCK_TRY_WRITE, "trier was here");
   say([{ type: "text", text: `## Commands\n- python3 /tmp/probe.py\n## Result\n- exit 0, 1.2s for 10k rows\n## Conclusion\nProbing is fast enough. (goal: ${brief.split("\n")[2]})` }]);
 } else say([{ type: "text", text: "unexpected role" }]);

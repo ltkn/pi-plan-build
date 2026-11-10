@@ -6,6 +6,7 @@
  * in your Pi sessions; the explorer, the reviewer and the verifier are separate, fresh calls.
  */
 import { tip } from "./help.ts";
+import { duration } from "./format.ts";
 import { BINDING_SECTIONS, type ParsedSpec, type SpecTask, sectionHeading, sectionOf } from "./spec.ts";
 import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, type Progress, type TaskProgress } from "./store.ts";
 
@@ -31,18 +32,29 @@ const TIMEOUT_RULE = "Shell calls are capped at commandTimeoutSec (30 minutes by
 
 /* ================================ explorer ================================ */
 
-export const EXPLORER_SYSTEM = `You are an EXPLORER in a fresh context: you answer a question about the code so the conversation that asked doesn't have to read it all. ${MAP_FIRST} Read code with grep for regex, find and ls for patterns, and read for known paths, in parallel where it helps. Shell is for inspection only (ls, find, cat, head, tail, git status, git log, git diff, rg): no mkdir, touch, rm, cp, mv, redirects, installs, curl, or scripts — experiments stay in the session that asked. Do not create or modify any file. Be concise: conclusion first. Quote only what the question asked for (rows, excerpts); otherwise cite paths (file:line), not pastes. Your answer is all that goes back.`;
+export const EXPLORER_SYSTEM = `You are an EXPLORER in a fresh context: you answer a question about the code so the conversation that asked doesn't have to read it all. ${MAP_FIRST} Read code with grep for regex, find and ls for patterns, and read for known paths, in parallel where it helps. Your shell runs read-only inspection only — ls, find, cat, head, tail, wc, rg, grep, and git status/log/diff/show — and pb refuses anything else, redirects and chained commands included: you never connect to a database, a service, the network or production. Anything that needs running code belongs in pb_try, called by the session that asked. Do not create or modify any file. Be concise: conclusion first. Quote only what the question asked for (rows, excerpts); otherwise cite paths (file:line), not pastes. Your answer is all that goes back.`;
 
-export function explorerBrief(question: string, context?: string): string {
-  return `# Question\n\n${question}${context ? `\n\n# What is being planned\n\n${context}` : ""}\n\nBudget: read at most ~20 files and stop after ~30 tool steps. If the question needs more, don't keep going: answer what you have and say which sub-question to split off.\n\n# Return exactly\n\n## Answer — the conclusion first, 5-15 lines\n## Files — \`path:line — role\`, up to ~20, no pastes; one role is \`pattern to imitate\` when relevant\n## Uncertainties — what wasn't found, or would need running code`;
+/** A limit in words: "2m", or "no limit" for 0. */
+const limitText = (sec: number) => (sec > 0 ? duration(sec * 1000) : "no limit");
+
+/** The explorer's limits, as its brief states them. */
+export const explorerLimits = (o: { commandSec: number; idleSec: number; totalSec: number }) =>
+  `Limits: each command stops after ${limitText(o.commandSec)}; this run ends after ${limitText(o.idleSec)} without progress, or ${limitText(o.totalSec)} in all.`;
+
+/** A probe's limits, as its brief states them: the project's own long commands get the long limit, nothing outlasts the probe. */
+export const probeLimits = (o: { commandSec: number; longSec: number; totalSec: number }) =>
+  `Limits: a command stops after ${limitText(o.commandSec)}, and the project's own suite, compile, lint and Test: commands after ${limitText(o.longSec)}; no command outlasts the probe, which ends after ${limitText(o.totalSec)}.`;
+
+export function explorerBrief(question: string, context?: string, limits = ""): string {
+  return `# Question\n\n${question}${context ? `\n\n# What is being planned\n\n${context}` : ""}\n\n${limits ? `${limits}\n` : ""}Budget: read at most ~20 files and stop after ~30 tool steps. If the question needs more, don't keep going: answer what you have and say which sub-question to split off.\n\n# Return exactly\n\n## Answer — the conclusion first, 5-15 lines\n## Files — \`path:line — role\`, up to ~20, no pastes; one role is \`pattern to imitate\` when relevant\n## Uncertainties — what wasn't found, or would need running code`;
 }
 
 /* ================================= try ================================= */
 
-export const TRY_SYSTEM = `You are a TRIER in a fresh context: you establish something by running code so the conversation that asked doesn't pay for the output. ${MAP_FIRST} Then run commands, curl, one-off scripts or single-file programs in a temporary directory outside the project. Do not create or modify any project file; for a database use read-only queries. ${PRODUCTION_RULE} Bound every command before you run it: size the input and the loop first, wrap anything that could hang or run long in \`timeout <seconds>\`, and keep the whole probe to a few minutes — a probe that needs longer is the wrong probe, and pb stops the run at its time limit. Be concise: conclusion first. Include only the evidence the question asked for (rows, excerpts, output excerpts); otherwise state commands and exits. Your answer is all that goes back.`;
+export const TRY_SYSTEM = `You are a TRIER in a fresh context: you establish something by running code so the conversation that asked doesn't pay for the output. ${MAP_FIRST} Then run commands, curl, one-off scripts or single-file programs in a temporary directory outside the project. Do not create or modify any project file; for a database use read-only queries. ${PRODUCTION_RULE} pb refuses commands that write to a system outside this machine (database writes, cluster, cloud and infrastructure changes, HTTP writes, remote shells, pushes), and your shell runs without database, cloud and cluster credentials: probe a local or scratch copy. Bound every command before you run it: size the input and the loop first, wrap anything that could hang or run long in \`timeout <seconds>\`, and keep the whole probe within its limits below — a probe that needs longer is the wrong probe, and pb stops a command, or the run, at its limit. Be concise: conclusion first. Include only the evidence the question asked for (rows, excerpts, output excerpts); otherwise state commands and exits. Your answer is all that goes back.`;
 
-export function tryBrief(goal: string, context?: string): string {
-  return `# Goal\n\n${goal}${context ? `\n\n# What is being planned\n\n${context}` : ""}\n\nBudget: stop after ~30 tool steps.\n\n# Return exactly\n\n## Commands — what you ran, one line each\n## Result — evidence: exits and output excerpts, up to ~20 lines\n## Conclusion — what this establishes, 3-10 lines`;
+export function tryBrief(goal: string, context?: string, limits = ""): string {
+  return `# Goal\n\n${goal}${context ? `\n\n# What is being planned\n\n${context}` : ""}\n\n${limits ? `${limits}\n` : ""}Budget: stop after ~30 tool steps.\n\n# Return exactly\n\n## Commands — what you ran, one line each\n## Result — evidence: exits and output excerpts, up to ~20 lines\n## Conclusion — what this establishes, 3-10 lines`;
 }
 
 /* ================================== plan ================================== */
@@ -422,7 +434,7 @@ export function fixSeedPrompt(spec: string, findings: Finding[], reference = "",
     `${reference ? `${reference}\n\n` : ""}` +
     `A finding is a class, not a line: before fixing one, look for the same defect elsewhere in ${change} and fix every instance there too, naming each in your reply; an instance outside the change is reported, not fixed. ` +
     `For each finding that changes behaviour, first write a test that reproduces it and call pb_fix_red with the finding's number and the command that runs it: pb runs it and it must fail. Then fix, and run it again yourself. A finding no test can show (a doc or comment, a config value) goes in untested when you report, with why. ` +
-    `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green: pb runs the project's checks after you report, and a failure there means the lap is not done. ${TIMEOUT_RULE} ${STRUCTURED_EDIT_RULE} ` +
+    `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green: pb runs the project's checks after you report, and a failure there means the lap is not done. ${PRODUCTION_RULE} ${TIMEOUT_RULE} ${STRUCTURED_EDIT_RULE} ` +
     `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
     `When a fix changes behaviour the spec's Design or Decisions describe, update those lines in this lap with pb_update_spec, so the spec says what the code now does; only Design and Decisions — a finding that needs its Goal, Contracts or Acceptance changed is skipped instead. A rule you write in a doc must match what the code does: check it against the code and its tests. ` +
     `Reply shape, one block per finding: files changed (every instance), test command, result. Do not commit or archive, and write nothing else under .pi/. ${SELF_REVIEW_RULE} ` +

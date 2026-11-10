@@ -45,6 +45,13 @@ export interface RunOptions {
    * result says `timedOut` so the caller can name the limit instead of reading as a user stop.
    */
   timeoutMs?: number;
+  /**
+   * Stop the run after this long without progress (a tool call or a finished message; streamed text alone is not
+   * progress): a run that keeps working is never stopped by it, a stuck one is. Its clock starts with the run's.
+   */
+  idleMs?: number;
+  /** extra environment for the spawned process (merged over pb's own), e.g. the fresh-guard settings */
+  env?: Record<string, string>;
   signal?: AbortSignal;
   /** Each tool call the fresh model makes, as it happens: a one-line preview and the call itself. */
   onActivity?: (line: string, call: ToolCall) => void;
@@ -73,8 +80,10 @@ export interface RunResult {
   /** wall-clock duration of the call */
   ms: number;
   aborted: boolean;
-  /** stopped because `timeoutMs` passed, not because the caller aborted */
+  /** stopped because `timeoutMs` or `idleMs` passed, not because the caller aborted */
   timedOut: boolean;
+  /** which limit stopped it: the run's total time, or its time without progress */
+  timedOutBy?: "time" | "idle";
   /** the saved session file (with sessionDir) */
   sessionFile?: string;
 }
@@ -229,11 +238,22 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
     res.exitCode = await new Promise<number>((resolve) => {
       const inv = piInvocation(args);
       const posix = process.platform !== "win32";
-      const proc = spawn(inv.command, inv.args, { cwd: o.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], detached: posix });
+      const proc = spawn(inv.command, inv.args, { cwd: o.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], detached: posix, ...(o.env ? { env: { ...process.env, ...o.env } } : {}) });
       let buf = "";
       let stderr = "";
       let closed = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      // Hoisted so the line parser above can call it before this point in the source runs.
+      function armIdle() {
+        if (!o.idleMs || o.idleMs <= 0 || closed || o.signal?.aborted) return;
+        if (idleTimer !== undefined) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          res.timedOut = true;
+          res.timedOutBy ??= "idle";
+          kill();
+        }, o.idleMs);
+      }
 
       const onLine = (line: string) => {
         if (!line.trim()) return;
@@ -244,6 +264,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
           return;
         }
         if (ev.type === "session") sessionId = ev.id ?? ev.sessionId ?? ev.session_id;
+        if (ev.type !== "message_update") armIdle(); // progress: a tool call, a result, a finished message
         if (ev.type === "message_update") {
           const d = ev.assistantMessageEvent;
           if ((d?.type === "text_delta" || d?.type === "thinking_delta") && typeof d.delta === "string") {
@@ -291,6 +312,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
       proc.on("close", (code, signal) => {
         closed = true;
         if (timer) clearTimeout(timer);
+        if (idleTimer) clearTimeout(idleTimer);
         if (o.signal) o.signal.removeEventListener("abort", kill);
         if (buf.trim()) onLine(buf);
         if (res.aborted) return resolve(1);
@@ -304,6 +326,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
       proc.on("error", (e) => {
         closed = true;
         if (timer) clearTimeout(timer);
+        if (idleTimer) clearTimeout(idleTimer);
         if (o.signal) o.signal.removeEventListener("abort", kill);
         res.error = e.message;
         resolve(1);
@@ -312,6 +335,10 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
         if (timer) {
           clearTimeout(timer);
           timer = undefined;
+        }
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = undefined;
         }
         if (closed) return;
         res.aborted = true;
@@ -340,9 +367,11 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
       if (o.timeoutMs && o.timeoutMs > 0 && !o.signal?.aborted) {
         timer = setTimeout(() => {
           res.timedOut = true;
+          res.timedOutBy ??= "time";
           kill();
         }, o.timeoutMs);
       }
+      armIdle();
     });
   } finally {
     await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});

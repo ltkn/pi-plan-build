@@ -79,8 +79,18 @@ export interface Config {
   freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
   baseline: boolean;
-  /** Model and thinking level of pb_explore and the project map; unset model = your session's, unset thinking = max (Pi clamps it to the model). */
-  explorer: { model?: string; thinking?: string };
+  /**
+   * Model and thinking level of pb_explore and the project map; unset model = your session's, unset thinking = max
+   * (Pi clamps it to the model). An explorer run ends after `idleSec` with no progress (default 600) or `timeoutSec`
+   * in all (default 1800), and each of its read-only commands after `commandTimeoutSec` (default 120); 0 = no limit.
+   */
+  explorer: { model?: string; thinking?: string; idleSec: number; timeoutSec: number; commandTimeoutSec: number };
+  /**
+   * The shell environment of pb_explore and pb_try: credentials for databases, clouds and clusters are removed from
+   * it (and the common tools' credential files pointed at nothing) so a probe cannot reach production. `drop` adds
+   * variable names or `PREFIX_*` / `*_SUFFIX` patterns; `keep` names ones a probe needs (a local test database, say).
+   */
+  probeEnv: { drop: string[]; keep: string[] };
   /**
    * The planning conversation's model and least thinking level, applied when planning starts and put back
    * when it ends: unset model = your session's; thinking is a floor (default "high"), never lowered.
@@ -134,7 +144,8 @@ export const DEFAULT_CONFIG: Config = {
   specFix: { maxLaps: 3, maxReviews: 2 },
   freshAbove: 50,
   baseline: true,
-  explorer: {},
+  explorer: { idleSec: 600, timeoutSec: 1800, commandTimeoutSec: 120 },
+  probeEnv: { drop: [], keep: [] },
   planner: {},
   checkpointAt: 75,
   buildReset: "task",
@@ -199,7 +210,15 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     explorer: {
       model: typeof (explorerRaw as { model?: unknown }).model === "string" ? (explorerRaw as { model: string }).model : undefined,
       thinking: typeof (explorerRaw as { thinking?: unknown }).thinking === "string" ? (explorerRaw as { thinking: string }).thinking : undefined,
+      idleSec: num((explorerRaw as { idleSec?: unknown }).idleSec, DEFAULT_CONFIG.explorer.idleSec),
+      timeoutSec: num((explorerRaw as { timeoutSec?: unknown }).timeoutSec, DEFAULT_CONFIG.explorer.timeoutSec),
+      commandTimeoutSec: num((explorerRaw as { commandTimeoutSec?: unknown }).commandTimeoutSec, DEFAULT_CONFIG.explorer.commandTimeoutSec),
     },
+    probeEnv: (() => {
+      const r = typeof (raw as { probeEnv?: unknown }).probeEnv === "object" && (raw as { probeEnv?: unknown }).probeEnv !== null ? ((raw as { probeEnv: Record<string, unknown> }).probeEnv) : {};
+      const names = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && /^(\*?[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*\*)$/.test(x)) : []);
+      return { drop: names(r.drop), keep: names(r.keep) };
+    })(),
     buildModel: typeof (raw as { buildModel?: unknown }).buildModel === "string" ? (raw as { buildModel: string }).buildModel : undefined,
     checkpointAt: num((raw as { checkpointAt?: unknown }).checkpointAt, DEFAULT_CONFIG.checkpointAt),
     buildReset: oneOf((raw as { buildReset?: unknown }).buildReset, ["task", "threshold", "never"] as const, DEFAULT_CONFIG.buildReset),

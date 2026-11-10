@@ -9,8 +9,9 @@ import { changedPaths, cleanupIndexes, snapshot } from "./checkpoint.ts";
 import { PLANNER_ROLE, PLANNER_SECTION, checkpointPrompt, checkpointSummary, extraBlock, reviewStateSummary, nudgePrompt } from "./prompts.ts";
 import { tokensOf } from "./spec.ts";
 import { Store, now } from "./store.ts";
-import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, pauseBuild, pruneSession, refreshWhere, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
+import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, longCommandSec, longCommands, pauseBuild, pruneSession, refreshWhere, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
 import { whereHere } from "./next.ts";
+import { TIMED_OUT, commandCap, isLongCommand, timeoutNote } from "./command-guard.ts";
 import { unfinishedPhase } from "./phase.ts";
 import { buildResetDue, stateSummary } from "./flow.ts";
 
@@ -44,17 +45,34 @@ export function registerHooks(pi: ExtensionAPI) {
     else delete sections[PLANNER_SECTION];
   });
 
+  /** which limit governs each shell call in flight, so a timeout names the one that fired */
+  const shellLimitKeys = new Map<string, string>();
+
+  // A command stopped at its limit says which limit and how to raise it, instead of a bare "timed out".
+  pi.on("tool_result", (ev, ctx) => {
+    if (ev.toolName !== "bash" && ev.toolName !== "powershell") return;
+    const key = shellLimitKeys.get(ev.toolCallId) ?? "commandTimeoutSec";
+    shellLimitKeys.delete(ev.toolCallId);
+    if (!TIMED_OUT.test(ev.content.map((c) => (c.type === "text" ? c.text : "")).join(""))) return;
+    return { content: [...ev.content, { type: "text" as const, text: `\n${timeoutNote(key, new Store(ctx.cwd).rel("config.json"))}` }] };
+  });
+
   pi.on("tool_call", (e, ctx) => {
-    const ev = e as { toolName: string; input: { path?: string; timeout?: unknown } };
+    const ev = e as { toolName: string; toolCallId?: string; input: { path?: string; command?: string; timeout?: unknown } };
     const session = ctx.sessionManager.getSessionFile();
     const store = new Store(ctx.cwd);
     // Pi's shell tools have no default timeout, so one unbounded command (a probe loop, a hung
     // install) holds the session for hours. pb caps every shell call before Pi runs it: a shorter
-    // timeout the model asked for stays, a longer one is clamped, and 0 turns the cap off.
+    // timeout the model asked for stays, a longer one is clamped, and 0 turns the cap off. The project's
+    // own long commands (suite, compile, lint, Test: lines) get the long limit, never a shorter one.
     if (ev.toolName === "bash" || ev.toolName === "powershell") {
-      const limit = store.config().commandTimeoutSec;
-      const asked = typeof ev.input.timeout === "number" && Number.isFinite(ev.input.timeout) && ev.input.timeout > 0 ? ev.input.timeout : undefined;
-      if (limit > 0 && (asked === undefined || asked > limit)) ev.input.timeout = limit;
+      const cfg = store.config();
+      const command = String(ev.input.command ?? "");
+      const longs = longCommands(ctx.cwd, store);
+      const long = isLongCommand(command, longs);
+      const cap = commandCap({ command, asked: typeof ev.input.timeout === "number" ? ev.input.timeout : undefined, shellSec: cfg.commandTimeoutSec, longSec: longCommandSec(cfg), longCommands: longs });
+      if (cap !== undefined) ev.input.timeout = cap;
+      if (ev.toolCallId) shellLimitKeys.set(ev.toolCallId, long && cfg.verifyTimeoutSec > cfg.commandTimeoutSec ? "verifyTimeoutSec" : "commandTimeoutSec");
     }
     // The review session's tool set is the allowlist itself, not a hope that Pi's active-tool
     // state matches it: a late-connecting MCP server registers its tools after session_start and

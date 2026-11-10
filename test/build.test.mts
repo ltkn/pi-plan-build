@@ -96,15 +96,22 @@ test("a shell call in a pb session is capped by commandTimeoutSec", async () => 
   const t = setup({ verify: "true", commandTimeoutSec: 5 });
   process.chdir(t.repo);
   await t.run("plan", "cancel orders");
-  const silent = { command: "true" };
+  const silent = { command: "echo ok" };
   await t.callTool("bash", silent);
   assert.equal((silent as { timeout?: number }).timeout, 5); // no timeout: pb sets the cap
-  const shorter = { command: "true", timeout: 2 };
+  const shorter = { command: "echo ok", timeout: 2 };
   await t.callTool("bash", shorter);
   assert.equal(shorter.timeout, 2); // the model's stricter bound stays
-  const longer = { command: "true", timeout: 60 };
+  const longer = { command: "echo ok", timeout: 60 };
   await t.callTool("bash", longer);
   assert.equal(longer.timeout, 5); // a longer one is clamped, not trusted
+  // The project's own suite ("true" here) is a genuine long command: it gets the long limit, never the shell's.
+  const suite = { command: "true" };
+  await t.callTool("bash", suite);
+  assert.equal((suite as { timeout?: number }).timeout, 900, "max(commandTimeoutSec, verifyTimeoutSec)");
+  const suiteWithArgs = { command: "cd sub && true --grep orders" };
+  await t.callTool("bash", suiteWithArgs);
+  assert.equal((suiteWithArgs as { timeout?: number }).timeout, 900);
   const off = setup({ verify: "true", commandTimeoutSec: 0 });
   process.chdir(off.repo);
   await off.run("plan", "cancel orders");

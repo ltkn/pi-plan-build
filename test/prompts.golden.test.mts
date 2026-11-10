@@ -51,8 +51,8 @@ const findings: Finding[] = [
 
 /** Every prompt pb sends, by snapshot name. Inputs are fixed so a diff is always a prompt change. */
 const RENDERED: Record<string, () => string> = {
-  "explorer": () => `${prompts.EXPLORER_SYSTEM}\n\n---\n\n${prompts.explorerBrief("Where are order transitions applied?", "Cancelling orders")}`,
-  "trier": () => `${prompts.TRY_SYSTEM}\n\n---\n\n${prompts.tryBrief("Does the ORM lock the row on update?", "Cancelling orders")}`,
+  "explorer": () => `${prompts.EXPLORER_SYSTEM}\n\n---\n\n${prompts.explorerBrief("Where are order transitions applied?", "Cancelling orders", prompts.explorerLimits({ commandSec: 120, idleSec: 600, totalSec: 1800 }))}`,
+  "trier": () => `${prompts.TRY_SYSTEM}\n\n---\n\n${prompts.tryBrief("Does the ORM lock the row on update?", "Cancelling orders", prompts.probeLimits({ commandSec: 1800, longSec: 1800, totalSec: 900 }))}`,
   "planner-role": () => prompts.PLANNER_ROLE,
   "plan": () => prompts.planPrompt("Let customers cancel pending orders", "npm test", "", "running"),
   "approach": () => prompts.approachPrompt("", ""),

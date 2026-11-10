@@ -1385,3 +1385,34 @@ test("deps: the lockfile peer ranges match package.json", async () => {
   const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
   assert.deepEqual(lock.packages[""].peerDependencies, pkg.peerDependencies); // npm ci refuses when these disagree
 });
+
+test("pb_explore and pb_try run guarded: the guard is loaded with each tool's limits, and a silent explorer is stopped by its idle limit", async () => {
+  const t = setup({ verify: "npm test", commandTimeoutSec: 1800, verifyTimeoutSec: 600, probeTimeoutSec: 900, explorer: { idleSec: 1, timeoutSec: 1800, commandTimeoutSec: 120 } });
+  process.chdir(t.repo);
+  const out = path.join(os.tmpdir(), `pb-fresh-args-${process.pid}.txt`);
+  const guardOf = () => {
+    const [argv, settings] = fs.readFileSync(out, "utf8").split("\n---\n");
+    return { argv, settings: JSON.parse(settings) };
+  };
+  process.env.MOCK_FRESH_ARGS_OUT = out;
+  try {
+    assert.equal((await t.callTool("pb_explore", { question: "Where are transitions?" })).error, undefined);
+    let g = guardOf();
+    assert.match(g.argv, /\n-e\n[^\n]*fresh-guard\.ts\n/, "the guard is loaded into the explorer's process");
+    assert.deepEqual([g.settings.role, g.settings.shellSec, g.settings.runSec, g.settings.longCommands], ["explorer", 120, 1800, []]);
+    assert.equal((await t.callTool("pb_try", { goal: "Does the ORM lock the row?" })).error, undefined);
+    g = guardOf();
+    assert.match(g.argv, /fresh-guard\.ts/);
+    assert.equal(g.settings.role, "trier");
+    assert.deepEqual([g.settings.shellSec, g.settings.longSec, g.settings.longKey, g.settings.runSec], [1800, 1800, "commandTimeoutSec", 900], "the suite's limit is never below an ordinary command's");
+    assert.ok(g.settings.longCommands.includes("npm test"), "the project's suite is a long command");
+    // A stuck explorer: no event at all for longer than idleSec.
+    process.env.MOCK_EXPLORE_HANG = "4000";
+    const stuck = await t.callTool("pb_explore", { question: "Where else?" });
+    assert.match(stuck.error ?? "", /^Exploration stopped after 1s without progress \(explorer\.idleSec\)\. Split the question[\s\S]*raises the limit in \.pi\/pb\/config\.json \(0 = none\)/);
+  } finally {
+    delete process.env.MOCK_FRESH_ARGS_OUT;
+    delete process.env.MOCK_EXPLORE_HANG;
+    fs.rmSync(out, { force: true });
+  }
+});

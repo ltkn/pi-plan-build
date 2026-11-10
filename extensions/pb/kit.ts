@@ -24,6 +24,7 @@ import { buildTimeLabel, buildTiming } from "./stats.ts";
 import { type Checkpoint, type Progress, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, now, readEvents, type PlannerSettings, type ThinkingLevel, THINKING_LEVELS } from "./store.ts";
 import { lintsEachStep, pauseAt, unfinishedPhase } from "./phase.ts";
 import { specReviewOn, statusLine, whereHere } from "./next.ts";
+import type { GuardSettings } from "./fresh-guard.ts";
 import { resolveBuild, resolveLint, resolveVerify } from "./verify.ts";
 
 export const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -401,6 +402,39 @@ export const commands = (cwd: string, store: Store) => {
     buildCmd: resolveBuild(cfg.build, cwd),
     lintCmd: resolveLint(cfg.lint, cwd),
     extraCmds: cfg.extraChecks.filter((c) => c.trim() && c !== "none"),
+  };
+};
+
+/**
+ * The commands this project defines as long-running: its suite, compile, lint and extra checks, and every live
+ * spec's Test: lines. A shell call that runs one of these gets the long limit (`longCommandSec`), wherever it runs.
+ */
+export const longCommands = (cwd: string, store: Store): string[] => {
+  const { testCmd, buildCmd, lintCmd, extraCmds } = commands(cwd, store);
+  const tests = store.specNames().flatMap((n) => loadSpec(store, n)?.spec.tasks.flatMap((t) => (t.test ? [t.test] : [])) ?? []);
+  return [...new Set([testCmd, buildCmd, lintCmd, ...extraCmds, ...tests].filter((c): c is string => !!c?.trim()))];
+};
+
+/** The limit a long command gets: never less than an ordinary command's, and the run limit pb trusts for its own checks. 0 = none. */
+export const longCommandSec = (cfg: { commandTimeoutSec: number; verifyTimeoutSec: number }) =>
+  cfg.commandTimeoutSec === 0 || cfg.verifyTimeoutSec === 0 ? 0 : Math.max(cfg.commandTimeoutSec, cfg.verifyTimeoutSec);
+
+/** What the fresh-guard in a pb_explore or pb_try process enforces, handed over in its environment. */
+export const guardSettings = (role: "explorer" | "trier", cwd: string, store: Store): GuardSettings => {
+  const cfg = store.config();
+  const explorer = role === "explorer";
+  return {
+    role,
+    shellSec: explorer ? cfg.explorer.commandTimeoutSec : cfg.commandTimeoutSec,
+    shellKey: explorer ? "explorer.commandTimeoutSec" : "commandTimeoutSec",
+    longSec: explorer ? cfg.explorer.commandTimeoutSec : longCommandSec(cfg),
+    longKey: explorer ? "explorer.commandTimeoutSec" : cfg.verifyTimeoutSec > cfg.commandTimeoutSec ? "verifyTimeoutSec" : "commandTimeoutSec",
+    longCommands: explorer ? [] : longCommands(cwd, store),
+    runSec: explorer ? cfg.explorer.timeoutSec : cfg.probeTimeoutSec,
+    runKey: explorer ? "explorer.timeoutSec" : "probeTimeoutSec",
+    drop: cfg.probeEnv.drop,
+    keep: cfg.probeEnv.keep,
+    configPath: store.rel("config.json"),
   };
 };
 
