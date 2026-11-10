@@ -410,14 +410,23 @@ export function fixText(taskId: string, what: string, output: string, attempt: n
 }
 
 /** A fix lap's first message: the findings it owns, numbered as pb_fix_done reports them, and its fence. */
-export function fixSeedPrompt(spec: string, findings: Finding[], reference = ""): string {
+/**
+ * A /pb:fix lap's brief. base: the commit the build started from, so "the change" is a diff the lap can take;
+ * failure: what pb's own check said after the previous lap, which this lap must make pass.
+ */
+export function fixSeedPrompt(spec: string, findings: Finding[], reference = "", o: { base?: string; failure?: string } = {}): string {
+  const change = o.base ? `the change (\`git diff ${o.base.slice(0, 12)}\` plus untracked files)` : "the change (the files this build touched)";
   return (
     `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings.map((f, i) => findingLine(f, i + 1)).join("\n")}\n\n` +
+    `${o.failure ? `The previous lap reported fixes, but pb's check after it failed, so none of them counts yet: make it pass without undoing them.\n${o.failure}\n\n` : ""}` +
     `${reference ? `${reference}\n\n` : ""}` +
-    `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green; run each affected task's Test: line yourself before and after the change (it must fail before, pass after), and the full suite once at the end. ${TIMEOUT_RULE} ${STRUCTURED_EDIT_RULE} ` +
+    `A finding is a class, not a line: before fixing one, look for the same defect elsewhere in ${change} and fix every instance there too, naming each in your reply; an instance outside the change is reported, not fixed. ` +
+    `For each finding that changes behaviour, first write a test that reproduces it and call pb_fix_red with the finding's number and the command that runs it: pb runs it and it must fail. Then fix, and run it again yourself. A finding no test can show (a doc or comment, a config value) goes in untested when you report, with why. ` +
+    `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green: pb runs the project's checks after you report, and a failure there means the lap is not done. ${TIMEOUT_RULE} ${STRUCTURED_EDIT_RULE} ` +
     `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
-    `When a fix changes behaviour the spec's Design or Decisions describe, update those lines in this lap with pb_update_spec, so the spec says what the code now does; only Design and Decisions — a finding that needs its Goal, Contracts or Acceptance changed is skipped instead. Reply shape, one block per finding: files changed, test command, result. Do not commit or archive, and write nothing else under .pi/. ${SELF_REVIEW_RULE} ` +
-    `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), and test results; then stop.`
+    `When a fix changes behaviour the spec's Design or Decisions describe, update those lines in this lap with pb_update_spec, so the spec says what the code now does; only Design and Decisions — a finding that needs its Goal, Contracts or Acceptance changed is skipped instead. A rule you write in a doc must match what the code does: check it against the code and its tests. ` +
+    `Reply shape, one block per finding: files changed (every instance), test command, result. Do not commit or archive, and write nothing else under .pi/. ${SELF_REVIEW_RULE} ` +
+    `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), untested (number and why, for a fixed finding no test can show), and test results; then stop.`
   );
 }
 

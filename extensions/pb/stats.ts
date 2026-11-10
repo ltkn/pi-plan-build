@@ -227,8 +227,8 @@ function specPhase(e: Ev[]): SpecPhase | undefined {
 
 export function summarize(s: SpecStats): Summary {
   const e = s.events;
-  // The spec's tasks: not the final check, the coherence pass, nor the skeleton step earlier versions recorded.
-  const checks = e.filter((x) => x.type === "check" && x.task !== "final" && x.task !== "skeleton" && x.task !== COHERE_TASK_ID);
+  // The spec's tasks: not the final check, the coherence pass, the skeleton step earlier versions recorded, nor a /pb:fix lap's checks.
+  const checks = e.filter((x) => x.type === "check" && x.task !== "final" && x.task !== "skeleton" && x.task !== "fix" && x.task !== COHERE_TASK_ID);
   const perTask = new Map<string, Ev[]>();
   for (const c of checks) perTask.set(String(c.task), [...(perTask.get(String(c.task)) ?? []), c]);
   const tasks = (s.progress?.tasks ?? []).filter((t) => t.id !== "final" && t.id !== "skeleton" && t.id !== COHERE_TASK_ID);

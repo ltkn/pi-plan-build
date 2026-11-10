@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, repairLap, setup, SPEC, taskOf, written } from "./harness.mts";
+import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, provedFixed, repairLap, setup, SPEC, taskOf, written } from "./harness.mts";
 
 test("review: the reviewer looks for what the change could do without, and prefers an invariant to another guard", async () => {
   const { REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
@@ -210,7 +210,9 @@ test("fix: an unfinished lap starts the next one automatically", async () => {
   t.agent.script = async (text, tool) => {
     if (text.startsWith("[pb:fix")) {
       laps++;
-      await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" }); // each lap numbers what it is shown from 1
+      await provedFixed(tool, [1]);
+      await provedFixed(tool, [1]);
+    await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" }); // each lap numbers what it is shown from 1
     }
   };
   await t.run("fix");
@@ -241,6 +243,7 @@ test("fix: a lap updates the spec's Design and Decisions to what it fixed, and n
     await tried(tool, "pb_update_spec", { status: "planning" });
     await tried(tool, "pb_update_spec", { name: "other-spec", section: "Decisions", mode: "append", content: "- an unrelated spec edit, because." });
     await tried(tool, "pb_write_spec", { name: "order-cancellation", content: SPEC() });
+    await provedFixed(tool, [1]);
     await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
   };
   await t.run("fix");
@@ -269,6 +272,7 @@ test("fix: a report names findings by the number in the brief; a number outside 
     said.push((await tool("pb_fix_done", { fixed: [2], skipped: [], tests: "ok" })).error ?? "recorded");
     said.push((await tool("pb_fix_done", { fixed: [], skipped: [], tests: "ok" })).error ?? "recorded");
     said.push((await tool("pb_fix_done", { fixed: [1], skipped: [1], tests: "ok" })).error ?? "recorded");
+    await provedFixed(tool, [1]);
     await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
   };
   await t.run("fix");
@@ -307,6 +311,7 @@ test("fix: a lap that revises the approved contract says re-approve before revie
     if (!text.startsWith("[pb:fix")) return;
     // The lap itself can't touch the contract, but the human can edit the spec while it runs.
     fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md"), approved.replace("Cancel orders.", "Cancel pending orders."));
+    await provedFixed(tool, [1]);
     await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
   };
   await t.run("fix");
@@ -339,15 +344,153 @@ test("fix: a lap that never reports stops the loop and escalates as silent", asy
   assert.match(t.posts.at(-1)!, /\*\*❌ Fixes stopped — order-cancellation\*\* · no report · (?:<1s|\d+s)/);
 });
 
+test("fix: pb runs the project's checks after a lap; a red check means the fixes don't count, and the next lap gets the failure", async () => {
+  const t = setup({ verify: "false" }); // the suite fails whatever the lap does
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 12, title: "name the constant" }]);
+  const seeds: string[] = [];
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    seeds.push(text);
+    await provedFixed(tool, [1]);
+    await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "all green here" });
+  };
+  await t.run("fix");
+  assert.equal(seeds.length, 3, "a red check keeps the finding open, so the laps go on until the budget");
+  assert.doesNotMatch(seeds[0], /pb's check after it failed/);
+  assert.match(seeds[1], /The previous lap reported fixes, but pb's check after it failed, so none of them counts yet: make it pass without undoing them\.\n`false` failed/);
+  const summary = t.posts.at(-1)!;
+  assert.match(summary, /\*\*❌ Fixes stopped — order-cancellation\*\* · check failed · 3 laps/);
+  assert.match(summary, /fixed none/, "the lap said fixed; pb's check said otherwise, and pb's word is the record");
+  assert.match(summary, /\*\*pb's check after the last lap failed\*\*, so its fixes don't count yet:\n\n`false` failed/);
+  const checks = t.events("order-cancellation").filter((e: any) => e.type === "check" && e.task === "fix");
+  assert.ok(checks.some((e: any) => e.command === "false" && e.ok === false));
+  assert.ok(!t.selectTitles.some((x) => x.includes("Review them now?")), "no review is offered over a red check");
+});
+
+test("fix: a green check is stated as a fact, and the follow-up review is offered", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 12, title: "name the constant" }]);
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    await provedFixed(tool, [1]);
+    await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
+  };
+  t.selects.push("Review the fixes now");
+  await t.run("fix");
+  const summary = t.posts.at(-1)!;
+  assert.match(summary, /\*\*✅ Fixes complete — order-cancellation\*\* · 1 lap/);
+  // The reproducing test the lap saw fail is re-run and must pass, then the project's checks.
+  assert.match(summary, /pb's checks passed: `test -f [^`]+`, `true`/);
+  assert.ok(t.selectTitles.includes("Fixes for order-cancellation are in. Review them now?"));
+  assert.equal(t.stat.editorText, "/pb:review order-cancellation");
+});
+
+test("fix: a fixed finding needs a test seen failing first, or a stated reason no test can show it", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [
+    { priority: "P2", file: "src/order.ts", line: 12, title: "the guard is missing" },
+    { priority: "P3", file: "README.md", line: 3, title: "the doc names the old flag" },
+  ]);
+  const said: string[] = [];
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    said.push((await tool("pb_fix_done", { fixed: [1, 2], skipped: [], tests: "ok" })).error ?? "recorded");
+    // A test that passes before the fix proves nothing: refused, and it clears nothing it never set.
+    said.push(String((await tool("pb_fix_red", { finding: 1, command: "true" })).content?.[0]?.text ?? ""));
+    said.push((await tool("pb_fix_red", { finding: 9, command: "false" })).error ?? "recorded");
+    await provedFixed(tool, [1]);
+    said.push((await tool("pb_fix_done", { fixed: [1, 2], skipped: [], tests: "ok" })).error ?? "recorded");
+    said.push((await tool("pb_fix_done", { fixed: [1, 2], skipped: [], untested: [{ finding: 2, why: "a doc line: no test can show it" }], tests: "ok" })).error ?? "recorded");
+  };
+  await t.run("fix");
+  assert.match(said[0], /Not recorded: 1, 2 are reported fixed with no test seen failing first[\s\S]*call pb_fix_red, or list it in untested/);
+  assert.match(said[1], /`true` passes before the fix, so it doesn't catch finding 1/);
+  assert.match(said[2], /9 is not one of the findings shown for this lap/);
+  assert.match(said[3], /Not recorded: 2 is reported fixed with no test seen failing first/);
+  assert.equal(said[4], "recorded");
+  const fix = t.events("order-cancellation").filter((e: any) => e.type === "fix").at(-1);
+  assert.deepEqual(fix.fixedIds, [1, 2]);
+  assert.equal(fix.reds.length, 1);
+  assert.deepEqual(fix.untested, [{ finding: 2, why: "a doc line: no test can show it" }]);
+  const { fixSeedPrompt } = await import("../extensions/pb/prompts.ts");
+  assert.match(fixSeedPrompt("x", []), /first write a test that reproduces it and call pb_fix_red with the finding's number/);
+  assert.doesNotMatch(fixSeedPrompt("x", []), /affected task's Test: line/, "the task's own command passed at build: it is not what fails first");
+});
+
+test("fix: a finding is a class — the lap looks for the same defect across the change, named by its base commit", async () => {
+  const { fixSeedPrompt } = await import("../extensions/pb/prompts.ts");
+  const seed = fixSeedPrompt("x", [], "", { base: "0123456789abcdef0123" });
+  assert.match(seed, /A finding is a class, not a line: before fixing one, look for the same defect elsewhere in the change \(`git diff 0123456789ab` plus untracked files\) and fix every instance there too, naming each in your reply; an instance outside the change is reported, not fixed\./);
+  assert.match(seed, /A rule you write in a doc must match what the code does: check it against the code and its tests\./);
+});
+
+test("fix: two findings sharing a title stay two — a report is read by number", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [
+    { priority: "P2", file: "src/a.ts", line: 3, title: "the same words" },
+    { priority: "P2", file: "src/b.ts", line: 9, title: "the same words" },
+  ]);
+  let laps = 0;
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    laps++;
+    if (laps > 1) return; // the second lap stays silent: what is left open is the point
+    await provedFixed(tool, [1]);
+    await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
+  };
+  await t.run("fix");
+  assert.equal(laps, 2, "finding 2 was not fixed, so a second lap opened for it");
+  assert.match(t.posts.at(-1)!, /fixed #1 the same words/);
+  assert.doesNotMatch(t.posts.at(-1)!, /fixed #1 the same words, #2/);
+});
+
+test("fix: each lap is an undo point — /pb:undo restores its files and the spec, not the task list", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 12, title: "name the constant" }]);
+  const file = path.join(t.repo, "fixed-by-lap.txt");
+  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  const specBefore = fs.readFileSync(specFile, "utf8");
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    await provedFixed(tool, [1]);
+    fs.writeFileSync(file, "the lap's edit");
+    await tool("pb_update_spec", { section: "Decisions", mode: "append", content: "- The constant is named, because the review asked." });
+    await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
+  };
+  t.selects.push("Later");
+  await t.run("fix");
+  const row = JSON.parse(t.read(".pi/pb/specs/order-cancellation/checkpoints.json")).find((c: any) => c.id === "fix1");
+  assert.ok(row, "a row before the lap");
+  assert.equal(row.kind, "fix");
+  assert.equal(row.spec, specBefore);
+  assert.ok(fs.existsSync(file));
+  await t.run("undo", "fix1");
+  assert.ok(!fs.existsSync(file), "the lap's file change is gone");
+  assert.equal(fs.readFileSync(specFile, "utf8"), specBefore, "the spec lines the lap wrote are gone too");
+  assert.doesNotMatch(t.posts.at(-1)!, /Tasks back to todo/, "a fix lap's row is not a build task");
+  assert.equal(t.stat.editorText, "", "Later leaves nothing in the editor");
+});
+
 test("fix lap: the report is picked by event order, not the clock", async () => {
   const { lapReport } = await import("../extensions/pb/fix.ts");
-  const prior = { at: "2026-01-01 10:00:01", type: "fix", fixed: ["first"], skipped: [], tests: "ok" };
+  const prior = { at: "2026-01-01 10:00:01", type: "fix", fixed: ["first"], skipped: [], fixedIds: [1], skippedIds: [], tests: "ok" };
   const start = { at: "2026-01-01 10:00:01", type: "fix-start", findings: ["second"] };
   const events = [prior, start];
   const from = events.length; // the log position right after this lap's fix-start marker
   assert.equal(lapReport(events, from), undefined); // the prior report shares the second; it is not this lap's
-  const report = { at: "2026-01-01 10:00:02", type: "fix", fixed: ["second"], skipped: ["third"], tests: "npm test" };
-  assert.deepEqual(lapReport([...events, report], from), { fixed: ["second"], skipped: ["third"], tests: "npm test" });
+  const report = { at: "2026-01-01 10:00:02", type: "fix", fixed: ["second"], skipped: ["third"], fixedIds: [1], skippedIds: [2], reds: ["npm test -- second"], tests: "npm test" };
+  // Findings by the number the brief showed them as: two findings sharing a title stay two.
+  assert.deepEqual(lapReport([...events, report], from), { fixed: [1], skipped: [2], reds: ["npm test -- second"], tests: "npm test" });
   assert.equal(lapReport([...events, { at: "2026-01-01 10:00:03", type: "fix" }], from), undefined); // a fix event without a fixed list is not a report
 });
 
@@ -371,7 +514,7 @@ test("fix: a silent lap is not read as the prior lap's report, whatever the cloc
     t.agent.script = async (text, tool) => {
       if (!text.startsWith("[pb:fix")) return;
       laps++;
-      if (laps === 1) await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" }); // fixes "first"; later laps never report
+      if (laps === 1) await provedFixed(tool, [1]).then(() => tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" })); // fixes "first"; later laps never report
     };
     await t.run("fix");
   } finally {
@@ -399,7 +542,7 @@ test("fix: skipped findings never start a lap and reach the escalation", async (
     }),
   );
   t.agent.script = async (text, tool) => {
-    if (text.startsWith("[pb:fix")) await tool("pb_fix_done", { fixed: [1], skipped: [2], tests: "ok" });
+    if (text.startsWith("[pb:fix")) await provedFixed(tool, [1]).then(() => tool("pb_fix_done", { fixed: [1], skipped: [2], tests: "ok" }));
   };
   await t.run("fix");
   assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 1);
@@ -476,7 +619,7 @@ test("fix: the report lands only in its own session, once", async () => {
     }),
   );
   t.agent.script = async (text, tool) => {
-    if (text.startsWith("[pb:fix")) await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "`true` passes" });
+    if (text.startsWith("[pb:fix")) await provedFixed(tool, [1]).then(() => tool("pb_fix_done", { fixed: [1], skipped: [], tests: "`true` passes" }));
   };
   await t.run("fix");
   assert.equal(t.events("order-cancellation").filter((e: { type: string }) => e.type === "fix").length, 1); // the lap's single report landed, once

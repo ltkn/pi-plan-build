@@ -618,6 +618,19 @@ export const pausedWithFindings = (t: ReturnType<typeof setup>, name: string, fi
   );
 };
 
+/**
+ * What a fix lap does before reporting a finding fixed: a reproducing test seen failing (pb_fix_red), then the fix
+ * that makes it pass. The "test" is a marker file outside the repo, so pb's re-run after the lap sees it pass.
+ */
+export const provedFixed = async (tool: Tool, numbers: number[]) => {
+  for (const n of numbers) {
+    const marker = path.join(os.tmpdir(), `pb-fix-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const r = await tool("pb_fix_red", { finding: n, command: `test -f ${marker}` });
+    assert.equal(r.error, undefined, r.error ?? "");
+    fs.writeFileSync(marker, "fixed");
+  }
+};
+
 /** A control character inside `<` + `!--`: a reader that strips markers first reassembles a live one. */
 export const INJECTED = {
   priority: "P2" as const,

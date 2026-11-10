@@ -14,7 +14,10 @@ build. Your engineering standards live in AGENTS.md, written once.
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
                       (--fresh: in a new session from the spec). Before T1, one fresh reviewer
                       reads the frozen draft: P0 findings stop the build until amended; P1-P3 are advisory
-/pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default); after the fix, /pb:build re-approves a changed contract first, then /pb:review checks the delta
+/pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default): each finding fixed
+                      wherever the change repeats it, proven by a test seen failing first; pb runs the checks after
+                      each lap and offers the follow-up review; each lap is an /pb:undo point. A changed contract is
+                      re-approved by /pb:build first, then /pb:review checks the delta
 /pb:review [focus]    independent review: a spec pass in a fresh session you watch, then an adversarial pass in the background, P0–P3, blocking findings
                       double-checked; follow-ups look only at what changed (--full: everything)
                       no spec? reviews the uncommitted change against its intent

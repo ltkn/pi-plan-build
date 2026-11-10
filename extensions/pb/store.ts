@@ -300,6 +300,14 @@ export interface SpecApproval {
  * Where an open spec repair stands (Progress.fix). A repair lap is a turn in the session that asked for
  * it, so the model can probe, ask and write through pb_write_spec; `stage` says who has the ball.
  */
+/** An open /pb:fix lap: its spec, the findings its brief numbered, and each finding's test seen failing (by number). */
+export interface FixSession {
+  spec: string;
+  findings: Finding[];
+  /** finding number (1-based, as the brief shows it) → the test command pb saw fail before the fix */
+  reds?: Record<string, string>;
+}
+
 export interface SpecFixState {
   /** the session whose turn repairs the spec: only it may report a lap */
   session: string;
@@ -401,8 +409,8 @@ export interface Checkpoint {
   pendingReset?: boolean;
   /** the build's first message comes after `entry`: rewinding here drops it */
   intro?: boolean;
-  /** a spec repair lap: its row restores `spec`, and its task list is not a build task list */
-  kind?: "lap";
+  /** a spec repair lap or a /pb:fix lap: its row restores `spec` and the files, and its task list is not a build task list */
+  kind?: "lap" | "fix";
   /** the spec text at this point; /pb:undo restores it for a lap row */
   spec?: string;
   /** the progress phase at this point, restored with the row */
@@ -1215,14 +1223,15 @@ export class Store {
   private fixSessionFile(sessionFile: string): string {
     return path.join(this.root, "fixes", `${createHash("sha1").update(sessionFile).digest("hex")}.json`);
   }
-  saveFixSession(sessionFile: string, rec: { spec: string; findings: Finding[] }): void {
+  saveFixSession(sessionFile: string, rec: FixSession): void {
     writeFileAtomic(this.fixSessionFile(sessionFile), `${JSON.stringify({ session: sessionFile, ...rec }, null, 2)}\n`);
   }
-  fixSession(sessionFile: string | undefined): { spec: string; findings: Finding[] } | undefined {
+  fixSession(sessionFile: string | undefined): FixSession | undefined {
     if (!sessionFile) return undefined;
-    const rec = readJson<{ session?: unknown; spec?: unknown; findings?: unknown }>(this.fixSessionFile(sessionFile));
+    const rec = readJson<{ session?: unknown; spec?: unknown; findings?: unknown; reds?: unknown }>(this.fixSessionFile(sessionFile));
     if (typeof rec?.session !== "string" || typeof rec?.spec !== "string" || !Array.isArray(rec?.findings)) return undefined;
-    return { spec: rec.spec, findings: rec.findings as Finding[] };
+    const reds = rec.reds && typeof rec.reds === "object" ? Object.fromEntries(Object.entries(rec.reds as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string")) : {};
+    return { spec: rec.spec, findings: rec.findings as Finding[], reds };
   }
   clearFixSession(sessionFile: string): void {
     fs.rmSync(this.fixSessionFile(sessionFile), { force: true });

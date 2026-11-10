@@ -952,7 +952,18 @@ The findings land in the session you ran it from; run it **in the build
 session** and fix them right there: that session knows the code it just wrote.
 Or fix them in a fresh fenced session: `/pb:fix [ids]` takes P0–P2 finding
 ids (no ids = all open ones); P3 nits never block and are fixed by hand or
-ignored. A fix lap keeps the spec true to what it fixed: when a fix changes
+ignored. A lap treats each finding as a class: it looks for the same defect
+across the change (the diff since the build's base commit) and fixes every
+instance, reporting any outside the change instead. Each behavioural fix is
+proven like a build task: the lap writes a test that reproduces the finding and
+pb runs it (`pb_fix_red`) and sees it fail before the fix; a finding no test can
+show, such as a doc line, is reported with why. After each lap **pb runs the
+checks itself**: each reproducing test, which must now pass, then the same
+project checks as the build's final step. A red check means the lap's fixes
+don't count: the next lap gets the failure, and with no lap left the run stops
+on it. When everything is fixed and green, pb offers the follow-up review. Each
+lap is an undo point: `/pb:undo fix1` restores the files and the spec as they
+were before it. A fix lap keeps the spec true to what it fixed: when a fix changes
 behaviour the spec's Design or Decisions describe, the lap updates those lines
 itself, and it can change nothing else in the spec. A finding that needs the
 Goal, Contracts or Acceptance changed is reported as skipped, for you to revise

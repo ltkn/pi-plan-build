@@ -1,4 +1,4 @@
-words: 1827
+words: 1990
 
 ## pb_ask
 
@@ -367,6 +367,28 @@ In a pb review session: report the review's findings and acceptance checklist, o
   }
 }
 
+## pb_fix_red
+
+In a pb fixes session (opened by /pb:fix): after writing a test that reproduces a finding and before fixing it, pb runs the command and requires it to FAIL, proving the test catches the defect. pb_fix_done counts a behavioural finding as fixed only with this proof. Call it again after changing the test: only the latest failed run counts.
+
+{
+  "type": "object",
+  "required": [
+    "finding",
+    "command"
+  ],
+  "properties": {
+    "finding": {
+      "type": "number",
+      "description": "the finding's number, as the brief shows it"
+    },
+    "command": {
+      "type": "string",
+      "description": "the command that runs the reproducing test, targeted (one file or one test), not the whole suite"
+    }
+  }
+}
+
 ## pb_fix_done
 
 In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Name each by the number it was shown as in the brief. Then stop: the home session runs the approved path after the fix — /pb:build to re-approve a revised contract, otherwise /pb:review to check the delta. Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.
@@ -392,6 +414,26 @@ In a pb fixes session (opened by /pb:fix): report which review findings this lap
         "type": "number"
       },
       "description": "the numbers of findings that need a design decision (spec revision), not an edit, as shown in the brief"
+    },
+    "untested": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "finding",
+          "why"
+        ],
+        "properties": {
+          "finding": {
+            "type": "number"
+          },
+          "why": {
+            "type": "string",
+            "description": "why no test can show this fix (a doc or comment, a config value)"
+          }
+        }
+      },
+      "description": "fixed findings with no reproducing test, each with why"
     },
     "tests": {
       "type": "string",

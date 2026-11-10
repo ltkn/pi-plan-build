@@ -11,7 +11,7 @@ import { restorePhase } from "./phase.ts";
 
 export function registerUndo(pi: ExtensionAPI) {
   pi.registerCommand(cmd("undo"), {
-    description: "Go back to before a task of this build or a spec repair lap: files, task list and conversation, picked from a list",
+    description: "Go back to before a task of this build, a spec repair lap or a /pb:fix lap: files, task list and conversation, picked from a list",
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
@@ -49,8 +49,8 @@ export function registerUndo(pi: ExtensionAPI) {
       // only when that text differs from what is on disk now.
       const intended = target.spec !== undefined && target.spec !== currentSpec ? [specPath, ...files] : files;
       const idx = cps.indexOf(target);
-      // A repair lap's row restores the spec, not a task list: only build rows say what went back to todo.
-      const undoneCps = cps.slice(idx).filter((c) => c.task && c.kind !== "lap");
+      // A repair or fix lap's row restores files and the spec, not a task list: only build rows say what went back to todo.
+      const undoneCps = cps.slice(idx).filter((c) => c.task && !c.kind);
       const undoneRows = cps.slice(idx).filter((c) => c.task);
       const undone = undoneCps.map((c) => c.id);
       const head = gitHead(ctx.cwd);
@@ -135,7 +135,7 @@ export function registerUndo(pi: ExtensionAPI) {
       p.fix = undefined;
       store.saveProgress(p);
       showProgress(ctx, p);
-      store.event(name, { type: "undo", to: target.id, tasks: undone, rewound, ...(target.kind === "lap" ? { lap: true } : {}) });
+      store.event(name, { type: "undo", to: target.id, tasks: undone, rewound, ...(target.kind === "lap" ? { lap: true } : target.kind === "fix" ? { fix: true } : {}) });
       const note = beforeCompaction
         ? `\nThe conversation wasn't rewound (that point is before a context reset or compaction). What was undone: ${undoneRows.map((c) => c.summary ?? `${c.id} (unfinished)`).join("; ") || "nothing finished"}.`
         : "";
