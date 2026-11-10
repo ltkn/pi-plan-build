@@ -19,6 +19,14 @@ only what its events already carry (the build's own start and end).
 <!-- pb:topic flow -->
 ## The normal path
 
+**You always know the next step.** The footer reads `pb · <spec> · <state> ·
+next: <command>` and follows every command and turn; the terminal title carries
+the spec and its state. **alt+n** puts that command in the editor (press Enter
+to run it); `/pb:help` with no topic opens with where you are and what's next,
+and `/pb:status` says it for every spec. Starting Pi on work in progress says it
+once. Finding numbers (`/pb:fix`, `/pb:spec-fix`) and checkpoint ids (`/pb:undo`)
+complete with what each one is.
+
 1. **`/pb:plan <what you want, in your own words>`**: Pi investigates (it can
    run anything, but won't touch the project's files): the code involved, the
    conventions, how a similar feature is built. The harness runs the test suite
@@ -1134,7 +1142,8 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 <!-- pb:topic status -->
 ## Status, stats and archive
 
-- **`/pb:status`**: every spec, its state, verification, dependencies and tasks.
+- **`/pb:status`**: every spec, its state, verification, dependencies and tasks,
+  and its next step.
   `/pb:status --json` prints the same information as the `pb.report/2`
   document for scripts.
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and

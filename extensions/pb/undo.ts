@@ -6,12 +6,13 @@ import type {
 import { changedPaths, restore, snapshot } from "./checkpoint.ts";
 import { tip } from "./help.ts";
 import { type Checkpoint, COHERE_TASK_ID, Store, appendCheckpoint, gitHead, now } from "./store.ts";
-import { cmd, post, rewindPoint, runtime, showProgress, specOfSession, tree } from "./kit.ts";
+import { cmd, post, rewindPoint, runtime, showProgress, specOfSession, tree, undoCompletions } from "./kit.ts";
 import { restorePhase } from "./phase.ts";
 
 export function registerUndo(pi: ExtensionAPI) {
   pi.registerCommand(cmd("undo"), {
     description: "Go back to before a task of this build, a spec repair lap or a /pb:fix lap: files, task list and conversation, picked from a list",
+    getArgumentCompletions: undoCompletions,
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);

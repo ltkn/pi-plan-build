@@ -74,7 +74,9 @@ export function setup(config: object = {}) {
   const names = new Map<string, string>();
   /** Acceptance ids from each review session's brief, for a pass resumed after an interruption. */
   const reviewChecklists = new Map<string, string[]>();
-  const stat = { runs: 0, editorText: "" };
+  const stat = { runs: 0, editorText: "", title: "" };
+  /** The footer status lines, by id: pb's is "pb". */
+  const statuses = new Map<string, string>();
   let sessions = 0;
 
   // Session trees, by session file: entries and the current leaf.
@@ -106,6 +108,7 @@ export function setup(config: object = {}) {
   type Runtime = {
     file: () => string;
     cmds: Record<string, any>;
+    shortcuts: Record<string, any>;
     tools: Record<string, any>;
     handlers: Record<string, ((e: object, ctx: object) => unknown)[]>;
     renderers: string[];
@@ -142,6 +145,7 @@ export function setup(config: object = {}) {
     const file = () => self.ctx.sessionManager.getSessionFile();
     self.file = file;
     self.cmds = {};
+    self.shortcuts = {};
     self.tools = {};
     self.handlers = {};
     self.renderers = [];
@@ -153,6 +157,7 @@ export function setup(config: object = {}) {
     self.contextFiles = [];
     self.pi = guard(me, {
       registerCommand: (n: string, o: object) => (self.cmds[n] = o),
+      registerShortcut: (k: string, o: object) => (self.shortcuts[k] = o),
       registerTool: (t: { name: string }) => (self.tools[t.name] = t),
       registerEntryRenderer: (n: string) => self.renderers.push(n),
       registerMessageRenderer: (n: string) => self.renderers.push(n),
@@ -210,7 +215,8 @@ export function setup(config: object = {}) {
       ui: {
         notify: (m: string) => notes.push(m),
         setWidget: (id: string, lines?: string[]) => void widgets.set(id, lines),
-        setStatus: () => {},
+        setStatus: (id: string, text?: string) => void (text === undefined ? statuses.delete(id) : statuses.set(id, text)),
+        setTitle: (t: string) => (stat.title = t),
         setEditorText: (t: string) => (stat.editorText = t),
         select: async (title: string, opts: string[], o?: { timeout?: number; signal?: AbortSignal }) => {
           selectTitles.push(title);
@@ -418,6 +424,7 @@ export function setup(config: object = {}) {
     agent,
     reviewer,
     stat,
+    statuses,
     run,
     read,
     progress,

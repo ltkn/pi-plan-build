@@ -23,6 +23,7 @@ import { type Stack, findStandards, isUserTemplate, standardsLoaded } from "./st
 import { buildTimeLabel, buildTiming } from "./stats.ts";
 import { type Checkpoint, type Progress, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, now, readEvents, type PlannerSettings, type ThinkingLevel, THINKING_LEVELS } from "./store.ts";
 import { lintsEachStep, pauseAt, unfinishedPhase } from "./phase.ts";
+import { specReviewOn, statusLine, whereHere } from "./next.ts";
 import { resolveBuild, resolveLint, resolveVerify } from "./verify.ts";
 
 export const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -207,6 +208,103 @@ export const specCompletions = (prefix: string) =>
     .specNames()
     .filter((n) => n.startsWith(prefix))
     .map((n) => ({ value: n, label: n }));
+
+/**
+ * Completion for `[spec] <number>...` arguments: the numbers a list carries, each with what it is, so nobody
+ * scrolls back to find them. The spec is the one named, else the only one with numbers to offer (written into
+ * the value, so the command resolves the same spec), else spec names. Pi replaces the whole argument text with
+ * the chosen value, so each value carries the words before it.
+ */
+const numberedCompletions = (prefix: string, listFor: (store: Store, name: string) => { n: number; label: string }[]) => {
+  const store = new Store(process.cwd());
+  const words = prefix.split(/\s+/);
+  const partial = words.pop() ?? "";
+  const specs = store.specNames();
+  const named = words[0] && specs.includes(words[0]) ? words[0] : undefined;
+  const offering = specs.filter((n) => listFor(store, n).length);
+  const spec = named ?? (offering.length === 1 ? offering[0] : undefined);
+  if (!spec) return words.length ? null : offering.filter((n) => n.startsWith(partial)).map((n) => ({ value: `${n} `, label: n, description: `${listFor(store, n).length} to pick from` }));
+  const taken = new Set(words.slice(named ? 1 : 0));
+  const base = [...(named ? [] : [spec]), ...words].join(" ");
+  const items = listFor(store, spec)
+    .filter((x) => !taken.has(String(x.n)) && String(x.n).startsWith(partial))
+    .map((x) => ({ value: `${base} ${x.n} `, label: String(x.n), description: x.label }));
+  return items.length ? items : null;
+};
+
+const oneLine = (t: string) => t.replace(/\s+/g, " ").trim().slice(0, 90);
+
+/** `/pb:fix [spec] <ids>`: the open review findings, numbered as the review showed them. */
+export const fixCompletions = (prefix: string) =>
+  numberedCompletions(prefix, (store, name) => (store.progress(name)?.review?.findings ?? []).map((f, i) => ({ n: i + 1, label: `[${f.priority}] ${oneLine(f.title)}` })));
+
+/** `/pb:spec-fix [spec] <numbers>`: the findings recorded on the spec's current text, numbered as a lap is shown them. */
+export const specFixCompletions = (prefix: string) =>
+  numberedCompletions(prefix, (store, name) => {
+    const md = store.readSpec(name);
+    const reported = md === undefined ? [] : specReviewOn(store, name, md)?.reported;
+    return (Array.isArray(reported) ? (reported as { priority?: string; title?: string }[]) : []).map((f, i) => ({ n: i + 1, label: `[${f.priority ?? "?"}] ${oneLine(f.title ?? "")}` }));
+  });
+
+/** `/pb:undo <id>`: the checkpoints of the one spec that has any, newest first, each with what it undoes. */
+export const undoCompletions = (prefix: string) => {
+  const store = new Store(process.cwd());
+  const withRows = store.specNames().filter((n) => store.checkpoints(n).length);
+  if (withRows.length !== 1) return null;
+  const items = [...store.checkpoints(withRows[0])]
+    .reverse()
+    .filter((c) => c.id.startsWith(prefix.trim()))
+    .map((c) => ({ value: c.id, label: c.id, description: c.id === "start" ? "the start of the build" : oneLine(c.summary ?? "(not finished)") }));
+  return items.length ? items : null;
+};
+
+/**
+ * Where this session stands, always on screen: the footer line (spec, state, next step) and the terminal title.
+ * Called after every pb command, at every turn end and settle, and at session start, so it never shows a stale
+ * step. Best-effort: a replaced session has nothing to draw on.
+ */
+export const refreshWhere = (ctx: ExtensionContext) =>
+  safely(() => {
+    if (!ctx.hasUI) return;
+    const where = whereHere(new Store(ctx.cwd), ctx.sessionManager.getSessionFile() ?? undefined);
+    ctx.ui.setStatus("pb", where ? statusLine(where) : undefined);
+    // Pi's own title is "π - [session name -] folder"; pb adds the spec and its state while there is one.
+    const folder = path.basename(ctx.cwd);
+    const named = tree(ctx).getSessionName?.();
+    ctx.ui.setTitle(where?.spec ? `π - ${where.spec}: ${where.state} - ${folder}` : named ? `π - ${named} - ${folder}` : `π - ${folder}`);
+  });
+
+/**
+ * Every pb command refreshes the footer when it returns: Pi has no "a command ran" event, and a command is
+ * exactly what moves a spec to its next state. Installed once, before any module registers a command.
+ */
+export const refreshAfterCommands = (pi: ExtensionAPI) => {
+  const register = pi.registerCommand.bind(pi);
+  pi.registerCommand = (name, options) =>
+    register(name, {
+      ...options,
+      handler: async (args, ctx) => {
+        try {
+          return await options.handler(args, ctx);
+        } finally {
+          refreshWhere(ctx);
+        }
+      },
+    });
+};
+
+/** alt+n: the next step's command into the editor — one key, then Enter. */
+export const registerNextShortcut = (pi: ExtensionAPI) =>
+  pi.registerShortcut("alt+n", {
+    description: "pb: put the next step's command in the editor",
+    handler: async (ctx) => {
+      const where = whereHere(new Store(ctx.cwd), ctx.sessionManager.getSessionFile() ?? undefined);
+      if (!where) return ctx.ui.notify(`No pb work here: /${cmd("plan")} <feature> starts one.`, "info");
+      if (!where.command) return ctx.ui.notify(`${where.spec ? `${where.spec}: ` : ""}${where.state} — ${where.next}.`, "info");
+      ctx.ui.setEditorText(where.command);
+      ctx.ui.notify(`${where.spec ? `${where.spec}: ` : ""}${where.state} — press Enter to run ${where.command}.`, "info");
+    },
+  });
 
 type Entry = { id: string; parentId: string | null; type: string; message?: { role?: string; content?: unknown } };
 type Tree = { getLeafId?(): string | null; getEntry?(id: string): Entry | undefined; getSessionName?(): string | undefined; getBranch?(): Entry[] };

@@ -6,6 +6,7 @@ import { buildReport } from "./report.ts";
 import { findStandards, isUserTemplate, projectStack, stackNames, templatesDir, usesDatabase, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard } from "./stats.ts";
 import { Store } from "./store.ts";
+import { whereHere, whereNext } from "./next.ts";
 import { cmd, loadSpec, post, sessionIdOf, specCompletions, specOfSession, stackLabel, taskLine } from "./kit.ts";
 
 export function registerMisc(pi: ExtensionAPI) {
@@ -66,8 +67,9 @@ export function registerMisc(pi: ExtensionAPI) {
         const p = store.progress(n);
         const s = loadSpec(store, n)?.spec;
         const where = p?.session && n !== here ? ` · session: pi --session ${sessionIdOf(p.session)}` : "";
-        const head = `${n === here ? "▸ " : ""}${n} — ${p?.phase ?? "written"}${where}${s ? ` · verification ${s.gate}${s.newTests ? "" : " · no new tests"}${s.dependsOn ? ` · depends on ${s.dependsOn}` : ""}` : " · ⚠ doesn't parse"}${p?.pause ? ` · paused: ${p.pause}` : ""}${p?.fix ? ` · repair lap ${p.fix.laps} open (${p.fix.driver ? "hardening" : "one lap"})` : ""}`;
-        return [head, ...(p && p.phase !== "written" ? p.tasks.map((t) => `    ${taskLine(t)}`) : [])];
+        const next = whereNext(store, n);
+        const head = `${n === here ? "▸ " : ""}${n} — ${next.state}${where}${s ? ` · verification ${s.gate}${s.newTests ? "" : " · no new tests"}${s.dependsOn ? ` · depends on ${s.dependsOn}` : ""}` : " · ⚠ doesn't parse"}${p?.pause ? ` · paused: ${p.pause}` : ""}${p?.fix ? ` · repair lap ${p.fix.laps} open (${p.fix.driver ? "hardening" : "one lap"})` : ""}`;
+        return [head, `    next: ${next.next}`, ...(p && p.phase !== "written" ? p.tasks.map((t) => `    ${taskLine(t)}`) : [])];
       });
       ctx.ui.notify([...lines, `help: /${cmd("help")}`].join("\n"), "info");
     },
@@ -83,7 +85,14 @@ export function registerMisc(pi: ExtensionAPI) {
       if (body) return post(`${body}\n\n(Full guide: ${HELP_PATH})`);
       const list = topics().map((t) => `- \`/${cmd("help")} ${t.name}\` — ${t.title}`);
       if (!list.length) return ctx.ui.notify(`Help file not found: ${HELP_PATH}`, "warning");
-      post([name ? `No help topic "${name}".` : "**pb help** — pick a topic:", "", ...list, "", `Full guide: ${HELP_PATH}`].join("\n"));
+      // Help without a topic starts where you are: the one thing most people open it for.
+      const where = name ? undefined : whereHere(new Store(ctx.cwd), ctx.sessionManager.getSessionFile() ?? undefined);
+      const here = where
+        ? [`**You are here:** ${where.spec ? `${where.spec} — ` : ""}${where.state}`, `**Next:** ${where.next}${where.command ? ` (alt+n puts \`${where.command}\` in the editor)` : ""}`, ""]
+        : name
+          ? []
+          : [`**You are here:** no pb work yet`, `**Next:** \`/${cmd("plan")} <feature>\` plans one with you`, ""];
+      post([...here, name ? `No help topic "${name}".` : "**pb help** — pick a topic:", "", ...list, "", `Full guide: ${HELP_PATH}`].join("\n"));
     },
   });
 }

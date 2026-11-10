@@ -923,3 +923,78 @@ test("manifests: a pipe planted as package.json hangs no detection, and a script
   fs.writeFileSync(path.join(dir, "package.json"), "[1, 2]"); // JSON, but not a manifest
   assert.equal(detectLint(dir), null);
 });
+
+test("what's next: one derivation names every state a spec can be in and the command that moves it on", async () => {
+  const { whereNext } = await import("../extensions/pb/next.ts");
+  const { Store } = await import("../extensions/pb/store.ts");
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.chdir(t.repo);
+  const store = new Store(t.repo);
+  const name = "order-cancellation";
+  const progressFile = path.join(t.repo, ".pi/pb/specs", name, "progress.json");
+  const base = JSON.parse(fs.readFileSync(progressFile, "utf8"));
+  const at = (p: object) => {
+    fs.writeFileSync(progressFile, JSON.stringify({ ...base, ...p }));
+    const w = whereNext(store, name);
+    return `${w.state} | ${w.command ?? "-"}`;
+  };
+  assert.equal(at({}), "spec ready | /pb:build order-cancellation");
+  assert.equal(at({ phase: "building", current: "T2" }), "building T2 | -", "a running build says it will call you");
+  assert.equal(at({ phase: "paused", pause: "T2 failed 3 times" }), "paused: T2 failed 3 times | /pb:build order-cancellation");
+  assert.equal(at({ phase: "built" }), "built | /pb:review order-cancellation");
+  const review = (verdict: string, findings: object[] = []) => ({ at: "2026-10-01 10:00:00", verdict, findings });
+  assert.equal(at({ phase: "built", review: review("changes_needed", [{ priority: "P1", title: "x" }, { priority: "P3", title: "nit" }]) }), "review: CHANGES NEEDED (1 open) | /pb:fix order-cancellation");
+  assert.equal(at({ phase: "built", review: review("unverified") }), "review: UNVERIFIED | /pb:review order-cancellation");
+  assert.equal(at({ phase: "reviewed", review: review("pass") }), "reviewed: PASS | /pb:archive order-cancellation");
+  // Fixes after the last review: the follow-up review is next, not the fixes again.
+  store.event(name, { type: "review", verdict: "changes_needed" });
+  store.event(name, { type: "fix", fixed: ["x"], skipped: [] });
+  assert.equal(at({ phase: "built", review: review("changes_needed", [{ priority: "P1", title: "x" }]) }), "fixed, not re-reviewed | /pb:review order-cancellation");
+  // A spec review on this exact text decides what "written" means.
+  const md = store.readSpec(name)!;
+  const { specHash } = await import("../extensions/pb/spec.ts");
+  store.event(name, { type: "spec-review", verdict: "pass", hash: specHash(md), reported: [{ priority: "P1", title: "a" }, { priority: "P2", title: "b" }] });
+  assert.equal(at({ phase: "written" }), "spec reviewed: 1 P1 | /pb:build order-cancellation");
+  store.event(name, { type: "spec-review", verdict: "block", hash: specHash(md), reported: [{ priority: "P0", title: "c" }] });
+  assert.equal(at({ phase: "written" }), "spec review found a P0 | /pb:spec-fix order-cancellation");
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs", name, "spec.md"), md.replace("Status: ready", "Status: planning").replace(/^# Order cancellation\n/, "# Order cancellation\nStatus: planning\n"));
+  assert.match(at({ phase: "written" }), /^planning \| \/pb:spec order-cancellation$/, "an edited text has no review: the planning status decides");
+});
+
+test("what's next: always on screen — the footer, the title, situational help and status, a startup greeting, alt+n, completions", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  // The footer and the title follow every command.
+  assert.equal(t.statuses.get("pb"), "pb · order-cancellation · built · next: /pb:review order-cancellation");
+  assert.match(t.stat.title, /^π - order-cancellation: built - /);
+  await t.run("help");
+  assert.match(t.posts.at(-1)!, /^\*\*You are here:\*\* order-cancellation — built\n\*\*Next:\*\* \/pb:review order-cancellation \(alt\+n puts `\/pb:review order-cancellation` in the editor\)/);
+  await t.run("status");
+  assert.match(t.notes.at(-1)!, /order-cancellation — built[\s\S]*\n    next: \/pb:review order-cancellation/);
+  // Starting Pi on this work says so once; pb's own session switches never do.
+  const notes = t.notes.length;
+  for (const h of t.runtime().handlers.session_start ?? []) await h({ type: "session_start", reason: "startup" }, t.runtime().ctx);
+  assert.equal(t.notes.length, notes + 1);
+  assert.match(t.notes.at(-1)!, /^pb · order-cancellation: built — next: \/pb:review order-cancellation \(alt\+n puts `\/pb:review order-cancellation` in the editor\)\.$/);
+  for (const h of t.runtime().handlers.session_start ?? []) await h({ type: "session_start", reason: "resume" }, t.runtime().ctx);
+  assert.equal(t.notes.length, notes + 1);
+  // One key puts the next command in the editor.
+  await t.runtime().shortcuts["alt+n"].handler(t.runtime().ctx);
+  assert.equal(t.stat.editorText, "/pb:review order-cancellation");
+  // Finding numbers complete with what they are; Pi replaces the whole argument with the value.
+  process.chdir(t.repo);
+  const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+  const p = JSON.parse(fs.readFileSync(progressFile, "utf8"));
+  fs.writeFileSync(progressFile, JSON.stringify({ ...p, review: { at: "2026-10-01 10:00:00", verdict: "changes_needed", findings: [{ priority: "P1", title: "the guard is missing" }, { priority: "P2", title: "name the constant" }] } }));
+  const fix = t.runtime().cmds["pb:fix"].getArgumentCompletions;
+  assert.deepEqual(fix(""), [
+    { value: "order-cancellation 1 ", label: "1", description: "[P1] the guard is missing" },
+    { value: "order-cancellation 2 ", label: "2", description: "[P2] name the constant" },
+  ]);
+  assert.deepEqual(fix("order-cancellation 1 ").map((i: any) => i.value), ["order-cancellation 1 2 "], "a number already picked is not offered again");
+  const undo = t.runtime().cmds["pb:undo"].getArgumentCompletions("");
+  assert.ok(undo.some((i: any) => i.value === "T1" && i.description), "checkpoints complete with what they undo");
+});

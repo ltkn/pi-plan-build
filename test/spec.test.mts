@@ -1501,7 +1501,7 @@ test("status lists every spec with its state and tasks", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   await t.run("status");
-  assert.match(t.notes.at(-1)!, /order-cancellation — written · verification tests/);
+  assert.match(t.notes.at(-1)!, /order-cancellation — spec ready · verification tests[\s\S]*\n    next: \/pb:build order-cancellation \(it reviews the spec first\), or \/pb:spec-review order-cancellation on its own/);
 });
 
 test("format: durations are human-readable and build time counts only the running segments", async () => {

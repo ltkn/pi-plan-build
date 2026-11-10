@@ -37,6 +37,7 @@ build. Your engineering standards live in AGENTS.md, written once.
                     one confirming review, a lap kept for what it finds, then a digest naming what is left;
                     budgets specFix.maxLaps / specFix.maxReviews
 /pb:undo · /pb:status [--json] · /pb:stats [--json] · /pb:archive · /pb:help
+alt+n                 the next step's command into the editor; the footer always shows where you are and what's next
 pb-report [--cwd dir] [--stats] [--review]   # the same pb.report/2 JSON, for scripts
 ```
 

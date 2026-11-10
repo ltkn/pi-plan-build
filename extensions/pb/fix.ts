@@ -11,7 +11,7 @@ import { KEBAB_NAME } from "./names.ts";
 import { snapshot } from "./checkpoint.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, now, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { approvalDrift, choose, cmd, commands, evidenceLine, finalCheckCommands, loadSpec, nextLine, phaseHeader, reply, specOfSession, withChecking } from "./kit.ts";
+import { approvalDrift, choose, cmd, commands, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, nextLine, phaseHeader, reply, specOfSession, withChecking } from "./kit.ts";
 
 /** One lap's report shape, normalized from its `fix` event: findings by the number its brief showed them as. */
 export interface LapReport {
@@ -343,6 +343,7 @@ export function registerFix(pi: ExtensionAPI) {
 
   pi.registerCommand(cmd("fix"), {
     description: "Fix P0-P2 review findings in a fresh fenced session: /pb:fix [finding ids]. No ids = all open findings (P3 nits are never open: fix those by hand). Run /pb:review afterwards: it checks only those findings and what changed",
+    getArgumentCompletions: fixCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();

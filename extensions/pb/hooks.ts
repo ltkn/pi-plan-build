@@ -9,7 +9,8 @@ import { changedPaths, cleanupIndexes, snapshot } from "./checkpoint.ts";
 import { PLANNER_ROLE, PLANNER_SECTION, checkpointPrompt, checkpointSummary, extraBlock, reviewStateSummary, nudgePrompt } from "./prompts.ts";
 import { tokensOf } from "./spec.ts";
 import { Store, now } from "./store.ts";
-import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, pauseBuild, pruneSession, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
+import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, pauseBuild, pruneSession, refreshWhere, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
+import { whereHere } from "./next.ts";
 import { unfinishedPhase } from "./phase.ts";
 import { buildResetDue, stateSummary } from "./flow.ts";
 
@@ -114,6 +115,14 @@ export function registerHooks(pi: ExtensionAPI) {
       if (store.reviewRunForSession(session)?.interrupted?.session === session) ctx.ui.notify(`This review was interrupted: \`/${cmd("review")} continue\` picks it up where it was.`, "info");
     }
     else if (active.includes("pb_report_findings")) pi.setActiveTools(active.filter((t) => t !== "pb_report_findings"));
+    refreshWhere(ctx);
+    // Starting Pi on work in progress: say once where it stands and what's next. Only at startup: pb's own
+    // session switches (back from a review or a fix lap) arrive as "resume" and post their own result, and
+    // the footer already carries the same line everywhere else.
+    if (ev.reason === "startup" && ctx.hasUI && !store.reviewSession(session) && !store.fixSession(session)) {
+      const where = whereHere(store, session ?? undefined);
+      if (where?.spec) ctx.ui.notify(`pb · ${where.spec}: ${where.state} — next: ${where.next}${where.command ? ` (alt+n puts \`${where.command}\` in the editor)` : ""}.`, "info");
+    }
     if (!carry) return;
     if (carry.model) {
       const model = findModel(ctx, carry.model);
@@ -234,7 +243,11 @@ export function registerHooks(pi: ExtensionAPI) {
 
   /** The last planning change set posted per session, so a note is not repeated on every settle. */
 
+  // A turn or a run that ends may have moved the spec (a task done, a lap reported): the footer follows.
+  pi.on("agent_settled", (_e, ctx) => refreshWhere(ctx));
+
   pi.on("turn_end", (_e, ctx) => {
+    refreshWhere(ctx);
     const { store, name, progress: p } = specOfSession(ctx);
     const wasBoundary = runtime.boundary;
     runtime.boundary = false;

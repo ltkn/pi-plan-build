@@ -37,7 +37,7 @@
  *   misc.ts       /pb:stats, /pb:standards, /pb:status, /pb:help
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { bindKit } from "./kit.ts";
+import { bindKit, refreshAfterCommands, registerNextShortcut } from "./kit.ts";
 import { registerRenderers } from "./render.ts";
 import { registerAsk } from "./ask.ts";
 import { registerArchive } from "./archive.ts";
@@ -55,6 +55,9 @@ export { sessionGone, ASK_DESCRIPTION } from "./kit.ts";
 
 export default function pb(pi: ExtensionAPI) {
   bindKit(pi);
+  // Before any module registers a command: each one then refreshes the "where you are, what's next" footer.
+  refreshAfterCommands(pi);
+  registerNextShortcut(pi);
   registerRenderers(pi);
   registerHooks(pi);
   registerAsk(pi);

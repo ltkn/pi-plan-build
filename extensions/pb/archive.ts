@@ -7,7 +7,7 @@ import { findingsOf, readMap } from "./map.ts";
 import { commitMessage, parseSpec, sectionOf } from "./spec.ts";
 import { type Progress, Store, changedSince, readEvents, reviewLedger } from "./store.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { cmd, commitBlock, post, specCompletions } from "./kit.ts";
+import { cmd, commitBlock, nextLine, post, specCompletions } from "./kit.ts";
 import { updateMap } from "./map-flow.ts";
 
 /**
@@ -87,7 +87,8 @@ export function registerArchive(pi: ExtensionAPI) {
         : mapChanges
           ? [`${mapNote[0]} after ${title}`, ...mapNote.slice(1)].join("\n")
           : undefined;
-      if (message) post(commitBlock(message));
+      // Archiving ends a feature: what's left is the commit, and the next feature.
+      post([...(message ? [commitBlock(message), ""] : []), nextLine(`${message ? "commit with the message above, then " : ""}\`/${cmd("plan")} <feature>\` for the next one.`)].join("\n"));
     },
   });
 

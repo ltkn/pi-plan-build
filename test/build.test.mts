@@ -1389,8 +1389,10 @@ test("commit message: from the spec, after the build, the review and the archive
   await v.run("build");
   execSync("git add -A -- . ':(exclude).pi' && git commit -qm feature", { cwd: v.repo });
   const posted = v.posts.length;
-  await v.run("archive"); // nothing left to commit: no message
-  assert.equal(v.posts.length, posted);
+  await v.run("archive"); // nothing left to commit: no message, only the next step
+  assert.equal(v.posts.length, posted + 1);
+  assert.doesNotMatch(v.posts.at(-1)!, /```/);
+  assert.match(v.posts.at(-1)!, /^\*\*Next:\*\* `\/pb:plan <feature>` for the next one\.$/);
 });
 
 test("an unfinished build (e.g. after a crash) can be restarted in a new session; finished tasks stay done", async () => {

@@ -20,7 +20,7 @@ import { buildTimeLabel, buildTiming } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, COHERE_TASK_ID, Store, appendCheckpoint, cap, diffStat, gitHead, now, pathExists, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
 import { safeLine } from "./markdown.ts";
-import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
+import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, commitBlock, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specFixCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
 import { enterStep, finishBuild, lintsEachStep, nextPhase, nextStep, nextTodo, unfinishedPhase } from "./phase.ts";
 
 const DRY_RUN_TIMEOUT_SEC = 120;
@@ -1882,7 +1882,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
 
   pi.registerCommand(cmd("spec-fix"), {
     description: "Repair a reviewed spec: one lap over the findings recorded against this exact text — it probes what needs measuring, applies the fix it recommends, argues in Decisions when a finding is wrong, and parks only what it will not decide. Optional: which spec, then the finding numbers (every P0-P2 by default)",
-    getArgumentCompletions: specCompletions,
+    getArgumentCompletions: specFixCompletions,
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
