@@ -328,6 +328,37 @@ test("map: the repair pass says what it's fixing", async () => {
   assert.equal(mapRepairPhase(2, 2500), "checking 2 paths and trimming 2,500 tokens");
 });
 
+test("archive: a spec with work left asks first and says what — never reviewed, a non-pass verdict, open findings; a bad name is refused", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  const live = () => fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md"));
+  // Built but never reviewed: asked, and a no keeps it where /pb:fix and /pb:review reach it.
+  t.confirmAnswers.push(false);
+  await t.run("archive", "order-cancellation");
+  assert.equal(t.confirms.at(-1), "order-cancellation isn't finished: it was never reviewed");
+  assert.ok(live());
+  // Reviewed with an open finding: both facts are named.
+  const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+  const p = JSON.parse(fs.readFileSync(progressFile, "utf8"));
+  fs.writeFileSync(progressFile, JSON.stringify({ ...p, review: { at: "2026-10-01 10:00:00", verdict: "changes_needed", findings: [{ priority: "P1", title: "the guard is missing" }] } }));
+  t.confirmAnswers.push(false);
+  await t.run("archive", "order-cancellation");
+  assert.equal(t.confirms.at(-1), "order-cancellation isn't finished: its last review was CHANGES NEEDED; 1 review finding still open");
+  assert.ok(live());
+  // A name that is not one never reaches a path.
+  const asked = t.confirms.length;
+  await t.run("archive", "../order-cancellation");
+  assert.match(t.notes.at(-1)!, /`\.\.\/order-cancellation` isn't a valid spec name/);
+  assert.equal(t.confirms.length, asked);
+  // A clean pass with nothing open archives without a question.
+  fs.writeFileSync(progressFile, JSON.stringify({ ...p, phase: "reviewed", review: { at: "2026-10-01 10:00:00", verdict: "pass", findings: [] } }));
+  await t.run("archive", "order-cancellation");
+  assert.equal(t.confirms.length, asked, "nothing owed, nothing asked");
+  assert.ok(!live());
+});
+
 test("map: /pb:archive updates it by itself: paths that don't resolve go back once to be fixed, then it's written, and undo swaps back", async () => {
   const t = setup({ verify: "true" });
   fs.mkdirSync(path.join(t.repo, "src/main/auth"), { recursive: true });

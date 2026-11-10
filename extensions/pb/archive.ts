@@ -5,9 +5,25 @@ import * as path from "node:path";
 import { dropCheckpoints } from "./checkpoint.ts";
 import { findingsOf, readMap } from "./map.ts";
 import { commitMessage, parseSpec, sectionOf } from "./spec.ts";
-import { Store, changedSince, readEvents, reviewLedger } from "./store.ts";
+import { type Progress, Store, changedSince, readEvents, reviewLedger } from "./store.ts";
+import { KEBAB_NAME } from "./names.ts";
 import { cmd, commitBlock, post, specCompletions } from "./kit.ts";
 import { updateMap } from "./map-flow.ts";
+
+/**
+ * What a spec still owes before it is put away: a build that never finished, a review never run or whose last
+ * verdict was not a pass, and the P0-P2 findings still open. Empty when it is done.
+ */
+export const owedOnArchive = (p: Progress | undefined): string[] => {
+  if (!p || !["built", "reviewed"].includes(p.phase)) return [`its build is ${p?.phase ?? "not started"}`];
+  const review = p.review;
+  if (!review) return ["it was never reviewed"];
+  const open = review.findings.filter((f) => f.priority !== "P3").length;
+  return [
+    ...(review.verdict !== "pass" ? [`its last review was ${review.verdict === "changes_needed" ? "CHANGES NEEDED" : review.verdict === "unverified" ? "UNVERIFIED" : "without a verdict"}`] : []),
+    ...(open ? [`${open} review finding${open === 1 ? "" : "s"} still open`] : []),
+  ];
+};
 
 export function registerArchive(pi: ExtensionAPI) {
   pi.registerCommand(cmd("archive"), {
@@ -22,8 +38,15 @@ export function registerArchive(pi: ExtensionAPI) {
         name = candidates.length === 1 || !ctx.hasUI ? candidates[0] : await ctx.ui.select("Archive which spec?", candidates);
         if (!name) return;
       }
+      // The name is the only user string that reaches a path: anything that isn't one is refused here.
+      if (!KEBAB_NAME.test(name)) return ctx.ui.notify(`\`${name}\` isn't a valid spec name (spec names are lowercase with hyphens). /${cmd("status")} lists the specs.`, "warning");
       if (!store.readSpec(name)) return ctx.ui.notify(`No spec "${name}".`, "warning");
-      if (!candidates.includes(name) && ctx.hasUI && !(await ctx.ui.confirm(`${name} isn't finished`, "Archive it anyway?"))) return;
+      // Archived findings are out of /pb:fix's reach: what the spec still owes is said before it goes, not after.
+      const owed = owedOnArchive(store.progress(name));
+      if (owed.length) {
+        if (ctx.hasUI && !(await ctx.ui.confirm(`${name} isn't finished: ${owed.join("; ")}`, "Archive it anyway? Its open findings leave /pb:fix's reach."))) return;
+        if (!ctx.hasUI) ctx.ui.notify(`Archiving ${name} with work left: ${owed.join("; ")}.`, "warning");
+      }
       const markdown = store.readSpec(name) ?? "";
       const reviewFindings = reviewLedger(readEvents(path.join(store.specDir(name), "events.jsonl")));
       const changed = changedSince(ctx.cwd, store.progress(name)?.baseCommit);

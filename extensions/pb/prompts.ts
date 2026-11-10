@@ -510,7 +510,7 @@ export const REVIEWER_SYSTEM = `You are an independent REVIEWER in a fresh sessi
 
 ## Ground rules
 
-${READ_ONLY_PREAMBLE} The harness already ran the check on the current tree; the result is in the brief. Ignore .pi/ except the spec you are given.
+${READ_ONLY_PREAMBLE} The harness already ran the project's checks and each finished task's Test: command on the current tree; the results are in the brief. A passing run of a task's Test: command is evidence you can cite for an acceptance line once you have read that its tests check that line; a failed one is pb's to report, and the verdict already accounts for it. Ignore .pi/ except the spec you are given.
 
 The brief is a frozen snapshot: judge the change as it was when the review started.
 
@@ -788,9 +788,9 @@ export function reviewerBrief(o: ReviewBrief): string {
       ? ["", "## Possibly stale prose references", "", "These identifiers vanished from the code but are still cited in prose; judge each as a P2 candidate (intentional history is fine):", ...o.staleRefs.map((s) => `- ${s.symbol}: ${s.referrers.join(", ")}`)]
       : []),
     "",
-    "## The check the harness ran",
+    "## The checks the harness ran",
     "",
-    o.spec?.parsed.gate === "none" ? `None: verification is "none" for this feature (${o.spec.parsed.gateReason}). Look harder at correctness yourself.` : o.check,
+    ...(o.spec?.parsed.gate === "none" ? [`No suite: verification is "none" for this feature (${o.spec.parsed.gateReason}). Look harder at correctness yourself.`, ...(o.check !== "(not run)" ? ["", o.check] : [])] : [o.check]),
   );
   return lines.join("\n");
 }

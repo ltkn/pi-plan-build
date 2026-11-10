@@ -884,9 +884,13 @@ then:
 <!-- pb:topic review -->
 ## Review
 
-`/pb:review` runs the check once more, then opens a **fresh session**, "review:
-<spec> · spec", and takes you there: the reviewer sees the spec, the diff and the check
-result, but not the build conversation, so it isn't anchored by the builder's
+`/pb:review` first runs the checks itself: the same ones as the build's final
+step (suite or compile, lint, extra checks), then each finished task's `Test:`
+command. The reviewer has no shell, so those runs are the evidence it can cite
+for an acceptance line. A red one caps the verdict: a review never passes over
+it, whatever the reviewers found (UNVERIFIED, naming the command). Then it opens
+a **fresh session**, "review: <spec> · spec", and takes you there: the reviewer
+sees the spec, the diff and those results, but not the build conversation, so it isn't anchored by the builder's
 reasoning. It reports
 every acceptance criterion as met with evidence, not met, or not verified. It
 also checks the decisions (including rejected
@@ -1152,7 +1156,10 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
   `pb.report/2`; a breaking change gets a new one (pb.report/1 lost its dead `context.asks` count).
 - **`/pb:archive`**: moves a finished spec to `.pi/pb-archive/` (which git
   ignores), so `/pb:build` and `/pb:status` only show live work, and offers to
-  update the project map (`/pb:help map`). The approved spec moves with it; the
+  update the project map (`/pb:help map`). A spec with work left (a build not
+  finished, never reviewed, a last review that wasn't a pass, or open findings)
+  is archived only after you confirm, with what it still owes named: once
+  archived, its findings are out of `/pb:fix`'s reach. The approved spec moves with it; the
   archive stays local, and git keeps the history of the specs that were live.
 <!-- /pb -->
 

@@ -310,6 +310,14 @@ export const commands = (cwd: string, store: Store) => {
 
 export const finalExtras = (lintCmd: string | null, extraCmds: string[]): string[] => [...(lintCmd ? [lintCmd] : []), ...extraCmds];
 
+/**
+ * The project's checks as the build's final step runs them: the suite (or a compile, as the spec's Verification
+ * says), then lint and the extra checks. A fix lap and a review run exactly this list, so a change that passes
+ * the build's end passes theirs. Without a spec (a review of an uncommitted change): the suite, else a compile.
+ */
+export const finalCheckCommands = (spec: ParsedSpec | undefined, c: { testCmd: string | null; buildCmd: string | null; lintCmd: string | null; extraCmds: string[] }): string[] =>
+  [...new Set([spec ? checkCommand(spec, undefined, c.testCmd, c.buildCmd, true, false) : (c.testCmd ?? c.buildCmd), ...finalExtras(c.lintCmd, c.extraCmds)].filter((x): x is string => !!x))];
+
 /** " · 2m 3s" when a phase recorded its time, nothing when it didn't (older events carry none). */
 
 export const timeSuffix = (ms?: number) => (ms !== undefined ? ` · ${duration(ms)}` : "");

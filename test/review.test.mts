@@ -654,6 +654,7 @@ test("review: a pass verdict mid-build keeps the phase and says tasks remain", a
       updatedAt: "2026-10-01 10:00:00",
     }),
   );
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "x"); // what a done T1 made: pb re-runs its Test: before the review
   await t.run("review");
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "building"); // a pass must not strand the build as reviewed
@@ -809,6 +810,24 @@ test("review: starting a new review clears an abandoned run from this session", 
   assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS/);
 });
 
+test("review: pb runs the build's final checks and each finished task's Test: — a red one caps the verdict at UNVERIFIED", async () => {
+  const t = setup({ verify: "true", lint: "test -d ." });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  fs.rmSync(path.join(t.repo, "T2.txt")); // T2's own proof no longer holds
+  await t.run("review"); // the stand-in reviewer reports nothing wrong and every criterion met
+  const brief = briefOf(t);
+  // The same checks as the build's final step, lint included, then each task's Test: as evidence to cite.
+  assert.match(brief, /## The checks the harness ran\n\n`true` → PASS[\s\S]*`test -d \.` → PASS[\s\S]*T1's Test: `test -f T1\.txt` → PASS[\s\S]*T2's Test: `test -f T2\.txt` → FAIL/);
+  assert.match(brief, /A passing run of a task's Test: command is evidence you can cite for an acceptance line/);
+  const result = t.posts.at(-1)!;
+  assert.match(result, /\*\*⚠ Review — order-cancellation\*\* · UNVERIFIED/, "the reviewers found nothing, but pb's own run is red");
+  assert.match(result, /⚠ \*\*pb's check failed before the review\*\*: `test -f T2\.txt` — a review never passes over a red check\./);
+  assert.match(result, /\*\*Next:\*\* make `test -f T2\.txt` pass \(or fix what keeps it from running\), then `\/pb:review` again\./);
+  assert.equal(t.progress("order-cancellation").phase, "built", "not marked reviewed");
+});
+
 test("review: when the second look can't run, the findings are reported unconfirmed", async () => {
   const t = setup({ verify: "true" });
   await written(t);
@@ -834,7 +853,7 @@ test("review: a fresh review session with the spec first and the diff; you're br
   await t.run("review");
   const brief = briefOf(t);
   assert.match(brief, /^\[pb:review\] You are an independent REVIEWER in a fresh session[\s\S]*read-only: don't edit or write files[\s\S]*--- brief ---\n\n# The spec \(\.pi\/pb\/specs\/order-cancellation\/spec\.md\)[\s\S]*## Acceptance checklist[\s\S]*## Changed files\n\n(T1\.txt\n)?[\s\S]*T2\.txt/);
-  assert.match(brief, /## The check the harness ran\n\n`true` → PASS/);
+  assert.match(brief, /## The checks the harness ran\n\n`true` → PASS/);
   // The reviewer has no shell: the change travels in the brief as a frozen diff, untracked files included.
   assert.match(brief, /## The diff\n\n[\s\S]*\+x/);
   assert.doesNotMatch(brief, /Run: git diff/);

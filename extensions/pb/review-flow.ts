@@ -18,7 +18,7 @@ import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { P_ORDER, approvalDrift, cmd, commands, commitBlock, contentText, evidenceLine, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, tree, watchable, withChecking } from "./kit.ts";
+import { P_ORDER, approvalDrift, cmd, commands, commitBlock, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, watchable, withChecking } from "./kit.ts";
 import { markReviewed, unfinishedPhase } from "./phase.ts";
 
 import { confirmLiveBuild } from "./flow.ts";
@@ -304,7 +304,10 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       run.acceptance,
       run.passes.filter((x) => x.role === "review").flatMap((x) => x.acceptance ?? []),
     );
-    const verdict = !run.passes.length || lost ? "none" : verdictOf(findings, coverage);
+    // pb's own check outranks the reviewers: over a red one the best a review can say is UNVERIFIED.
+    const judged = !run.passes.length || lost ? "none" : verdictOf(findings, coverage);
+    const failedChecks = run.failedChecks ?? [];
+    const verdict = judged === "pass" && failedChecks.length ? "unverified" : judged;
     const tally = findings.length || o.dismissed.length ? counts.map((c, n) => `P${n} ${c}`).join(" · ") : "";
     const sessions = run.passes
       .filter((x) => x.session)
@@ -332,7 +335,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       ? `\`/${cmd("review")}\` continues this review.`
       : lost
         ? `read the ${unparsed.join(" and ")} session${unparsed.length === 1 ? "" : "s"}, then \`/${cmd("review")}\` again.`
-        : verdict === "unverified"
+        : verdict === "unverified" && failedChecks.length && judged === "pass"
+          ? `make ${failedChecks.map((c) => `\`${c}\``).join(", ")} pass (or fix what keeps ${failedChecks.length === 1 ? "it" : "them"} from running), then \`/${cmd("review")}\` again.`
+          : verdict === "unverified"
           ? `check each unverified criterion (or amend the spec), then \`/${cmd("review")}\` again — \`/${cmd("review")} --full\` if nothing else changed.`
           : verdict === "changes_needed"
             ? run.name && fixIds && complete
@@ -372,6 +377,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
               : `⚠ The ${unparsed.join(" and ")} pass${unparsed.length === 1 ? "" : "es"} reported in prose only — nothing parseable, so findings may be missing above. Read the session${unparsed.length === 1 ? "" : "s"} before trusting this verdict.`,
           ]
         : []),
+      ...(failedChecks.length ? ["", `⚠ **pb's check failed before the review**: ${failedChecks.map((c) => `\`${c}\``).join(", ")} — a review never passes over a red check.`] : []),
       "",
       run.passes.find((x) => x.role === "review")?.prose ?? "",
       ...(coverage.enforced
@@ -561,7 +567,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       store.clearReviewRunsForHome(session);
       const full = /(^|\s)--full(\s|$)/.test(args);
       const rest = args.replace(/(^|\s)--full(?=\s|$)/g, " ").trim();
-      const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+      const { cfg, testCmd, buildCmd, lintCmd, extraCmds } = commands(ctx.cwd, store);
 
       // done/continue only mean something inside a review session (handled above).
       if (rest === "done" || rest === "continue") {
@@ -675,20 +681,33 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       // all use this one capture, so a check or a later edit cannot change what was reviewed. Capped
       // once, the same text the reviewer reads (and the saved run keeps).
       const reviewDiff = cap(`${gitDiff(ctx.cwd, base)}${untrackedText(ctx.cwd, changed)}`.trim(), REVIEW_DIFF_CHARS);
-      // Fresh ground truth first: the reviewer should judge what's on disk now.
-      const command = loaded ? (loaded.spec.gate === "tests" ? testCmd : loaded.spec.gate === "build" ? buildCmd : null) : (testCmd ?? buildCmd);
-      let check = "(not run)";
-      if (command) {
+      // Fresh ground truth first: the reviewer should judge what's on disk now. pb runs the build's final-step
+      // checks, then each finished task's Test: command — the reviewer has no shell, so these runs are the
+      // evidence it can cite for an acceptance line. A red one caps the verdict: a review never passes over it.
+      const projectChecks = finalCheckCommands(loaded?.spec, { testCmd, buildCmd, lintCmd, extraCmds });
+      const finished = new Set((p?.tasks ?? []).filter((t) => t.status === "done").map((t) => t.id));
+      const taskChecks = new Map<string, string[]>();
+      for (const t of loaded?.spec.tasks ?? []) {
+        // A command that chains shells or reaches the network is never run unasked (as at the pre-approval dry run).
+        if (!t.test || !finished.has(t.id) || projectChecks.includes(t.test) || suspiciousCommand(t.test)) continue;
+        taskChecks.set(t.test, [...(taskChecks.get(t.test) ?? []), t.id]);
+      }
+      const results: string[] = [];
+      const failedChecks: string[] = [];
+      for (const command of [...projectChecks, ...taskChecks.keys()]) {
         safely(() => ctx.ui.setWidget("pb-review", [`pb review ${label} — checking: ${command}`]));
         const v = await withChecking(() => runVerify(command, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap));
-        safely(() => ctx.ui.setWidget("pb-review", undefined));
-        check = v.summary;
-        if (p && !unfinishedPhase(p.phase)) {
+        const owners = taskChecks.get(command);
+        results.push(owners ? `${owners.join(", ")}'s Test: ${v.summary}` : v.summary);
+        if (v.ok === false) failedChecks.push(command);
+        if (command === projectChecks[0] && p && !unfinishedPhase(p.phase)) {
           // A mid-build review must not clobber the build's own last result.
           p.lastVerify = v;
           store.saveProgress(p);
         }
       }
+      safely(() => ctx.ui.setWidget("pb-review", undefined));
+      const check = results.length ? results.join("\n\n") : "(not run)";
 
       const prevReview = p?.review;
       let previous: { snapshot: string; findings: Finding[]; changed: string[]; acceptance?: AcceptanceCheck[] } | undefined;
@@ -771,6 +790,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         model: cfg.reviewer.model ?? sessionModel(ctx),
         thinking: cfg.reviewer.thinking ?? (pi.getThinkingLevel() as string | undefined),
         passes: [],
+        ...(failedChecks.length ? { failedChecks } : {}),
       };
       await reviewNext(ctx, store, run);
     },

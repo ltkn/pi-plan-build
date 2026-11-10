@@ -29,6 +29,6 @@ src/order.ts
  1 file changed, 1 insertion(+)
 
 
-## The check the harness ran
+## The checks the harness ran
 
 `npm test` → PASS in 3s

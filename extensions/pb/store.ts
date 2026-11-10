@@ -526,6 +526,8 @@ export interface ReviewRun {
   passes: { role: "review" | "abuse"; findings: Finding[]; acceptance?: AcceptanceCheck[]; prose: string; session: string; left: boolean; unparsed: boolean; error?: string; ms?: number }[];
   /** the pass you left before it finished */
   interrupted?: { role: "review" | "abuse"; session: string };
+  /** the checks pb ran before the review that failed: the verdict can't be PASS over them */
+  failedChecks?: string[];
 }
 
 export const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);

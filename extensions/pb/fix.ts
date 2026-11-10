@@ -11,7 +11,7 @@ import { KEBAB_NAME } from "./names.ts";
 import { snapshot } from "./checkpoint.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, now, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { approvalDrift, checkCommand, choose, cmd, commands, evidenceLine, finalExtras, loadSpec, nextLine, phaseHeader, reply, specOfSession, withChecking } from "./kit.ts";
+import { approvalDrift, choose, cmd, commands, evidenceLine, finalCheckCommands, loadSpec, nextLine, phaseHeader, reply, specOfSession, withChecking } from "./kit.ts";
 
 /** One lap's report shape, normalized from its `fix` event: findings by the number its brief showed them as. */
 export interface LapReport {
@@ -217,9 +217,9 @@ export function registerFix(pi: ExtensionAPI) {
    */
   const checkAfterLap = async (cwd: string, store: Store, spec: string, lap: number, reds: string[]): Promise<{ ok: boolean; ran: string[]; failure?: string }> => {
     const loaded = loadSpec(store, spec);
-    const { cfg, testCmd, buildCmd, lintCmd, extraCmds } = commands(cwd, store);
-    const project = loaded ? [checkCommand(loaded.spec, undefined, testCmd, buildCmd, true, false), ...finalExtras(lintCmd, extraCmds)] : [];
-    const list = [...new Set([...reds, ...project.filter((c): c is string => !!c)])];
+    const cmds = commands(cwd, store);
+    const cfg = cmds.cfg;
+    const list = [...new Set([...reds, ...(loaded ? finalCheckCommands(loaded.spec, cmds) : [])])];
     const ran: string[] = [];
     for (const command of list) {
       const r = await withChecking(() => runVerify(command, cwd, cfg.verifyTimeoutSec, cfg.testOutputCap));
