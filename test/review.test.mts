@@ -217,7 +217,7 @@ test("fix: an unfinished lap starts the next one automatically", async () => {
   };
   await t.run("fix");
   assert.equal(laps, 2);
-  assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 2);
+  assert.deepEqual([...t.names.values()].filter((n) => n.startsWith("fix: order-cancellation")), ["fix: order-cancellation · lap 1", "fix: order-cancellation · lap 2"]);
   assert.match(t.posts.at(-1)!, /complete[\s\S]*\/pb:review/);
 });
 
@@ -340,7 +340,7 @@ test("fix: a lap that never reports stops the loop and escalates as silent", asy
   );
   t.agent.script = async () => {}; // the lap never reports, nudges unanswered
   await t.run("fix");
-  assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 1); // never retried into a second silent session
+  assert.equal([...t.names.values()].filter((n) => n.startsWith("fix: order-cancellation · lap ")).length, 1); // never retried into a second silent session
   assert.match(t.posts.at(-1)!, /\*\*❌ Fixes stopped — order-cancellation\*\* · no report · (?:<1s|\d+s)/);
 });
 
@@ -521,7 +521,7 @@ test("fix: a silent lap is not read as the prior lap's report, whatever the cloc
     Store.prototype.event = event;
   }
   assert.equal(laps, 2); // the silent lap stops the loop instead of consuming laps 2 and 3 on a stale report
-  assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 2);
+  assert.equal([...t.names.values()].filter((n) => n.startsWith("fix: order-cancellation · lap ")).length, 2);
   assert.match(t.posts.at(-1)!, /no report after 2 nudges/);
 });
 
@@ -545,7 +545,7 @@ test("fix: skipped findings never start a lap and reach the escalation", async (
     if (text.startsWith("[pb:fix")) await provedFixed(tool, [1]).then(() => tool("pb_fix_done", { fixed: [1], skipped: [2], tests: "ok" }));
   };
   await t.run("fix");
-  assert.equal([...t.names.values()].filter((n) => n === "fix: order-cancellation").length, 1);
+  assert.equal([...t.names.values()].filter((n) => n.startsWith("fix: order-cancellation · lap ")).length, 1);
   assert.match(t.posts.at(-1)!, /second/);
   assert.match(t.posts.at(-1)!, /spec revision/);
 });
@@ -590,7 +590,7 @@ test("fix: a lap opens a fenced session seeded with the findings", async () => {
     }),
   );
   await t.run("fix", "name the constant");
-  assert.ok([...t.names.values()].includes("fix: order-cancellation"));
+  assert.ok([...t.names.values()].includes("fix: order-cancellation · lap 1"));
   const seed = t.instructions.find((x) => x.startsWith("[pb:fix"))!;
   assert.match(seed, /Fix exactly the review findings below/);
   assert.match(seed, /name the constant/);

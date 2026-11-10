@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Repair laps run in a fresh session.** `/pb:spec-fix` and `/pb:spec-harden` used to run each lap inside the planning conversation, where the planner role was active, the whole discussion was carried along (one real session had reached 248k tokens), and lap transcripts piled up. Each lap now gets a session of its own, `spec-fix: <spec> · lap N`, seeded with the spec and its worklist and running on the model the run started from; pb brings you back after it, and the results land in your session.
+- **One build-start screen.** `/pb:build` used to ask one dialog per concern: an unbuilt dependency, a red baseline, the spec review's P1s, where to build. It now shows them all on one screen after the spec review, with one choice: build here or fresh, repair first, or stop.
+- **Sessions are easier to find in `/resume`.** Fix laps are named `fix: <spec> · lap N` and are all children of the session that ran `/pb:fix`; a planning session that starts building is renamed `build: <spec>`.
+- **pb says when it is waiting for you, and what it did when you didn't answer.** While a dialog is open the footer reads "pb · waiting for your answer"; a choice that times out posts the default pb took.
+
 - **You always know the next step.** The footer now shows `pb · <spec> · <state> · next: <command>` at every stage, from planning to archive, and refreshes after every command and turn; the terminal title carries the spec and its state. Before, only a running build showed anything, and a "What now" block scrolled away. **alt+n** puts the next command in the editor. `/pb:status` gives every spec its next step, `/pb:help` with no topic opens with where you are, starting Pi on work in progress says it once, and `/pb:archive` ends with the next step too. All of them read one derivation of where a spec stands, so they can't disagree.
 - **Numbers complete.** `/pb:fix` and `/pb:spec-fix` complete finding numbers with each finding's priority and title, and `/pb:undo` completes checkpoint ids with what each undoes: no scrolling back to find them.
 

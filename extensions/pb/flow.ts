@@ -258,7 +258,8 @@ export function registerFlow(pi: ExtensionAPI) {
         ...(prev ?? { spec: params.name, phase: "written" }),
         spec: params.name,
         tasks: syncTasks(spec, prev?.tasks),
-        writtenIn: session,
+        // A repair lap runs in a session of its own: the spec stays owned by the session that wrote it.
+        writtenIn: repair && prev ? prev.writtenIn : session,
         edited: false,
         updatedAt: now(),
       });
@@ -343,13 +344,14 @@ export function registerFlow(pi: ExtensionAPI) {
       if (specMs !== undefined && session) specStarted.delete(session);
       // A live build's task list is its approved one: a Design or Decisions edit never resyncs it
       // from the live file, and the build that owns the spec keeps its writtenIn.
-      // A fix lap's edit is the same kind: the spec stays owned by the session that wrote it.
+      // A fix lap's or a repair lap's edit is the same kind: the spec stays owned by the session that wrote it.
       const buildingNow = !!building || !!fixLap;
+      const ownerStays = buildingNow || !!repair;
       store.saveProgress({
         ...(prev ?? { spec: name, phase: "written" }),
         spec: name,
         tasks: buildingNow ? (prev?.tasks ?? []) : syncTasks(spec, prev?.tasks),
-        writtenIn: buildingNow ? prev?.writtenIn : session,
+        writtenIn: ownerStays && prev ? prev.writtenIn : session,
         updatedAt: now(),
       });
       store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md), ...(specMs !== undefined ? { ms: specMs } : {}) });
@@ -900,18 +902,18 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       ctx.ui.notify(`Verification is "build" but no build command is set: set "build" in ${store.rel("config.json")}.`, "warning");
       return undefined;
     }
-    if (spec.dependsOn) {
-      if (!store.finishedPhase(spec.dependsOn)) {
-        if (!(await agree(ctx, store, `${name} depends on ${spec.dependsOn}, which isn't built yet. Build ${name} anyway?`, notes))) return undefined;
-      }
-    }
+    // What could make you hold the build is collected, not asked one dialog at a time: the build-start screen
+    // shows it all once, after the spec review, with the one choice it leads to.
+    const concerns: string[] = [];
+    if (spec.dependsOn && !store.finishedPhase(spec.dependsOn)) concerns.push(`${name} depends on ${spec.dependsOn}, which isn't built yet`);
     if (!o.checked && spec.gate === "tests" && baselineApplies(ctx, store, testCmd)) {
-      if (!(await agree(ctx, store, baselineQuestion(store.baseline(ctx.sessionManager.getSessionFile() ?? undefined)!), notes))) return undefined;
+      const b = store.baseline(ctx.sessionManager.getSessionFile() ?? undefined)!;
+      concerns.push(`the test suite already failed when planning began (${b.summary.split("\n")[0]}, ${b.at}): the final check runs it, so it fails too unless that's fixed`);
     }
     if (!o.checked) baselineExtraWarning(ctx, store, testCmd);
     if (!o.checked && !(await reviewPlanningChanges(ctx, store, notes))) return undefined;
     if (!cfg.checkpoints) ctx.ui.notify("Checkpoints are off: this build runs without undo points, and without the test-tampering checks.", "warning");
-    return { spec, md, cfg, buildCmd };
+    return { spec, md, cfg, buildCmd, concerns };
   };
 
   /**
@@ -986,6 +988,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     store.saveProgress(p);
     saveStartCheckpoint(ctx, store, name, p, cfg.checkpoints, restart);
     store.event(name, { type: "build-start", tasks: spec.tasks.length, gate: spec.gate, fresh: false, taskTexts: spec.tasks.map((t) => t.text) });
+    // The session is the build's now: its name says so in /resume, as a fresh build session's does.
+    pi.setSessionName(`build: ${name}`);
     if (reapproved) post(`**Spec re-approved** — ${name}'s contract changed since its build was approved; the build now runs against the revised spec. Tasks already done stay done.`);
     const cohereFirst = first === COHERE_TASK_ID;
     if (cohereFirst) beginCohereEntry(ctx, store, p);
@@ -1412,10 +1416,10 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
 
   /**
    * Open a repair lap: the undo point first, so a lap that rewrote the plan can be dropped whole with
-   * /pb:undo; then the record naming the one session allowed to report it; then the instruction. A lap is
-   * a turn in the session that owns the spec, not a fresh run: it probes with pb_try, asks you with
-   * pb_ask, and writes through the spec tools, so the format gates and your standards still bind what it
-   * writes — an unreviewed run holding the spec's pen would be the wrong kind of automatic.
+   * /pb:undo; then the lap record; then the brief, queued for driveRepair, which runs it in a fresh session
+   * of its own and names that session as the one allowed to report. The lap is a real session, not a
+   * read-only run: it probes with pb_try, asks you with pb_ask, and writes through the spec tools, so the
+   * format gates and your standards still bind what it writes.
    */
 
   const beginFixLap = (
@@ -1479,10 +1483,85 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     store.saveProgress(p);
     const unverified = unresolvedAnchors(ctx.cwd, list.map(({ f }) => f));
     const extra = [store.extra("spec-fix")?.trim(), unverified.length ? `The review cites paths that don't exist in this project: ${unverified.join(", ")} — treat those locations as unverified; check before you fix or cite.` : undefined].filter(Boolean).join("\n\n");
-    instruct(
-      `\u25b6 spec-fix ${name} lap ${lap}`,
-      specFixPrompt({ name, work: o.work, items: list.map(({ id, f }) => findingLine(f, id)), lap, answers: o.answers, extra }),
-    );
+    queuedLap = { name, lap, prompt: specFixPrompt({ name, work: o.work, items: list.map(({ id, f }) => findingLine(f, id)), lap, answers: o.answers, extra }) };
+  };
+
+  /** The lap beginFixLap opened, waiting for driveRepair to run it in a session of its own. */
+  let queuedLap: { name: string; lap: number; prompt: string } | undefined;
+  const takeQueuedLap = (name: string) => {
+    const lap = queuedLap?.name === name ? queuedLap : undefined;
+    queuedLap = undefined;
+    return lap;
+  };
+
+  /** Reminders a lap gets to report before its silence is read as "ended without reporting". */
+  const LAP_NUDGES = 2;
+
+  /**
+   * Runs the laps a repair door opened, each in a fresh session seeded with the spec and its worklist — never in
+   * the planning conversation, whose role, length and stale beliefs are not the lap's. Between laps it comes back
+   * to the session that started the run, where the next step (claim check, review, next lap or digest) runs and
+   * posts, so the human reads every result where they planned. The lap session is fenced by the lap record
+   * (REPAIR_SESSION_TOOLS) and is the only one that may report.
+   */
+  const driveRepair = async (ctx: ExtensionCommandContext, store: Store, name: string): Promise<void> => {
+    const home = ctx.sessionManager.getSessionFile();
+    const drop = (why: string) => {
+      const p = store.progress(name);
+      if (p?.fix) {
+        p.fix = undefined;
+        store.saveProgress(p);
+      }
+      ctx.ui.notify(why, "warning");
+    };
+    if (!home || typeof ctx.newSession !== "function") return drop("This Pi can't open a session for the repair lap, so none was started.");
+    let live: ExtensionCommandContext = ctx;
+    for (let lap = takeQueuedLap(name); lap; lap = takeQueuedLap(name)) {
+      post(`\u25b6 spec-fix ${name} lap ${lap.lap} — in a fresh session seeded with the spec; pb brings you back with what it settled.`);
+      // The lap thinks on the model this run started from, not on whatever a new session defaults to.
+      const thinking = (live as { thinkingLevel?: string }).thinkingLevel;
+      store.setCarry({ model: sessionModel(live), ...(thinking ? { thinking } : {}), spec: name, parent: live.sessionManager.getSessionFile() ?? undefined });
+      let lapCtx: ExtensionCommandContext | undefined;
+      const seed = lap.prompt;
+      const opened = await live
+        .newSession({
+          parentSession: home,
+          setup: async (sm) => {
+            sm.appendSessionInfo(`spec-fix: ${name} · lap ${lap.lap}`);
+          },
+          withSession: async (c) => {
+            const cc = c as ExtensionCommandContext;
+            lapCtx = cc;
+            const file = cc.sessionManager.getSessionFile();
+            const p = store.progress(name);
+            if (!file || !p?.fix) return;
+            p.fix.session = file; // from here on only this session may report the lap
+            store.saveProgress(p);
+            await c.sendMessage({ customType: "pb-instruction", content: seed, display: true }, { triggerTurn: true });
+            for (let n = 0; n < LAP_NUDGES; n++) {
+              await cc.waitForIdle();
+              if (store.progress(name)?.fix?.stage !== "lap") return; // reported
+              await c.sendMessage({ customType: "pb-instruction", content: "Finish the repair lap with pb_spec_fix_done now: every number you were shown, in exactly one list. Then stop.", display: false }, { triggerTurn: true });
+            }
+            await cc.waitForIdle();
+          },
+        })
+        .catch(() => ({ cancelled: true as const }));
+      store.clearCarry(); // taken by the lap's session at its start; never left for an unrelated one
+      if (opened.cancelled || !lapCtx) return drop(`The repair lap for ${name} could not open its session, so it was dropped; /${cmd("spec-fix")} ${name} starts it again.`);
+      let back: ExtensionCommandContext | undefined;
+      await lapCtx
+        .switchSession(home, {
+          withSession: async (c) => {
+            back = c as ExtensionCommandContext;
+          },
+        })
+        .catch(() => undefined);
+      if (!back) return; // home is gone: the lap record stays, and /pb:status names the open lap
+      live = back;
+      const p = store.progress(name);
+      if (p?.fix) await advanceSpecFix(live, store, name, p);
+    }
   };
 
   /**
@@ -1894,6 +1973,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       const opened = await openRepair(ctx, store, named, words.slice(named ? 1 : 0).filter((w) => /^\d+$/.test(w)).map(Number));
       if (!opened) return;
       beginFixLap(ctx, store, opened.name, opened.p, opened.picked, { work: "findings", driver: false, hash: opened.hash, run: now(), reviews: 0 });
+      await driveRepair(ctx, store, opened.name);
     },
   });
 
@@ -2051,6 +2131,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         }
       }
       beginFixLap(ctx, store, name, p, findings, { work: "findings", driver: true, hash: specHash(md), run: now(), reviews, answers: notes.length ? notes : undefined });
+      await driveRepair(ctx, store, name);
     },
   });
 
@@ -2064,30 +2145,15 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
   const specReviewCount = (store: Store, name: string) => readEvents(path.join(store.specDir(name), "events.jsonl")).filter((e) => e.type === "spec-review").length;
 
   /**
-   * A P1 the spec review raised on this text is a known risk, not a gate: before T1 the human decides
-   * whether to build on it, repair first, or stop. A recorded pass is reused silently at this door, so its
-   * P1s are shown here; a text already approved (a restart or resume) was decided before. Nobody to ask:
-   * the build goes on, as it always has, and says so.
+   * The P1s the spec review raised on the text about to be approved: known risks the build-start screen names,
+   * never a gate. A recorded pass is reused silently at this door, so its P1s are posted again here; a text
+   * already approved (a restart or resume) was decided before and counts none.
    */
-  const weighP1s = async (ctx: ExtensionContext, store: Store, name: string, md: string, reused: boolean, notes: string[]): Promise<boolean> => {
-    if (store.progress(name)?.approval?.hash === specHash(md)) return true;
+  const openP1s = (store: Store, name: string, md: string, reused: boolean): number => {
+    if (store.progress(name)?.approval?.hash === specHash(md)) return 0;
     const p1 = recordedFindings(store, name, md).filter(({ f }) => f.priority === "P1");
-    if (!p1.length) return true;
-    const count = `${p1.length} P1 finding${p1.length === 1 ? "" : "s"}`;
-    if (reused) post([`**The spec review of this text raised ${count}** — not blocking, but the build would carry ${p1.length === 1 ? "it" : "them"}:`, "", ...p1.map(({ id, f }) => `- ${findingLine(f, id)}`)].join("\n"));
-    const BUILD = "Build anyway: they stay known risks";
-    const REPAIR = `Repair first: /${cmd("spec-harden")} ${name} works through them`;
-    const STOP = "Stop here";
-    const choice = await choose(ctx, store, `Spec review raised ${count} on ${name}. Build on ${p1.length === 1 ? "it" : "them"}?`, [BUILD, REPAIR, STOP], BUILD, notes);
-    if (choice === BUILD) {
-      if (!ctx.hasUI) notes.push(`built with ${count} from the spec review unaddressed (no one to ask)`);
-      return true;
-    }
-    if (choice === REPAIR) {
-      ctx.ui.setEditorText(`/${cmd("spec-harden")} ${name}`);
-      ctx.ui.notify(`Press Enter to repair ${name}; /${cmd("build")} ${name} afterwards reviews the repaired text.`, "info");
-    }
-    return false;
+    if (p1.length && reused) post([`**The spec review of this text raised ${p1.length} P1 finding${p1.length === 1 ? "" : "s"}** — not blocking, but the build would carry ${p1.length === 1 ? "it" : "them"}:`, "", ...p1.map(({ id, f }) => `- ${findingLine(f, id)}`)].join("\n"));
+    return p1.length;
   };
 
   const startBuild = async (
@@ -2108,22 +2174,33 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
 
     const reviewsBefore = specReviewCount(store, name);
     if ((await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "build"))) !== "pass") return;
-    if (!(await weighP1s(ctx, store, name, md, specReviewCount(store, name) === reviewsBefore, notes))) return;
+    const p1s = openP1s(store, name, md, specReviewCount(store, name) === reviewsBefore);
     const buildModel = cfg.buildModel ? findModel(ctx, cfg.buildModel) : undefined;
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
     const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";
-    if (!fresh && !o.decided) {
-      const usage = ctx.getContextUsage()?.percent;
-      const full = usage != null && usage > cfg.freshAbove;
-      if ((full || switching) && ctx.hasUI) {
-        const why = switching ? `building on ${cfg.buildModel} here sends this whole conversation to it again, uncached` : `this session is ${Math.round(usage!)}% full`;
-        const FRESH = "Build in a fresh session, from the spec (recommended)";
-        const HERE = "Build here anyway";
-        const choice = await choose(ctx, store, `Build ${name}: ${why}`, [FRESH, HERE], canOpenSession ? FRESH : HERE, notes);
-        if (!choice) return;
-        fresh = choice === FRESH;
-      } else if (switching) fresh = true;
-    }
+    // The build-start screen: everything that could make you hold the build (an unbuilt dependency, a red
+    // baseline, the spec review's P1s, a full session or a model switch), shown once, with one choice.
+    const usage = ctx.getContextUsage()?.percent;
+    const placing = !fresh && !o.decided && ((usage != null && usage > cfg.freshAbove) || switching);
+    const why = !placing ? "" : switching ? `building on ${cfg.buildModel} here sends this whole conversation to it again, uncached` : `this session is ${Math.round(usage!)}% full`;
+    const concerns = [...checked.concerns, ...(p1s ? [`the spec review raised ${p1s} P1 finding${p1s === 1 ? "" : "s"} (shown above): the build would carry ${p1s === 1 ? "it" : "them"}`] : [])];
+    if ((placing || concerns.length) && ctx.hasUI) {
+      const FRESH = "Build in a fresh session, from the spec (recommended)";
+      const HERE = "Build here anyway";
+      const GO = "Build anyway";
+      const REPAIR = `Repair first: /${cmd("spec-harden")} ${name} works through them`;
+      const STOP = "Stop here";
+      const build = placing ? (canOpenSession ? [FRESH, HERE] : [HERE, FRESH]) : [GO];
+      const title = [`Build ${name}${why ? `: ${why}` : "?"}`, ...concerns.map((c) => `- ⚠ ${c}`)].join("\n");
+      const choice = await choose(ctx, store, title, [...build, ...(p1s ? [REPAIR] : []), STOP], build[0], notes);
+      if (!choice || choice === STOP) return;
+      if (choice === REPAIR) {
+        ctx.ui.setEditorText(`/${cmd("spec-harden")} ${name}`);
+        return ctx.ui.notify(`Press Enter to repair ${name}; /${cmd("build")} ${name} afterwards reviews the repaired text.`, "info");
+      }
+      if (placing) fresh = choice === FRESH;
+    } else if (!fresh && !o.decided && switching) fresh = true;
+    if (!ctx.hasUI && p1s) notes.push(`built with ${p1s} P1 finding${p1s === 1 ? "" : "s"} from the spec review unaddressed (no one to ask)`);
     if (fresh && !canOpenSession) {
       ctx.ui.setEditorText(`/${cmd("build")} ${name} --fresh`);
       return ctx.ui.notify(`Press Enter to build ${name} in a fresh session.`, "info");
@@ -2347,12 +2424,14 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
 
   pi.on("agent_settled", async (_e, ctx) => {
     if (await offerPendingBuild(ctx)) return;
-    // An open spec repair: the lap's turn just ended, so the harness owes the next step (claim check, the
-    // next lap, the confirming review, or the digest). This is the only place that step happens, for both
-    // doors, so a lap that ends silently is seen by the same code that reads one that reports.
+    // A repair lap's next step is driveRepair's, in the command that started the run — except when a build
+    // took the plan meanwhile: then the lap is dropped here and the build settles as a build does.
     const fixStore = new Store(ctx.cwd);
     const owned = fixStore.fixOfSession(ctx.sessionManager.getSessionFile());
-    if (owned?.p.fix && (await advanceSpecFix(ctx, fixStore, owned.name, owned.p))) return;
+    if (owned?.p.fix) {
+      if (!unfinishedPhase(owned.p.phase)) return;
+      await advanceSpecFix(ctx, fixStore, owned.name, owned.p);
+    }
     const { store, progress: p } = specOfSession(ctx);
     if (p?.phase === "building") pauseBuild(ctx, store, p, "the agent stopped without finishing its task (you stopped it, or it stopped again after a reminder).", "build.paused", "stopped");
     // bash can write where edit and write are blocked: say what changed as soon as the turn ends,

@@ -1735,9 +1735,9 @@ test("/pb:build reads a Depends on note as the spec name, not the whole line", a
   await t.callTool("pb_write_spec", { name: "tempo-gtfs-live-trains", content: SPEC() });
   const dependent = SPEC().replace("Depends on: none", "Depends on: tempo-gtfs-live-trains — implemented and on HEAD; this spec consumes its endpoints unchanged");
   assert.equal((await t.callTool("pb_write_spec", { name: "live-trains", content: dependent })).error, undefined);
-  t.selects.push("No, stop here"); // the dependency has no build yet: the human can decline
+  t.selects.push("Stop here"); // the dependency has no build yet: the human can decline
   await t.run("build", "live-trains");
-  assert.match(t.selectTitles.at(-1)!, /live-trains depends on tempo-gtfs-live-trains, which isn't built yet/);
+  assert.match(t.selectTitles.at(-1)!, /^Build live-trains\?\n- ⚠ live-trains depends on tempo-gtfs-live-trains, which isn't built yet$/);
   assert.equal(t.instructions.length, 0);
 });
 

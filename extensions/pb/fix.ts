@@ -156,6 +156,7 @@ export function registerFix(pi: ExtensionAPI) {
     spec: string,
     remaining: Finding[],
     lap: number,
+    home: string | undefined,
     failure?: string,
   ): Promise<{ live: ExtensionCommandContext; report?: LapReport; ms: number } | undefined> => {
     const started = Date.now();
@@ -166,10 +167,11 @@ export function registerFix(pi: ExtensionAPI) {
     // The lap owns only events appended after its own fix-start marker; `from` is the log
     // position captured right after that marker is written.
     let from = 0;
+    // Every lap is a child of the session that ran /pb:fix, named by its lap: /resume lists them apart.
     const result = await ctx.newSession({
-      parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
+      parentSession: home ?? ctx.sessionManager.getSessionFile() ?? undefined,
       setup: async (sm) => {
-        sm.appendSessionInfo(`fix: ${spec}`);
+        sm.appendSessionInfo(`fix: ${spec} · lap ${lap}`);
       },
       withSession: async (c) => {
         const cc = c as ExtensionCommandContext;
@@ -254,7 +256,7 @@ export function registerFix(pi: ExtensionAPI) {
     let checked: string[] = [];
     while (remaining.length && laps < FIX_LAPS) {
       laps++;
-      const out = await runFixLap(live, store, spec, remaining, laps, failure);
+      const out = await runFixLap(live, store, spec, remaining, laps, home, failure);
       if (!out) return; // its session never opened (cancelled): user is present, nothing to say
       live = out.live;
       ms += out.ms;

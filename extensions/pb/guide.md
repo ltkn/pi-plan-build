@@ -657,6 +657,12 @@ for you. A lap that changes nothing ends the run. That is the stop rule, not "no
 out of subjects. Every claim left without evidence is listed for you, with what
 settling it would take.
 
+Each lap runs in a **fresh session of its own** (`spec-fix: <spec> · lap N`),
+seeded with the spec and its worklist rather than the whole planning discussion:
+the spec is written so a fresh session can start from it alone. pb brings you
+back after each lap, and the claim check, the review and the digest land in
+your session.
+
 Either way the run asks you only the calls it won't make: each question comes with
 its recommendation and with what it would do if you don't answer (that goes on
 the record as decided without you). The lap's pen is the ordinary one, so the

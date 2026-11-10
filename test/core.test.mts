@@ -998,3 +998,56 @@ test("what's next: always on screen — the footer, the title, situational help 
   const undo = t.runtime().cmds["pb:undo"].getArgumentCompletions("");
   assert.ok(undo.some((i: any) => i.value === "T1" && i.description), "checkpoints complete with what they undo");
 });
+
+test("build-start screen: an unbuilt dependency, the review's P1 and a full session are one screen with one choice", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "base-feature", content: SPEC() });
+  assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("Depends on: none", "Depends on: base-feature") })).error, undefined);
+  t.runtime().usage = 80; // past freshAbove (50): where to build is part of the same screen
+  process.env.MOCK_SPEC_REVIEW = "advisory"; // a pass with a P1
+  t.selects.push("Stop here");
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const screens = t.selectTitles.filter((x) => x.startsWith("Build order-cancellation"));
+  assert.equal(screens.length, 1, "one screen, not a dialog per concern");
+  assert.equal(
+    screens[0],
+    "Build order-cancellation: this session is 80% full\n- ⚠ order-cancellation depends on base-feature, which isn't built yet\n- ⚠ the spec review raised 1 P1 finding (shown above): the build would carry it",
+  );
+  assert.deepEqual(t.selectOptions.at(-1), ["Build in a fresh session, from the spec (recommended)", "Build here anyway", "Repair first: /pb:spec-harden order-cancellation works through them", "Stop here"]);
+  assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved");
+});
+
+test("a build in the planning session renames it, so /resume shows what it became", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  const session = t.runtime().ctx.sessionManager.getSessionFile();
+  await t.run("build");
+  assert.equal(t.names.get(session), "build: order-cancellation");
+});
+
+test("dialogs: the footer says pb is waiting for you, and a timed-out choice says what pb did", async () => {
+  const { choose } = await import("../extensions/pb/kit.ts");
+  const { Store } = await import("../extensions/pb/store.ts");
+  const t = setup({ verify: "true", askTimeoutSec: 1 });
+  await written(t);
+  const ctx = t.runtime().ctx as any;
+  for (const h of t.runtime().handlers.ui_prompt_start ?? []) await h({ type: "ui_prompt_start", kind: "select", title: "Build order-cancellation?\n- ⚠ something" }, ctx);
+  assert.equal(t.statuses.get("pb"), "pb · waiting for your answer: Build order-cancellation?");
+  for (const h of t.runtime().handlers.ui_prompt_end ?? []) await h({ type: "ui_prompt_end" }, ctx);
+  assert.match(t.statuses.get("pb")!, /^pb · order-cancellation · spec ready · next: /, "the next step is back");
+  ctx.mode = "tui";
+  t.selects.push("<hang>");
+  const notes: string[] = [];
+  const picked = await choose(ctx, new Store(t.repo), "Build order-cancellation?\n- ⚠ a P1", ["Build anyway", "Stop here"], "Build anyway", notes);
+  assert.equal(picked, "Build anyway");
+  assert.equal(t.posts.at(-1), '**No answer within 1 min**, so pb went on with its default — "Build anyway" — for: Build order-cancellation?');
+  assert.equal(notes.length, 1);
+});

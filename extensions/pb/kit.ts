@@ -767,7 +767,10 @@ export const choose = async (ctx: ExtensionContext, store: Store, title: string,
   const { result: choice, timedOut } = await patiently(ctx, ms, (opts) => ctx.ui.select(title, options, opts));
   if (choice !== undefined) return choice;
   if (timedOut) {
-    notes?.push(`${title} → ${fallback} (no answer within ${Math.max(1, Math.round(ms / 60_000))} min)`);
+    const minutes = Math.max(1, Math.round(ms / 60_000));
+    notes?.push(`${title} → ${fallback} (no answer within ${minutes} min)`);
+    // Said where you will look when you come back, not only in the notes a later summary may carry.
+    post(`**No answer within ${minutes} min**, so pb went on with its default — "${fallback}" — for: ${title.split("\n")[0]}`);
     return fallback;
   }
   return undefined;

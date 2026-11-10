@@ -123,8 +123,8 @@ test("spec review: a P1 is weighed before T1 — build anyway, repair first or s
     await t.run("build", "order-cancellation");
     const shown = t.posts.slice(posted).join("\n");
     assert.match(shown, /\*\*The spec review of this text raised 1 P1 finding\*\* — not blocking, but the build would carry it:\n\n- 1\. \[P1\]/);
-    assert.ok(t.selectTitles.includes("Spec review raised 1 P1 finding on order-cancellation. Build on it?"));
-    assert.deepEqual(t.selectOptions.at(-1), ["Build anyway: they stay known risks", "Repair first: /pb:spec-harden order-cancellation works through them", "Stop here"]);
+    assert.ok(t.selectTitles.includes("Build order-cancellation?\n- ⚠ the spec review raised 1 P1 finding (shown above): the build would carry it"));
+    assert.deepEqual(t.selectOptions.at(-1), ["Build anyway", "Repair first: /pb:spec-harden order-cancellation works through them", "Stop here"]);
     assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved, nothing built");
     assert.equal(t.progress("order-cancellation").approval, undefined);
     // Repair first hands over the command instead of building.
@@ -133,13 +133,13 @@ test("spec review: a P1 is weighed before T1 — build anyway, repair first or s
     assert.equal(t.stat.editorText, "/pb:spec-harden order-cancellation");
     assert.equal(t.progress("order-cancellation").phase, "written");
     // Build anyway: the build goes on, and a restart of an approved text is not asked again.
-    t.selects.push("Build anyway: they stay known risks");
+    t.selects.push("Build anyway");
     await t.run("build", "order-cancellation");
     assert.equal(t.progress("order-cancellation").phase, "built");
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
   }
-  assert.equal(t.selectTitles.filter((x) => x.startsWith("Spec review raised")).length, 3, "asked once per attempt, never after the approval");
+  assert.equal(t.selectTitles.filter((x) => x.startsWith("Build order-cancellation?")).length, 3, "asked once per attempt, never after the approval");
 });
 
 test("spec review: only a P1 is weighed; P2 and P3 alone build without asking", async () => {
@@ -152,7 +152,7 @@ test("spec review: only a P1 is weighed; P2 and P3 alone build without asking", 
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
   }
-  assert.ok(!t.selectTitles.some((x) => x.startsWith("Spec review raised")));
+  assert.ok(!t.selectTitles.some((x) => x.startsWith("Build order-cancellation")), "nothing to hold the build for: no screen");
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
@@ -982,6 +982,32 @@ test("spec-harden and spec-fix refuse a spec that is mid-build or already mid-la
   await t.run("build", "order-cancellation");
   assert.match(t.notes.at(-1)!, /A repair lap for order-cancellation is still open \(the model is rewriting its plan\)/);
   assert.equal(t.progress("order-cancellation").phase, "written", "the build refused before approving anything");
+});
+
+test("spec fix: each lap runs in a fresh session of its own — no planner role, named and parented to yours — and you come back to its result", async () => {
+  const t = setup({ verify: "true" });
+  await t.run("plan", "Let customers cancel pending orders");
+  await written(t);
+  const home = t.runtime().ctx.sessionManager.getSessionFile();
+  const owner = t.progress("order-cancellation").writtenIn;
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const runsBefore = t.systemSections.length;
+  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+  await t.run("spec-fix", "order-cancellation");
+  const lapRuns = t.systemSections.slice(runsBefore);
+  assert.ok(lapRuns.length >= 1, "the lap ran");
+  assert.ok(lapRuns.every((sections) => !sections.pb_planner), "the lap works to its own contract, not the planner's role");
+  const lapSession = [...t.names.entries()].find(([, n]) => n === "spec-fix: order-cancellation · lap 1")?.[0];
+  assert.ok(lapSession && lapSession !== home, "a session of its own, named for the spec and the lap");
+  assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home, "back where you were");
+  assert.match(t.posts.at(-1)!, /Spec fix — order-cancellation/, "the digest lands in your session");
+  assert.equal(t.progress("order-cancellation").writtenIn, owner, "the lap's writes keep the spec's owner");
+  assert.equal(t.progress("order-cancellation").fix, undefined);
 });
 
 test("spec fix: a build that takes the plan drops the open lap, and still pauses as a build does", async () => {

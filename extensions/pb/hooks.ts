@@ -246,6 +246,19 @@ export function registerHooks(pi: ExtensionAPI) {
   // A turn or a run that ends may have moved the spec (a task done, a lap reported): the footer follows.
   pi.on("agent_settled", (_e, ctx) => refreshWhere(ctx));
 
+  // While a dialog waits on you, the footer says so — seen from another window or pane, "running" and
+  // "waiting for you" look the same otherwise. The prompt's end puts the next step back.
+  pi.on("ui_prompt_start", (e, ctx) => {
+    if (!ctx.hasUI) return;
+    const title = String((e as { title?: unknown }).title ?? "").split("\n")[0].slice(0, 80);
+    try {
+      ctx.ui.setStatus("pb", `pb · waiting for your answer${title ? `: ${title}` : ""}`);
+    } catch {
+      // the session was replaced: nothing to draw on
+    }
+  });
+  pi.on("ui_prompt_end", (_e, ctx) => refreshWhere(ctx));
+
   pi.on("turn_end", (_e, ctx) => {
     refreshWhere(ctx);
     const { store, name, progress: p } = specOfSession(ctx);

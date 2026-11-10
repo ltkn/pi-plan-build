@@ -127,7 +127,7 @@ test("plan: the baseline runs in the background (no tokens) and a red suite warn
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  assert.ok(t.selectTitles.some((x) => /^The test suite already failed when planning began \(`exit 1` → FAIL/.test(x)));
+  assert.ok(t.selectTitles.some((x) => /^Build order-cancellation\?\n- ⚠ the test suite already failed when planning began \(`exit 1` → FAIL/.test(x)));
 });
 
 test("plan: a baseline from an older commit doesn't block the build", async () => {
