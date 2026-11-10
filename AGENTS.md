@@ -23,6 +23,7 @@
   its probe (`pb_try`) is read-only, `pb_spec_fix_done` accepts a report only from the session named in
   `Progress.fix` and only for the finding numbers that lap was shown, and the claim check records
   `spec-check`, never `spec-review` — so no repair run can satisfy the build's review gate. (security)
+- A spec may cite a sibling repository (`../<repo>/<path>:<line>`, a change spanning a backend and its frontend), and only through `resolveSiblingFile` (`extensions/pb/map.ts`): the real path (links followed) must stay inside the folder that holds the project and outside the project, with no dot-named part, and never when that folder is a filesystem root. Anything else is "not in the project" and the error says nothing about the file it names. `specPathErrors` and `unresolvedAnchors` share it. (security)
 - A spec name never becomes a path directly: `specDir` (`extensions/pb/store.ts`) is the only spec-name→path point; anything that is not `KEBAB_NAME` (`extensions/pb/names.ts`) or the name of an existing spec dir throws before a path is built. (security)
 - A build tool may only record into the build its own session owns, and only the current step: `specForSession` (realpath-compares the session file) → `buildOfSession` throws unless `phase === "building"`, and `pb_task_done`/`pb_tests_red` refuse `params.task !== p.current` (`extensions/pb/flow.ts`). The tool is never the place to relax this. (security)
 - Review sessions are read-only by the `tool_call` guard (`extensions/pb/hooks.ts`), which blocks every tool outside `REVIEW_SESSION_TOOLS` for any session holding a `reviewSession` record — not just `edit`/`write`, because a tool Pi activates after `session_start` (a late-connecting MCP server's, say) must not reach a reviewer; the pass re-marks the new session fail-closed inside `newSession`'s `withSession` (`extensions/pb/review-flow.ts`), so stolen or expired handover state cannot yield a writable reviewer. `pb_report_findings` separately refuses any session without that record. (security)
@@ -59,8 +60,10 @@
 - A spec edited while the review runs is not built: the pass is discarded and the human is asked to rerun `/pb:build`, which reviews the new text. The window after the pass — the placement dialog — is guarded too: `startBuild` re-reads the spec and compares `specHash` against the reviewed text right before any `approveSpec`, and refuses on a mismatch (the sub-second gap before a fresh session's approval stays uncovered on purpose).
 
 ### Spec repair laps (extensions/pb/flow.ts, extensions/pb/prompts.ts)
-- A lap repairs the **plan**, in the session that owns the spec, through `pb_write_spec` — so the format
-  gates and the standards still bind it. It is not a fresh run: it has `pb_try` (read-only probes),
+- A lap repairs the **plan**, in the session that owns the spec, through the spec tools (`pb_update_spec`
+  section by section; `pb_write_spec` only when most of it changes) — so the format gates and the standards
+  still bind it, and `specLosses` names anything a write removed. Before reporting it runs `SPEC_CHECKS`
+  over what it changed (`specFixPrompt`), so a lap that settles one claim does not write two new ones. It is not a fresh run: it has `pb_try` (read-only probes),
   `pb_ask` (you) and the ordinary spec pen. `SPEC_FIX_RULES` is its contract: point a claim at evidence,
   delete it, decide it in `Decisions`, or tag it `assumed:` — plus a written rebuttal with a `path:line`
   citation when a finding is wrong. It never invents a worklist: `recordedFindings` (flow.ts) numbers only
@@ -73,7 +76,12 @@
   so a report always closes the lap its session owns. `advanceSpecFix` (flow.ts) is the **only** step-forward
   and runs from `agent_settled` alone, for both doors: an unreported lap stops and says so; an unchanged
   text is not re-checked or re-reviewed; parked questions are asked before anything else; a manual
-  `/pb:spec-fix` lap stops at its claim check, and only the driver chains another lap. A review that
+  `/pb:spec-fix` lap stops at its claim check, and only the driver chains another lap. The driver runs the
+  claim check **once per run** (`SpecFixState.claimCheck`, carried across laps), after the first lap and
+  before any confirming review; its claims get a lap only while `laps < maxLaps − 1` when a review is still
+  in budget, so claim laps never spend the lap the confirming review's findings need. Claims handed to a
+  lap are not re-checked, so the digest says they were sent to a lap (`claimsTaken`), never that none are left.
+- What a lap repairs by default is `repairable` (flow.ts): P0–P2, for both doors; P3 only when named. A review that
   reports nothing (or whose text changed under it) stops the run: no digest claims a verdict on text no
   review read. `fixLive` drops a lap whose session file is gone or older than
   six hours, so a killed session cannot lock a spec out of repair.
@@ -83,7 +91,7 @@
   `spec-review`, so it cannot satisfy the build's review gate; a check that reports nothing is `error`
   and stops the run rather than reading as clean.
 - `/pb:spec-harden`'s stop rule is facts, not silence: budgets (`specFix.maxLaps`, `specFix.maxReviews`,
-  defaults 3 and 2), nothing left un-evidenced, or a lap that changed nothing. A fresh full review never
+  defaults 3 and 2), nothing left to repair, or a lap that changed nothing. A fresh full review never
   runs out of subjects, so "no findings" is never the condition. `/pb:spec-fix` is the manual single lap;
   the hardening driver's `driver: true` is the only difference in the lap record.
 
@@ -125,13 +133,13 @@
 - `BINDING_SECTIONS` (`spec.ts`) is the single list every build prompt names for the model to read (`specReference`), and the guide and README must state it in the exported order (test "binding: the guide and README list the binding sections in the exported order"). Nothing renders or shortens the sections any more: the spec file is one read away.
 
 ### Tests + build
-- `npm test` → `node --test "test/*.test.mts"` (452 tests, ~65 s: the files run in parallel); `npm run typecheck` (strict, with `noUnusedLocals`/`noUnusedParameters`, tests included); `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
+- `npm test` → `node --test "test/*.test.mts"` (456 tests, ~65 s: the files run in parallel); `npm run typecheck` (strict, with `noUnusedLocals`/`noUnusedParameters`, tests included); `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
 - The end-to-end suite is split by area — `plan`, `spec`, `build`, `review`, `core` `.test.mts` — over one harness, `test/harness.mts` (the simulated Pi, `setup()`, the `SPEC()` fixtures and the scripted agents, every helper exported). A new test goes in its area's file and imports only what it uses (the typecheck refuses an unused import); a helper shared by two files belongs in the harness. `phase.test.mts` and `prompts.golden.test.mts` are unit-level.
 - `node scripts/verify-test.mjs [--file <file>] "<exact test name>" ...` is the per-task proof: it exits 0 only when every name has a TAP `ok N - <name>` line and the report says `# fail 0` (a `# SKIP` is not a proof), because `node --test --test-name-pattern=<zero-match>` itself exits 0. Names are regex-escaped; without `--file` it runs the whole suite (every `test/*.test.mts`); dev-only (outside `package.json` `files`).
 - `test/verify-fixture.test.mjs` is deliberately **not** run by `npm test` (its `.mjs` extension keeps it out of the `*.test.mts` glob); the prover's tests drive it through `--file`, so they never nest the real suite.
 - Peer ranges must stay identical in `package.json` and `package-lock.json` or `npm ci` refuses in CI: after touching a peer, run `npm install --package-lock-only`. Pinned by "deps: the lockfile peer ranges match package.json".
 - Pi's host-provided packages (`typebox`, `@earendil-works/pi-*`) are never in `dependencies` — Pi refuses such a package at startup (`[Extension issues] … Host-provided extension packages …`) and can end up with two copies of TypeBox; they are peers, `typebox` as `"*"` (the version is whichever Pi ships) and kept in `devDependencies` so typecheck and tests resolve it outside Pi. Pinned by "deps: Pi's host-provided packages are peers, never dependencies".
-- The suite drives the real commands/tools against a simulated Pi; `PI_PB_PI_COMMAND` points fresh sub-processes at `test/mock-pi.mjs`, whose `MOCK_SPEC_REVIEW` modes are `block` (a P0), `block-advisory` (P0 + P2), `advisory` (P1 + P2, a pass), `minor` (a P2 alone), `tagged` (findings tagged with their check, one unknown), `mixed` (P0 + P1), `prose` (a report written as prose, no tool call) and `crash` (no report). `MOCK_SPEC_BRIEF_OUT` captures the latest brief; `MOCK_SPEC_EDIT` simulates a human editing the spec mid-review; `MOCK_ABUSE_ARGS_OUT` / `MOCK_SPEC_ARGS_OUT` capture a fresh run's argv (its `--tools` allowlist), and the mock refuses a report through a tool `--tools` does not name.
+- The suite drives the real commands/tools against a simulated Pi; `PI_PB_PI_COMMAND` points fresh sub-processes at `test/mock-pi.mjs`, whose `MOCK_SPEC_REVIEW` modes are `block` (a P0), `block-advisory` (P0 + P2), `advisory` (P1 + P2, a pass), `minor` (a P2 alone), `polish` (a P3 alone), `tagged` (findings tagged with their check, one unknown), `mixed` (P0 + P1), `prose` (a report written as prose, no tool call) and `crash` (no report). `MOCK_SPEC_BRIEF_OUT` captures the latest brief; `MOCK_SPEC_EDIT` simulates a human editing the spec mid-review; `MOCK_ABUSE_ARGS_OUT` / `MOCK_SPEC_ARGS_OUT` capture a fresh run's argv (its `--tools` allowlist), and the mock refuses a report through a tool `--tools` does not name.
 - `setup()` sets `reviewer.idleSec: 0` and an empty `specReviewer` (the review always runs); `PI_CODING_AGENT_DIR` is redirected to a temp dir so nothing touches the real user agent dir. `MOCK_VERIFIER_BRIEF_OUT` captures the verifier's brief.
 - `written()` asserts an error-free `pb_write_spec`, so any new write gate must be satisfied by the shared fixtures: `SPEC()` plus the one task-list builder `tasksMarkedBy` behind `TASKS_WITH_OWN_IDS` and `TASKS_WITH_EXEMPTIONS`.
 

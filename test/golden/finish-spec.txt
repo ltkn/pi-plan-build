@@ -1,4 +1,4 @@
-words: 1469
+words: 1485
 
 [pb:spec order-cancellation] Finish the spec .pi/pb/specs/order-cancellation/spec.md for building: ask me with pb_ask, all at once, about each open question; write answered ones into Decisions; add the Tasks and the Verification line, leave no Open questions, and set Status: ready. Anything still unanswered stays Open and the spec stays Status: planning — never decide for me. (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
 
@@ -11,7 +11,7 @@ New tests: yes | no — <why>
 ## Goal
 The outcome in a few sentences: what is true after the change, for whom, and how we'll know it worked — no implementation. Every task and acceptance line serves it; anything beyond it belongs in Out of scope.
 ## Findings
-What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. A path:line must point at a real line in the repo; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
+What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. A path:line must point at a real line: in this repo, or in a sibling repository the change also touches, cited from the project root as ../<repo>/<path>:<line>; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
 ## Decisions
 Each decision with its reason, as it stands now: no dates, no history, not who decided. Say why in plain prose, not with a bare colon; rejected ideas as "Not doing X, because …", so they aren't reconsidered.
 ## Contracts

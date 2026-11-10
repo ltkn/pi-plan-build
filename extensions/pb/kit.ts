@@ -16,7 +16,7 @@ import { type Snapshot, changedPaths, commitTime, restore, skippedLargeFiles, sn
 import { notifyDesktop } from "./notify.ts";
 import { tip } from "./help.ts";
 import { PI_RESERVE_TOKENS, specReference, taskPrompt } from "./prompts.ts";
-import { ignoredPathsFor, projectFiles, resolveProjectPath } from "./map.ts";
+import { ignoredPathsFor, projectFiles, resolveProjectPath, resolveSiblingFile } from "./map.ts";
 import { type ParsedSpec, type SpecTask, addDecision, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sharedTestCommands, specHash, specPathRefs } from "./spec.ts";
 import { duration } from "./format.ts";
 import { type Stack, findStandards, isUserTemplate, standardsLoaded } from "./standards.ts";
@@ -137,12 +137,13 @@ export const fileLines = (file: string): number | undefined => {
 export const unresolvedAnchors = (cwd: string, findings: { file?: string }[]): string[] => {
   const files = projectFiles(cwd);
   return [...new Set(findings.flatMap((f) => (f.file ? [f.file] : [])))]
-    .filter((p) => resolveProjectPath(cwd, p, files) === undefined)
+    .filter((p) => resolveProjectPath(cwd, p, files) === undefined && resolveSiblingFile(cwd, p) === undefined)
     .sort();
 };
 
 /**
- * A ready spec's `path:line` citations must resolve to a real file and a real line. A citation the visible
+ * A ready spec's `path:line` citations must resolve to a real file and a real line, in the project or in a sibling
+ * repository (`resolveSiblingFile`). A citation the visible
  * file list can't answer is asked of the working tree once for all of them, and the file that answers is
  * line-checked like any other, so a gitignored file must really carry the line it is cited at.
  */
@@ -152,8 +153,9 @@ export const specPathErrors = (md: string, cwd: string): string[] => {
   const visible = new Map(refs.map((ref) => [ref.path, resolveProjectPath(cwd, ref.path, files)]));
   const rescued = ignoredPathsFor(cwd, [...new Set(refs.filter((ref) => !visible.get(ref.path)).map((ref) => ref.path))]);
   return refs.flatMap((ref) => {
-    const found = visible.get(ref.path) ?? rescued.get(ref.path);
-    if (!found) return [`the spec cites \`${ref.path}:${ref.line}\`, but that path is not in the project`];
+    const found = visible.get(ref.path) ?? rescued.get(ref.path) ?? resolveSiblingFile(cwd, ref.path);
+    if (!found)
+      return [`the spec cites \`${ref.path}:${ref.line}\`, but that path is not in the project${ref.path.startsWith("../") ? ", nor a file in a sibling repository (`../<repo>/<path>`, one folder up, no dot-named part)" : ""}`];
     let isFile = false;
     try {
       isFile = fs.statSync(found).isFile();

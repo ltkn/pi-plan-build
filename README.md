@@ -30,9 +30,9 @@ build. Your engineering standards live in AGENTS.md, written once.
                     applies the fix it recommends, argues in Decisions when a finding is wrong, parks only
                     what it won't decide; a claim check then reads the new text for claims standing on nothing
 /pb:spec-harden [name]
-                    auto-pilot over a written spec: repair laps, a claim check after each, one confirming
-                    review, one last lap, then a digest naming what is left; budgets specFix.maxLaps /
-                    specFix.maxReviews
+                    auto-pilot over a written spec: repair laps over the P0-P2 findings, one claim check,
+                    one confirming review, a lap kept for what it finds, then a digest naming what is left;
+                    budgets specFix.maxLaps / specFix.maxReviews
 /pb:undo · /pb:status [--json] · /pb:stats [--json] · /pb:archive · /pb:help
 pb-report [--cwd dir] [--stats] [--review]   # the same pb.report/2 JSON, for scripts
 ```
@@ -270,7 +270,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium"}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports) |
 | `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always` on every review; `off`) |
 | `specReviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the one fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. Only a P0 blocks; P1-P3 are advisory. Point it at `buildModel` to have the implementer model validate the plan |
-| `specFix` | `{}` | `{"model": "provider/id", "thinking": "low", "maxLaps": 3, "maxReviews": 2}` for the repair laps (`/pb:spec-fix`, `/pb:spec-harden`) and the claim check that follows each lap; unset thinking runs the claim check at `low`; the budgets cap a hardening run, which stops when nothing is left un-evidenced, a lap changes nothing, or a budget is spent |
+| `specFix` | `{}` | `{"model": "provider/id", "thinking": "low", "maxLaps": 3, "maxReviews": 2}` for the repair laps (`/pb:spec-fix`, `/pb:spec-harden`) and the claim check (after a manual lap; once per hardening run); unset thinking runs the claim check at `low`; the budgets cap a hardening run, which stops when nothing is left un-evidenced, a lap changes nothing, or a budget is spent |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
 | `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |

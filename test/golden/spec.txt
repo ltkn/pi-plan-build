@@ -1,4 +1,4 @@
-words: 1765
+words: 1781
 
 [pb:spec]
 
@@ -13,7 +13,7 @@ New tests: yes | no — <why>
 ## Goal
 The outcome in a few sentences: what is true after the change, for whom, and how we'll know it worked — no implementation. Every task and acceptance line serves it; anything beyond it belongs in Out of scope.
 ## Findings
-What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. A path:line must point at a real line in the repo; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
+What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. A path:line must point at a real line: in this repo, or in a sibling repository the change also touches, cited from the project root as ../<repo>/<path>:<line>; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
 ## Decisions
 Each decision with its reason, as it stands now: no dates, no history, not who decided. Say why in plain prose, not with a bare colon; rejected ideas as "Not doing X, because …", so they aren't reconsidered.
 ## Contracts
@@ -64,5 +64,5 @@ Then tell me where it is. End your reply with this block, verbatim:
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
 - Review it before building: `/pb:spec-review` — the same fresh reviewer, nothing built, and `/pb:build` then starts at T1 without re-reviewing.
-- The review found things? `/pb:spec-fix` — one lap over its findings on your say-so — or `/pb:spec-harden` — laps, a claim check and one confirming review, unattended.
+- The review found things? `/pb:spec-fix` — one lap over its findings on your say-so — or `/pb:spec-harden` — laps, one claim check and one confirming review, unattended.
 - Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — every spec is reviewed first: a P0 stops it before the first task · more: `/pb:help spec`

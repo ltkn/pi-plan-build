@@ -669,7 +669,7 @@ test("spec-fix: a lap whose turn ends without reporting stops and records nothin
   assert.equal(t.progress("order-cancellation").fix, undefined);
 });
 
-test("spec-harden: plan, review, lap, claim check, confirming review, last lap — then it stops and reports", async () => {
+test("spec-harden: plan, review, lap, one claim check, confirming review, last lap — then it stops and reports", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length : 0);
@@ -686,7 +686,8 @@ test("spec-harden: plan, review, lap, claim check, confirming review, last lap �
   assert.match(intro, /no verdict on this text yet: pb runs one review pass first[\s\S]*at most 3 repair laps and 2 review passes/);
   assert.match(intro, /a lap settles each finding one of four ways[\s\S]*by an `assumed:` tag that says what would prove it wrong/);
   assert.match(intro, /a finding it can prove wrong is rebutted in `## Decisions` with a `path:line` citation/);
-  assert.match(intro, /adds a lap while that check or the confirming review finds something and the budget lasts/);
+  assert.match(intro, /each lap re-checks what it wrote before reporting; after the first lap, one quick check names the claims still standing on nothing, and they get a lap only while one stays free for what the confirming review finds/);
+  assert.match(intro, /P0-P2 are repaired; P3 polish is left to you/);
   assert.match(intro, /the calls it won't make come back as questions, each with its recommendation/);
   assert.match(t.posts.find((p) => p.includes("A repair may do only one of four things")) ?? t.instructions.find((i) => i.includes("[pb:spec-fix]"))!, /.+/);
   const laps = t.instructions.filter((i) => i.includes("[pb:spec-fix]"));
@@ -694,7 +695,7 @@ test("spec-harden: plan, review, lap, claim check, confirming review, last lap �
   assert.match(laps[0], /Repair lap 1 on order-cancellation: 2 findings to settle/);
   assert.match(laps[1], /Repair lap 2/);
   assert.equal(reviews(), 2, "the pass that found the work, and the one that confirmed the repair — no more");
-  assert.equal(checks(), 2, "a claim check after each lap");
+  assert.equal(checks(), 1, "one claim check per run, before the confirming review");
   const harden = specFixEvents(t, "spec-harden").at(-1)!;
   assert.equal(harden.laps, 2);
   assert.equal(harden.reviews, 2);
@@ -720,28 +721,78 @@ test("spec-harden: a clean pass on record is named as a pass, not 'no verdict'",
   assert.match(t.posts.at(-1)!, /Spec hardened[\s\S]*nothing to repair/);
 });
 
-test("spec-harden: the budget is the stop rule — claims keep coming, the run still ends", async () => {
-  const t = setup({ verify: "true", specFix: { maxLaps: 2, maxReviews: 0 } });
+test("spec-harden: claim laps never spend the lap the confirming review's findings need", async () => {
+  const t = setup({ verify: "true", specFix: { maxLaps: 2, maxReviews: 2 } });
   await written(t);
+  const checks = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-check")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-check")).length : 0);
   process.env.MOCK_SPEC_REVIEW = "advisory";
-  process.env.MOCK_SETTLE = "claims"; // the check always finds un-evidenced claims: only the budget can end this
+  process.env.MOCK_SETTLE = "claims"; // the check always finds un-evidenced claims
   t.selects.push("Yes, go on");
   t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled what it was shown" });
   try {
-    await t.run("spec-review", "order-cancellation"); // the work exists; the budget here is for the repairs
     await t.run("spec-harden", "order-cancellation");
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
     delete process.env.MOCK_SETTLE;
   }
-  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 2, "maxLaps laps, not one more");
+  const laps = t.instructions.filter((i) => i.includes("[pb:spec-fix]"));
+  // Lap 1 takes the review's findings; the claims would take lap 2 and leave the confirming review's findings
+  // with nothing, so the claims wait and the confirming review's findings get the last lap.
+  assert.deepEqual(laps.map((l) => /\d+ (finding|claim)s? to settle/.exec(l)?.[1]), ["finding", "finding"]);
+  assert.equal(checks(), 1);
   const harden = specFixEvents(t, "spec-harden").at(-1)!;
-  assert.equal(harden.laps, 2);
-  assert.equal(harden.reviews, 0, "no review budget: the run confirms nothing by itself");
-  assert.equal(harden.unEvidenced, 2);
-  assert.match(t.posts.at(-1)!, /2 un-evidenced[\s\S]*Claims with nothing behind them[\s\S]*≤ 90 s/);
-  assert.match(t.posts.at(-1)!, /2 claims without a probe/, "the digest never claims the run cleared the claims it did not touch");
-  assert.equal(t.progress("order-cancellation").fix, undefined);
+  assert.deepEqual([harden.laps, harden.reviews, harden.unEvidenced], [2, 2, 2]);
+  assert.match(t.posts.at(-1)!, /2 un-evidenced[\s\S]*Claims with nothing behind them[\s\S]*≤ 90 s/, "the claims no lap took are yours, listed");
+});
+
+test("spec-harden: without a confirming review the one claim check's claims get a lap, and the digest never calls them cleared", async () => {
+  const t = setup({ verify: "true", specFix: { maxLaps: 3, maxReviews: 0 } });
+  await written(t);
+  const checks = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-check")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-check")).length : 0);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  process.env.MOCK_SETTLE = "claims";
+  t.selects.push("Yes, go on");
+  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled what it was shown" });
+  try {
+    await t.run("spec-review", "order-cancellation"); // the work exists; no review budget for the run itself
+    await t.run("spec-harden", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SETTLE;
+  }
+  const laps = t.instructions.filter((i) => i.includes("[pb:spec-fix]"));
+  assert.deepEqual(laps.map((l) => /\d+ (finding|claim)s? to settle/.exec(l)?.[1]), ["finding", "claim"], "one check, one claim lap, then the run ends");
+  assert.equal(checks(), 1, "the claims keep coming, but they are checked once per run");
+  const harden = specFixEvents(t, "spec-harden").at(-1)!;
+  assert.deepEqual([harden.laps, harden.reviews], [2, 0]);
+  assert.match(t.posts.at(-1)!, /2 claims sent to a lap/);
+  assert.doesNotMatch(t.posts.at(-1)!, /no un-evidenced claims/, "pb did not re-check them, so it never says none are left");
+});
+
+test("spec-harden: P3 polish is not repaired; only P3 recorded ends the run with nothing to repair", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "polish";
+  try {
+    await t.run("spec-review", "order-cancellation");
+    t.selects.push("Yes, go on");
+    await t.run("spec-harden", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 0, "no lap for polish");
+  assert.match(t.posts.at(-1)!, /Spec hardened[\s\S]*nothing to repair[\s\S]*only P3 polish \(1\); `\/pb:spec-fix order-cancellation <numbers>` repairs one you want/);
+});
+
+test("spec-fix: a lap edits by section and re-checks what it wrote before reporting", async () => {
+  const { specFixPrompt, specPrompt } = await import("../extensions/pb/prompts.ts");
+  const lap = specFixPrompt({ name: "x", work: "findings", items: ["1. [P1] a"], lap: 1 });
+  assert.match(lap, /section by section with pb_update_spec: a whole rewrite with pb_write_spec only when most of the spec changes/);
+  assert.match(lap, /Before reporting, run the spec checks over what you changed[^\n]*a lap that settles one claim and writes two new ones has made the spec worse/);
+  // The same checks as the writer's, word for word.
+  const checks = (prompt: string) => [...prompt.matchAll(/^\s*- (Claims|Values|Proof|Coverage|Reach|Consistency): [^\n]+$/gm)].map((m) => m[0].trim());
+  assert.equal(checks(lap).length, 6);
+  assert.deepEqual(checks(lap), checks(specPrompt("", [])));
 });
 
 test("spec-harden: a review that reports nothing stops the run instead of declaring the spec hardened", async () => {
@@ -1192,6 +1243,39 @@ test("spec citation: nothing above the project root resolves, for the write gate
     assert.doesNotMatch(error, /has \d+ line/);
   } finally {
     process.env.TMPDIR = savedTmp;
+  }
+});
+
+test("citations: a sibling repository's file is cited from the project root and line-checked; nothing further out resolves", async () => {
+  const { resolveSiblingFile } = await import("../extensions/pb/map.ts");
+  const { unresolvedAnchors } = await import("../extensions/pb/kit.ts");
+  const t = setup();
+  process.chdir(t.repo);
+  const workspace = path.dirname(fs.realpathSync(t.repo));
+  const sibling = fs.mkdtempSync(path.join(workspace, "pb-sibling-ui-"));
+  const name = path.basename(sibling);
+  try {
+    fs.mkdirSync(path.join(sibling, "src"), { recursive: true });
+    fs.writeFileSync(path.join(sibling, "src/api.ts"), Array.from({ length: 20 }, (_, i) => `// line ${i + 1}`).join("\n") + "\n");
+    fs.writeFileSync(path.join(sibling, ".env"), "SECRET=1\n");
+    fs.symlinkSync("/etc/hosts", path.join(sibling, "src/hosts.ts"));
+    const write = (ref: string) => t.callTool("pb_write_spec", { name: "cross-repo", content: citingSpec(`\`${ref}\` holds the client.`) });
+
+    // A change that spans a backend and its frontend cites both: the sibling's line is checked like any other.
+    assert.equal((await write(`../${name}/src/api.ts:12`)).error, undefined);
+    assert.match((await write(`../${name}/src/api.ts:99`)).error!, /has 20 lines/);
+    assert.match((await write(`../${name}/src/missing.ts:1`)).error!, /not in the project, nor a file in a sibling repository/);
+    // Model-written paths: a dot-named file, a climb past the workspace and a link out of it never resolve.
+    for (const ref of [`../${name}/.env:1`, "../../etc/hosts:1", `../${name}/src/hosts.ts:1`, `../${name}/src/../../${path.basename(t.repo)}/../../etc/hosts:1`]) {
+      const error = (await write(ref)).error!;
+      assert.match(error, /not in the project, nor a file in a sibling repository/, ref);
+      assert.doesNotMatch(error, /has \d+ line/, `${ref}: says nothing about the file it names`);
+    }
+    assert.equal(resolveSiblingFile(t.repo, `../${path.basename(t.repo)}/src/x.ts`), undefined, "the project itself is not its own sibling");
+    // A review's anchor into the sibling is real, not flagged as unverified.
+    assert.deepEqual(unresolvedAnchors(t.repo, [{ file: `../${name}/src/api.ts` }, { file: `../${name}/nope.ts` }]), [`../${name}/nope.ts`]);
+  } finally {
+    fs.rmSync(sibling, { recursive: true, force: true });
   }
 });
 

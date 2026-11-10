@@ -204,7 +204,7 @@ New tests: yes | no — <why>
 ## Goal
 The outcome in a few sentences: what is true after the change, for whom, and how we'll know it worked — no implementation. Every task and acceptance line serves it; anything beyond it belongs in Out of scope.
 ## Findings
-What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. A path:line must point at a real line in the repo; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
+What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. A path:line must point at a real line: in this repo, or in a sibling repository the change also touches, cited from the project root as ../<repo>/<path>:<line>; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
 ## Decisions
 Each decision with its reason, as it stands now: no dates, no history, not who decided. Say why in plain prose, not with a bare colon; rejected ideas as "Not doing X, because …", so they aren't reconsidered.
 ## Contracts
@@ -845,7 +845,11 @@ export function specFixPrompt(o: { name: string; work: "findings" | "claims"; it
     "",
     SPEC_FIX_RULES,
     "",
-    `Settle them in the spec file itself (${P}/specs/${o.name}/spec.md, written with pb_write_spec so the format gates apply to what you write), then report with pb_spec_fix_done: every number you were shown goes in exactly one list — applied, rebutted (with the Decisions line you wrote), parked (only where two defensible answers genuinely differ: the number, your question, what you recommend and why), or assumed (the number, the claim, and what would falsify it). A number you were not shown is not reportable, and a report that leaves one out is refused: a claim you could not settle is parked or assumed, never guessed.`,
+    `Settle them in the spec file itself (${P}/specs/${o.name}/spec.md), section by section with pb_update_spec: a whole rewrite with pb_write_spec only when most of the spec changes, because a rewrite regenerates text no finding asked you to touch. The format gates apply either way.`,
+    "",
+    `Before reporting, run the spec checks over what you changed and fix what they find; above all, every claim you wrote carries its evidence or the assumed tag, because a lap that settles one claim and writes two new ones has made the spec worse:\n${SPEC_CHECKS}`,
+    "",
+    `Then report with pb_spec_fix_done: every number you were shown goes in exactly one list — applied, rebutted (with the Decisions line you wrote), parked (only where two defensible answers genuinely differ: the number, your question, what you recommend and why), or assumed (the number, the claim, and what would falsify it). A number you were not shown is not reportable, and a report that leaves one out is refused: a claim you could not settle is parked or assumed, never guessed.`,
     "",
     "Touch nothing but the spec: this lap designs, it does not build.",
     ...(o.answers?.length ? ["", "What the human answered since the last lap:", ...o.answers.map((a) => `- ${a}`)] : []),

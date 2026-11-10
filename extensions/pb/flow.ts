@@ -1388,6 +1388,9 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       .at(-1);
   };
 
+  /** What a lap repairs unless the human names numbers: P0-P2. P3 is polish, and polish adds text the next review reads. */
+  const repairable = (list: { id: number; f: Finding }[]) => list.filter((x) => x.f.priority !== "P3");
+
   const recordedFindings = (store: Store, name: string, md: string): { id: number; f: Finding }[] => {
     const last = lastReviewOn(store, name, md);
     const reported = last && Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
@@ -1411,7 +1414,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
    * Open a repair lap: the undo point first, so a lap that rewrote the plan can be dropped whole with
    * /pb:undo; then the record naming the one session allowed to report it; then the instruction. A lap is
    * a turn in the session that owns the spec, not a fresh run: it probes with pb_try, asks you with
-   * pb_ask, and writes through pb_write_spec, so the format gates and your standards still bind what it
+   * pb_ask, and writes through the spec tools, so the format gates and your standards still bind what it
    * writes — an unreviewed run holding the spec's pen would be the wrong kind of automatic.
    */
 
@@ -1470,6 +1473,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       rebutted: p.fix?.rebutted ?? 0,
       assumed: p.fix?.assumed ?? 0,
       parked: p.fix?.parked ?? [],
+      ...(p.fix?.claimCheck ? { claimCheck: p.fix.claimCheck } : {}),
+      ...(p.fix?.claimsTaken ? { claimsTaken: p.fix.claimsTaken } : {}),
     };
     store.saveProgress(p);
     const unverified = unresolvedAnchors(ctx.cwd, list.map(({ f }) => f));
@@ -1601,7 +1606,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         `${fix.applied} applied`,
         `${fix.rebutted} rebutted`,
         fix.assumed ? `${fix.assumed} assumed` : "",
-        claims.length ? `${claims.length} un-evidenced` : "no un-evidenced claims",
+        // Claims a lap took are not re-checked by pb: say they went to a lap, never that none are left.
+        claims.length ? `${claims.length} un-evidenced` : driver && fix.claimsTaken ? `${fix.claimsTaken} claim${fix.claimsTaken === 1 ? "" : "s"} sent to a lap` : "no un-evidenced claims",
       ),
       "",
       nextLine(next),
@@ -1693,28 +1699,50 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       post(fixDigest(store, name, fix, [], loaded.md, fix.driver, `the lap changed nothing (it parked or assumed everything it was shown): \`/${cmd("spec-review")} ${name}\` when you have decided, or \`/${cmd("spec-fix")} ${name}\` with the numbers you want argued.`, undefined));
       return true;
     }
-    const check = await runClaimCheck(ctx, store, name, loaded.md);
-    if (sessionGone(ctx)) return true;
-    if (!check.reported) {
-      p.fix = undefined;
-      store.saveProgress(p);
-      ctx.ui.notify("The claim check did not report, so pb stopped rather than read silence as clean. Run the lap again, or point specFix.model at a model that reports.", "warning");
-      return true;
-    }
-    // A manual lap is one lap, on the human's say-so: the claim check is its last step. Only the
-    // harden driver may chain another lap from what the check found.
+    const claimCheck = async () => {
+      const check = await runClaimCheck(ctx, store, name, loaded.md);
+      if (sessionGone(ctx)) return undefined;
+      if (!check.reported) {
+        p.fix = undefined;
+        store.saveProgress(p);
+        ctx.ui.notify("The claim check did not report, so pb stopped rather than read silence as clean. Run the lap again, or point specFix.model at a model that reports.", "warning");
+        return undefined;
+      }
+      return check;
+    };
+    // A manual lap is one lap, on the human's say-so: the claim check is its last step.
     if (!fix.driver) {
+      const check = await claimCheck();
+      if (!check) return true;
       p.fix = undefined;
       store.saveProgress(p);
       post(fixDigest(store, name, fix, check.claims, loaded.md, false, undefined, check.session));
       return true;
     }
-    if (check.claims.length && fix.laps < maxLaps) {
-      beginFixLap(ctx, store, name, p, check.claims.map((f, i) => ({ id: i + 1, f })), { work: "claims", driver: true, hash: specHash(loaded.md), run: fix.run, reviews: fix.reviews, answers: answers.length ? answers : undefined });
-      return true;
-    }
+    // The harden run checks claims once, on the first repaired text and before any confirming review: each lap
+    // already checks what it wrote, and a check after every lap cost the most for the least. A claim lap runs
+    // only while a lap stays free for what the confirming review brings back — those are the findings that
+    // matter most, and claim laps must not spend their budget.
     const maxReviews = cfg.specFix.maxReviews ?? 2;
-    if (fix.reviews < maxReviews) {
+    const reviewsLeft = fix.reviews < maxReviews;
+    let checkSession: string | undefined;
+    if (!fix.claimCheck) {
+      const check = await claimCheck();
+      if (!check) return true;
+      checkSession = check.session;
+      if (check.claims.length && fix.laps < maxLaps - (reviewsLeft ? 1 : 0)) {
+        fix.claimCheck = [];
+        fix.claimsTaken = check.claims.length;
+        store.saveProgress(p);
+        beginFixLap(ctx, store, name, p, check.claims.map((f, i) => ({ id: i + 1, f })), { work: "claims", driver: true, hash: specHash(loaded.md), run: fix.run, reviews: fix.reviews, answers: answers.length ? answers : undefined });
+        return true;
+      }
+      fix.claimCheck = check.claims;
+      store.saveProgress(p);
+    }
+    // What the one check found that no lap took: still standing, and yours.
+    const claims = fix.claimCheck;
+    if (reviewsLeft) {
       fix.reviews += 1;
       store.saveProgress(p);
       const reviewed = await ensureSpecReviewed(ctx, store, name, loaded.md, reviewDoor(name, "harden"));
@@ -1729,11 +1757,11 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         const stoppedWith = reviewed === "error"
           ? `the confirming review did not report (point \`specReviewer.model\` in ${store.rel("config.json")} at a model that reports, then /${cmd("spec-harden")} ${name} again)`
           : `the spec changed while the confirming review ran (/${cmd("spec-harden")} ${name} again)`;
-        post(fixDigest(store, name, fix, check.claims, md, true, `${stoppedWith} — nothing was declared hardened.`, check.session));
+        post(fixDigest(store, name, fix, claims, md, true, `${stoppedWith} — nothing was declared hardened.`, checkSession));
         return true;
       }
       const md = store.readSpec(name);
-      const fresh = md === undefined ? [] : recordedFindings(store, name, md);
+      const fresh = md === undefined ? [] : repairable(recordedFindings(store, name, md));
       if (fresh.length && fix.laps < maxLaps) {
         beginFixLap(ctx, store, name, p, fresh, { work: "findings", driver: true, hash: specHash(md ?? loaded.md), run: fix.run, reviews: fix.reviews, answers: answers.length ? answers : undefined });
         return true;
@@ -1741,11 +1769,11 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     }
     const md = store.readSpec(name) ?? loaded.md;
     const blocked = verdictOn(store, name, md) === "block";
-    store.event(name, { type: "spec-harden", run: fix.run, hash: specHash(md), laps: fix.laps, reviews: fix.reviews, applied: fix.applied, rebutted: fix.rebutted, assumed: fix.assumed, unEvidenced: check.claims.length, findingsOnText: md === undefined ? 0 : recordedFindings(store, name, md).length });
+    store.event(name, { type: "spec-harden", run: fix.run, hash: specHash(md), laps: fix.laps, reviews: fix.reviews, applied: fix.applied, rebutted: fix.rebutted, assumed: fix.assumed, unEvidenced: claims.length, findingsOnText: md === undefined ? 0 : recordedFindings(store, name, md).length });
     p.fix = undefined;
     store.saveProgress(p);
-    post(fixDigest(store, name, fix, check.claims, md, true, undefined, check.session));
-    if (cfg.notify) notifyDesktop(blocked ? "pb: spec harden stopped" : "pb: spec hardened", `${name}: ${fix.laps} repair laps, ${fix.applied} applied, ${check.claims.length} claims left for you`);
+    post(fixDigest(store, name, fix, claims, md, true, undefined, checkSession));
+    if (cfg.notify) notifyDesktop(blocked ? "pb: spec harden stopped" : "pb: spec hardened", `${name}: ${fix.laps} repair laps, ${fix.applied} applied, ${claims.length} claims left for you`);
     return true;
   };
 
@@ -1932,7 +1960,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       }
       return { name, p, picked: numbers.map((n) => byId.get(n)!), hash: specHash(loaded.md) };
     }
-    const picked = all.filter((x) => x.f.priority !== "P3");
+    const picked = repairable(all);
     if (!picked.length) {
       ctx.ui.notify(`Every finding recorded for ${name} is P3 polish (${all.map((x) => x.id).join(", ")}): name the numbers to have them repaired.`, "info");
       return undefined;
@@ -1973,7 +2001,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       } else if (p.fix) return ctx.ui.notify(`A repair lap for ${name} is already open${p.fix.session ? ` in \`pi --session ${sessionIdOf(p.fix.session)}\`` : ""}.`, "warning");
       if (unfinishedPhase(p.phase)) return ctx.ui.notify(`${name} is being built: its plan is frozen while the build holds it. Harden it before /${cmd("build")}, or after the review.`, "warning");
 
-      let findings = recordedFindings(store, name, loaded.md);
+      const recorded = recordedFindings(store, name, loaded.md);
+      let findings = repairable(recorded);
       let reviews = 0;
       const verdict = verdictOn(store, name, loaded.md);
       post([
@@ -1981,7 +2010,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         "",
         `- ${
           findings.length
-            ? `${findings.length} finding${findings.length === 1 ? "" : "s"} already recorded against this text`
+            ? `${findings.length} finding${findings.length === 1 ? "" : "s"} already recorded against this text${recorded.length > findings.length ? ` (P3 polish is left to you: \`/${cmd("spec-fix")} ${name} <numbers>\` repairs one)` : ""}`
             : verdict
               ? `a ${verdict} is on record for this text; pb reuses it`
               : "no verdict on this text yet: pb runs one review pass first to find the work"
@@ -1989,7 +2018,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         `- budget: at most ${cfg.specFix.maxLaps} repair laps and ${cfg.specFix.maxReviews} review pass${cfg.specFix.maxReviews === 1 ? "" : "es"} in total`,
         `- a lap settles each finding one of four ways: with evidence (it runs the read-only probe and writes the command and result beside the claim), by cutting a claim that nothing supports or needs, by a decision in the spec that says why and names the alternative it rejected, or by an \`assumed:\` tag that says what would prove it wrong`,
         `- a finding it can prove wrong is rebutted in \`## Decisions\` with a \`path:line\` citation, never silently dropped`,
-        `- after each lap, a quick check names the claims still standing on nothing; the run adds a lap while that check or the confirming review finds something and the budget lasts, and a lap that changes nothing ends it`,
+        `- each lap re-checks what it wrote before reporting; after the first lap, one quick check names the claims still standing on nothing, and they get a lap only while one stays free for what the confirming review finds; a lap that changes nothing ends the run`,
+        `- P0-P2 are repaired; P3 polish is left to you`,
         `- the calls it won't make come back as questions, each with its recommendation (if you don't answer in time, it takes the recommendation and records that)`,
       ].join("\n"));
       if (!(await agree(ctx, store, `Harden ${name} now?`, notes))) return;
@@ -2006,12 +2036,18 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         if (after === undefined || after !== md) {
           return ctx.ui.notify(`The spec changed while it was under review: run \`/${cmd("spec-harden")} ${name}\` again and the new text will be hardened.`, "warning");
         }
-        findings = recordedFindings(store, name, after);
+        findings = repairable(recordedFindings(store, name, after));
         if (!findings.length) {
           if (reviewed === "block") {
             return ctx.ui.notify(`The review blocked ${name} but recorded no findings pb can read, so there is no worklist and nothing was declared hardened. Run /${cmd("spec-review")} ${name} again.`, "warning");
           }
-          return post([phaseHeader("\u2705", "Spec hardened", name, "nothing to repair"), "", nextLine(`\`/${cmd("build")} ${name}\` — the pass above covers this text and reported no findings.`), evidenceLine("the review found nothing a repair lap could settle")].join("\n"));
+          const polish = recordedFindings(store, name, after).length;
+          return post([
+            phaseHeader("\u2705", "Spec hardened", name, "nothing to repair"),
+            "",
+            nextLine(`\`/${cmd("build")} ${name}\` — the pass above covers this text and reported ${polish ? `only P3 polish (${polish}); \`/${cmd("spec-fix")} ${name} <numbers>\` repairs one you want` : "no findings"}.`),
+            evidenceLine(polish ? "P3 polish is left to you: it adds text the next review reads" : "the review found nothing a repair lap could settle"),
+          ].join("\n"));
         }
       }
       beginFixLap(ctx, store, name, p, findings, { work: "findings", driver: true, hash: specHash(md), run: now(), reviews, answers: notes.length ? notes : undefined });

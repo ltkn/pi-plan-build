@@ -44,7 +44,7 @@ if (sys.includes("ATTACKER")) {
   say([{ type: "text", text: process.env.MOCK_ABUSE_PROSE ?? "Done." }]);
 } else if (sys.includes("SPEC REVIEWER")) {
   // One structured pass: the reviewer reports findings with report_findings; only P0 blocks.
-  // =block: a P0; =block-advisory: a P0 plus a P2; =advisory: a P1 plus a P2 (pass); =minor: a P2 alone (pass); =tagged: findings tagged with their check;
+  // =block: a P0; =block-advisory: a P0 plus a P2; =advisory: a P1 plus a P2 (pass); =minor: a P2 alone (pass); =tagged: findings tagged with their check; =polish: a P3 alone;
   // =mixed: a P0 plus a P1; =prose: a report written as prose, no tool call; =crash: exits nonzero
   // with no report. MOCK_SPEC_BRIEF_OUT captures
   // the brief; MOCK_SPEC_EDIT simulates a human editing the spec mid-review.
@@ -66,6 +66,7 @@ if (sys.includes("ATTACKER")) {
   else if (mode === "block-advisory") report("report_findings", { findings: [p0, p2] });
   else if (mode === "advisory") report("report_findings", { findings: [p1, p2] });
   else if (mode === "minor") report("report_findings", { findings: [p2] });
+  else if (mode === "polish") report("report_findings", { findings: [{ ...p2, priority: "P3", title: "Contracts — wording" }] });
   // Findings tagged with the check they fail, one in lower case and one outside the list.
   else if (mode === "tagged") report("report_findings", { findings: [{ ...p1, check: "Values" }, { ...p2, check: "claims" }, { ...p2, title: "Contracts — a third", check: "Vibes" }, { ...p2, title: "Contracts — untagged" }] });
   else if (mode === "mixed") report("report_findings", { findings: [p0, p1] });

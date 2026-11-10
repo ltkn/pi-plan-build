@@ -1,4 +1,4 @@
-words: 576
+words: 834
 
 [pb:spec-fix] Repair lap 1 on order-cancellation: 1 finding to settle.
 
@@ -19,6 +19,16 @@ Push back in writing when you are sure. If a finding is wrong, do not comply wit
 
 Keep the spec the same size or smaller. Evidence replaces the paragraph that argued about it: a Contracts line quoting the measured value has no use for the essay that guessed it.
 
-Settle them in the spec file itself (.pi/pb/specs/order-cancellation/spec.md, written with pb_write_spec so the format gates apply to what you write), then report with pb_spec_fix_done: every number you were shown goes in exactly one list — applied, rebutted (with the Decisions line you wrote), parked (only where two defensible answers genuinely differ: the number, your question, what you recommend and why), or assumed (the number, the claim, and what would falsify it). A number you were not shown is not reportable, and a report that leaves one out is refused: a claim you could not settle is parked or assumed, never guessed.
+Settle them in the spec file itself (.pi/pb/specs/order-cancellation/spec.md), section by section with pb_update_spec: a whole rewrite with pb_write_spec only when most of the spec changes, because a rewrite regenerates text no finding asked you to touch. The format gates apply either way.
+
+Before reporting, run the spec checks over what you changed and fix what they find; above all, every claim you wrote carries its evidence or the assumed tag, because a lap that settles one claim and writes two new ones has made the spec worse:
+- Claims: each claim about existing code or a service says what the line it cites says; open the line, because a fact remembered from the discussion is not evidence.
+- Values: every value the spec introduces has its unit, range, sign and empty or missing case; a time names its clock or zone; a rule chosen by a classification says which class wins for an input that matches more than one class.
+- Proof: each Acceptance line is pinned by a test its task's Test: command selects (a runner and test file the project has, or the new file it names), and that test can fail before the change; when what makes it observable isn't obvious (a fake clock, a fixed seed, a mode that skips the code), say so.
+- Coverage: each Contract and each Decision that changes behaviour has an Acceptance line that pins it; what no line pins is not built.
+- Reach: the existing tests, callers, links and docs that assert the behaviour being changed are named, and a task owns updating each.
+- Consistency: Goal, Decisions, Contracts, Migration, Threats and Tasks say the same thing.
+
+Then report with pb_spec_fix_done: every number you were shown goes in exactly one list — applied, rebutted (with the Decisions line you wrote), parked (only where two defensible answers genuinely differ: the number, your question, what you recommend and why), or assumed (the number, the claim, and what would falsify it). A number you were not shown is not reportable, and a report that leaves one out is refused: a claim you could not settle is parked or assumed, never guessed.
 
 Touch nothing but the spec: this lap designs, it does not build.

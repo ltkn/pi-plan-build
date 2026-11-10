@@ -278,6 +278,28 @@ export function resolveProjectPath(cwd: string, p: string, files = projectFiles(
 }
 
 /**
+ * A file in a sibling repository, cited from the project root as `../<repo>/<path>`: a change that spans a
+ * backend and its frontend cites both sides. The citation is model-written, so it resolves only to a regular
+ * file whose real path (links followed) stays inside the folder that holds this project and outside the project
+ * itself, under no dot-named folder or file (`.ssh`, `.env`, `.git`), and never when that folder is a filesystem root.
+ */
+export function resolveSiblingFile(cwd: string, p: string): string | undefined {
+  if (!p.startsWith("../")) return undefined;
+  if (p.split("/").slice(1).some((part) => part.startsWith("."))) return undefined;
+  try {
+    const project = fs.realpathSync(cwd);
+    const workspace = path.dirname(project);
+    if (workspace === path.parse(workspace).root) return undefined;
+    const real = fs.realpathSync(path.resolve(project, p));
+    if (!real.startsWith(workspace + path.sep) || real === project || real.startsWith(project + path.sep)) return undefined;
+    if (path.relative(workspace, real).split(path.sep).some((part) => part.startsWith("."))) return undefined;
+    return fs.statSync(real).isFile() ? real : undefined;
+  } catch {
+    return undefined; // missing or unreadable: not a citation that resolves
+  }
+}
+
+/**
  * Whether a path the map names exists: from the project root, under the path the section's heading names,
  * or as the end of a real path. Every route goes through `resolveProjectPath`, so a name that leaves the
  * project resolves for none of them.

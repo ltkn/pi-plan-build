@@ -637,20 +637,25 @@ reports. It does not re-review: the text changed, so the old verdict doesn't cov
 it and `/pb:spec-review` decides that on the new bytes.
 
 **`/pb:spec-harden [name]`** drives the whole loop: a review if the text has no
-verdict yet, repair lap → claim check → one confirming review → one last lap over
-what that review finds → digest. It prints the plan first and one confirm starts
-it. Budget: `specFix.maxLaps` repair laps and `specFix.maxReviews` review passes
-(defaults 3 and 2). A lap is added only while the claim check or the confirming
-review still finds something and the budget lasts; a lap that changes nothing ends
-the run. That is the stop rule, not "no findings" — a fresh full pass never runs
+verdict yet, repair lap → one claim check → one confirming review → one last lap
+over what that review finds → digest. It prints the plan first and one confirm
+starts it. Budget: `specFix.maxLaps` repair laps and `specFix.maxReviews` review
+passes (defaults 3 and 2). It repairs P0–P2; P3 polish is left to you (polish adds
+text the next review reads), and `/pb:spec-fix <numbers>` repairs one you want.
+The claim check runs once, after the first lap: each lap already re-checks what it
+wrote before it reports. Its claims get a lap only while one stays free for the
+confirming review's findings, which matter more; claims no lap took are listed
+for you. A lap that changes nothing ends the run. That is the stop rule, not "no findings" — a fresh full pass never runs
 out of subjects. Every claim left without evidence is listed for you, with what
 settling it would take.
 
 Either way the run asks you only the calls it won't make: each question comes with
 its recommendation and with what it would do if you don't answer (that goes on
 the record as decided without you). The lap's pen is the ordinary one, so the
-format gates and your standards still bind it: it writes through `pb_write_spec`
-and `pb_try` writes nothing. Each lap is an undo point — `/pb:undo` restores the
+format gates and your standards still bind it: it edits the spec section by
+section through `pb_update_spec` (a whole rewrite only when most of it changes,
+and either tool names anything the write removed), checks what it wrote against
+the same spec checks the writer runs, and `pb_try` writes nothing. Each lap is an undo point — `/pb:undo` restores the
 spec text and the phase it had before the lap, and drops the lap whole. Repair and
 build never overlap: `/pb:build` waits while a lap is open, and a build that
 starts anyway drops the open lap rather than build a plan that is mid-edit —
@@ -1175,7 +1180,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
 - Review it before building: `/pb:spec-review` — the same fresh reviewer, nothing built, and `/pb:build` then starts at T1 without re-reviewing.
-- The review found things? `/pb:spec-fix` — one lap over its findings on your say-so — or `/pb:spec-harden` — laps, a claim check and one confirming review, unattended.
+- The review found things? `/pb:spec-fix` — one lap over its findings on your say-so — or `/pb:spec-harden` — laps, one claim check and one confirming review, unattended.
 - Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — every spec is reviewed first: a P0 stops it before the first task · more: `/pb:help spec`
 <!-- /pb -->
 

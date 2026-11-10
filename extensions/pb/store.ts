@@ -324,6 +324,10 @@ export interface SpecFixState {
   assumed: number;
   /** questions a lap refused to answer, each with its recommendation; the driver puts them to the human */
   parked: { id: number; question: string; recommendation: string }[];
+  /** a harden run's one claim check: what it found that no lap took; empty when a lap took them all, absent until it ran */
+  claimCheck?: Finding[];
+  /** how many claims that check handed to a lap: pb does not re-check them, so the digest never calls them cleared */
+  claimsTaken?: number;
 }
 
 export interface Progress {
