@@ -14,6 +14,7 @@ import { commitMessage, parseSpec } from "./spec.ts";
 import { type Progress, Store, changedSince, now, readEvents } from "./store.ts";
 import { cmd, nextLine, post, specCompletions, specOfSession } from "./kit.ts";
 import { whereNext } from "./next.ts";
+import { inRepo, resolveRepos } from "./repos.ts";
 
 /** The spec whose work is committed: live, or archived (a commit right after /pb:archive). */
 interface Target {
@@ -106,10 +107,19 @@ export function registerCommit(pi: ExtensionAPI) {
       // Files mid-change are not a commit: a running build or an open repair lap is still writing them.
       if (spec?.p?.phase === "building") return ctx.ui.notify(`${spec.name} is being built: commit when the build is done (or paused).`, "warning");
       if (spec?.p?.fix) return ctx.ui.notify(`A repair lap for ${spec.name} is open: let it report first.`, "warning");
-      // The change: what is uncommitted now (pb's state excluded), and — for a spec — what differs since its build began.
-      const uncommitted = changedSince(ctx.cwd);
-      const touched = spec?.p?.baseCommit ? new Set(changedSince(ctx.cwd, spec.p.baseCommit)) : undefined;
-      const files = touched ? uncommitted.filter((f) => touched.has(f)) : uncommitted;
+      // The change: what is uncommitted now (pb's state excluded), and — for a spec — what differs since its build began,
+      // in the project and in each sibling repository the spec also changes (shown as ../<repo>/<path>).
+      const pending = (root: string, base?: string) => {
+        const uncommitted = changedSince(root);
+        const touched = base ? new Set(changedSince(root, base)) : undefined;
+        return touched ? uncommitted.filter((f) => touched.has(f)) : uncommitted;
+      };
+      const groups = [
+        { name: "", root: ctx.cwd, files: pending(ctx.cwd, spec?.p?.baseCommit) },
+        ...resolveRepos(ctx.cwd, spec ? (parseSpec(spec.md).spec?.repos ?? []) : []).flatMap((r) => (r.root ? [{ name: r.name, root: r.root, files: pending(r.root, spec?.p?.repoBases?.[r.name]) }] : [])),
+      ];
+      const shownPath = (g: { name: string }, f: string) => (g.name ? inRepo(g.name, f) : f);
+      const files = groups.flatMap((g) => g.files.map((f) => shownPath(g, f)));
       if (!files.length) return ctx.ui.notify(`Nothing to commit${spec ? ` for ${spec.name}` : ""}: no change since the last commit.`, "info");
       const events = spec ? readEvents(path.join(spec.dir, "events.jsonl")) : [];
       const message = spec ? commitMessageFor({ md: spec.md, name: spec.name, events, files }) : "";
@@ -122,22 +132,33 @@ export function registerCommit(pi: ExtensionAPI) {
       const chosen = edited === undefined ? undefined : readCommitEditor(edited, files);
       if (!chosen?.message) return ctx.ui.notify("Not committed.", "info");
       if (!chosen.files.length) return ctx.ui.notify("Not committed: no file left to commit.", "info");
-      const commitFiles = chosen.files;
-      let sha: string;
-      try {
-        git(ctx.cwd, ["add", "--", ...commitFiles]);
-        // Only these paths: whatever else you had staged stays staged, and out of this commit.
-        git(ctx.cwd, ["commit", "--file", "-", "--only", "--", ...commitFiles], chosen.message);
-        sha = git(ctx.cwd, ["rev-parse", "HEAD"]).trim();
-      } catch (e) {
-        const said = String((e as { stderr?: unknown }).stderr ?? (e as Error).message ?? e).trim();
-        return post(`**❌ Not committed** — git refused (a hook, or the repository state):\n\n\`\`\`text\n${said.slice(0, 4000)}\n\`\`\``);
+      // One commit per repository, the same message in each: the project first, then each sibling.
+      const committed: { name: string; sha: string; files: number }[] = [];
+      for (const g of groups) {
+        const mine = g.files.filter((f) => chosen.files.includes(shownPath(g, f)));
+        if (!mine.length) continue;
+        try {
+          git(g.root, ["add", "--", ...mine]);
+          // Only these paths: whatever else was staged stays staged, and out of this commit.
+          git(g.root, ["commit", "--file", "-", "--only", "--", ...mine], chosen.message);
+          committed.push({ name: g.name, sha: git(g.root, ["rev-parse", "HEAD"]).trim(), files: mine.length });
+        } catch (e) {
+          const said = String((e as { stderr?: unknown }).stderr ?? (e as Error).message ?? e).trim();
+          const done = committed.map((c) => `${c.name || "this repository"} \`${c.sha.slice(0, 7)}\``).join(", ");
+          return post(`**❌ Not committed${g.name ? ` in ${g.name}` : ""}** — git refused (a hook, or the repository state)${done ? `; already committed: ${done}` : ""}:\n\n\`\`\`text\n${said.slice(0, 4000)}\n\`\`\``);
+        }
       }
       const subject = chosen.message.split("\n")[0];
-      const left = files.filter((f) => !commitFiles.includes(f));
-      if (spec) fs.appendFileSync(path.join(spec.dir, "events.jsonl"), `${JSON.stringify({ at: now(), type: "commit", sha, files: commitFiles.length, subject })}\n`);
+      const left = files.filter((f) => !chosen.files.includes(f));
+      const total = committed.reduce((n, c) => n + c.files, 0);
+      if (spec)
+        fs.appendFileSync(
+          path.join(spec.dir, "events.jsonl"),
+          `${JSON.stringify({ at: now(), type: "commit", sha: committed[0].sha, files: total, subject, ...(committed.some((c) => c.name) ? { repos: Object.fromEntries(committed.filter((c) => c.name).map((c) => [c.name, c.sha])) } : {}) })}\n`,
+        );
       const next = spec && !spec.archived ? whereNext(store, spec.name).next : `\`/${cmd("plan")} <feature>\` for the next one`;
-      post([`**✅ Committed** \`${sha.slice(0, 7)}\` — ${subject} · ${commitFiles.length} file${commitFiles.length === 1 ? "" : "s"}${left.length ? ` · left out, still uncommitted: ${left.join(", ")}` : ""}`, "", nextLine(`${next}.`)].join("\n"));
+      const shas = committed.map((c) => `${c.name ? `${c.name} ` : ""}\`${c.sha.slice(0, 7)}\``).join(" · ");
+      post([`**✅ Committed** ${shas} — ${subject} · ${total} file${total === 1 ? "" : "s"}${left.length ? ` · left out, still uncommitted: ${left.join(", ")}` : ""}`, "", nextLine(`${next}.`)].join("\n"));
     },
   });
 }

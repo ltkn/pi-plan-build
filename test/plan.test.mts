@@ -1534,3 +1534,28 @@ test("pb_ask in a lap: a fix lap and a hardening lap never ask; a manual repair 
     delete process.env.MOCK_SPEC_REVIEW;
   }
 });
+
+test("planning changes nothing outside this machine either: a remote write is refused, a read is not; a sibling repository is protected like the project", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  assert.match((await t.callTool("bash", { command: "kubectl delete pod web-1" })).error!, /^Planning mode changes nothing — not the project, and not a system outside this machine — and this looks like a change to a Kubernetes cluster/);
+  assert.match((await t.callTool("bash", { command: "psql $DB -c \"update orders set status = 'x'\"" })).error!, /a write through a database client/);
+  assert.equal((await t.callTool("bash", { command: "kubectl get pods" })).error, undefined, "reads stay allowed");
+  // A git repository beside the project (a frontend) is the change's too.
+  const sibling = fs.mkdtempSync(path.join(path.dirname(fs.realpathSync(t.repo)), "pb-front-"));
+  try {
+    execSync("git init -q", { cwd: sibling });
+    const name = path.basename(sibling);
+    assert.match((await t.callTool("write", { path: `../${name}/src/app.ts`, content: "x" })).error!, new RegExp(`^Planning mode: the sibling repository ${name} stays untouched until /pb:build`));
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "pb-scratch-"));
+    assert.equal((await t.callTool("write", { path: path.join(scratch, "probe.ts"), content: "x" })).error, undefined, "a scratch folder outside every repository is fine");
+    fs.rmSync(scratch, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(sibling, { recursive: true, force: true });
+  }
+  // Outside planning, the same commands are the human's and the build's business.
+  await t.run("plan", "off");
+  assert.equal((await t.callTool("bash", { command: "kubectl delete pod web-1" })).error, undefined);
+});

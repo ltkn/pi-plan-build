@@ -21,10 +21,11 @@ import { type ParsedSpec, type SpecTask, addDecision, contractHash, earlierProof
 import { duration } from "./format.ts";
 import { type Stack, findStandards, isUserTemplate, standardsLoaded } from "./standards.ts";
 import { buildTimeLabel, buildTiming } from "./stats.ts";
-import { type Checkpoint, type Progress, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, now, readEvents, type PlannerSettings, type ThinkingLevel, THINKING_LEVELS } from "./store.ts";
+import { type Checkpoint, type Progress, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, gitHead, now, readEvents, type PlannerSettings, type ThinkingLevel, THINKING_LEVELS } from "./store.ts";
 import { lintsEachStep, pauseAt, unfinishedPhase } from "./phase.ts";
 import { specReviewOn, statusLine, whereHere } from "./next.ts";
 import type { GuardSettings } from "./fresh-guard.ts";
+import { resolveRepos } from "./repos.ts";
 import { resolveBuild, resolveLint, resolveVerify } from "./verify.ts";
 
 export const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -172,6 +173,27 @@ export const specPathErrors = (md: string, cwd: string): string[] => {
     return [];
   });
 };
+
+/**
+ * A snapshot of each sibling repository the spec also changes, for an undo point: the same per-repository private
+ * snapshot the project gets, in that repository's own refs. Empty when the spec changes no sibling.
+ */
+export const repoSnapshots = (cwd: string, store: Store, name: string, message: string): { name: string; commit: string; tree: string }[] => {
+  const spec = loadSpec(store, name)?.spec;
+  if (!spec?.repos.length) return [];
+  return resolveRepos(cwd, spec.repos).flatMap((r) => {
+    const snap = r.root ? snapshot(r.root, message) : undefined;
+    return snap ? [{ name: r.name, commit: snap.commit, tree: snap.tree }] : [];
+  });
+};
+
+/** Each of a spec's sibling repositories at its HEAD now, by name: the build's base there. */
+export const repoHeads = (cwd: string, spec: ParsedSpec): Record<string, string> =>
+  Object.fromEntries(resolveRepos(cwd, spec.repos).flatMap((r) => (r.root ? [[r.name, gitHead(r.root) ?? ""]] : [])).filter(([, h]) => h));
+
+/** A ready spec's sibling repositories must exist beside the project as git repositories: undo, review and commit act on them. */
+export const specRepoErrors = (spec: ParsedSpec, cwd: string): string[] =>
+  resolveRepos(cwd, spec.repos).flatMap((r) => (r.error ? [`"Also changes: ${r.name}" is ${r.error}`] : []));
 
 export const specWarnings = (md: string, spec: ParsedSpec): string[] => {
   const redEligible = (t: SpecTask) => spec.gate === "tests" && spec.newTests && !/^\(refactor\)/i.test(t.title);

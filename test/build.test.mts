@@ -2502,3 +2502,65 @@ test("checkpoints: a checkpoint row that adds no information over the last row i
   assert.equal(appendCheckpoint(list, row({ commit: "c3", tree: "t3", entry: "e3", id: "T2", task: "T2" })), true);
   assert.equal(list.length, 5);
 });
+
+test("sibling repositories: a spec that also changes ../<repo> gets undo points, a review diff and a commit there too", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const sibling = fs.mkdtempSync(path.join(path.dirname(fs.realpathSync(t.repo)), "pb-front-"));
+  const name = `../${path.basename(sibling)}`;
+  try {
+    execSync("git init -q && git config user.email t@t && git config user.name t && echo base > README && git add . && git commit -qm base", { cwd: sibling, shell: "/bin/sh" });
+    // The header is checked: a sibling that is not a repository beside the project is refused at a ready write.
+    const { Store } = await import("../extensions/pb/store.ts");
+    new Store(t.repo).markAsked("standards");
+    const missing = await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("Depends on: none", "Depends on: none\nAlso changes: ../no-such-repo") });
+    assert.match(missing.error!, /"Also changes: \.\.\/no-such-repo" is no git repository there/);
+    assert.match((await t.callTool("pb_write_spec", { name: "x", content: SPEC().replace("Depends on: none", "Depends on: none\nAlso changes: ../../far") })).error!, /must name sibling repositories as \.\.\/<name>/);
+    await written(t, SPEC().replace("Depends on: none", `Depends on: none\nAlso changes: ${name}`));
+    // T1 also changes the frontend beside the project.
+    t.agent.script = async (text, tool) => {
+      if (taskOf(text) === "T1") fs.writeFileSync(path.join(sibling, "front.txt"), "cancel button\n");
+      return diligent(text, tool);
+    };
+    await t.run("build");
+    const rows = JSON.parse(t.read(".pi/pb/specs/order-cancellation/checkpoints.json"));
+    assert.ok(rows.find((c: any) => c.id === "T1").repos?.[0]?.name === name, "the undo point covers the sibling too");
+    await t.run("review");
+    const brief = briefOf(t);
+    assert.match(brief, new RegExp(`# The change in ${name.replace(/[.]/g, "\\.")} \\(the paths in this diff are inside`));
+    assert.match(brief, /\+cancel button/);
+    assert.match(brief, new RegExp(`## Changed files\\n[\\s\\S]*${name.replace(/[.]/g, "\\.")}/front\\.txt`));
+    // One commit per repository, the same message in each; the sibling's file is offered by its ../ path.
+    let offered = "";
+    t.editors.push((prefill) => ((offered = prefill), prefill));
+    await t.run("commit");
+    assert.match(offered, new RegExp(`\\n- ${name.replace(/[.]/g, "\\.")}/front\\.txt\\n`));
+    assert.equal(execSync("git log -1 --format=%s", { cwd: sibling, encoding: "utf8" }).trim(), "Order cancellation");
+    assert.equal(execSync("git show --name-only --format= HEAD", { cwd: sibling, encoding: "utf8" }).trim(), "front.txt");
+    assert.match(t.posts.at(-1)!, new RegExp(`^\\*\\*✅ Committed\\*\\* \`[0-9a-f]{7}\` · ${name.replace(/[.]/g, "\\.")} \`[0-9a-f]{7}\` — Order cancellation · 3 files`));
+  } finally {
+    fs.rmSync(sibling, { recursive: true, force: true });
+  }
+});
+
+test("sibling repositories: /pb:undo puts the sibling back with the project", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const sibling = fs.mkdtempSync(path.join(path.dirname(fs.realpathSync(t.repo)), "pb-front-"));
+  const name = `../${path.basename(sibling)}`;
+  try {
+    execSync("git init -q && git config user.email t@t && git config user.name t && echo base > README && git add . && git commit -qm base", { cwd: sibling, shell: "/bin/sh" });
+    await written(t, SPEC().replace("Depends on: none", `Depends on: none\nAlso changes: ${name}`));
+    t.agent.script = async (text, tool) => {
+      if (taskOf(text) === "T1") fs.writeFileSync(path.join(sibling, "front.txt"), "cancel button\n");
+      return diligent(text, tool);
+    };
+    await t.run("build");
+    assert.ok(fs.existsSync(path.join(sibling, "front.txt")));
+    await t.run("undo", "T1");
+    assert.ok(!fs.existsSync(path.join(sibling, "front.txt")), "the sibling's change went back with the project's");
+    assert.match(t.posts.at(-1)!, /Undone to before T1/);
+  } finally {
+    fs.rmSync(sibling, { recursive: true, force: true });
+  }
+});

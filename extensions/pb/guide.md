@@ -375,9 +375,18 @@ says why. The header tells the build how to check the work:
 # Order cancellation
 Status: ready                  (planning: a checkpoint — no tasks yet)
 Depends on: none               (or: <spec name> — an optional note)
+Also changes: ../frontend      (optional: sibling repositories the change also edits)
 Verification: tests            (or: build — why · none — why)
 New tests: yes                 (or: no — why)
 ```
+
+**A change that spans two repositories** (a backend and its frontend, side by
+side) names the sibling in `Also changes:`; it must be a git repository one
+folder up from the project. The build then records where it starts there,
+every undo point snapshots it too (`/pb:undo` puts it back with the project),
+the review's diff and changed files include it (as `../frontend/…`), and
+`/pb:commit` offers its files and commits them in that repository with the same
+message. Planning protects every sibling repository, named or not.
 
 Then the sections:
 

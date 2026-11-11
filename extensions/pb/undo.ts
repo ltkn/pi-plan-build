@@ -6,6 +6,7 @@ import type {
 import { changedPaths, restore, snapshot } from "./checkpoint.ts";
 import { tip } from "./help.ts";
 import { type Checkpoint, COHERE_TASK_ID, Store, appendCheckpoint, gitHead, now } from "./store.ts";
+import { inRepo, resolveRepos } from "./repos.ts";
 import { cmd, post, rewindPoint, runtime, showProgress, specOfSession, tree, undoCompletions } from "./kit.ts";
 import { restorePhase } from "./phase.ts";
 
@@ -46,9 +47,16 @@ export function registerUndo(pi: ExtensionAPI) {
       const currentSpec = store.readSpec(name);
       const specPath = store.rel("specs", name, "spec.md");
       const files = changedPaths(ctx.cwd, cur.commit, target.commit);
+      // The sibling repositories the row also snapshotted go back with the project, each against its own snapshot.
+      const siblings = (target.repos ?? []).map((r) => {
+        const root = resolveRepos(ctx.cwd, [r.name])[0]?.root;
+        const now = root ? snapshot(root, "pb: before undo") : undefined;
+        return { ...r, root, now, files: root && now ? changedPaths(root, now.commit, r.commit) : [] };
+      });
+      const siblingFiles = siblings.flatMap((s) => s.files.map((f) => inRepo(s.name, f)));
       // The spec is outside the snapshots: a row that carries its own text names it in the summary
       // only when that text differs from what is on disk now.
-      const intended = target.spec !== undefined && target.spec !== currentSpec ? [specPath, ...files] : files;
+      const intended = [...(target.spec !== undefined && target.spec !== currentSpec ? [specPath, ...files] : files), ...siblingFiles];
       const idx = cps.indexOf(target);
       // A repair or fix lap's row restores files and the spec, not a task list: only build rows say what went back to todo.
       const undoneCps = cps.slice(idx).filter((c) => c.task && !c.kind);
@@ -72,6 +80,20 @@ export function registerUndo(pi: ExtensionAPI) {
       const specRestored = target.spec !== undefined && !specChanged && specNow !== target.spec;
       if (specRestored) store.writeSpec(name, target.spec!);
       const skipped = files.filter((f) => !reverted.restored.includes(f));
+      let siblingsRestored = 0;
+      for (const s of siblings) {
+        if (!s.root || !s.now) {
+          skipped.push(`${s.name} (${s.root ? "its snapshot failed" : "the repository is gone"})`);
+          continue;
+        }
+        const r = restore(s.root, s.now.commit, s.commit);
+        if (r.guardFailed) {
+          skipped.push(`${s.name} (its drift check failed: nothing there was put back)`);
+          continue;
+        }
+        siblingsRestored += r.restored.length;
+        skipped.push(...s.files.filter((f) => !r.restored.includes(f)).map((f) => inRepo(s.name, f)));
+      }
       if (specChanged) skipped.push(specPath);
 
       // The conversation goes back too, so the discarded attempt doesn't anchor the next one;
@@ -123,6 +145,7 @@ export function registerUndo(pi: ExtensionAPI) {
         head,
         tasks: structuredClone(p.tasks),
         entry: rewound ? oldLeaf : undefined,
+        ...(siblings.some((s) => s.now) ? { repos: siblings.flatMap((s) => (s.now ? [{ name: s.name, commit: s.now.commit, tree: s.now.tree }] : [])) } : {}),
         ...(target.spec !== undefined ? { spec: specNow, phase: p.phase } : {}),
       };
       appendCheckpoint(keptCps, undoEntry); // freshly numbered, so it always adds information
@@ -144,7 +167,7 @@ export function registerUndo(pi: ExtensionAPI) {
         ? `\nLeft alone because they changed again since the diff was taken: ${skipped.join(", ")} — restore them by hand if that wasn't you.`
         : "";
       post(
-        `**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${reverted.restored.length + (specRestored ? 1 : 0)} file(s) restored${rewound ? ", the conversation rewound" : ""}.\n${summary}${note}${leftAlone}\n\n${tip("undo.done", { id: undoEntry.id })}`,
+        `**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${reverted.restored.length + siblingsRestored + (specRestored ? 1 : 0)} file(s) restored${rewound ? ", the conversation rewound" : ""}.\n${summary}${note}${leftAlone}\n\n${tip("undo.done", { id: undoEntry.id })}`,
       );
     },
   });

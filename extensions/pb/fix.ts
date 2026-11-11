@@ -11,7 +11,7 @@ import { KEBAB_NAME } from "./names.ts";
 import { snapshot } from "./checkpoint.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, now, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { approvalDrift, choose, cmd, commands, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, nextLine, phaseHeader, reply, specOfSession, withChecking } from "./kit.ts";
+import { approvalDrift, choose, cmd, commands, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, specOfSession, withChecking } from "./kit.ts";
 
 /** One lap's report shape, normalized from its `fix` event: findings by the number its brief showed them as. */
 export interface LapReport {
@@ -208,7 +208,8 @@ export function registerFix(pi: ExtensionAPI) {
     // Rows are looked up by id: a later /pb:fix run's lap 1 must not collide with an earlier one.
     let id = `fix${lap}`;
     for (let n = 2; rows.some((c) => c.id === id); n++) id = `fix${lap}-${n}`;
-    const row: Checkpoint = { id, at: now(), ...snap, head: gitHead(cwd), tasks: structuredClone(p.tasks), task: id, kind: "fix", spec: store.readSpec(spec) ?? "", phase: p.phase, summary: `the fixes in /pb:fix lap ${lap}` };
+    const repos = repoSnapshots(cwd, store, spec, `pb: before ${spec} fix lap ${lap}`);
+    const row: Checkpoint = { id, at: now(), ...snap, ...(repos.length ? { repos } : {}), head: gitHead(cwd), tasks: structuredClone(p.tasks), task: id, kind: "fix", spec: store.readSpec(spec) ?? "", phase: p.phase, summary: `the fixes in /pb:fix lap ${lap}` };
     if (appendCheckpoint(rows, row)) store.saveCheckpoints(spec, rows);
   };
 

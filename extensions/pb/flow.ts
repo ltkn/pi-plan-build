@@ -20,7 +20,7 @@ import { buildTimeLabel, buildTiming } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, COHERE_TASK_ID, Store, appendCheckpoint, cap, diffStat, gitHead, now, pathExists, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
 import { safeLine } from "./markdown.ts";
-import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specFixCompletions, specOfSession, specPathErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
+import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specFixCompletions, specOfSession, repoHeads, repoSnapshots, specPathErrors, specRepoErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
 import { enterStep, finishBuild, lintsEachStep, nextPhase, nextStep, nextTodo, unfinishedPhase } from "./phase.ts";
 
 const DRY_RUN_TIMEOUT_SEC = 120;
@@ -237,7 +237,7 @@ export function registerFlow(pi: ExtensionAPI) {
         );
       const { spec, errors } = parseSpec(params.content);
       if (!spec) throw new Error(`The spec doesn't parse:\n- ${errors.join("\n- ")}\nFix it and call pb_write_spec again.`);
-      const pathErrs = spec.status === "ready" ? specPathErrors(params.content, ctx.cwd) : [];
+      const pathErrs = spec.status === "ready" ? [...specPathErrors(params.content, ctx.cwd), ...specRepoErrors(spec, ctx.cwd)] : [];
       if (pathErrs.length) throw new Error(`The spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\nFix the path, line or citation; new files need no line number.`);
       const prev = store.progress(params.name);
       // Everything the answer needs is settled first: from the write down, the only work left is the
@@ -329,7 +329,7 @@ export function registerFlow(pi: ExtensionAPI) {
       // A path:line is a claim about the code the spec was written against. Check it on every
       // ready write except Design, which the build writes and may legitimately describe new code.
       if (spec.status === "ready" && sectionName !== "design") {
-        const pathErrs = specPathErrors(md, ctx.cwd);
+        const pathErrs = [...specPathErrors(md, ctx.cwd), ...specRepoErrors(spec, ctx.cwd)];
         if (pathErrs.length) throw new Error(`Not written: the spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\nFix the path, line or citation; new files need no line number.`);
       }
       const prev = store.progress(name);
@@ -555,7 +555,8 @@ export function registerFlow(pi: ExtensionAPI) {
         const where = o.inTool
           ? { entry: tree(ctx).getLeafId?.() ?? undefined, pendingEntry: true as const, intro: o.intro || undefined }
           : { entry: tree(ctx).getLeafId?.() ?? undefined, intro: o.intro || undefined };
-        if (appendCheckpoint(list, { id: taskId, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: taskId, ...where })) store.saveCheckpoints(p.spec, list);
+        const repos = repoSnapshots(ctx.cwd, store, p.spec, `pb: before ${p.spec} ${taskId}`);
+        if (appendCheckpoint(list, { id: taskId, at: now(), ...snap, ...(repos.length ? { repos } : {}), head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: taskId, ...where })) store.saveCheckpoints(p.spec, list);
       }
       // Outside git snapshot() is undefined: no undo point, and /pb:undo already says so. No silent failure.
     }
@@ -587,7 +588,8 @@ export function registerFlow(pi: ExtensionAPI) {
       const kept = store.checkpoints(p.spec).filter((c) => c.id !== COHERE_TASK_ID);
       const snap = snapshot(ctx.cwd, `pb: before ${p.spec} cohere`);
       if (snap) {
-        if (appendCheckpoint(kept, { id: COHERE_TASK_ID, at: now(), ...snap, head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: COHERE_TASK_ID, entry: tree(ctx).getLeafId?.() ?? undefined, pendingEntry: true })) store.saveCheckpoints(p.spec, kept);
+        const repos = repoSnapshots(ctx.cwd, store, p.spec, `pb: before ${p.spec} coherence`);
+        if (appendCheckpoint(kept, { id: COHERE_TASK_ID, at: now(), ...snap, ...(repos.length ? { repos } : {}), head: gitHead(ctx.cwd), tasks: structuredClone(p.tasks), task: COHERE_TASK_ID, entry: tree(ctx).getLeafId?.() ?? undefined, pendingEntry: true })) store.saveCheckpoints(p.spec, kept);
       }
     }
     p.tasks.push({ id: COHERE_TASK_ID, title: "Coherence pass: consolidate what slicing split apart", status: "doing", attempts: 1 });
@@ -928,6 +930,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
       spec: name,
       phase: nextPhase(prev?.phase ?? "written", "building"),
       baseCommit: restart ? (prev!.baseCommit ?? gitHead(ctx.cwd)) : gitHead(ctx.cwd),
+      repoBases: restart && prev?.repoBases ? prev.repoBases : repoHeads(ctx.cwd, spec),
       // A task's tests seen failing stay proven: only /pb:undo takes that back, with the files.
       // Attempts are preserved on restart: a crash must not grant a fresh budget. A fresh set comes
       // only from answering an exhausted task via /pb:build guidance (see the build command below).
@@ -956,7 +959,8 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     if (!checkpoints || (restart && store.checkpoints(name).length)) return;
     const snap = snapshot(c.cwd, `pb: start of ${name}`);
     const entry = tree(c).getLeafId?.() ?? undefined;
-    store.saveCheckpoints(name, snap ? [{ id: "start", at: now(), ...snap, head: p.baseCommit, tasks: structuredClone(p.tasks), entry, intro: true }] : []);
+    const repos = snap ? repoSnapshots(c.cwd, store, name, `pb: start ${name}`) : [];
+    store.saveCheckpoints(name, snap ? [{ id: "start", at: now(), ...snap, ...(repos.length ? { repos } : {}), head: p.baseCommit, tasks: structuredClone(p.tasks), entry, intro: true }] : []);
   };
 
   interface LaunchBuild {

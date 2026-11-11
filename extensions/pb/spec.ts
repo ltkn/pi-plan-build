@@ -23,6 +23,7 @@
 import { createHash } from "node:crypto";
 import { blankFenced, escapeRegExp, headerBlock, sectionHeading, sectionOf, setSection, unfenced } from "./markdown.ts";
 import { KEBAB_NAME } from "./names.ts";
+import { SIBLING_REPO } from "./repos.ts";
 import type { AcceptanceCriterion, Gate } from "./store.ts";
 
 export { sectionHeading, sectionOf, setSection };
@@ -39,6 +40,8 @@ export interface ParsedSpec {
   title: string;
   status: "planning" | "ready";
   dependsOn?: string;
+  /** sibling repositories the change also edits (`Also changes: ../tempo-ui`): undo, review and commit cover them */
+  repos: string[];
   gate: Gate;
   gateReason?: string;
   newTests: boolean;
@@ -99,6 +102,11 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
     errors.push(`"Depends on: ${dep}" must name a spec (short kebab-case, e.g. order-cancellation) or none; a note may follow after a dash or in parentheses`);
   const dependsOn = depName && depName !== "none" ? depName : undefined;
 
+  // Sibling repositories the change also edits: `../<name>` each, comma- or space-separated, or none.
+  const also = header(md, "Also changes");
+  const repos = also && !/^none\b/i.test(also) ? [...new Set(also.split(/[,\s]+/).filter(Boolean))] : [];
+  for (const r of repos) if (!SIBLING_REPO.test(r)) errors.push(`"Also changes: ${also}" must name sibling repositories as ../<name> (one folder beside the project), or none`);
+
   for (const s of REQUIRED_SECTIONS) {
     const found = blanked.filter((l) => sectionHeading(s).test(l));
     if (!found.length) errors.push(`missing the "## ${s}" section`);
@@ -142,7 +150,7 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
   const dup = ids.filter((id, i) => ids.indexOf(id) !== i);
   if (dup.length) errors.push(`duplicate task ids: ${[...new Set(dup)].join(", ")}`);
 
-  return errors.length ? { errors } : { spec: { title: title!, status, dependsOn, gate, gateReason, newTests, newTestsReason, tasks }, errors };
+  return errors.length ? { errors } : { spec: { title: title!, status, dependsOn, repos, gate, gateReason, newTests, newTestsReason, tasks }, errors };
 }
 
 /** A section that does not apply: "none — why", "N/A", and nothing checkable. */

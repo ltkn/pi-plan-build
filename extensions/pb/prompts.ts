@@ -247,6 +247,7 @@ ${SPEC_CHECKS.replace(/^- /gm, "  - ")}
 const SPEC_FORMAT = `# <title>
 Status: ready | planning
 Depends on: <spec name> | none (a note may follow, after a dash or in parentheses)
+Also changes: ../<repo>, … (only when the change also edits a sibling repository, e.g. its frontend: omit the line otherwise)
 Verification: tests | build — <why> | none — <why>
 New tests: yes | no — <why>
 

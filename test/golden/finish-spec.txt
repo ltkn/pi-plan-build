@@ -1,10 +1,11 @@
-words: 1485
+words: 1505
 
 [pb:spec order-cancellation] Finish the spec .pi/pb/specs/order-cancellation/spec.md for building: ask me with pb_ask, all at once, about each open question; write answered ones into Decisions; add the Tasks and the Verification line, leave no Open questions, and set Status: ready. Anything still unanswered stays Open and the spec stays Status: planning — never decide for me. (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
 
 # <title>
 Status: ready | planning
 Depends on: <spec name> | none (a note may follow, after a dash or in parentheses)
+Also changes: ../<repo>, … (only when the change also edits a sibling repository, e.g. its frontend: omit the line otherwise)
 Verification: tests | build — <why> | none — <why>
 New tests: yes | no — <why>
 

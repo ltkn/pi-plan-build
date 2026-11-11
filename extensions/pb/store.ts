@@ -362,6 +362,8 @@ export interface Progress {
   /** a new plan started in the build's session: its later turns aren't this spec's any more */
   detached?: boolean;
   baseCommit?: string;
+  /** each sibling repository's HEAD when the build began (by its `../<name>`): where the change starts there */
+  repoBases?: Record<string, string>;
   tasks: TaskProgress[];
   /** task being worked on; "final" = the full check after the last task */
   current?: string;
@@ -402,6 +404,8 @@ export interface Checkpoint {
   at: string;
   commit: string;
   tree: string;
+  /** the same point in each sibling repository the spec also changes (`Also changes`), by its `../<name>` */
+  repos?: { name: string; commit: string; tree: string }[];
   head?: string;
   tasks: TaskProgress[];
   task?: string;

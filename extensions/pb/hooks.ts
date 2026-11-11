@@ -11,7 +11,8 @@ import { tokensOf } from "./spec.ts";
 import { Store, now } from "./store.ts";
 import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, longCommandSec, longCommands, pauseBuild, pruneSession, refreshWhere, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
 import { whereHere } from "./next.ts";
-import { TIMED_OUT, commandCap, isLongCommand, timeoutNote } from "./command-guard.ts";
+import { TIMED_OUT, commandCap, isLongCommand, remoteWriteRefusal, timeoutNote } from "./command-guard.ts";
+import { siblingRepoOf } from "./repos.ts";
 import { unfinishedPhase } from "./phase.ts";
 import { buildResetDue, stateSummary } from "./flow.ts";
 
@@ -93,6 +94,16 @@ export function registerHooks(pi: ExtensionAPI) {
           reason: `A repair lap for ${repair.name} is open in this session: read and probe with pb_try, ask with pb_ask, and change only that spec through pb_write_spec or pb_update_spec. Stop the project edits and report the lap with pb_spec_fix_done.`,
         };
     }
+    // Planning changes nothing outside this machine either: a shell command that writes to a database, a cluster,
+    // a cloud or an API is refused, as in a probe (the same rule, command-guard.ts). Reads stay allowed.
+    if ((ev.toolName === "bash" || ev.toolName === "powershell") && session && store.planningSessions().includes(session)) {
+      const refused = remoteWriteRefusal(String(ev.input.command ?? ""));
+      if (refused)
+        return {
+          block: true,
+          reason: `Planning mode changes nothing — not the project, and not a system outside this machine — and this looks like ${refused}. Reads are fine; a change like this belongs in the build, or is the human's to run.`,
+        };
+    }
     if (ev.toolName !== "edit" && ev.toolName !== "write") return;
     const building = liveBuildOfSession(ctx, store);
     if (building) {
@@ -111,10 +122,12 @@ export function registerHooks(pi: ExtensionAPI) {
     // exist yet, the resolved one covers a different spelling of the same directory.
     const inside = (target: string, cwd: string) => target !== cwd && under(target, cwd);
     const target = path.resolve(ctx.cwd, ev.input.path ?? "");
-    if (!inside(realPath(target), realPath(ctx.cwd)) && !inside(target, ctx.cwd)) return; // outside the project: scratch files are fine
+    // A sibling repository (a frontend beside its backend) is the change's too: planning leaves it untouched as well.
+    const sibling = siblingRepoOf(ctx.cwd, target);
+    if (!sibling && !inside(realPath(target), realPath(ctx.cwd)) && !inside(target, ctx.cwd)) return; // outside every repository: scratch files are fine
     return {
       block: true,
-      reason: `Planning mode: the project's files stay untouched until /${cmd("build")}. Put scratch files outside the project (e.g. in a mktemp -d directory), or say what you would change.`,
+      reason: `Planning mode: ${sibling ? `the sibling repository ${path.basename(sibling)}` : "the project's files"} stay${sibling ? "s" : ""} untouched until /${cmd("build")}. Put scratch files outside every repository (e.g. in a mktemp -d directory), or say what you would change.`,
     };
   });
 

@@ -18,6 +18,7 @@ import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
 import { runVerify } from "./verify.ts";
+import { inRepo, resolveRepos } from "./repos.ts";
 import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, watchable, withChecking } from "./kit.ts";
 import { markReviewed, unfinishedPhase } from "./phase.ts";
 
@@ -679,7 +680,17 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       // The change as the review starts: the brief's diff, the security read and the verifier's brief
       // all use this one capture, so a check or a later edit cannot change what was reviewed. Capped
       // once, the same text the reviewer reads (and the saved run keeps).
-      const reviewDiff = cap(`${gitDiff(ctx.cwd, base)}${untrackedText(ctx.cwd, changed)}`.trim(), REVIEW_DIFF_CHARS);
+      // The sibling repositories the spec also changes: each one's diff since the build's base there, under its name,
+      // in the same frozen capture — the reviewer has no shell to take it, and a change is reviewed whole.
+      const siblings = resolveRepos(ctx.cwd, loaded?.spec.repos ?? []).flatMap((r) => {
+        if (!r.root) return [];
+        const since = p?.repoBases?.[r.name];
+        const files = changedSince(r.root, since);
+        return files.length ? [{ name: r.name, files, diff: `${gitDiff(r.root, since)}${untrackedText(r.root, files)}`.trim() }] : [];
+      });
+      const siblingDiffs = siblings.map((s) => `\n\n# The change in ${s.name} (the paths in this diff are inside ${s.name}/)\n\n${s.diff}`).join("");
+      const reviewDiff = cap(`${gitDiff(ctx.cwd, base)}${untrackedText(ctx.cwd, changed)}${siblingDiffs}`.trim(), REVIEW_DIFF_CHARS);
+      const changedEverywhere = [...changed, ...siblings.flatMap((s) => s.files.map((f) => inRepo(s.name, f)))];
       // Fresh ground truth first: the reviewer should judge what's on disk now. pb runs the build's final-step
       // checks, then each finished task's Test: command — the reviewer has no shell, so these runs are the
       // evidence it can cite for an acceptance line. A red one caps the verdict: a review never passes over it.
@@ -747,7 +758,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
 
       // The abuse pass: on sensitive ground by default (reviewer.security "auto"), or on every review ("always").
       const mode = cfg.reviewer.security ?? "auto";
-      const security = mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changed, diff: reviewDiff });
+      const security = mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changedEverywhere, diff: reviewDiff });
       const acceptance = loaded && name ? acceptanceCriteria(loaded.md, loaded.spec) : undefined;
       const brief = reviewerBrief({
         spec: loaded && name ? { name, parsed: loaded.spec } : undefined,
@@ -755,7 +766,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         intent,
         base,
         diff: reviewDiff,
-        changed,
+        changed: changedEverywhere,
         stat: diffStat(ctx.cwd, base),
         check,
         focus: name ? focusRest : "",

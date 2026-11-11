@@ -186,6 +186,7 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 # Order cancellation
 Status: ready                       # planning: a checkpoint, no tasks yet
 Depends on: none                    # or: <spec name> — an optional note
+Also changes: ../frontend           # optional: sibling repositories the change also edits (undo, review and commit cover them)
 Verification: tests                 # or: build — why  ·  none — why
 New tests: yes                      # or: no — why
 
