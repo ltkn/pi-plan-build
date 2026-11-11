@@ -12,7 +12,7 @@ import { test } from "node:test";
 
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pb-agent-dir-")); // never the real ~/.pi
 const prompts = await import("../extensions/pb/prompts.ts");
-const { CARTOGRAPHER_SYSTEM } = await import("../extensions/pb/map.ts");
+const { CARTOGRAPHER_SYSTEM, cartographerBrief } = await import("../extensions/pb/map.ts");
 const { parseSpec } = await import("../extensions/pb/spec.ts");
 const { default: pb } = await import("../extensions/pb/index.ts");
 type Finding = import("../extensions/pb/store.ts").Finding;
@@ -88,6 +88,16 @@ const RENDERED: Record<string, () => string> = {
   "spec-fix": () => prompts.specFixPrompt({ name: "order-cancellation", work: "findings", items: ["1. [P1] The 409 is not pinned by any code path"], lap: 1 }),
   "claim-check": () => `${prompts.SPEC_CLAIM_CHECK_SYSTEM}\n\n---\n\n${prompts.claimCheckBrief("order-cancellation", SPEC)}`,
   "cartographer": () => CARTOGRAPHER_SYSTEM,
+  "cartographer-brief": () => cartographerBrief({ current: "### Layout\n- `src/order.ts`: the order model" }),
+  "cartographer-brief-change": () =>
+    cartographerBrief({
+      current: "### Layout\n- `src/order.ts`: the order model",
+      spec: { name: "order-cancellation", findings: "- src/order.ts holds the order model." },
+      changed: ["src/order.ts"],
+      scope: "change",
+      base: "abc1234",
+      recheck: [{ heading: "### Layout", text: "- `src/order.ts`: the order model" }],
+    }),
 };
 
 /** The tools as the model sees them: each name, description and parameter schema, in registration order. */

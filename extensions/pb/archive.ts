@@ -49,7 +49,9 @@ export function registerArchive(pi: ExtensionAPI) {
       }
       const markdown = store.readSpec(name) ?? "";
       const reviewFindings = reviewLedger(readEvents(path.join(store.specDir(name), "events.jsonl")));
-      const changed = changedSince(ctx.cwd, store.progress(name)?.baseCommit);
+      const baseCommit = store.progress(name)?.baseCommit;
+      const changed = changedSince(ctx.cwd, baseCommit);
+      const base = baseCommit && /^[0-9a-f]{7,40}$/.test(baseCommit) ? baseCommit : undefined; // it reaches the cartographer's brief as a command
       // The feature is finished: its review runs and the explorer and map runs so far aren't needed any more.
       let dest: string;
       try {
@@ -76,7 +78,8 @@ export function registerArchive(pi: ExtensionAPI) {
       if (store.config().mapOnArchive && !mapNews) {
         ctx.ui.notify(`No new findings in ${name} for the project map; skipping.`, "info");
       } else if (willMap) {
-        mapChanges = await updateMap(ctx, store, { spec: { name, findings }, changed, reviewFindings });
+        // The feature's change only: /pb:map is the whole-map audit, run when you choose.
+        mapChanges = await updateMap(ctx, store, { spec: { name, findings }, changed, reviewFindings, scope: "change", base });
       }
       // What the map gained is kept with the archived spec: a later /pb:commit of the map names it.
       if (mapChanges) fs.appendFileSync(path.join(dest, "events.jsonl"), `${JSON.stringify({ at: now(), type: "map", changes: mapChanges })}\n`);

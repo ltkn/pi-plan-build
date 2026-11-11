@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
 import { extraBlock } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_BULLET_CHARS, MAP_CHECK_LINES, MAP_CHECK_SYSTEM, MAP_MARKERS, MAP_TOKENS, areaNotes, bulletsOf, cartographerBrief, changedBullets, longBullets, mapCheckBrief, readCore, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_BULLET_CHARS, MAP_CHECK_LINES, MAP_CHECK_SYSTEM, MAP_MARKERS, MAP_TOKENS, areaNotes, bulletsCiting, bulletsOf, cartographerBrief, changedBullets, longBullets, mapCheckBrief, readCore, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { REVIEW_TOOLS } from "./review.ts";
 import { runFresh } from "./runner.ts";
 import { duration } from "./format.ts";
@@ -27,7 +27,11 @@ export const mapRefusal = (cwd: string): string => {
  * the existing map removed (unanswered: it is written and what it was flagged for is posted; dismissed: the proposal is kept for `/pb:map apply`). Returns the changes when it wrote the map.
  */
 
-export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string; reviewFindings?: ReviewLedgerEntry[] } = {}): Promise<string[] | undefined> => {
+export const updateMap = async (
+  ctx: ExtensionContext,
+  store: Store,
+  o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string; reviewFindings?: ReviewLedgerEntry[]; scope?: "change"; base?: string } = {},
+): Promise<string[] | undefined> => {
   const cwd = ctx.cwd;
   // Before any cartographer runs: minutes of work are not spent on a file pb cannot write, and the
   // human reads which marker to fix while the reason is still the live problem.
@@ -35,6 +39,9 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
   const sessionFile = ctx.sessionManager.getSessionFile();
   const cfg = store.config();
   const current = readMap(cwd);
+  // Only the feature's change is read on an archive, once there is a map to keep: the first one is always a full read.
+  const scope = o.scope === "change" && current ? "change" : undefined;
+  const recheck = scope ? bulletsCiting(cwd, current, o.changed ?? []) : undefined;
   const started = Date.now();
   const abort = new AbortController();
   const canEsc = ctx.hasUI && ctx.mode === "tui" && typeof ctx.ui.onTerminalInput === "function";
@@ -115,7 +122,7 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
     checkNote = ` ${shown.length} new line${shown.length === 1 ? " was" : "s were"} checked against the code${lines.length > shown.length ? ` (${lines.length - shown.length} more were not)` : ""}.`;
   };
   try {
-    const first = await cartographer(cartographerBrief({ current, ...o }), "reading the project");
+    const first = await cartographer(cartographerBrief({ current, ...o, scope, recheck }), scope ? "reading the change" : "reading the project");
     store.exploreEvent({ session: sessionFile, ...first.tokens, cost: first.cost, ms: first.ms });
     if (first.aborted) return void ctx.ui.notify("Map update stopped.", "info");
     ({ map: body, changes } = mapOf(first));
@@ -189,7 +196,7 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
   const notes = areaNotes(ctx.cwd);
   const where = notes.length ? `AGENTS.md (~${mapTokens(readCore(ctx.cwd))} tokens read in every session) and ${notes.length} area note${notes.length === 1 ? "" : "s"}` : "AGENTS.md";
   ctx.ui.notify(
-    `Project map ${current ? "updated" : "written"} in ${where} (~${tokens} tokens in ${Math.max(1, Math.round((Date.now() - started) / 1000))}s${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}).${long.length ? ` ${long.length} bullet${long.length === 1 ? " is" : "s are"} still over ${MAP_BULLET_CHARS} characters.` : ""}${checkNote} \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
+    `Project map ${current ? "updated" : "written"} in ${where} (~${tokens} tokens in ${Math.max(1, Math.round((Date.now() - started) / 1000))}s${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}).${scope ? ` Only ${o.spec?.name ?? "the feature"}'s change was read against the map; \`/${cmd("map")}\` audits the whole map.` : ""}${long.length ? ` ${long.length} bullet${long.length === 1 ? " is" : "s are"} still over ${MAP_BULLET_CHARS} characters.` : ""}${checkNote} \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
     "info",
   );
   return changes;

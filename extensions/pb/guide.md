@@ -1154,8 +1154,13 @@ touch.
   established: its spec's Findings, the design the build settled on, the files
   it changed, and the completed reviews' P0–P2 findings as leads the
   cartographer must check against the code (a finding that no longer holds is
-  left out); `"mapOnArchive": false` turns that off.
-- **Any time**, `/pb:map [focus]` refreshes it from the code as it is now.
+  left out); `"mapOnArchive": false` turns that off. It reads only the
+  feature's change: the lines that cite a changed file are re-checked, the
+  change is read against every rule on the map, and every other line is kept
+  as it is.
+- **Any time**, `/pb:map [focus]` audits the whole map against the code as it
+  is now: every path, command and claim. Run it after a large change outside
+  pb, or when you want the map re-proven.
 - **`/pb:map undo`** puts the previous map back (again: swaps them back).
 - A proposal that looks off (paths that don't resolve, lines the code
   contradicts, much of the map removed) asks first. Unanswered, it is written

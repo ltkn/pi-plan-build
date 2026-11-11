@@ -1,0 +1,10 @@
+words: 74
+
+# The current map
+
+### Layout
+- `src/order.ts`: the order model
+
+# How far to look: the whole map
+
+Revisit the whole map, not only the area just worked on: check every path, command and claim against the code as it is now, correct what changed, and keep every line that is still true exactly as it is. Change or remove only what the code now contradicts or what the finished feature makes obsolete.

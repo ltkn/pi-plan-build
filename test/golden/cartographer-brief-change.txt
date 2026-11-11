@@ -1,0 +1,29 @@
+words: 197
+
+# The current map
+
+### Layout
+- `src/order.ts`: the order model
+
+# The feature just finished: order-cancellation
+
+What its planning established (its Findings; the code may have changed since):
+
+- src/order.ts holds the order model.
+
+# Files that feature changed
+
+src/order.ts
+
+# How far to look: this feature's change
+
+The map was audited before: this run looks only at what the feature changed (the files above; `git diff abc1234` shows the change, uncommitted work included). Three jobs:
+1. Re-check each line below that cites a changed file against the code as it is now: correct it, or remove it when the code no longer holds it.
+2. Read the change itself, and for every rule on the map ask whether the change breaks it, bypasses it (a new entry point, caller or write that skips the enforcement point the rule names) or makes it obsolete; correct the map where it does.
+3. Add what the change establishes that a later feature would otherwise miss.
+
+Keep every other line exactly as it is, without re-reading its code: the whole-map audit is /pb:map's.
+
+## Lines that cite a changed file
+
+- [under ### Layout] - `src/order.ts`: the order model

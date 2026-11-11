@@ -2194,7 +2194,9 @@ test("map: the cartographer reads and preserves; no builds, snapshots, routes-as
   assert.ok(CARTOGRAPHER_SYSTEM.includes("write an HTTP route with its verb (`GET /api/orders/{id}`) or as prose"));
   assert.match(CARTOGRAPHER_SYSTEM, /name a repo or file outside this project in prose, never as a backticked path/);
   assert.match(CARTOGRAPHER_SYSTEM, /Never put a secret, credential, token, key, connection string or personal data in the map/);
-  assert.match(CARTOGRAPHER_SYSTEM, /keep every line that is still true exactly as it is/);
+  assert.match(CARTOGRAPHER_SYSTEM, /The brief says how far to look: the whole map, or one feature's change/);
+  assert.match(cartographerBrief({ current: "- `README`: readme" }), /keep every line that is still true exactly as it is/);
+  assert.match(cartographerBrief({ current: "- `README`: readme", scope: "change", recheck: [] }), /Keep every other line exactly as it is/);
   assert.match(CARTOGRAPHER_SYSTEM, /If nothing changed, report the map as it is with an empty changes list/);
   assert.match(CARTOGRAPHER_SYSTEM, /Read the project's engineering standards[\s\S]*don't restate the standards/);
   assert.match(CARTOGRAPHER_SYSTEM, /A test proves an invariant only after you have read its assertion, not from its name/);

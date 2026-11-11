@@ -380,6 +380,7 @@ test("map: /pb:archive updates it by itself: paths that don't resolve go back on
   assert.equal(t.selectTitles.length, asked); // no question
   assert.match(fs.readFileSync(briefFile, "utf8"), /# The current map\n\n\(none yet[\s\S]*# The feature just finished: order-cancellation[\s\S]*`src\/order\.ts` holds the model[\s\S]*# Files that feature changed/);
   assert.match(fs.readFileSync(briefFile, "utf8"), /The design as built \(its "## Design"\):\n- One file per task\./); // recorded by the build, in T1
+  assert.match(fs.readFileSync(briefFile, "utf8"), /# How far to look: the whole map/, "the first map is a full read, even on an archive");
   const agents = t.read("AGENTS.md");
   assert.match(agents, /^# Shop\n\n<!-- pb:map -->\n## Project map\n\n### Layout\n- `src\/`: the application\n### Orders\n- `src\/order\.ts`[\s\S]*follow `auth\/Login`[\s\S]*Services own transactions[\s\S]*<!-- \/pb:map -->/);
   assert.doesNotMatch(agents, /gone\.ts|### Empty/); // corrected by the cartographer, not cut by pb; empty headings go
@@ -390,6 +391,56 @@ test("map: /pb:archive updates it by itself: paths that don't resolve go back on
   assert.doesNotMatch(t.read("AGENTS.md"), /### Orders/); // back to no map
   await t.run("map", "undo");
   assert.match(t.read("AGENTS.md"), /### Orders/); // and forth
+});
+
+test("map: /pb:archive reads only the feature's change against the map, marking the lines that cite a changed file; /pb:map audits the whole map", async () => {
+  const t = setup({ verify: "true" });
+  fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });
+  fs.mkdirSync(path.join(t.repo, "src/orders"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/orders/state.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/auth/Login.java"), "class Login {}\n");
+  const { writeMap } = await import("../extensions/pb/map.ts");
+  writeMap(t.repo, "### Security invariants\n- Orders change state only in `src/order.ts`.\n- Sessions are issued by `src/auth/Login.java` alone.\n### Orders (src/)\n- `orders/state.ts` holds the transitions.");
+  execSync("git add . && git commit -qm src", { cwd: t.repo });
+  const base = execSync("git rev-parse HEAD", { cwd: t.repo }).toString().trim();
+  await written(t, SPEC().replace("## Context\nsrc/order.ts holds the model.", "## Findings\n- `src/order.ts` holds the model."));
+  t.agent.script = async (text, tool) => {
+    if (taskOf(text) === "T1") {
+      fs.appendFileSync(path.join(t.repo, "src/order.ts"), "export const cancelled = true;\n");
+      fs.appendFileSync(path.join(t.repo, "src/orders/state.ts"), "export const states = [];\n");
+    }
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  const briefFile = path.join(os.tmpdir(), `pb-map-change-brief-${process.pid}.md`);
+  const systemFile = path.join(os.tmpdir(), `pb-map-change-system-${process.pid}.md`);
+  process.env.MOCK_BRIEF_OUT = briefFile;
+  process.env.MOCK_SYSTEM_OUT = systemFile;
+  try {
+    await t.run("archive");
+    const brief = fs.readFileSync(briefFile, "utf8");
+    assert.match(brief, /# How far to look: this feature's change\n\nThe map was audited before: this run looks only at what the feature changed \(the files above; `git diff ([0-9a-f]+)` shows the change, uncommitted work included\)/);
+    assert.equal(brief.match(/`git diff ([0-9a-f]+)`/)![1], base, "the diff starts where the build did");
+    assert.match(brief, /for every rule on the map ask whether the change breaks it, bypasses it/);
+    const marked = brief.slice(brief.indexOf("## Lines that cite a changed file"));
+    assert.match(marked, /- \[under ### Security invariants\] - Orders change state only in `src\/order\.ts`\./);
+    assert.match(marked, /- \[under ### Orders \(src\/\)\] - `orders\/state\.ts` holds the transitions\./, "a path under its heading's folder counts");
+    assert.doesNotMatch(marked, /Login\.java/, "a line whose code didn't change is kept unread");
+    assert.doesNotMatch(brief, /How far to look: the whole map/);
+    assert.match(fs.readFileSync(systemFile, "utf8"), /never a whole file or a long block of context/);
+    assert.match(t.notes.join("\n"), /Only order-cancellation's change was read against the map; `\/pb:map` audits the whole map\./);
+
+    await t.run("map");
+    const full = fs.readFileSync(briefFile, "utf8");
+    assert.match(full, /# How far to look: the whole map\n\nRevisit the whole map/);
+    assert.doesNotMatch(full, /Lines that cite a changed file/);
+  } finally {
+    delete process.env.MOCK_BRIEF_OUT;
+    delete process.env.MOCK_SYSTEM_OUT;
+    fs.rmSync(briefFile, { force: true });
+    fs.rmSync(systemFile, { force: true });
+  }
 });
 
 test("map: a map over the budget goes back once to be trimmed, by the same cartographer that can read the code", async () => {
