@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.40.0
 
 pb now covers a change from plan to commit with the next step always on screen, proves more of its own claims (a task's test, a fix's test, the checks before a review), keeps its probes away from production, and spans a backend and its frontend in sibling repositories. Laps run in sessions of their own, the project map is split into area notes and checked against the code, and one rule — build for the needs you have, cleanly — replaces "smallest change" everywhere.
 
