@@ -2635,3 +2635,31 @@ test("undo: files no finished step changed are named, and you can keep them", as
   assert.ok(!fs.existsSync(path.join(t.repo, "notes.md")));
   assert.ok(!fs.existsSync(path.join(t.repo, "T1.txt")));
 });
+
+test("sibling repositories: a follow-up review isn't skipped when only the sibling changed since the last one", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const sibling = fs.mkdtempSync(path.join(path.dirname(fs.realpathSync(t.repo)), "pb-front-"));
+  const name = `../${path.basename(sibling)}`;
+  try {
+    execSync("git init -q && git config user.email t@t && git config user.name t && echo base > README && git add . && git commit -qm base", { cwd: sibling, shell: "/bin/sh" });
+    await written(t, SPEC().replace("Depends on: none", `Depends on: none\nAlso changes: ${name}`));
+    t.agent.script = diligent;
+    await t.run("build");
+    t.reviewer.review = [{ priority: "P2", file: "T1.txt", line: 1, title: "name the file" }] as any;
+    await t.run("review");
+    const reviews = () => t.instructions.filter((i) => i.startsWith("[pb:review]")).length;
+    const first = reviews();
+    // Nothing anywhere: the follow-up is skipped, as before.
+    await t.run("review");
+    assert.match(t.notes.at(-1)!, /^Nothing changed since the last review/);
+    assert.equal(reviews(), first);
+    // A fix made only in the sibling is a change: it gets its follow-up, naming the sibling's file.
+    fs.writeFileSync(path.join(sibling, "front.txt"), "fixed\n");
+    await t.run("review");
+    assert.equal(reviews(), first + 1);
+    assert.match(briefOf(t), new RegExp(`${name.replace(/[.]/g, "\\.")}/front\\.txt`));
+  } finally {
+    fs.rmSync(sibling, { recursive: true, force: true });
+  }
+});

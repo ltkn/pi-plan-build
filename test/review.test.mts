@@ -7,10 +7,13 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, provedFixed, repairLap, setup, SPEC, taskOf, written } from "./harness.mts";
 
-test("overengineering: one rule — build for the needs the change has, the cleanest design within them — carried word for word by the planner, the spec check, the builder and the reviewer", async () => {
-  const { REVIEWER_SYSTEM, PLANNER_ROLE, CRAFT_RULE, SPEC_REVIEWER_SYSTEM, SPEC_CHECK_NAMES, OVERENGINEERING_RULE } = await import("../extensions/pb/prompts.ts");
+test("overengineering: one rule — build for the needs the change has, the cleanest design within them — carried word for word by the planner, the spec check, the builder, a fix lap and the reviewer", async () => {
+  const { REVIEWER_SYSTEM, PLANNER_ROLE, CRAFT_RULE, SPEC_REVIEWER_SYSTEM, SPEC_CHECK_NAMES, OVERENGINEERING_RULE, fixSeedPrompt } = await import("../extensions/pb/prompts.ts");
+  const FIX_SEED = fixSeedPrompt("order-cancellation", [{ priority: "P1", title: "x" }]);
   assert.match(OVERENGINEERING_RULE, /^Build for the needs this change has, not ones it might have:[\s\S]*Within those needs, the cleanest design wins over the smallest: more work now beats debt later\.$/);
-  for (const [name, text] of Object.entries({ PLANNER_ROLE, CRAFT_RULE, SPEC_REVIEWER_SYSTEM, REVIEWER_SYSTEM })) assert.ok(text.includes(OVERENGINEERING_RULE), name);
+  for (const [name, text] of Object.entries({ PLANNER_ROLE, CRAFT_RULE, SPEC_REVIEWER_SYSTEM, REVIEWER_SYSTEM, FIX_SEED })) assert.ok(text.includes(OVERENGINEERING_RULE), name);
+  // A fix lap writes code too: it fits the codebase like a task does.
+  assert.match(FIX_SEED, /Fit the codebase where it is sound:[\s\S]*extend an existing helper rather than adding a near-copy\. Make the cleanest fix, not the smallest: Build for the needs/);
   assert.ok(SPEC_CHECK_NAMES.includes("Overengineering"), "a spec check of its own, counted per check");
   // Nothing in pb asks for the smallest change any more: "simpler" never reads as "less code at the price of debt".
   for (const [name, text] of Object.entries({ PLANNER_ROLE, CRAFT_RULE, REVIEWER_SYSTEM })) assert.doesNotMatch(text, /the smallest change that meets|the simplest thing that would work/, name);

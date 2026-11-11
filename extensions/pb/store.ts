@@ -373,6 +373,8 @@ export interface ReviewState {
   findings: Finding[];
   /** acceptance statuses to carry into a follow-up */
   acceptance?: AcceptanceCheck[];
+  /** each sibling repository's snapshot when the review started, by its `../<repo>` name: the follow-up's base there */
+  repos?: Record<string, string>;
 }
 
 /** The text a build may not rewrite: recorded when the build starts and re-recorded only on re-approval. */
@@ -623,6 +625,8 @@ export interface ReviewRun {
   home?: string;
   /** the tree the review saw: the delta base for the next review, and what changed during this one is reported against it */
   before?: { commit: string; tree: string };
+  /** each sibling repository's snapshot taken with `before`, by its `../<repo>` name */
+  repoBefore?: Record<string, string>;
   /** untracked files over the snapshot cap, which no diff can show: the reviewer is told to read them */
   largeFiles?: string[];
   model?: string;

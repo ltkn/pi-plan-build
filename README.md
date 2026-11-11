@@ -1,9 +1,9 @@
 # pi-plan-build
 
 **Plan → spec → build → review for the [Pi coding agent](https://pi.dev).**
-Plan a feature with Pi, build it task by task in the same conversation behind
-checks the harness runs, and have it reviewed by someone who never saw the
-build. Your engineering standards live in AGENTS.md, written once.
+Plan a feature with Pi, build it task by task (here, or in a fresh session from
+the spec) behind checks the harness runs, and have it reviewed by someone who
+never saw the build. Your engineering standards live in AGENTS.md, written once.
 
 ```
 /pb:plan <what>       plan together; project files untouched; the test baseline runs in the background
@@ -13,7 +13,8 @@ build. Your engineering standards live in AGENTS.md, written once.
                       build, compact to the build's state
 /pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
                       (--fresh: in a new session from the spec). Before T1, one fresh reviewer
-                      reads the frozen draft: P0 findings stop the build until amended; P1-P3 are advisory
+                      reads the frozen draft: P0 findings stop the build until amended; P1s are shown on
+                      the build-start screen with a repair-first choice; P2-P3 are advisory
 /pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default): each finding fixed
                       wherever the change repeats it, proven by a test seen failing first; pb runs the checks after
                       each lap and offers the follow-up review; each lap is an /pb:undo point. A changed contract is

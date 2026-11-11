@@ -422,11 +422,16 @@ export function specReference(name: string, notes: string[] = []): string {
 export const areaNotesLine = (notes: string[], where: string) =>
   `The project map's area notes for ${where}: ${notes.map((n) => `\`${n}\``).join(", ")} — read the ones covering a file before you change or judge it.`;
 
+/** Code that fits the codebase it lands in: shared by the build's task handout and a fix lap, which both write code. */
+const FIT_RULE =
+  "Fit the codebase where it is sound: before adding code, find where the project solves the same kind of problem (the spec's Findings name the code to imitate), match its conventions (naming, structure, error handling) and extend an existing helper rather than adding a near-copy.";
+
 /**
- * How a builder writes the code: the codebase's conventions where they meet the standards, never its flaws; the smallest change. Shared by the task
- * handout only; the standards (AGENTS.md) carry the rest, so this stays to what a task most often gets wrong.
+ * How a builder writes the code: the codebase's conventions where they meet the standards, never its flaws; the
+ * cleanest change for the needs the spec states. The standards (AGENTS.md) carry the rest, so this stays to what a
+ * task most often gets wrong.
  */
-export const CRAFT_RULE = "Fit the codebase where it is sound: before adding code, find where the project solves the same kind of problem (the spec's Findings name the code to imitate), match its conventions (naming, structure, error handling) and extend an existing helper rather than adding a near-copy. Where that code falls short of the engineering standards (outdated, insecure, a workaround), don't copy the flaw: write the new code to the standards and name the old pattern under open, since refactoring it is a change of its own. Meet the Acceptance lines with the cleanest change, not the smallest: " + OVERENGINEERING_RULE + " No re-check of what a type or an earlier boundary already guarantees.";
+export const CRAFT_RULE = FIT_RULE + " Where that code falls short of the engineering standards (outdated, insecure, a workaround), don't copy the flaw: write the new code to the standards and name the old pattern under open, since refactoring it is a change of its own. Meet the Acceptance lines with the cleanest change, not the smallest: " + OVERENGINEERING_RULE + " No re-check of what a type or an earlier boundary already guarantees.";
 
 /** The look a builder takes at its own diff before reporting: shared by the task handout and the fix lap. */
 export const SELF_REVIEW_RULE = "Before reporting, re-read your diff and fix what it shows: duplicated or dead code, debug output, names that don't say what the thing is, and comments that restate the code or tell its history (dates, decisions, task ids).";
@@ -490,6 +495,7 @@ export function fixSeedPrompt(spec: string, findings: Finding[], reference = "",
     `${reference ? `${reference}\n\n` : ""}` +
     `A finding is a class, not a line: before fixing one, look for the same defect elsewhere in ${change} and fix every instance there too, naming each in your reply; an instance outside the change is reported, not fixed. ` +
     `For each finding that changes behaviour, first write a test that reproduces it and call pb_fix_red with the finding's number and the command that runs it: pb runs it and it must fail. Then fix, and run it again yourself. A finding no test can show (a doc or comment, a config value) goes in untested when you report, with why. ` +
+    `${FIT_RULE} Make the cleanest fix, not the smallest: ${OVERENGINEERING_RULE} ` +
     `Fence: touch only what these findings require — no new behaviour, API, or data beyond a finding's Fix; keep the suite green: pb runs the project's checks after you report, and a failure there means the lap is not done. ${PRODUCTION_RULE} ${TIMEOUT_RULE} ${STRUCTURED_EDIT_RULE} ` +
     `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
     `When a fix changes behaviour the spec's Design or Decisions describe, update those lines in this lap with pb_update_spec, so the spec says what the code now does; only Design and Decisions — a finding that needs its Goal, Contracts or Acceptance changed is skipped instead. A rule you write in a doc must match what the code does: check it against the code and its tests. ` +

@@ -480,7 +480,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       const ledger = ledgerFindings(checked.findings);
       if (ledger.length) store.event(run.name, { type: "review-findings", review: run.id, findings: ledger });
       if (m.complete) {
-        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings, acceptance: m.acceptance };
+        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings, acceptance: m.acceptance, ...(run.repoBefore ? { repos: run.repoBefore } : {}) };
         // A pass only finishes a finished build: with tasks still open the phase stays,
         // or the next /pb:build strands and /pb:archive offers a half-built spec.
         if (m.verdict === "pass" && !remaining.length) markReviewed(p);
@@ -681,6 +681,15 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       // the check or the review changes is reported (never silently reverted), and the next
       // review's delta starts here too.
       const before = cfg.checkpoints ? snapshot(ctx.cwd, `pb: review ${label}`) : undefined;
+      // The sibling repositories the spec also changes, snapshotted with the project: the next review's base there.
+      const repoBefore: Record<string, string> = Object.fromEntries(
+        before
+          ? resolveRepos(ctx.cwd, loaded?.spec.repos ?? []).flatMap((r) => {
+              const s = r.root ? snapshot(r.root, `pb: review ${label}`) : undefined;
+              return s ? [[r.name, s.commit] as const] : [];
+            })
+          : [],
+      );
       // The change as the review starts: the brief's diff, the security read and the verifier's brief
       // all use this one capture, so a check or a later edit cannot change what was reviewed. Capped
       // once, the same text the reviewer reads (and the saved run keeps).
@@ -733,8 +742,18 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       // A review without a verdict is not a baseline to skip from: the documented next step is
       // another /pb:review, so run it fresh on the same tree instead of reporting "nothing changed".
       if (!full && prevReview?.snapshot && prevReview.verdict !== "none" && before) {
-        const since = changedPaths(ctx.cwd, prevReview.snapshot, before.commit);
-        if (!since.length && !largeFiles.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
+        // A sibling repository counts too: a fix made only there is a change. One with no snapshot from the last
+        // review (older reviews, or a sibling added since) can't be shown unchanged, so it is never skipped.
+        const siblingSince: string[] = [];
+        let siblingUnknown = false;
+        for (const r of resolveRepos(ctx.cwd, loaded?.spec.repos ?? [])) {
+          const was = prevReview.repos?.[r.name];
+          const now_ = repoBefore[r.name];
+          if (!r.root || !was || !now_) siblingUnknown = true;
+          else siblingSince.push(...changedPaths(r.root, was, now_).map((f) => inRepo(r.name, f)));
+        }
+        const since = [...changedPaths(ctx.cwd, prevReview.snapshot, before.commit), ...siblingSince];
+        if (!since.length && !siblingUnknown && !largeFiles.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
         previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since, acceptance: prevReview.acceptance };
       }
       // Fix laps report into their own sessions, not the brief: hand the follow-up review the
@@ -807,6 +826,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         followUp: !!previous,
         home: ctx.sessionManager.getSessionFile(),
         before: before ? { commit: before.commit, tree: before.tree } : undefined,
+        ...(Object.keys(repoBefore).length ? { repoBefore } : {}),
         largeFiles,
         model: cfg.reviewer.model ?? sessionModel(ctx),
         thinking: cfg.reviewer.thinking ?? (pi.getThinkingLevel() as string | undefined),

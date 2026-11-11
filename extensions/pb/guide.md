@@ -232,8 +232,9 @@ in production, whose job is the best plan for what you need, not agreement with
 what you first asked.
 It starts from the problem: the goal and how you'll know it worked, and a
 challenge to the request itself when it deserves one (the need behind it,
-something that already does it, the simplest thing that would work); a request
-that is already right gets one line. It pushes back with evidence — this code,
+something that already does it, the cleanest thing that meets it, built for
+the needs you have rather than ones you might); a request that is already right
+gets one line. It pushes back with evidence — this code,
 or a named practice, standard or documented behaviour and what it means here,
 never taste — and walks what applies before a plan is settled, one or two
 lenses for a small change: users (what they see when it works and when it
