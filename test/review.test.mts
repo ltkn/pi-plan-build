@@ -1934,3 +1934,37 @@ test("stats: review precision line reports reported dismissed and fixed", async 
     /^Precision 0 reported · 0 dismissed \(–\) · 0 fixed$/m,
   );
 });
+
+test("review: findings are tagged against the project map, and the first review's tally is what /pb:stats judges the map by", async () => {
+  const { REVIEWER_SYSTEM, ATTACKER_SYSTEM, MAP_FINDING_RULE, findingLine } = await import("../extensions/pb/prompts.ts");
+  // One rule, word for word, in the reviewer and the abuse pass.
+  assert.ok(REVIEWER_SYSTEM.includes(MAP_FINDING_RULE) && ATTACKER_SYSTEM.includes(MAP_FINDING_RULE));
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [
+    { priority: "P1", file: "src/order.ts", line: 12, title: "the repository is called from the controller", fix: "go through the service", map: "stated" },
+    { priority: "P2", file: "AGENTS.md", line: 20, title: "the map names a filter that no longer exists", fix: "name OrderGuard", map: "wrong" },
+    { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant", map: "made-up" },
+  ] as any;
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /\[P1 · The map states this rule\] src\/order\.ts:12/);
+  assert.match(t.posts.at(-1)!, /\[P2 · The map is wrong here\] AGENTS\.md:20/);
+  assert.match(t.posts.at(-1)!, /\[P2\] src\/order\.ts:30 — name the constant/); // an unknown tag is dropped, never minted
+  const review = t.events("order-cancellation").filter((e: any) => e.type === "review").at(-1);
+  assert.equal(review.mapStated, 1);
+  assert.equal(review.mapWrong, 1);
+  // The verifier's dismissal takes a finding out of the tally: only what survived counts.
+  process.env.MOCK_VERIFY = "reject";
+  await t.run("review", "--full");
+  delete process.env.MOCK_VERIFY;
+  const second = t.events("order-cancellation").filter((e: any) => e.type === "review").at(-1);
+  assert.equal(second.mapStated, 0);
+  // The stats read the first review: a follow-up re-reporting the same finding is not counted twice.
+  await t.run("stats", "order-cancellation");
+  assert.match(t.posts.at(-1)!, /Map +first review: 1 broke a rule the map states · 1 found a map line wrong/);
+  await t.run("stats", "compare");
+  assert.match(t.posts.at(-1)!.split("\n").find((l) => l.startsWith("order-cancellation"))!, / 1\/1 /);
+  assert.equal(findingLine({ priority: "P3", title: "x" }), "[P3] x");
+});

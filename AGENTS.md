@@ -144,7 +144,7 @@
 - `BINDING_SECTIONS` (`spec.ts`) is the single list every build prompt names for the model to read (`specReference`), and the guide and README must state it in the exported order (test "binding: the guide and README list the binding sections in the exported order"). Nothing renders or shortens the sections any more: the spec file is one read away.
 
 ### Tests + build
-- `npm test` → `node --test "test/*.test.mts"` (488 tests, ~65 s: the files run in parallel); `npm run typecheck` (strict, with `noUnusedLocals`/`noUnusedParameters`, tests included); `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
+- `npm test` → `node --test "test/*.test.mts"` (490 tests, ~65 s: the files run in parallel); `npm run typecheck` (strict, with `noUnusedLocals`/`noUnusedParameters`, tests included); `npm run check` runs both (CI matrix: Node 22/24/26). npm + `package-lock.json`.
 - The end-to-end suite is split by area — `plan`, `spec`, `build`, `review`, `core` `.test.mts` — over one harness, `test/harness.mts` (the simulated Pi, `setup()`, the `SPEC()` fixtures and the scripted agents, every helper exported). A new test goes in its area's file and imports only what it uses (the typecheck refuses an unused import); a helper shared by two files belongs in the harness. `phase.test.mts` and `prompts.golden.test.mts` are unit-level.
 - `node scripts/verify-test.mjs [--file <file>] "<exact test name>" ...` is the per-task proof: it exits 0 only when every name has a TAP `ok N - <name>` line and the report says `# fail 0` (a `# SKIP` is not a proof), because `node --test --test-name-pattern=<zero-match>` itself exits 0. Names are regex-escaped; without `--file` it runs the whole suite (every `test/*.test.mts`); dev-only (outside `package.json` `files`).
 - `test/verify-fixture.test.mjs` is deliberately **not** run by `npm test` (its `.mjs` extension keeps it out of the `*.test.mts` glob); the prover's tests drive it through `--file`, so they never nest the real suite.
@@ -156,6 +156,10 @@
 
 ### Config (extensions/pb/store.ts)
 - `sanitizeConfig` is the one judge of a setting's value; `configProblems` only reports where it overruled the file (unknown keys against `CONFIG_KEYS`, with the nearest one; replaced values; user-level keys other than `GLOBAL_CONFIG_KEYS`; unparseable JSON), shown at startup and by `/pb:status`. A new setting goes into `DEFAULT_CONFIG` or `CONFIG_KEYS`, or every user who sets it is told pb ignores it.
+
+### The project map (extensions/pb/map.ts, extensions/pb/map-flow.ts)
+- The map's size rule is per bullet (`MAP_BULLET_CHARS`, `longBullets`): over-long bullets go back through the one repair pass with unresolved paths and the budget, and the result counts what is still long. `MAP_TOKENS` is a sanity bound, never a reason to drop a still-true invariant.
+- Whether the map works is measured, not assumed: `MAP_FINDING_RULE` (prompts.ts, shared word for word by the reviewer and the abuse pass) tags a finding `map: "stated" | "wrong"`; parsing keeps only `MAP_TAGS` (`mapTagOf`, store.ts), so model text never mints a tag; the `review` event records `mapCounts` over the findings that survived verification, and stats read the **first** review's tally (a follow-up re-reports what was not fixed).
 
 ### Standards (extensions/pb/standards.ts)
 - A section is composed, never a fixed text per stack: `backend(database, stackLines)` = core, the `DATABASE` part when `usesDatabase(cwd)`, the re-read, then the stack's lines last (so a shared core stays a prefix of every stack's own and `offerStandards`' "a shared section is enough" check keeps working). Vue and your own templates are written as they are. A shared section must never carry stack or database rules: a project needing either is offered its own, never the all-projects file.

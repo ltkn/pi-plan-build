@@ -558,6 +558,9 @@ export const READ_ONLY_PREAMBLE = `Do not modify any file. You have read/grep/fi
  * one the change makes newly reachable is not pre-existing, and keeps its priority. Shared so the
  * reviewer and the abuse pass cannot drift on the one rule that decides whether a finding blocks.
  */
+/** How a code-review finding is tagged against the project map: the data `/pb:stats` judges the map by. One rule, shared by the reviewer and the abuse pass. */
+export const MAP_FINDING_RULE = `Against the project map (the "Project map" section of AGENTS.md, when there is one): mark a finding \`map: "stated"\` when it breaks a rule the map states, and report a map line the code contradicts as its own finding on AGENTS.md, marked \`map: "wrong"\` (P2, or P1 when following the line leads to a bug). Leave \`map\` out otherwise.`;
+
 export const PRE_EXISTING_RULE = `Pre-existing issues are still findings, at most P2: report each one with \`outside: true\`, its own file, line and concrete fix — never leave it in prose, and never drop it because this change did not cause it. A problem the change makes newly reachable or materially worse is in the change and keeps its priority. Taste and hypotheticals are not findings.`;
 
 export const REVIEWER_SYSTEM = `You are an independent REVIEWER in a fresh session. You did not take part in planning or building, and you are deliberately not shown the build conversation: judge the actual code.
@@ -598,6 +601,7 @@ Severity is the consequence and likelihood of a concrete failure in the shipped 
 Merge findings with the same concrete fix before reporting: same file and line plus the same action means one finding at the highest priority, its title naming each symptom — never two findings for one fix.
 When the code is right and only the spec's framing is imprecise, report P3 with a proposed rewording, not P2: ask which reasonable reader would call the code wrong — if the code matches at least one reasonable reading of the spec, it's a note for the author, not a defect. A change that violates every reasonable reading keeps its priority.
 ${PRE_EXISTING_RULE}
+${MAP_FINDING_RULE}
 
 ## Report
 
@@ -623,7 +627,7 @@ For every entry point the change adds or alters (API routes, UI actions, command
 - Configuration: security-relevant defaults, migrations and permissions (grants, roles, public access).
 - The spec's Threats and abuse, if any: each abuse really prevented, and tested.
 
-Report only problems someone could actually use or hit, with report_findings, in one call made as soon as you have them and before your reply (pb reads the call, never your prose): in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. Merge findings with the same concrete fix into one at the highest priority, its title naming each symptom. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. ${PRE_EXISTING_RULE} No findings is a fine result. Then reply with one line that adds no problem: a real problem belongs in the tool report, never only in that line.`;
+Report only problems someone could actually use or hit, with report_findings, in one call made as soon as you have them and before your reply (pb reads the call, never your prose): in each title, the abuse in a sentence (who, how, what they gain or break), and a concrete fix, at the boundary or as an invariant (a type, a constraint, a transaction, a lock), not checks scattered through the code. Merge findings with the same concrete fix into one at the highest priority, its title naming each symptom. P0: exploitable now for serious gain or damage; P1: exploitable with effort, or for limited gain; P2: hardening worth doing. ${PRE_EXISTING_RULE} ${MAP_FINDING_RULE} No findings is a fine result. Then reply with one line that adds no problem: a real problem belongs in the tool report, never only in that line.`;
 
 /** The first message of a review session: its role, the brief, and how the session works. */
 export function reviewSessionPrompt(brief: string, extra = ""): string {
@@ -653,7 +657,7 @@ const oneLine = (s: string) => s.replace(/\s*\n\s*/g, " ");
 export const findingDetails = (f: Finding) => `${f.fix ? `\n   Fix: ${oneLine(f.fix)}` : ""}`;
 
 export const findingLine = (f: Finding, n?: number) =>
-  `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.check ? ` · ${f.check}` : ""}${f.outside ? " · Outside the change" : ""}] ${f.file ? `${oneLine(f.file)}${f.line ? `:${f.line}` : ""} — ` : ""}${oneLine(f.title)}${findingDetails(f)}`;
+  `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.check ? ` · ${f.check}` : ""}${f.outside ? " · Outside the change" : ""}${f.map === "stated" ? " · The map states this rule" : f.map === "wrong" ? " · The map is wrong here" : ""}] ${f.file ? `${oneLine(f.file)}${f.line ? `:${f.line}` : ""} — ` : ""}${oneLine(f.title)}${findingDetails(f)}`;
 
 /**
  * How much of the frozen diff a review brief carries. Most changes fit; past the cap the reviewer

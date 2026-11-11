@@ -255,6 +255,7 @@ export function mergeFindings(findings: Finding[]): Finding[] {
     }
     // A defect the change is responsible for is not outside it, whichever copy was seen first.
     if (!f.outside) delete same.outside;
+    same.map ??= f.map;
     if (!same.title.includes(f.title)) same.title = `${same.title} / ${f.title}`;
   }
   return out;

@@ -334,7 +334,16 @@ export interface Finding {
   check?: string;
   /** a pre-existing problem outside the change under review: still reported and pickable; the P2 cap is the reviewer's rule, and a serious one keeps its priority */
   outside?: boolean;
+  /** in a code review: the finding breaks a rule the project map states ("stated"), or the map line itself is wrong ("wrong") */
+  map?: MapTag;
 }
+
+/** How a code-review finding relates to the project map: what `/pb:stats` judges the map by. */
+export const MAP_TAGS = ["stated", "wrong"] as const;
+export type MapTag = (typeof MAP_TAGS)[number];
+export const mapTagOf = (v: unknown): MapTag | undefined => MAP_TAGS.find((t) => t === v);
+/** A review's map tally, over the findings that survived verification: recorded on every review event, zeros included. */
+export const mapCounts = (findings: Finding[]) => ({ mapStated: findings.filter((f) => f.map === "stated").length, mapWrong: findings.filter((f) => f.map === "wrong").length });
 
 /** One acceptance criterion's review result. A criterion left out is never `met`. */
 export type AcceptanceStatus = "met" | "not met" | "not verified";

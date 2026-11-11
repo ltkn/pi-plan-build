@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
 import { extraBlock } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_MARKERS, MAP_TOKENS, cartographerBrief, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_BULLET_CHARS, MAP_MARKERS, MAP_TOKENS, cartographerBrief, longBullets, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { REVIEW_TOOLS } from "./review.ts";
 import { runFresh } from "./runner.ts";
 import { type ReviewLedgerEntry, Store } from "./store.ts";
@@ -73,6 +73,7 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
   let body = "";
   let changes: string[] = [];
   let unresolved: { path: string; line: string }[] = [];
+  let long: { text: string; chars: number }[] = [];
   try {
     render("reading the project");
     const first = await cartographer(cartographerBrief({ current, ...o }), "reading the project");
@@ -81,18 +82,20 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
     ({ map: body, changes } = mapOf(first));
     if (!body) return void ctx.ui.notify(`No map came back${first.error ? `: ${first.error}` : ""}.`, "warning");
     unresolved = unresolvedPaths(cwd, body);
+    long = longBullets(body);
     const overBy = mapTokens(body) - MAP_TOKENS;
-    if (unresolved.length || overBy > 0) {
-      // Once: the cartographer corrects or removes what doesn't resolve and trims to the budget, still able to
-      // read the code; nothing is deleted behind its back.
-      const phase = mapRepairPhase(unresolved.length, overBy > 0 ? overBy : 0);
-      const second = await cartographer(cartographerBrief({ current, proposed: body, unresolved, overBy: overBy > 0 ? overBy : undefined }), phase);
+    if (unresolved.length || long.length || overBy > 0) {
+      // Once: the cartographer corrects or removes what doesn't resolve, shortens the long bullets and trims to
+      // the budget, still able to read the code; nothing is deleted behind its back.
+      const phase = mapRepairPhase(unresolved.length, overBy > 0 ? overBy : 0, long.length);
+      const second = await cartographer(cartographerBrief({ current, proposed: body, unresolved, long, overBy: overBy > 0 ? overBy : undefined }), phase);
       store.exploreEvent({ session: sessionFile, ...second.tokens, cost: second.cost, ms: second.ms });
       if (second.aborted) return void ctx.ui.notify("Map update stopped.", "info");
       const fixed = mapOf(second).map;
       if (fixed) {
         body = fixed;
         unresolved = unresolvedPaths(cwd, body);
+        long = longBullets(body);
       }
     }
   } finally {
@@ -127,7 +130,7 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
   if (!writeMap(ctx.cwd, body)) return void ctx.ui.notify(mapRefusal(ctx.cwd), "error");
   store.saveMapPrevious(current);
   ctx.ui.notify(
-    `Project map ${current ? "updated" : "written"} in AGENTS.md (~${tokens} tokens in ${Math.max(1, Math.round((Date.now() - started) / 1000))}s${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}). \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
+    `Project map ${current ? "updated" : "written"} in AGENTS.md (~${tokens} tokens in ${Math.max(1, Math.round((Date.now() - started) / 1000))}s${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}).${long.length ? ` ${long.length} bullet${long.length === 1 ? " is" : "s are"} still over ${MAP_BULLET_CHARS} characters.` : ""} \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
     "info",
   );
   return changes;

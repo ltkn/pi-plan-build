@@ -1138,9 +1138,12 @@ only the new area). Its readers are capable models that explore fast, so it
 holds only what exploring wouldn't show them: security and data invariants with
 the code that enforces them, where new code goes and what to copy, known gaps,
 commands and quirks, docs the code contradicts, and layout only where names
-mislead. It's written in short bullet lines, as short as the project allows, up
-to about 20,000 tokens: it's read in every session, so a line stays only if it
-saves a later feature a search or a mistake. Your session doesn't grow. Only a
+mislead. Each bullet is at most two sentences, about 400 characters: the rule,
+where it is enforced and the test that proves it, with the mechanism left to the
+code or a doc it names. The limit is per bullet, not per map: a project with
+more invariants gets more lines, never fewer rules, and the total (about 20,000
+tokens) is only a sanity bound. It's read in every session, so a line stays only
+if it saves a later feature a search or a mistake. Your session doesn't grow. Only a
 name shaped like a path is checked at all: it carries a slash, starts with a
 dot, or is a root file name pb knows (`README`, `package.json`, `pom.xml`). So
 `Store.config`, `process.env` and `thread.lock` stay prose in any repo, however
@@ -1153,9 +1156,10 @@ the project root counts as found, and a name that walks there (`../old/Ctrl`)
 is reported like a missing file. The one price of a warning worth trusting: a
 stale name written bare (`gone.md`) is left alone. The names that still don't
 resolve go back to it once to be corrected or rewritten so they no longer read
-as paths here (a route gets its verb; an outside repo is prose), and so does a
-map over the budget, to be trimmed. Then the map is written and the change is
-shown. It asks you first only when something looks off: paths that still don't
+as paths here (a route gets its verb; an outside repo is prose), and so do the
+bullets over the length, to be shortened without dropping a rule, and a map over
+the budget, to be trimmed. Then the map is written and the change is shown, with
+the bullets still too long counted. It asks you first only when something looks off: paths that still don't
 resolve, or a large part of the existing map removed; unanswered, the current
 map stays.
 `/pb:plan` warns when paths in the map no longer exist (a cheap check, no
@@ -1197,6 +1201,11 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
   `/pb:stats compare [n]` lines up the last n specs (default 10) phase by phase:
   what the first spec review and the first code review found, the repair and fix
   laps, the first-try rate and each phase's cost, to judge a change to pb itself.
+  Its `map` column (and the card's `Map` line) is how the project map is judged:
+  of the first code review's findings, how many broke a rule the map states (the
+  map said it, and the build didn't follow: too long, or in the wrong place) and
+  how many found a map line wrong. The reviewer marks both, and the post shows
+  them on each finding.
   `/pb:stats --json` prints the same report with each spec's stats.
 - **`pb-report`**: the report without Pi, for scripts and dashboards:
   `pb-report [--cwd dir] [--stats] [--review]`. The `schema` field is

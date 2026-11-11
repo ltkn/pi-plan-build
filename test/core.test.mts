@@ -1109,8 +1109,43 @@ test("stats compare: the last specs side by side — what the first spec review 
   const out = renderCompare(list as any, 2);
   assert.ok(!out.split("\n").some((l) => l.startsWith("oldest")), "only the last n specs");
   const before = out.split("\n").find((l) => l.startsWith("before"))!;
-  assert.deepEqual(before.trim().split(/\s+/).slice(1, 9), ["1/2/0/0", "1", "–", "4", "1", "$0.75", "$2.00", "$1.00"]);
+  assert.deepEqual(before.trim().split(/\s+/).slice(1, 10), ["1/2/0/0", "1", "–", "4", "1", "–", "$0.75", "$2.00", "$1.00"]);
   const after = out.split("\n").find((l) => l.startsWith("after"))!;
-  assert.deepEqual(after.trim().split(/\s+/).slice(1, 9), ["0/0/0/0", "0", "–", "–", "0", "–", "$1.50", "–"]);
+  assert.deepEqual(after.trim().split(/\s+/).slice(1, 10), ["0/0/0/0", "0", "–", "–", "0", "–", "–", "$1.50", "–"]);
   assert.ok(out.indexOf("before") < out.indexOf("after"), "oldest first");
+});
+
+test("map: a bullet carrying the mechanism goes back to be shortened; the limit is per bullet, and one left long is named", async () => {
+  const { longBullets, MAP_BULLET_CHARS, CARTOGRAPHER_SYSTEM } = await import("../extensions/pb/map.ts");
+  // A wrapped bullet is one bullet; a heading or a blank line ends it.
+  const wrapped = `- first part ${"x".repeat(MAP_BULLET_CHARS)}\n  continued\n- short\n### Next\n- also short`;
+  assert.deepEqual(longBullets(wrapped).map((b) => b.text.endsWith("continued")), [true]);
+  assert.match(CARTOGRAPHER_SYSTEM, new RegExp(`Each bullet is at most two sentences, about ${MAP_BULLET_CHARS} characters: the rule, where it is enforced, and the test that proves it\\.`));
+  assert.match(CARTOGRAPHER_SYSTEM, /shorten it, never drop a rule that is still true\. The map's total, about [\d,]+ tokens at most, is a sanity bound, not a target\./);
+  const t = setup({ verify: "true" });
+  fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/auth/Login.java"), "class Login {}\n");
+  process.chdir(t.repo);
+  const repair = path.join(os.tmpdir(), `pb-map-long-${process.pid}.md`);
+  process.env.MOCK_MAP_LONG = "1";
+  process.env.MOCK_REPAIR_OUT = repair;
+  try {
+    await t.run("map");
+    const brief = fs.readFileSync(repair, "utf8");
+    assert.match(brief, /# Bullets over the length\n\nEach of these is over 400 characters\. Rewrite each as the rule, where it is enforced, and the test that proves it/);
+    assert.match(brief, /- \(\d+ characters\) - Orders settle in one transaction:/);
+    assert.doesNotMatch(brief, /# Over the budget/); // far below the total: the bullet alone sent it back
+    assert.doesNotMatch(t.read("AGENTS.md"), /the mechanism, case by case/);
+    // A cartographer that doesn't shorten it: the map is written, and the result says what is still long.
+    process.env.MOCK_MAP_LONG = "stubborn";
+    fs.writeFileSync(path.join(t.repo, "src/extra.ts"), "export {}\n");
+    await t.run("map", "orders");
+    assert.match(t.read("AGENTS.md"), /the mechanism, case by case/);
+    assert.match(t.notes.at(-1)!, /1 bullet is still over 400 characters\./);
+  } finally {
+    delete process.env.MOCK_MAP_LONG;
+    delete process.env.MOCK_REPAIR_OUT;
+    fs.rmSync(repair, { force: true });
+  }
 });

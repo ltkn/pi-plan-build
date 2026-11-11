@@ -161,7 +161,15 @@ export interface Summary {
   reviewMs?: number;
   /** What getting the spec ready cost: its reviews, claim checks and repair laps. Present once any ran. */
   spec?: SpecPhase;
+  /** The first code review's findings against the project map: rules it stated that the change broke, lines it got wrong. Present once a review recorded them. */
+  map?: { stated: number; wrong: number };
 }
+
+/** The first review that tagged its findings against the project map (reviews before the tags existed carry none). */
+const firstMapTally = (e: Ev[]): { stated: number; wrong: number } | undefined => {
+  const r = e.find((x) => x.type === "review" && typeof x.mapStated === "number");
+  return r ? { stated: num(r.mapStated), wrong: num(r.mapWrong) } : undefined;
+};
 
 /** The spec phase in numbers: the data a change to the spec's evidence rules is judged by. */
 export interface SpecPhase {
@@ -323,6 +331,7 @@ export function summarize(s: SpecStats): Summary {
     specReviewMs: lastMs("spec-review"),
     reviewMs: typeof lastReview?.ms === "number" ? lastReview.ms : undefined,
     spec: specPhase(e),
+    map: firstMapTally(e),
   };
 }
 
@@ -359,6 +368,7 @@ export function renderCard(s: SpecStats): string {
     ...(x.spec ? [specLine(x.spec)] : []),
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,
     `Review    ${x.reviews.length ? `${x.reviews.join(" → ")} · P0/P1 confirmed (latest): ${x.confirmed.p0 + x.confirmed.p1}` : "not run"}`,
+    ...(x.map ? [`Map       first review: ${x.map.stated} broke a rule the map states · ${x.map.wrong} found a map line wrong`] : []),
     ...(x.precision ? [`Precision ${x.precision.reported} reported · ${x.precision.dismissed} dismissed (${pct(x.precision.dismissed, x.precision.reported)}) · ${x.precision.fixed} fixed`] : []),
     ...(hasRed ? [`Proof     ${x.proof.proven} proven · ${x.proof.sentBack} sent back · ${x.proof.unproven} no run could prove`] : []),
     `Build     ${b.turns} turns · in ${human(b.prompt)} (${pct(b.cached, b.prompt)} cached) · out ${human(b.output)} · $${b.cost.toFixed(2)}`,
@@ -403,14 +413,15 @@ export function renderCompare(list: SpecStats[], n: number): string {
     const firstReview = s.events.find((e) => e.type === "review");
     const reviewFound = firstReview ? (Array.isArray(firstReview.p) ? (firstReview.p as unknown[]).reduce<number>((a, v) => a + num(v), 0) : 0) + num(firstReview.dismissed) : undefined;
     const fixLaps = s.events.filter((e) => e.type === "fix").length;
-    return `${pad(s.name, 24)}${lp(firstSpecReview ? specFound : "–", 10)}${lp(String(x.spec?.laps ?? 0), 6)}${lp(pct(...x.firstTry), 8)}${lp(reviewFound === undefined ? "–" : String(reviewFound), 8)}${lp(String(fixLaps), 6)}${lp(money(x.spec?.cost ?? 0), 8)}${lp(money(x.build.cost), 8)}${lp(money(x.review.cost), 9)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
+    return `${pad(s.name, 24)}${lp(firstSpecReview ? specFound : "–", 10)}${lp(String(x.spec?.laps ?? 0), 6)}${lp(pct(...x.firstTry), 8)}${lp(reviewFound === undefined ? "–" : String(reviewFound), 8)}${lp(String(fixLaps), 6)}${lp(x.map ? `${x.map.stated}/${x.map.wrong}` : "–", 6)}${lp(money(x.spec?.cost ?? 0), 8)}${lp(money(x.build.cost), 8)}${lp(money(x.review.cost), 9)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
   });
   return [
     "```",
-    `${pad("spec", 24)}${lp("spec P0-3", 10)}${lp("laps", 6)}${lp("1st try", 8)}${lp("review", 8)}${lp("fixes", 6)}${lp("$spec", 8)}${lp("$build", 8)}${lp("$review", 9)}${lp("build", 9)}`,
+    `${pad("spec", 24)}${lp("spec P0-3", 10)}${lp("laps", 6)}${lp("1st try", 8)}${lp("review", 8)}${lp("fixes", 6)}${lp("map", 6)}${lp("$spec", 8)}${lp("$build", 8)}${lp("$review", 9)}${lp("build", 9)}`,
     ...rows,
     "",
     "spec P0-3: the first spec review's findings · laps: spec repair laps · review: findings the first code review reported",
+    "map: of the first code review's findings, how many broke a rule the project map states / found a map line wrong",
     "fixes: /pb:fix laps · $: each phase's fresh runs and build turns (the planning conversation isn't counted) · oldest first",
     "```",
   ].join("\n");

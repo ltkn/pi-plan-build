@@ -64,6 +64,8 @@ export interface ReportStats {
   ms: number;
   /** the spec phase (reviews, claim checks, repair laps and the fresh runs' cost); null before any ran */
   spec: SpecPhase | null;
+  /** the first code review's findings against the project map (broke a rule it states / found a line wrong); null before a review recorded them */
+  map: { stated: number; wrong: number } | null;
 }
 
 export interface ReportReview {
@@ -168,6 +170,7 @@ const reportStats = (spec: SpecStats): ReportStats => {
     context: x.context,
     ms: x.ms,
     spec: x.spec ?? null,
+    map: x.map ?? null,
   };
 };
 

@@ -16,7 +16,7 @@ import { runFresh } from "./runner.ts";
 import { acceptanceCriteria } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, mapCounts, mapTagOf, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
 import { runVerify } from "./verify.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
 import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, watchable, withChecking } from "./kit.ts";
@@ -39,6 +39,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
           title: Type.String({ description: "the problem, in one sentence" }),
           fix: Type.Optional(Type.String({ description: "a concrete fix" })),
           outside: Type.Optional(Type.Boolean({ description: "true when the problem pre-dates this change (outside it): still a finding — give it the priority it deserves, and a serious one (P0/P1) still blocks" })),
+          map: Type.Optional(StringEnum(["stated", "wrong"], { description: "in a code review: \"stated\" when the problem breaks a rule the project map in AGENTS.md states; \"wrong\" when the problem is that a map line is wrong (the code contradicts it)" })),
         }),
       ),
       acceptance: Type.Optional(
@@ -56,7 +57,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionFile();
       const state = store.reviewSession(session);
       if (!session || !state) throw new Error("This is not a pb review session.");
-      const findings = (params.findings as Finding[]).filter((f) => /^P[0-3]$/.test(f.priority) && f.title);
+      const findings = (params.findings as Finding[]).filter((f) => /^P[0-3]$/.test(f.priority) && f.title).map(({ map, ...f }) => (mapTagOf(map) ? { ...f, map: mapTagOf(map) } : f));
       if (state.role === "abuse") {
         store.saveReviewSession(session, { ...state, findings });
         return reply(`Recorded ${findings.length} finding(s). Now reply briefly, then stop.`);
@@ -182,7 +183,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const call = res.toolCalls.filter((c) => c.name === "report_findings").at(-1);
     const raw = call && Array.isArray(call.arguments.findings) ? call.arguments.findings : undefined;
     const findings: Finding[] = (raw ?? []).flatMap((item) => {
-      const f = item as { priority?: unknown; title?: unknown; file?: unknown; line?: unknown; fix?: unknown; outside?: unknown };
+      const f = item as { priority?: unknown; title?: unknown; file?: unknown; line?: unknown; fix?: unknown; outside?: unknown; map?: unknown };
       if (typeof f.title !== "string" || !f.title.trim() || (f.priority !== "P0" && f.priority !== "P1" && f.priority !== "P2" && f.priority !== "P3")) return [];
       return [{
         priority: f.priority,
@@ -191,6 +192,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         ...(typeof f.line === "number" && Number.isFinite(f.line) ? { line: f.line } : {}),
         ...(typeof f.fix === "string" && f.fix.trim() ? { fix: f.fix.trim() } : {}),
         ...(f.outside === true ? { outside: true } : {}),
+        ...(mapTagOf(f.map) ? { map: mapTagOf(f.map) } : {}),
       }];
     });
     // undefined = no report call; [] = an explicit clean report. A non-empty call that yields no
@@ -471,7 +473,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       midBuild: remaining,
     });
     if (run.name && p) {
-      store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, followUp: run.followUp, ms: run.ms, ...checked.tokens, cost: checked.cost });
+      store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, ...mapCounts(checked.findings), followUp: run.followUp, ms: run.ms, ...checked.tokens, cost: checked.cost });
       // A lead for later features: completed findings survive the review's own files and the archive.
       const ledger = ledgerFindings(checked.findings);
       if (ledger.length) store.event(run.name, { type: "review-findings", review: run.id, findings: ledger });

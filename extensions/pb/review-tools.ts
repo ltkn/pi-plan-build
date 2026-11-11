@@ -21,6 +21,7 @@ export default function reviewTools(pi: ExtensionAPI) {
           fix: Type.Optional(Type.String({ description: "a concrete fix" })),
           check: Type.Optional(Type.String({ description: "in a spec review: the name of the check the finding fails (e.g. Claims, Values, Proof), as your instructions list them" })),
           outside: Type.Optional(Type.Boolean({ description: "true when the problem pre-dates this change (outside it): still a finding — give it the priority it deserves, and a serious one (P0/P1) still blocks" })),
+          map: Type.Optional(StringEnum(["stated", "wrong"], { description: "in a code review: \"stated\" when the problem breaks a rule the project map in AGENTS.md states; \"wrong\" when the problem is that a map line is wrong (the code contradicts it)" })),
         }),
       ),
     }),

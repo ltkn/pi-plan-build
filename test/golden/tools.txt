@@ -1,4 +1,4 @@
-words: 2140
+words: 2183
 
 ## pb_ask
 
@@ -359,6 +359,14 @@ In a pb review session: report the review's findings and acceptance checklist, o
           "outside": {
             "type": "boolean",
             "description": "true when the problem pre-dates this change (outside it): still a finding — give it the priority it deserves, and a serious one (P0/P1) still blocks"
+          },
+          "map": {
+            "type": "string",
+            "enum": [
+              "stated",
+              "wrong"
+            ],
+            "description": "in a code review: \"stated\" when the problem breaks a rule the project map in AGENTS.md states; \"wrong\" when the problem is that a map line is wrong (the code contradicts it)"
           }
         }
       }
