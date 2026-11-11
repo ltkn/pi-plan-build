@@ -1133,6 +1133,19 @@ on the way in and on the way back, a finding whose title was nothing but markup
 keeps a `(untitled finding)` placeholder instead of vanishing from the ledger, and
 each tab becomes a space so no line turns into an indented code block.
 
+**The core and the area notes.** The map's whole-project headings (Security
+invariants, Layout, Tests + build, Docs, Known gaps) stay in the root AGENTS.md,
+which every session reads. Every other heading names one folder, `### Orders
+(src/orders/)`, and lives in that folder's own AGENTS.md, under the same
+markers; the core ends with an `Area notes` list of them. pb names the notes a
+session needs: each build handout those for the folders its spec cites, the
+review those for the files the change touched, and planning and the explorer
+read the list. Any other agent working in that folder finds its notes there too.
+A heading whose folder doesn't exist, is the root, is dot-named, ignored by git,
+or leads outside the project through a link stays in the core. An area the map
+drops leaves its folder (your own text in that file stays), and `/pb:map undo`
+swaps the areas back with the rest.
+
 A fresh, read-only call proposes the whole new map (it revisits all of it, not
 only the new area). Its readers are capable models that explore fast, so it
 holds only what exploring wouldn't show them: security and data invariants with
@@ -1157,8 +1170,13 @@ is reported like a missing file. The one price of a warning worth trusting: a
 stale name written bare (`gone.md`) is left alone. The names that still don't
 resolve go back to it once to be corrected or rewritten so they no longer read
 as paths here (a route gets its verb; an outside repo is prose), and so do the
+lines a fresh check finds the code contradicts, and the
 bullets over the length, to be shortened without dropping a rule, and a map over
-the budget, to be trimmed. Then the map is written and the change is shown, with
+the budget, to be trimmed. That check reads the code behind every new or changed
+line (up to 60) before anything is written, since agents read the map as
+instructions and a wrong line is worse than none; a contradicted line the
+cartographer keeps word for word is put to you like a path that doesn't
+resolve, and a check that reports nothing is said, never read as a pass. Then the map is written and the change is shown, with
 the bullets still too long counted. It asks you first only when something looks off: paths that still don't
 resolve, or a large part of the existing map removed; unanswered, the current
 map stays.

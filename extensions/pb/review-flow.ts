@@ -23,6 +23,7 @@ import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, final
 import { markReviewed, unfinishedPhase } from "./phase.ts";
 
 import { confirmLiveBuild } from "./flow.ts";
+import { areaNotesFor } from "./map.ts";
 import type { ReplacedSessionContext } from "./kit.ts";
 export function registerReviewFlow(pi: ExtensionAPI) {
   pi.registerTool({
@@ -769,6 +770,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         base,
         diff: reviewDiff,
         changed: changedEverywhere,
+        areaNotes: areaNotesFor(ctx.cwd, changedEverywhere),
         stat: diffStat(ctx.cwd, base),
         check,
         focus: name ? focusRest : "",

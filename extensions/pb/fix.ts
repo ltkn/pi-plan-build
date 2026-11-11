@@ -5,13 +5,13 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext
 } from "@earendil-works/pi-coding-agent";
-import { fixSeedPrompt, reportRegister, specReference } from "./prompts.ts";
+import { fixSeedPrompt, reportRegister } from "./prompts.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { snapshot } from "./checkpoint.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, now, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { approvalDrift, choose, cmd, commands, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, specOfSession, withChecking } from "./kit.ts";
+import { approvalDrift, choose, cmd, commands, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, specOfSession, specRef, withChecking } from "./kit.ts";
 
 /** One lap's report shape, normalized from its `fix` event: findings by the number its brief showed them as. */
 export interface LapReport {
@@ -161,7 +161,7 @@ export function registerFix(pi: ExtensionAPI) {
   ): Promise<{ live: ExtensionCommandContext; report?: LapReport; ms: number } | undefined> => {
     const started = Date.now();
     const p = store.progress(spec);
-    const seed = fixSeedPrompt(spec, remaining, loadSpec(store, spec) ? specReference(spec) : "", { base: p?.baseCommit, failure });
+    const seed = fixSeedPrompt(spec, remaining, loadSpec(store, spec) ? specRef(store, spec) : "", { base: p?.baseCommit, failure });
     checkpointLap(ctx.cwd, store, spec, lap);
     let live: ExtensionCommandContext | undefined;
     // The lap owns only events appended after its own fix-start marker; `from` is the log

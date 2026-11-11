@@ -114,6 +114,14 @@ if (sys.includes("ATTACKER")) {
   const n = (brief.match(/^\d+\. \[P/gm) ?? []).length;
   const verdict = process.env.MOCK_VERIFY === "reject" ? "rejected" : "confirmed";
   report("report_verdicts", { verdicts: Array.from({ length: n }, (_, i) => ({ finding: i + 1, verdict, evidence: "src/order.ts:11 already guards it" })) });
+} else if (sys.includes("MAP CHECKER")) {
+  // MOCK_MAP_CHECK: "reject" or "stubborn" rejects the line about controllers (stubborn: the repair keeps it); "silent" reports nothing.
+  if (process.env.MOCK_CHECK_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_CHECK_BRIEF_OUT, brief);
+  if (process.env.MOCK_MAP_CHECK !== "silent") {
+    const lines = [...brief.matchAll(/^(\d+)\. (.*)$/gm)];
+    const wrong = (text) => (process.env.MOCK_MAP_CHECK === "reject" || process.env.MOCK_MAP_CHECK === "stubborn") && text.includes("controllers never call repositories");
+    report("report_verdicts", { verdicts: lines.map((m) => ({ finding: Number(m[1]), verdict: wrong(m[2]) ? "rejected" : "confirmed", evidence: wrong(m[2]) ? "src/order.ts:3 the controller calls the repository" : "src/order.ts:1" })) });
+  }
 } else if (sys.includes("CARTOGRAPHER")) {
   // MOCK_MAP_BIG: the first map is far over the budget; the repair call trims it.
   const repairing = brief.startsWith("# Your proposed map");
@@ -124,7 +132,7 @@ if (sys.includes("ATTACKER")) {
   // MOCK_MAP_LONG: the first map has one bullet carrying the whole mechanism; the repair call shortens it (MOCK_MAP_LONG=stubborn: it doesn't).
   const long = process.env.MOCK_MAP_LONG && (!repairing || process.env.MOCK_MAP_LONG === "stubborn") ? `\n- Orders settle in one transaction: ${"the mechanism, case by case, ".repeat(20)}see \`src/order.ts\`.` : "";
   const big = process.env.MOCK_MAP_BIG && !repairing ? `\n### Filler\n${"- `src/order.ts`: a line that saves nobody anything at all.\n".repeat(2000)}` : "";
-  const map = `## Layout\n- \`src/\`: the application\n### Orders\n- \`src/order.ts\`: the order model and its transitions\n- Sign-in: follow \`auth/Login\`.${gone}\n- Services own transactions; controllers never call repositories.${long}\n### Empty${big}`;
+  const map = `## Layout\n- \`src/\`: the application\n### Orders\n- \`src/order.ts\`: the order model and its transitions\n- Sign-in: follow \`auth/Login\`.${gone}${repairing && brief.includes("# Lines the code contradicts") && process.env.MOCK_MAP_CHECK !== "stubborn" ? "" : "\n- Services own transactions; controllers never call repositories."}${long}\n### Empty${process.env.MOCK_MAP_AREA ? "\n### Auth (src/auth/)\n- Sign-in goes through \`Login.java\`; nothing else issues sessions." : ""}${big}`;
   report("report_map", { map, changes: ["added Orders", "noted transactions"] });
 } else if (sys.includes("EXPLORER")) {
   // MOCK_FRESH_ARGS_OUT captures argv and the guard settings pb handed the process; MOCK_EXPLORE_HANG goes silent

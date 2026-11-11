@@ -1,11 +1,11 @@
-words: 591
+words: 586
 
 [pb:plan] Let customers cancel pending orders
 
 Let's plan this together. Investigate as you like (read the code, run the build or tests, curl, one-off scripts in a temp directory), but don't change the project's files: that is blocked until /pb:build.
 
 How to investigate:
-1. Check the project map in AGENTS.md first. From the map, read the whole-project headings (Security invariants, Layout, Tests + build, Docs, Known gaps) in full and only the area headings covering the touched paths; explore only what it doesn't answer.
+1. Check the project map in AGENTS.md first: its whole-project headings, then the area notes its "Area notes" list names for the folders you touch (each is that folder's AGENTS.md); explore only what they don't answer.
 2. For a broad or multi-file look (where things live, how a similar feature is built, the conventions, what calls what), call pb_explore: it answers from a separate context, so this one stays lean. Searching the whole repo for a common term goes to pb_explore, not a direct grep; grep directly only within named files or directories.
 3. Budget: fan out once (up to 6 pb_explore and pb_try calls in one block), then synthesize. Never re-read a file the explorer already listed. When you catch yourself raising a grep limit past ~15 or searching the same term twice, stop and call pb_explore with what you've learned instead.
 4. When you know the 1-3 files, read them yourself. Grep narrow: one path and pattern, low limit, no surrounding lines unless a match is ambiguous.

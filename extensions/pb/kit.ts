@@ -16,7 +16,7 @@ import { type Snapshot, changedPaths, commitTime, restore, skippedLargeFiles, sn
 import { notifyDesktop } from "./notify.ts";
 import { tip } from "./help.ts";
 import { PI_RESERVE_TOKENS, specReference, taskPrompt } from "./prompts.ts";
-import { ignoredPathsFor, projectFiles, resolveProjectPath, resolveSiblingFile } from "./map.ts";
+import { areaNotesFor, ignoredPathsFor, mapPaths, projectFiles, resolveProjectPath, resolveSiblingFile } from "./map.ts";
 import { type ParsedSpec, type SpecTask, addDecision, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sharedTestCommands, specHash, specPathRefs } from "./spec.ts";
 import { duration } from "./format.ts";
 import { type Stack, findStandards, isUserTemplate, standardsLoaded } from "./standards.ts";
@@ -511,6 +511,16 @@ export const recordedMs = (store: Store, name: string, type: string): number | u
 
 export const specStarted = new Map<string, number>();
 
+/**
+ * The spec reference every build handout carries, with the project map's area notes for the folders the spec
+ * cites: pb picks the notes from the spec's own paths, so a builder reads the rules of the areas it works in
+ * and no session pays for the others.
+ */
+export const specRef = (store: Store, name: string): string => {
+  const md = store.readSpec(name) ?? "";
+  return specReference(name, areaNotesFor(store.cwd, [...specPathRefs(md).map((r) => r.path), ...mapPaths(md)]));
+};
+
 export const loadSpec = (store: Store, name: string): { md: string; spec: ParsedSpec } | undefined => {
   const md = store.readSpec(name);
   const spec = md ? parseSpec(md).spec : undefined;
@@ -669,7 +679,7 @@ export const stepPrompt = (ctx: ExtensionContext, store: Store, spec: ParsedSpec
   const { cfg, testCmd, buildCmd, lintCmd } = commands(ctx.cwd, store);
   const tp = p.tasks.find((t) => t.id === task.id);
   const red = needsRed(spec, task);
-  return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specReference(p.spec), doneHandoff(store, p, task.id), lintsEachStep(p) ? lintCmd : null);
+  return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specRef(store, p.spec), doneHandoff(store, p, task.id), lintsEachStep(p) ? lintCmd : null);
 };
 
 /**

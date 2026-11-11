@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { diligent, repairLap, setup, SPEC, taskOf, until, written } from "./harness.mts";
+import { briefOf, diligent, repairLap, setup, SPEC, taskOf, until, written } from "./harness.mts";
 
 test("skippedLargeFiles: oversized untracked files are reported because snapshots can't see them", async () => {
   const t = setup();
@@ -19,14 +19,14 @@ test("skippedLargeFiles: oversized untracked files are reported because snapshot
   assert.deepEqual(changedPaths(t.repo, before.commit, after.commit), ["small.txt"]); // big.bin is missing from the diff: that's the blind spot this warns about
 });
 
-test("map: whole-project headings carry no path; sessions read them plus covering area headings", async () => {
+test("map: whole-project headings carry no path; sessions read them plus the area notes for the folders they touch", async () => {
   const { CARTOGRAPHER_SYSTEM } = await import("../extensions/pb/map.ts");
-  assert.match(CARTOGRAPHER_SYSTEM, /The whole-project headings — "### Security invariants", "### Layout", "### Tests \+ build", "### Docs", "### Known gaps" — carry no path and are read in every session/);
-  assert.match(CARTOGRAPHER_SYSTEM, /every other heading is an area heading and carries its path prefix/);
+  assert.match(CARTOGRAPHER_SYSTEM, /The whole-project headings — "### Security invariants", "### Layout", "### Tests \+ build", "### Docs", "### Known gaps" — carry no path: they stay in the root AGENTS\.md, read in every session/);
+  assert.match(CARTOGRAPHER_SYSTEM, /Every other heading is an area heading and names its one folder[^:]*: pb stores it in that folder's AGENTS\.md, read only by the sessions working there/);
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   await t.run("plan", "cancel orders");
-  assert.match(t.instructions.at(-1)!, /From the map, read the whole-project headings \(Security invariants, Layout, Tests \+ build, Docs, Known gaps\) in full and only the area headings covering the touched paths/);
+  assert.match(t.instructions.at(-1)!, /Check the project map in AGENTS\.md first: its whole-project headings, then the area notes its "Area notes" list names for the folders you touch/);
 });
 
 test("a finding title capped mid-sentence renders on one line, with the cut disclosed inline", async () => {
@@ -384,7 +384,7 @@ test("map: /pb:archive updates it by itself: paths that don't resolve go back on
   assert.match(agents, /^# Shop\n\n<!-- pb:map -->\n## Project map\n\n### Layout\n- `src\/`: the application\n### Orders\n- `src\/order\.ts`[\s\S]*follow `auth\/Login`[\s\S]*Services own transactions[\s\S]*<!-- \/pb:map -->/);
   assert.doesNotMatch(agents, /gone\.ts|### Empty/); // corrected by the cartographer, not cut by pb; empty headings go
   assert.deepEqual(t.views.find((v) => v.customType === "pb-map")!.data.warnings, []);
-  assert.match(t.notes.at(-1)!, /Project map written in AGENTS\.md \(~\d+ tokens in \d+s: added Orders; noted transactions\)\. `\/pb:map undo` puts the previous one back/);
+  assert.match(t.notes.at(-1)!, /Project map written in AGENTS\.md \(~\d+ tokens in \d+s: added Orders; noted transactions\)\. 5 new lines were checked against the code\. `\/pb:map undo` puts the previous one back/);
 
   await t.run("map", "undo");
   assert.doesNotMatch(t.read("AGENTS.md"), /### Orders/); // back to no map
@@ -417,7 +417,7 @@ test("map: a map over the budget goes back once to be trimmed, by the same carto
   const agents = t.read("AGENTS.md");
   assert.doesNotMatch(agents, /### Filler/);
   assert.match(agents, /### Orders/);
-  assert.equal(t.read(".pi/pb/explore.jsonl").trim().split("\n").length, 2); // both calls counted in the stats
+  assert.equal(t.read(".pi/pb/explore.jsonl").trim().split("\n").length, 3); // the cartographer twice and the map check, all counted in the stats
 });
 
 test("map: its entry reads well: collapsed, what changed; expanded, the map as markdown and what was removed", async () => {
@@ -591,7 +591,7 @@ test("map: a stray fence does not hide the map", async () => {
   // write the map into the author's example.
   const unclosed = `# Shop\n\npb's own markers, documented:\n\n${example}\n<!-- pb:map -->\n## Project map\n\n- \`README\`: readme\n\n\`\`\`\n\nMy own note.\n`;
   fs.writeFileSync(path.join(t.repo, "AGENTS.md"), unclosed);
-  assert.deepEqual(mapDefect(t.repo), { marker: "<!-- /pb:map -->", line: 13 }); // line 13 is pb's own start; its end sits past the fence nobody closed
+  assert.deepEqual(mapDefect(t.repo), { marker: "<!-- /pb:map -->", line: 13, file: path.join(t.repo, "AGENTS.md") }); // line 13 is pb's own start; its end sits past the fence nobody closed
   assert.equal(readMap(t.repo), "");
   assert.equal(writeMap(t.repo, "### Layout\n- `README`: the readme"), false);
   assert.equal(t.read("AGENTS.md"), unclosed); // the documented example and the tail both stay byte-identical
@@ -1146,6 +1146,113 @@ test("map: a bullet carrying the mechanism goes back to be shortened; the limit 
   } finally {
     delete process.env.MOCK_MAP_LONG;
     delete process.env.MOCK_REPAIR_OUT;
+    fs.rmSync(repair, { force: true });
+  }
+});
+
+test("map: an area lives in its folder's AGENTS.md, listed in the core; the build's handouts and the review name the notes their files need", async () => {
+  const { areaDir, areaNotes, areaNotesFor, readMap, writeMap } = await import("../extensions/pb/map.ts");
+  const t = setup({ verify: "true" });
+  fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/auth/Login.java"), "class Login {}\n");
+  process.chdir(t.repo);
+  process.env.MOCK_MAP_AREA = "1";
+  try {
+    await t.run("map");
+  } finally {
+    delete process.env.MOCK_MAP_AREA;
+  }
+  // Every session reads the core and the index; the area's rules sit in its folder, for the sessions working there.
+  const root = t.read("AGENTS.md");
+  assert.match(root, /### Area notes\n- `src\/auth\/AGENTS\.md`: Auth — read it before working under `src\/auth\/`\./);
+  assert.doesNotMatch(root, /Sign-in goes through/);
+  assert.match(t.read("src/auth/AGENTS.md"), /^<!-- pb:map -->\n## Project map: src\/auth\/\n\n### Auth \(src\/auth\/\)\n- Sign-in goes through `Login\.java`; nothing else issues sessions\.\n<!-- \/pb:map -->\n$/);
+  assert.match(t.notes.at(-1)!, /written in AGENTS\.md \(~\d+ tokens read in every session\) and 1 area note/);
+  // The cartographer reads one map: the core without the index, then the areas.
+  assert.match(readMap(t.repo), /### Orders[\s\S]*### Auth \(src\/auth\/\)\n- Sign-in goes through/);
+  assert.doesNotMatch(readMap(t.repo), /Area notes/);
+  assert.deepEqual(areaNotesFor(t.repo, ["src/auth/Login.java", "src/order.ts"]), ["src/auth/AGENTS.md"]);
+  assert.deepEqual(areaNotesFor(t.repo, ["src/order.ts"]), []);
+  // Undo swaps the whole map, the area notes with it.
+  await t.run("map", "undo");
+  assert.ok(!fs.existsSync(path.join(t.repo, "src/auth/AGENTS.md")));
+  await t.run("map", "undo");
+  assert.match(t.read("src/auth/AGENTS.md"), /Sign-in goes through/);
+
+  // A heading is model text: it becomes a folder only inside the project, existing, not the root, not dot-named,
+  // not ignored, and not through a link that leaves the project. Anything else stays in the core.
+  fs.mkdirSync(path.join(t.repo, "build"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, ".gitignore"), "build/\n");
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pb-outside-"));
+  fs.symlinkSync(outside, path.join(t.repo, "src/linked"));
+  for (const h of ["(../)", "(./)", "(.pi/pb/)", "(src/missing/)", "(build/)", "(src/linked/)", "(/etc/)", ""]) assert.equal(areaDir(t.repo, `### X ${h}`), undefined, h);
+  assert.equal(areaDir(t.repo, "### X (src/auth/Login.java, src/auth/)"), "src/auth"); // files count as their folder
+  // An index line edited by hand never makes pb read or write outside the project.
+  fs.writeFileSync(path.join(t.repo, "AGENTS.md"), root.replace("- `src/auth/AGENTS.md`", "- `../outside/AGENTS.md`: X\n- `src/auth/AGENTS.md`"));
+  assert.deepEqual(areaNotes(t.repo), ["src/auth"]);
+
+  // An area the map no longer has leaves its folder; the author's own text there stays.
+  fs.writeFileSync(path.join(t.repo, "src/auth/AGENTS.md"), `My notes.\n\n${t.read("src/auth/AGENTS.md")}`);
+  assert.equal(writeMap(t.repo, "### Layout\n- `src/`: the application"), true);
+  assert.equal(t.read("src/auth/AGENTS.md"), "My notes.\n");
+  assert.doesNotMatch(t.read("AGENTS.md"), /Area notes/);
+
+  // The build's handouts name the notes for the folders the spec cites; the review, those for the files it changed.
+  const u = setup({ verify: "true" });
+  fs.mkdirSync(path.join(u.repo, "src/auth"), { recursive: true });
+  fs.writeFileSync(path.join(u.repo, "src/auth/Login.java"), "class Login {}\n");
+  fs.writeFileSync(path.join(u.repo, "src/order.ts"), "export {}\n");
+  writeMap(u.repo, "### Layout\n- `src/`: the app\n### Auth (src/auth/)\n- Sign-in goes through `Login.java`.\n### Orders (src/)\n- Orders settle in one transaction.");
+  execSync("git add . && git commit -qm src", { cwd: u.repo });
+  await written(u, SPEC().replace("## Context\nsrc/order.ts holds the model.", "## Findings\n- `src/auth/Login.java` signs in."));
+  u.agent.script = diligent;
+  await u.run("build");
+  assert.ok(u.instructions.some((i) => i.includes("The project map's area notes for the folders this spec cites: `src/auth/AGENTS.md`, `src/AGENTS.md`")), "the task handout names the notes");
+  fs.writeFileSync(path.join(u.repo, "src/order.ts"), "export const settled = true;\n");
+  await u.run("review");
+  assert.match(briefOf(u), /The project map's area notes for the folders this change touches: `src\/AGENTS\.md` — read the ones covering a file/);
+});
+
+test("map: new lines are checked against the code before they're written; a contradicted one is corrected, or you decide", async () => {
+  const t = setup({ verify: "true", askTimeoutSec: 0.001 });
+  fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/auth/Login.java"), "class Login {}\n");
+  process.chdir(t.repo);
+  const checkBrief = path.join(os.tmpdir(), `pb-map-check-${process.pid}.md`);
+  const repair = path.join(os.tmpdir(), `pb-map-check-repair-${process.pid}.md`);
+  process.env.MOCK_CHECK_BRIEF_OUT = checkBrief;
+  process.env.MOCK_REPAIR_OUT = repair;
+  process.env.MOCK_MAP_CHECK = "reject";
+  try {
+    await t.run("map");
+    // The check reads only the new lines, each with the heading it sits under.
+    assert.match(fs.readFileSync(checkBrief, "utf8"), /^# Lines to check\n\n1\. \[under ### Layout\] - `src\/`: the application\n[\s\S]*\d\. \[under ### Orders\] - Services own transactions; controllers never call repositories\./);
+    assert.match(fs.readFileSync(repair, "utf8"), /# Lines the code contradicts\n\n[\s\S]*- - Services own transactions; controllers never call repositories\.\n  Evidence: src\/order\.ts:3 the controller calls the repository/);
+    assert.doesNotMatch(t.read("AGENTS.md"), /controllers never call repositories/);
+    // Nothing new: nothing to check.
+    const calls = t.read(".pi/pb/explore.jsonl").trim().split("\n").length;
+    fs.rmSync(checkBrief);
+    process.env.MOCK_MAP_CHECK = "stubborn";
+    await t.run("map");
+    assert.ok(t.read(".pi/pb/explore.jsonl").trim().split("\n").length > calls);
+    // A cartographer that keeps a contradicted line word for word: you decide, and unanswered, the map stays.
+    t.selects.push("<timeout>");
+    fs.writeFileSync(path.join(t.repo, "src/extra.ts"), "export {}\n");
+    await t.run("map", "transactions");
+    assert.match(t.selectTitles.at(-1)!, /The proposed project map needs a look: the code contradicts "- Services own transactions; controllers never call repositories\." \(src\/order\.ts:3 the controller calls the repository\)/);
+    assert.doesNotMatch(t.read("AGENTS.md"), /controllers never call repositories/);
+    // A check that reports nothing is said, never read as a pass.
+    process.env.MOCK_MAP_CHECK = "silent";
+    t.selects.push("<timeout>");
+    await t.run("map", "again");
+    assert.ok(t.notes.some((n) => /The new lines weren't checked against the code: the check reported nothing/.test(n)));
+  } finally {
+    delete process.env.MOCK_CHECK_BRIEF_OUT;
+    delete process.env.MOCK_REPAIR_OUT;
+    delete process.env.MOCK_MAP_CHECK;
+    fs.rmSync(checkBrief, { force: true });
     fs.rmSync(repair, { force: true });
   }
 });

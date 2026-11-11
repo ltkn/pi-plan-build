@@ -8,7 +8,7 @@ import type {
  } from "@earendil-works/pi-coding-agent";
 import { addedDeclarations, changedPaths, inspectChanges, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { tip } from "./help.ts";
-import { buildIntro, buildMechanics, claimCheckBrief, buildStateSummary, coherePrompt, continuePrompt, extraBlock, findingLine, finishSpecPrompt, fixText, reportRegister, specPrompt, specReviewBrief, specReference, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, SPEC_CHECK_NAMES, specFixPrompt } from "./prompts.ts";
+import { buildIntro, buildMechanics, claimCheckBrief, buildStateSummary, coherePrompt, continuePrompt, extraBlock, findingLine, finishSpecPrompt, fixText, reportRegister, specPrompt, specReviewBrief, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, SPEC_CHECK_NAMES, specFixPrompt } from "./prompts.ts";
 import { REVIEW_TOOLS } from "./review.ts";
 import { runFresh, runUsage } from "./runner.ts";
 import { notifyDesktop } from "./notify.ts";
@@ -20,7 +20,7 @@ import { buildTimeLabel, buildTiming } from "./stats.ts";
 import { type Checkpoint, type Finding, type Progress, COHERE_TASK_ID, Store, appendCheckpoint, cap, diffStat, gitHead, now, pathExists, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
 import { safeLine } from "./markdown.ts";
-import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specFixCompletions, specOfSession, repoHeads, repoSnapshots, specPathErrors, specRepoErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
+import { COHERE_MIN_TASKS, P_ORDER, agree, appendDecision, appendEntry, approvalDrift, approveSpec, buildOfSession, changedFilesSection, checkCommand, choose, cmd, commands, driftStop, evidenceLine, finalExtras, findModel, instruct, liftPlanning, liveBuildOfSession, loadBuildSpec, loadSpec, nextLine, normSpecArg, pauseBuild, phaseHeader, planningWriteNotes, post, recordedMs, redNotes, reply, resetLimit, retryCount, revertFreshRun, reviewPlanningChanges, rewriteWarning, runtime, safely, sessionGone, sessionModel, showProgress, sessionIdOf, sizeNote, sleep, specCompletions, specFixCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specPathErrors, specRepoErrors, specStarted, specTasks, specWarnings, specWriting, standardsFor, stepPrompt, stop, suspiciousCommand, syncTasks, taskLine, text, timeSuffix, tree, unresolvedAnchors, warnLater, watchable, withChecking } from "./kit.ts";
 import { enterStep, finishBuild, lintsEachStep, nextPhase, nextStep, nextTodo, unfinishedPhase } from "./phase.ts";
 
 const DRY_RUN_TIMEOUT_SEC = 120;
@@ -678,12 +678,12 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     if (attempts >= cfg.maxAttempts) {
       if (tp) tp.status = "doing";
       pauseBuild(ctx, store, p, `${p.current} still fails after ${attempts} attempts.`, "build.paused-attempts", "attempts", { task: p.current ?? "" });
-      return stop(withFiles(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true, specReference(p.spec))));
+      return stop(withFiles(fixText(p.current!, what, failure, attempts, cfg.maxAttempts, true, specRef(store, p.spec))));
     }
     if (tp) tp.attempts += 1;
     store.saveProgress(p);
     showProgress(ctx, p);
-    return reply(withFiles(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false, specReference(p.spec))));
+    return reply(withFiles(fixText(p.current!, what, failure, attempts + 1, cfg.maxAttempts, false, specRef(store, p.spec))));
   };
 
   const checkAndAdvance = async (
@@ -803,7 +803,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     }
     if (step.kind === "cohere") {
       beginCohereEntry(ctx, store, p);
-      return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(p.spec))}`);
+      return reply(`${passed}\n\n${COHERE_MARKER}\n\n${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specRef(store, p.spec))}`);
     }
     if (step.kind === "final") {
       // The project's own checks still run; lint only when it was left to the end (the passed step ran it otherwise).
@@ -998,7 +998,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
     const task = cohereFirst ? null : beginTask(ctx, store, p, first, { intro: true });
     if (!task && !cohereFirst) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} no longer parses. Fix it (or /${cmd("spec")} ${name}), then /${cmd("build")}.`, "error");
     const marker = cohereFirst ? COHERE_MARKER : task!.marker;
-    const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(name)) : task!.prompt;
+    const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specRef(store, name)) : task!.prompt;
     instruct(
       `▶ Building **${name}** here${switching ? ` on ${cfg.buildModel}` : ""}.\n${marker}`,
       `${buildIntro(name, spec, buildCmd, cfg.taskChecks === "each", standardsFor(ctx), store.extra("build"))}\n\n${prompt}`,
@@ -1043,7 +1043,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
           );
           return;
         }
-        const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(name)) : task!.prompt;
+        const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specRef(store, name)) : task!.prompt;
         await c.sendMessage(
           {
             customType: "pb",
@@ -2532,13 +2532,13 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
           store.saveProgress(p);
           showProgress(ctx, p);
           const finalFiles = changedFilesSection(store, p);
-          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false, specReference(p.spec)) + (finalFiles ? `\n${finalFiles}` : "") + from);
+          return instruct("▶ final check", fixText("final", `\`${p.lastVerify?.command ?? "the full suite"}\``, p.lastVerify?.summary ?? "", attempt, cfg.maxAttempts, false, specRef(store, p.spec)) + (finalFiles ? `\n${finalFiles}` : "") + from);
         }
         if (p.current === COHERE_TASK_ID) {
           const cc = p.tasks.find((t) => t.id === COHERE_TASK_ID);
           if (!cc) {
             beginCohereEntry(ctx, store, p);
-            return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(p.spec))}${from}`);
+            return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specRef(store, p.spec))}${from}`);
           }
           resetExhausted(cc, cfg.maxAttempts);
           const attempt = cc.attempts + 1;
@@ -2546,7 +2546,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
           enterStep(p, COHERE_TASK_ID);
           store.saveProgress(p);
           showProgress(ctx, p);
-          return instruct("▶ coherence pass", `${coherePrompt(p.baseCommit, attempt, cfg.maxAttempts, specReference(p.spec))}${from}`);
+          return instruct("▶ coherence pass", `${coherePrompt(p.baseCommit, attempt, cfg.maxAttempts, specRef(store, p.spec))}${from}`);
         }
         // p.current can name a task the list no longer has: a spec rewrite or human edit renamed
         // it. Only a live, undone task keeps its claim; anything else resumes at the next todo,
@@ -2558,7 +2558,7 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
         // Undone past the coherence pass (or a restart that dropped it): all spec tasks done, pass pending.
         if ((!cur || !tp) && needsCohere(loaded.spec) && !p.tasks.some((t) => t.id === COHERE_TASK_ID)) {
           beginCohereEntry(ctx, store, p);
-          return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specReference(p.spec))}${from}`);
+          return instruct(COHERE_MARKER, `${coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specRef(store, p.spec))}${from}`);
         }
         if (!cur || !tp) return ctx.ui.notify("Nothing left to build here.", "info");
         // Your answer to a task that kept failing buys it a fresh set of attempts; other pauses cost none.

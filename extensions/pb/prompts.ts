@@ -22,7 +22,7 @@ export const extraBlock = (extra: string) => (extra ? `\n\nAlso, from your pb co
 export const STRUCTURED_EDIT_RULE = "Edit structured files (XML, JSON, YAML) by exact literal replacement or line-based edits, never a backtracking regex.";
 
 /** Where every investigating role starts: the project map, read by its headings. */
-const MAP_FIRST = "Check the project map in AGENTS.md first. From the map, read the whole-project headings (Security invariants, Layout, Tests + build, Docs, Known gaps) in full and only the area headings covering the touched paths; explore only what it doesn't answer.";
+const MAP_FIRST = "Check the project map in AGENTS.md first: its whole-project headings, then the area notes its \"Area notes\" list names for the folders you touch (each is that folder's AGENTS.md); explore only what they don't answer.";
 
 /** What any role that can run commands may do with production. */
 export const PRODUCTION_RULE = "Production: a read-only query only when local code and data cannot answer, stating why, the table and a row cap (at most ~500 rows); never a production write, channel or real notification.";
@@ -405,9 +405,13 @@ export const PI_RESERVE_TOKENS = 16384;
  * bind a step. A copy would be shortened, stale, or too big for the model reading it; the spec is
  * already the project's source of truth.
  */
-export function specReference(name: string): string {
-  return `The spec that binds this work is ${P}/specs/${name}/spec.md: read ${BINDING_SECTIONS.map((s) => `"${s}"`).join(", ")} before you change anything, and the sections a task names when it needs them.`;
+export function specReference(name: string, notes: string[] = []): string {
+  return `The spec that binds this work is ${P}/specs/${name}/spec.md: read ${BINDING_SECTIONS.map((s) => `"${s}"`).join(", ")} before you change anything, and the sections a task names when it needs them.${notes.length ? ` ${areaNotesLine(notes, "the folders this spec cites")}` : ""}`;
 }
+
+/** The area notes pb names to a session: the project map's rules for the folders its work touches. */
+export const areaNotesLine = (notes: string[], where: string) =>
+  `The project map's area notes for ${where}: ${notes.map((n) => `\`${n}\``).join(", ")} — read the ones covering a file before you change or judge it.`;
 
 /**
  * How a builder writes the code: the codebase's conventions where they meet the standards, never its flaws; the smallest change. Shared by the task
@@ -683,6 +687,8 @@ export interface ReviewBrief {
   previous?: { snapshot: string; findings: Finding[]; changed: string[]; acceptance?: AcceptanceCheck[] };
   /** existing tests the build deleted, cut down or skipped */
   testChanges?: string[];
+  /** the project map's area notes covering the changed files */
+  areaNotes?: string[];
   /** tasks whose new tests were never seen failing, with why: the review judges each */
   redNotes?: string[];
   /** what the build itself reported as still unchecked, one line per task: claims to verify, not evidence */
@@ -809,6 +815,7 @@ export function reviewerBrief(o: ReviewBrief): string {
     "",
     o.changed.join("\n") || "(none)",
     o.stat ? `\n${o.stat}` : "",
+    ...(o.areaNotes?.length ? ["", areaNotesLine(o.areaNotes, "the folders this change touches")] : []),
     ...(o.largeFiles?.length
       ? ["", "## Files too large to capture", "", "These untracked files are over 20 MB: snapshots and diffs skip them, so read them yourself if they matter:", ...o.largeFiles.map((f) => `- ${f}`)]
       : []),
