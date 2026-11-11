@@ -27,8 +27,11 @@
  * boundaries (the build's approval gate, the read-only review, the fix numbering) stay
  * legible one module at a time:
  *   plan.ts       /pb:plan, /pb:approach, /pb:deps — the baseline and the planning guard
- *   flow.ts       pb_write_spec … pb_spec_fix_done, the spec review and its repair laps,
- *                 /pb:build, /pb:spec, /pb:spec-review, /pb:spec-fix, /pb:spec-harden
+ *   spec-tools.ts pb_write_spec, pb_update_spec, pb_record_decision and /pb:spec
+ *   spec-review.ts the spec review and /pb:spec-review
+ *   repair.ts     repair laps and the claim check: /pb:spec-fix, /pb:spec-harden, pb_spec_fix_done
+ *   build-loop.ts a task's handout, checks and next step: pb_task_done, pb_tests_red, the coherence pass
+ *   build-start.ts /pb:build: the build-start screen, launching, the pending-build offer, resume
  *   review-flow.ts pb_report_findings, the review passes and /pb:review
  *   fix.ts        pb_fix_done, the fix-lap loop and /pb:fix
  *   hooks.ts      pi's event hooks (compaction, checkpoints, planning protections) and /pb:compact
@@ -43,7 +46,11 @@ import { registerAsk } from "./ask.ts";
 import { registerArchive } from "./archive.ts";
 import { registerCommit } from "./commit.ts";
 import { registerFix } from "./fix.ts";
-import { registerFlow } from "./flow.ts";
+import { registerBuildLoop } from "./build-loop.ts";
+import { registerBuildStart } from "./build-start.ts";
+import { registerRepair } from "./repair.ts";
+import { registerSpecReview } from "./spec-review.ts";
+import { registerSpecTools } from "./spec-tools.ts";
 import { registerFreshTools } from "./fresh-tools.ts";
 import { registerHooks } from "./hooks.ts";
 import { registerMapFlow } from "./map-flow.ts";
@@ -64,7 +71,11 @@ export default function pb(pi: ExtensionAPI) {
   registerAsk(pi);
   registerFreshTools(pi);
   registerPlan(pi);
-  registerFlow(pi);
+  registerSpecTools(pi);
+  registerBuildLoop(pi);
+  registerSpecReview(pi);
+  registerRepair(pi);
+  registerBuildStart(pi);
   registerReviewFlow(pi);
   registerFix(pi);
   registerMapFlow(pi);

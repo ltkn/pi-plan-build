@@ -22,7 +22,7 @@ import { inRepo, resolveRepos } from "./repos.ts";
 import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, watchable, withChecking } from "./kit.ts";
 import { markReviewed, unfinishedPhase } from "./phase.ts";
 
-import { confirmLiveBuild } from "./flow.ts";
+import { confirmLiveBuild } from "./build-loop.ts";
 import { areaNotesFor } from "./map.ts";
 import type { ReplacedSessionContext } from "./kit.ts";
 export function registerReviewFlow(pi: ExtensionAPI) {

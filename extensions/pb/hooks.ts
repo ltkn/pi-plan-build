@@ -14,7 +14,7 @@ import { whereHere } from "./next.ts";
 import { TIMED_OUT, commandCap, isLongCommand, remoteWriteRefusal, timeoutNote } from "./command-guard.ts";
 import { siblingRepoOf } from "./repos.ts";
 import { unfinishedPhase } from "./phase.ts";
-import { buildResetDue, stateSummary } from "./flow.ts";
+import { buildResetDue, stateSummary } from "./build-loop.ts";
 
 export function registerHooks(pi: ExtensionAPI) {
   /**
