@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
 import { HELP_PATH, topic, topics } from "./help.ts";
 import { buildReport } from "./report.ts";
-import { findStandards, isUserTemplate, projectStack, stackNames, templatesDir, usesDatabase, writeStandards } from "./standards.ts";
+import { findStandards, isUserTemplate, presetNote, projectStack, stackNames, templatesDir, usesDatabase, writeStandards } from "./standards.ts";
 import { loadStats, renderAll, renderCard, renderCompare } from "./stats.ts";
 import { Store } from "./store.ts";
 import { whereHere, whereNext } from "./next.ts";
@@ -51,7 +51,7 @@ export function registerMisc(pi: ExtensionAPI) {
       const what = { created: "Created", added: "Added pb's standards to", replaced: "Replaced pb's standards in", unchanged: "pb's standards are already current in" }[result];
       const shared = findStandards(path.dirname(ctx.cwd));
       ctx.ui.notify(
-        `${what} ${file} (${stackLabel(stack)}${database && stack !== "vue" && !(stack && isUserTemplate(stack)) ? ", with the database rules" : ""})${result === "created" ? ", with pb's standards" : ""}.${result === "replaced" || result === "added" ? " The rest of the file is untouched." : ""}${result === "unchanged" ? "" : " Sessions already running keep the ones they loaded until restarted."}${shared ? ` ${shared.file} also has a pb section: Pi loads both.` : ""}`,
+        `${what} ${file} (${stackLabel(stack)}${database && stack !== "vue" && !(stack && isUserTemplate(stack)) ? ", with the database rules" : ""})${result === "created" ? ", with pb's standards" : ""}.${result === "replaced" || result === "added" ? " The rest of the file is untouched." : ""}${result === "unchanged" ? "" : " Sessions already running keep the ones they loaded until restarted."}${shared ? ` ${shared.file} also has a pb section: Pi loads both.` : ""}${presetNote(stack) ? ` ${presetNote(stack)}` : ""}`,
         "info",
       );
     },

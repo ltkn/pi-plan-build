@@ -1076,7 +1076,7 @@ export const P_ORDER = ["P0", "P1", "P2", "P3"] as const;
 /** Which standards a stack gets, in words. */
 
 const BUILT_IN_STACK_LABELS: Record<string, string> = {
-  java: "the backend ones, with Java 25",
+  java: "the backend ones, with Java",
   vue: "the frontend ones, for a Vue project",
   rust: "the backend ones, with Rust",
 };

@@ -45,11 +45,11 @@ const DATABASE = [
 ];
 
 /** The stack-specific line added for a Java project (Maven or Gradle). */
-export const JAVA_STANDARDS = "- Java 25: records, sealed types, pattern matching, virtual threads and scoped values; no Lombok.";
+export const JAVA_STANDARDS = "- Java: the current LTS release, with records, sealed types, pattern matching, virtual threads and scoped values; no Lombok.";
 
 /** The stack-specific lines added for a Rust project (Cargo). */
 export const RUST_STANDARDS = [
-  "- Rust: stable toolchain, edition 2024. Errors are typed (`thiserror` enums in libraries; `anyhow` with context only at a binary's edge) and propagated with `?`. No `unwrap`, `expect` or `panic!` outside tests, unless an invariant makes failure impossible and the `expect` message states it. No `unsafe` without a `// SAFETY:` comment proving the invariants it relies on. A validated value is a newtype built only by a fallible constructor (parse, don't validate); borrow rather than clone to satisfy the borrow checker.",
+  "- Rust: the stable toolchain and the current edition. Errors are typed (`thiserror` enums in libraries; `anyhow` with context only at a binary's edge) and propagated with `?`. No `unwrap`, `expect` or `panic!` outside tests, unless an invariant makes failure impossible and the `expect` message states it. No `unsafe` without a `// SAFETY:` comment proving the invariants it relies on. A validated value is a newtype built only by a fallible constructor (parse, don't validate); borrow rather than clone to satisfy the borrow checker.",
   "- Rust async and tooling: never block inside async code (`spawn_blocking` for blocking work) and never hold a lock across `.await`; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` stay clean.",
 ];
 
@@ -66,14 +66,14 @@ export const DEFAULT_STANDARDS = backend(false);
 export const FRONTEND_STANDARDS = section([
   QUALITY,
   DEPENDENCIES,
-  `- Comments: explain why, never history (no dates, "decided", previous values or task ids). In these apps, maintained by backend (Java) developers, comments are deliberately dense: every platform-integration step (sessions, CSRF, redirects, problem types, where-to-go-next) says why it works that way.`,
+  `- Comments: explain why, never history (no dates, "decided", previous values or task ids). Every platform-integration step (sessions, CSRF, redirects, problem types, where-to-go-next) says why it works that way.`,
   TESTS,
   SECURITY,
   `- One source of truth: every rule lives in the backend. The page never re-implements one (no length checks, no "same as current", no email checks, no trimming or normalizing): input is sent as typed, and a client copy would drift from the real rule.`,
   '- Frontend role: the page renders what the backend decides. No business rules on the page (validation, permissions, eligibility, where to go next): the backend checks every input and words every message, and a client-side copy of a rule is a second rule that drifts. State is minimal and justified: form inputs and presentation state; backend data lives in the query cache, never copied into stores. "No rules" is not "no UI quality": loading and disabled states, focus after errors, accessible messages (`aria-describedby`, `role="status"`), autocomplete hints, and clearing secrets from memory once sent are the page\'s job.',
   "- Backend refusals: RFC 9457 problem details. The page branches only on the stable `type`, and shows `detail` and `errors` as sent. It never infers meaning from the wording, the status code alone, or the body's shape (an empty `errors` is not a kind). An unknown or missing `type` falls back to `detail`, else a generic message. The page words only what the backend doesn't send: no answer at all (offline), rate limiting, and success texts for empty responses.",
   "- Browser security: sign-in is an HttpOnly session cookie. No tokens or secrets in JavaScript-readable storage. Writes carry the CSRF token fetched from the backend. Navigation goes only to backend-given `https` URLs or fixed route names, never to a URL taken from the query string (open redirect). Pages whose URL carries a token send no Referer. No `v-html` on backend or user data.",
-  "- Vue: Vue 3.5 Composition API with `<script setup lang=\"ts\">`; TypeScript 6 (vue-tsc doesn't support 7); Vite; Vue Router; TanStack Vue Query for all backend reads and writes; Bootstrap 5.3 through Sass (tokens, `data-bs-theme` dark mode); Vitest with @vue/test-utils and jsdom, MSW for the dev fake backend; ESLint and Prettier; pnpm with a committed lockfile. Pinia only for client-only state that must outlive a route (such as a file the user picked), never as a cache of backend data.",
+  "- Vue: Vue 3 Composition API with `<script setup lang=\"ts\">`; TypeScript; Vite; Vue Router; TanStack Vue Query for all backend reads and writes; Bootstrap 5 through Sass (tokens, `data-bs-theme` dark mode); Vitest with @vue/test-utils and jsdom, MSW for the dev fake backend; ESLint and Prettier; pnpm with a committed lockfile. Pinia only for client-only state that must outlive a route (such as a file the user picked), never as a cache of backend data.",
   "- Frontend tests: each page is tested through the real router against a scripted backend. They check what it sends (body, CSRF header) and how it renders each response `type` it handles, plus one unknown `type`.",
   REREAD(", a double click, a session that expires mid-edit, a URL from the query string"),
 ]);
@@ -124,14 +124,20 @@ export const templatesDir = () => path.join(agentDir(), "pb", "standards");
 interface Template {
   /** files at the project root, or "package.json:<dependency>"; none = never detected, only named */
   detect: string[];
+  /** a built-in preset's opinions, named before anyone accepts it */
+  assumes?: string;
   /** the section to write, given whether the project uses a SQL database (your templates ignore it) */
   section: (database: boolean) => string;
 }
 
 const BUILT_IN: Record<string, Template> = {
-  java: { detect: ["pom.xml", "build.gradle", "build.gradle.kts"], section: (database) => backend(database, [JAVA_STANDARDS]) },
-  vue: { detect: ["package.json:vue"], section: () => FRONTEND_STANDARDS },
-  rust: { detect: ["Cargo.toml"], section: (database) => backend(database, RUST_STANDARDS) },
+  java: { detect: ["pom.xml", "build.gradle", "build.gradle.kts"], section: (database) => backend(database, [JAVA_STANDARDS]), assumes: "Java's current LTS with records, sealed types and virtual threads, no Lombok" },
+  vue: {
+    detect: ["package.json:vue"],
+    section: () => FRONTEND_STANDARDS,
+    assumes: "the backend decides every rule; an HttpOnly session cookie with CSRF tokens; RFC 9457 problem details; TanStack Vue Query, Bootstrap through Sass, Vitest with MSW, pnpm",
+  },
+  rust: { detect: ["Cargo.toml"], section: (database) => backend(database, RUST_STANDARDS), assumes: "thiserror in libraries and anyhow at a binary's edge, no unwrap outside tests, clippy and fmt clean" },
   plain: { detect: [], section: (database) => backend(database) },
 };
 
@@ -163,6 +169,16 @@ function templates(): [string, Template][] {
 }
 
 export const stackNames = () => templates().map(([n]) => n);
+
+/**
+ * pb's presets are opinionated on purpose — a concrete rule steers a model, a bland one doesn't — so what one
+ * assumes is said before it is accepted, with where your own goes instead. Empty for your templates and the plain section.
+ */
+export const presetNote = (stack?: Stack): string => {
+  if (!stack || isUserTemplate(stack)) return "";
+  const assumes = BUILT_IN[stack]?.assumes;
+  return assumes ? `pb's ${stack} preset is opinionated: ${assumes}. To use your own instead, put it in ${path.join(templatesDir(), `${stack}.md`)}.` : "";
+};
 
 /** True when it's your template rather than pb's. */
 export const isUserTemplate = (stack: string) => stack in userTemplates();

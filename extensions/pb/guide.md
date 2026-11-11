@@ -134,9 +134,9 @@ The other parts:
   database and are compared in SQL; consistency and concurrency come from the
   database: one transaction per request, constraints, atomic statements or row
   locks, not check-then-write in application code.
-- **Java** (Maven or Gradle): Java 25, records, sealed types, pattern matching,
-  virtual threads and scoped values; no Lombok.
-- **Rust** (Cargo): stable toolchain, edition 2024; typed errors (`thiserror`
+- **Java** (Maven or Gradle): the current LTS release, with records, sealed
+  types, pattern matching, virtual threads and scoped values; no Lombok.
+- **Rust** (Cargo): the stable toolchain and the current edition; typed errors (`thiserror`
   in libraries, `anyhow` only at a binary's edge) propagated with `?`; no
   `unwrap`, `expect` or `panic!` outside tests unless an invariant rules failure
   out; `unsafe` only with a `// SAFETY:` proof; newtypes for validated values;
@@ -159,21 +159,28 @@ other bullets:
 - **Browser security**: an HttpOnly session cookie, CSRF tokens on writes, no
   open redirects, no Referer from pages whose URL carries a token, no `v-html`
   on backend or user data.
-- **Vue**: Vue 3.5 with `<script setup lang="ts">`, TypeScript 6, Vite, Vue
-  Router, TanStack Vue Query, Bootstrap 5.3 through Sass, Vitest with MSW,
+- **Vue**: Vue 3 with `<script setup lang="ts">`, TypeScript, Vite, Vue
+  Router, TanStack Vue Query, Bootstrap 5 through Sass, Vitest with MSW,
   pnpm; Pinia only for client-only state.
 - **Frontend tests**: each page through the real router against a scripted
   backend, one test per response `type` plus an unknown one.
-- **Comments**: dense, because backend (Java) developers maintain these apps:
-  every platform-integration step says why. Still never history.
+- **Comments**: every platform-integration step says why it works that way.
+  Still never history.
 - **Before calling it done**: as above, plus a double click, a session that
   expires mid-edit, and a URL from the query string.
 
-Make them yours: "Java 25: records, sealed types, pattern matching, virtual
-threads and scoped values; no Lombok", "every public
+Make them yours: "Java 25 with records and sealed types; no Lombok", "every public
 API has a Javadoc contract", "no new dependencies without asking". Keep them
 short: every line is read in every session. A session that started before you
 added them gets them in pb's messages until it's restarted.
+
+**pb's presets are opinionated on purpose.** A concrete rule steers a model and
+a bland one doesn't, so the Java, Rust and Vue sections take sides (the Vue one
+assumes the backend decides every rule, an HttpOnly session cookie with CSRF
+tokens, RFC 9457 problem details, TanStack Vue Query, Bootstrap and pnpm). The
+offer names what a preset assumes before you accept it. If yours differs, don't
+edit pb's section in AGENTS.md (`/pb:standards` rewrites it): put your own in a
+template, below.
 
 **Your own templates.** Put a section in `~/.pi/agent/pb/standards/<name>.md`:
 a `java.md`, `vue.md`, `rust.md` or `plain.md` there replaces pb's (yours is

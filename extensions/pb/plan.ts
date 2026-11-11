@@ -10,7 +10,7 @@ import { approachPrompt, continuePlanPrompt, depsPrompt, planPrompt } from "./pr
 import { missingPaths, readMap } from "./map.ts";
 import { parseSpec, setStatus } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { agentDir, findStandards, isUserTemplate, projectStack, sectionFor, usesDatabase, writeStandards } from "./standards.ts";
+import { agentDir, findStandards, isUserTemplate, presetNote, projectStack, sectionFor, usesDatabase, writeStandards } from "./standards.ts";
 import { type VerifyResult, Store, cap, gitHead, now } from "./store.ts";
 import { dependencyCommands, runVerify } from "./verify.ts";
 import { MODEL_ARG_CAP, baselineSessions, cmd, commands, instruct, liftPlanning, noSnapshotWarning, normSpecArg, planTitle, post, reviewPlanningChanges, runtime, sessionGone, sessionModel, specCompletions, stackLabel, standardsFor, syncTasks, applyPlanner, plannerSettings } from "./kit.ts";
@@ -39,12 +39,12 @@ export const offerStandards = async (ctx: ExtensionContext, store: Store) => {
       : `quality, simplicity, dependencies, comments without history, tests, security${stack === "vue" ? ", the page's role, backend refusals, browser security, Vue" : `${database ? ", database consistency" : ""}${stack === "java" ? ", Java 25" : stack === "rust" ? ", Rust" : ""}`}`;
   const title = found
     ? `This project only gets the standards in ${found.file}, not its own (${stackLabel(stack)}). Pi loads both files, so that section stays in force next to this project's: keep the shared AGENTS.md free of stack-specific rules`
-    : `Engineering standards (${covers})`;
+    : `Engineering standards (${covers})${presetNote(stack) ? `. ${presetNote(stack)}` : ""}`;
   const choice = await ctx.ui.select(title, stack || database ? [HERE, "No thanks"] : [HERE, ALL, "No thanks"]);
   if (choice !== HERE && choice !== ALL) return;
   const file = choice === HERE ? path.join(ctx.cwd, "AGENTS.md") : path.join(agentDir(), "AGENTS.md");
   writeStandards(file, stack, choice === HERE && database);
-  ctx.ui.notify(`Added to ${file}${stack ? ` (${stackLabel(stack)})` : ""}: edit them there. Pi loads them into every session from now on.`, "info");
+  ctx.ui.notify(`Added to ${file}${stack ? ` (${stackLabel(stack)})` : ""}. Pi loads them into every session from now on. /${cmd("standards")} rewrites pb's section, so a change of yours inside it lasts until then${presetNote(stack) ? `; ${presetNote(stack)}` : "."}`, "info");
 };
 
 /** Continue planning a spec in a fresh session, seeded from it: clean context, exact checkpoint. */

@@ -159,14 +159,18 @@ test("plan: re-planning the same session while its baseline is running doesn't s
   assert.equal(fs.readFileSync(where, "utf8").trim().split("\n").length, 1);
 });
 
-test("standards: a Java project gets the Java 25 defaults with pb's section", async () => {
+test("standards: a Java project gets the Java preset with pb's section, named as opinionated before it is accepted", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   fs.writeFileSync(path.join(t.repo, "pom.xml"), "<project/>");
   await t.run("plan", "x");
   const agents = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
-  assert.match(agents, /even where the surrounding code doesn't[\s\S]*- Java 25: records, sealed types, pattern matching, virtual threads and scoped values; no Lombok\.\n<!-- \/pb:standards -->/);
-  assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /\(the backend ones, with Java 25\)/);
+  assert.match(agents, /even where the surrounding code doesn't[\s\S]*- Java: the current LTS release, with records, sealed types, pattern matching, virtual threads and scoped values; no Lombok\.\n<!-- \/pb:standards -->/);
+  assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /\(the backend ones, with Java\)/);
+  // The preset's opinions are named in the offer, with where your own goes instead, and again once it's written.
+  const offer = t.selectTitles.find((x) => x.startsWith("Engineering standards"))!;
+  assert.match(offer, /pb's java preset is opinionated: Java's current LTS with records, sealed types and virtual threads, no Lombok\. To use your own instead, put it in .*pb\/standards\/java\.md\./);
+  assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /\/pb:standards rewrites pb's section, so a change of yours inside it lasts until then; pb's java preset is opinionated/);
 });
 
 test("standards: a Vue project gets the frontend section, without the database rules", async () => {
@@ -175,9 +179,9 @@ test("standards: a Vue project gets the frontend section, without the database r
   fs.writeFileSync(path.join(t.repo, "package.json"), JSON.stringify({ dependencies: { vue: "^3.5.0" } }));
   await t.run("plan", "x");
   const agents = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
-  assert.match(agents, /- Quality: [\s\S]*- One source of truth: every rule lives in the backend[\s\S]*- Backend refusals: RFC 9457[\s\S]*- Vue: Vue 3\.5[\s\S]*a double click, a session that expires mid-edit, a URL from the query string\. Search for existing copies of any rule you touched\.\n<!-- \/pb:standards -->/);
-  assert.doesNotMatch(agents, /Consistency and concurrency|Java 25|Compare against the database/);
-  assert.ok(t.selectTitles.some((x) => /^Engineering standards \(.*browser security, Vue\)$/.test(x)));
+  assert.match(agents, /- Quality: [\s\S]*- One source of truth: every rule lives in the backend[\s\S]*- Backend refusals: RFC 9457[\s\S]*- Vue: Vue 3 Composition API[\s\S]*a double click, a session that expires mid-edit, a URL from the query string\. Search for existing copies of any rule you touched\.\n<!-- \/pb:standards -->/);
+  assert.doesNotMatch(agents, /Consistency and concurrency|- Java:|Compare against the database/);
+  assert.ok(t.selectTitles.some((x) => /^Engineering standards \(.*browser security, Vue\)\. pb's vue preset is opinionated: the backend decides every rule; an HttpOnly session cookie with CSRF tokens; RFC 9457 problem details/.test(x)));
   assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /the frontend ones, for a Vue project/);
 });
 
@@ -188,7 +192,7 @@ test("standards: a Java project that also has a Vue package.json keeps the backe
   fs.writeFileSync(path.join(t.repo, "package.json"), JSON.stringify({ devDependencies: { vue: "^3.5.0" } }));
   await t.run("plan", "x");
   const agents = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
-  assert.match(agents, /Consistency and concurrency[\s\S]*- Java 25/);
+  assert.match(agents, /Consistency and concurrency[\s\S]*- Java: the current LTS/);
   assert.doesNotMatch(agents, /Frontend role/);
 });
 
@@ -198,9 +202,9 @@ test("standards: a Rust project gets the Rust lines; the database rules come onl
   fs.writeFileSync(path.join(t.repo, "Cargo.toml"), '[package]\nname = "x"\n\n[dependencies]\nserde = "1"\n');
   await t.run("plan", "x");
   const agents = t.read("AGENTS.md");
-  assert.match(agents, /- Simplicity: the smallest design[\s\S]*- Rust: stable toolchain, edition 2024\.[\s\S]*`\/\/ SAFETY:`[\s\S]*- Rust async and tooling: [^\n]*\n<!-- \/pb:standards -->/);
-  assert.doesNotMatch(agents, /Consistency and concurrency|Database rules|Java 25/);
-  assert.ok(t.selectTitles.some((x) => /^Engineering standards \(quality, simplicity, [^)]*, Rust\)$/.test(x)));
+  assert.match(agents, /- Simplicity: the smallest design[\s\S]*- Rust: the stable toolchain and the current edition\.[\s\S]*`\/\/ SAFETY:`[\s\S]*- Rust async and tooling: [^\n]*\n<!-- \/pb:standards -->/);
+  assert.doesNotMatch(agents, /Consistency and concurrency|Database rules|- Java:/);
+  assert.ok(t.selectTitles.some((x) => /^Engineering standards \(quality, simplicity, [^)]*, Rust\)\. pb's rust preset is opinionated: thiserror in libraries/.test(x)));
   assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /\(the backend ones, with Rust\)/);
 
   const u = setup({ verify: "true" });
@@ -208,7 +212,7 @@ test("standards: a Rust project gets the Rust lines; the database rules come onl
   fs.writeFileSync(path.join(u.repo, "Cargo.toml"), '[package]\nname = "x"\n\n[dependencies]\nsqlx = { version = "0.8", features = ["postgres"] }\n');
   await u.run("plan", "x");
   assert.match(u.read("AGENTS.md"), /- Database rules: [\s\S]*- Consistency and concurrency come from the database[\s\S]*- Rust: /);
-  assert.ok(u.selectTitles.some((x) => /database consistency, Rust\)$/.test(x)));
+  assert.ok(u.selectTitles.some((x) => /database consistency, Rust\)\. pb's rust preset is opinionated/.test(x)));
 });
 
 test("standards: a project with no stack and no database gets the core alone", async () => {
@@ -345,8 +349,8 @@ test("/pb:standards: creates AGENTS.md, replaces only pb's section, and recovers
   fs.writeFileSync(agents, "# Shop\n");
   fs.writeFileSync(path.join(t.repo, "pom.xml"), "<project/>");
   await t.run("standards");
-  assert.match(fs.readFileSync(agents, "utf8"), /^# Shop\n\n<!-- pb:standards -->[\s\S]*- Java 25: [^\n]*\n<!-- \/pb:standards -->\n$/);
-  assert.match(t.notes.at(-1)!, /^Added pb's standards to .*\(the backend ones, with Java 25\)/);
+  assert.match(fs.readFileSync(agents, "utf8"), /^# Shop\n\n<!-- pb:standards -->[\s\S]*- Java: [^\n]*\n<!-- \/pb:standards -->\n$/);
+  assert.match(t.notes.at(-1)!, /^Added pb's standards to .*\(the backend ones, with Java\)/);
 
   const broken = "# Shop\n<!-- pb:standards -->\n- mine\n";
   fs.writeFileSync(agents, broken);

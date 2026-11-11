@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **pb's standards presets say what they assume.** The Java, Rust and Vue sections are opinionated on purpose; the offer and `/pb:standards` now name what each one assumes (the Vue one: the backend decides every rule, an HttpOnly session cookie with CSRF tokens, RFC 9457 problem details, TanStack Vue Query, Bootstrap, pnpm) and where your own goes instead. They no longer pin versions ("Java 25", "Vue 3.5", "TypeScript 6", "edition 2024"), which went stale and contradicted their own Dependencies rule, and the Vue comments rule no longer describes one team.
 - **pb runs a task's own test when it reports done.** With the default `taskChecks: "end"`, pb watched a task's `Test:` fail before the change but never ran it afterwards: "it passes now" was the model's word until the final suite or the review. A task that proved itself red now has its `Test:` run by pb on `pb_task_done`, and the handout stops asking the model to run it first. The final step's commands come from the same list the review and fix laps run.
 - **`/pb:undo` can keep your edits.** It restores the whole tree, so a file you edited after the undo point went back too. When a file differs that no finished step changed, it now names those files and asks: restore all, or only what the finished steps changed.
 - **Lap costs are counted.** Repair laps and `/pb:fix` laps run in sessions of their own, whose turns were counted nowhere. Their tokens and cost are recorded now: a repair lap's in the spec phase, a fix lap's as `Fix laps` on the card and `$fix` in `/pb:stats compare`.
