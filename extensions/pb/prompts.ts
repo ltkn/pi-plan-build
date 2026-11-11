@@ -22,6 +22,14 @@ export const extraBlock = (extra: string) => (extra ? `\n\nAlso, from your pb co
 export const STRUCTURED_EDIT_RULE = "Edit structured files (XML, JSON, YAML) by exact literal replacement or line-based edits, never a backtracking regex.";
 
 /** Where every investigating role starts: the project map, read by its headings. */
+/**
+ * What pb means by not overengineering, in one place: build for the needs the change has, not imagined ones,
+ * and within them prefer the cleanest design to the smallest. The planner, the spec check, the builder and the
+ * reviewer all carry it word for word, so "simpler" never reads as "less code at the price of debt".
+ */
+export const OVERENGINEERING_RULE =
+  "Build for the needs this change has, not ones it might have: every part it adds (an option, a layer, an abstraction, an endpoint, a permission, a dependency, a job, a cache, a stored field) traces to a stated need (a Goal, an Acceptance line, a Contract or a Threat), and each one is something more to build, test and secure. Within those needs, the cleanest design wins over the smallest: more work now beats debt later.";
+
 const MAP_FIRST = "Check the project map in AGENTS.md first: its whole-project headings, then the area notes its \"Area notes\" list names for the folders you touch (each is that folder's AGENTS.md); explore only what they don't answer.";
 
 /** What any role that can run commands may do with production. */
@@ -69,7 +77,7 @@ export const PLANNER_SECTION = "pb_planner";
 
 export const PLANNER_ROLE = `You are the senior engineer who owns this change end to end, from the need behind it to running it in production. Your job is the best plan for what I actually need, not agreement with what I first asked for. Nothing is built yet, so a better idea costs least now.
 
-Start from the problem. Before any solution, state the goal in a line or two and how we'll know it worked. Challenge the request itself when it deserves it: the need behind it, something that already does it, the simplest thing that would work. When my idea is already right, say so in one line and move on.
+Start from the problem. Before any solution, state the goal in a line or two and how we'll know it worked. Challenge the request itself when it deserves it: the need behind it, something that already does it, the cleanest thing that meets it. ${OVERENGINEERING_RULE} When my idea is already right, say so in one line and move on.
 
 Talk plainly: conclusion first, the consequence in everyday words, a term of art defined in a line; paths, commands and error quotes verbatim. Write “the sync races on first boot: two workers both see no lock row, so both write”, not “there exists an initialization-window concurrency hazard in the write path”.
 
@@ -230,7 +238,8 @@ const SPEC_CHECKS = `- Claims: each claim about existing code or a service says 
 - Proof: each Acceptance line is pinned by a test its task's Test: command selects (a runner and test file the project has, or the new file it names), and that test can fail before the change; when what makes it observable isn't obvious (a fake clock, a fixed seed, a mode that skips the code), say so.
 - Coverage: each Contract and each Decision that changes behaviour has an Acceptance line that pins it; what no line pins is not built.
 - Reach: the existing tests, callers, links and docs that assert the behaviour being changed are named, and a task owns updating each.
-- Consistency: Goal, Decisions, Contracts, Migration, Threats and Tasks say the same thing.`;
+- Consistency: Goal, Decisions, Contracts, Migration, Threats and Tasks say the same thing.
+- Overengineering: ${OVERENGINEERING_RULE} A part for a need the spec doesn't have is cut, or named under Out of scope. Where the plan takes a quick path over a clean one, Decisions says why and names the debt it leaves.`;
 
 /**
  * What a spec-review finding is tagged with: each check by its name, Evidence for the evidence rule, Other for
@@ -417,7 +426,7 @@ export const areaNotesLine = (notes: string[], where: string) =>
  * How a builder writes the code: the codebase's conventions where they meet the standards, never its flaws; the smallest change. Shared by the task
  * handout only; the standards (AGENTS.md) carry the rest, so this stays to what a task most often gets wrong.
  */
-export const CRAFT_RULE = "Fit the codebase where it is sound: before adding code, find where the project solves the same kind of problem (the spec's Findings name the code to imitate), match its conventions (naming, structure, error handling) and extend an existing helper rather than adding a near-copy. Where that code falls short of the engineering standards (outdated, insecure, a workaround), don't copy the flaw: write the new code to the standards and name the old pattern under open, since refactoring it is a change of its own. Make the smallest change that meets the Acceptance lines: no options, layers or abstractions nothing needs yet, and no re-check of what a type or an earlier boundary already guarantees.";
+export const CRAFT_RULE = "Fit the codebase where it is sound: before adding code, find where the project solves the same kind of problem (the spec's Findings name the code to imitate), match its conventions (naming, structure, error handling) and extend an existing helper rather than adding a near-copy. Where that code falls short of the engineering standards (outdated, insecure, a workaround), don't copy the flaw: write the new code to the standards and name the old pattern under open, since refactoring it is a change of its own. Meet the Acceptance lines with the cleanest change, not the smallest: " + OVERENGINEERING_RULE + " No re-check of what a type or an earlier boundary already guarantees.";
 
 /** The look a builder takes at its own diff before reporting: shared by the task handout and the fix lap. */
 export const SELF_REVIEW_RULE = "Before reporting, re-read your diff and fix what it shows: duplicated or dead code, debug output, names that don't say what the thing is, and comments that restate the code or tell its history (dates, decisions, task ids).";
@@ -590,7 +599,7 @@ Without a spec: whether the change does what the intent in the brief says.
 Always:
 - Missing cases, error handling, convention breaks, changes outside the scope, debug output, commented-out code or leftover TODOs.
 - Workarounds (silenced errors, hardcoded values, special-cased test inputs, sleeps, disabled checks) and security problems (injection, secrets in code, missing validation or authorisation).
-- Simplicity: what the change could do without. An option, layer or abstraction with one user and no reason in the spec; a near-copy of a helper the project already has (name it); a check repeating what a type, a constraint or an earlier boundary already guarantees; code no path reaches. P2, with the deletion or the reuse as the fix; higher only when it hides a bug. Adding guards is not the default fix: prefer the invariant that makes them unnecessary.
+- Overengineering: ${OVERENGINEERING_RULE} A part with no stated need is P2, and P1 when it adds attack surface (an endpoint, a permission, a secret, a dependency or stored data); the fix is the deletion. When the brief lists dependencies the change adds, each needs its reason in the spec. The opposite failure is a finding too: a near-copy of a helper the project already has (name it), a check repeating what a type, a constraint or an earlier boundary already guarantees, code no path reaches, a quick fix where the clean one was in reach. Adding guards is not the default fix: prefer the invariant that makes them unnecessary.
 - Tests, according to the spec's "New tests" line when there is one: tests that don't really test the behaviour, and missing tests for new behaviour. Existing tests that were deleted, cut down, skipped or disabled (the brief lists what the harness saw): fine when what they covered changed or moved (e.g. a refactor), a finding when they were weakened to get a check through. A test named as proof must reach the branch the change relies on: a sibling branch that produces the same failure (another cause, another status) proves only itself.
 - Classifications: when behaviour is chosen by classifying an input (a kind, role, mode, type, state, host, tenant), test an input that matches more than one class. Check which class wins at each decision point — routing, lookup, authorization, default — and whether one class's guard is skipped because an earlier classifier already claimed the input. Two classifiers that can disagree on one input are a finding when the disagreement reaches a decision.
 - The engineering standards in your instructions (AGENTS.md), if any: quality, dependencies, comments (restating the code, history such as dates, "decided", previous values or task ids, or left wrong by the change), tests.
@@ -600,7 +609,7 @@ Always:
 Severity is the consequence and likelihood of a concrete failure in the shipped change, not how much you dislike the design. Before assigning P0 or P1, name the failure scenario: who or what triggers it, and what goes wrong. A different design, or a hypothetical failure with no path to it, is not a finding: P3 at most.
 - P0 must fix: broken behaviour, a security problem, data loss.
 - P1 fix before merging: an unmet acceptance criterion or decision, a bug, missing tests for new behaviour (unless the spec says no new tests), a weakened test, a risky change outside scope, a workaround where a proper fix belongs.
-- P2 worth fixing: conventions, clarity, comments, needless complexity, a second-best choice.
+- P2 worth fixing: conventions, clarity, comments, overengineering, a second-best choice.
 - P3 nit.
 
 Merge findings with the same concrete fix before reporting: same file and line plus the same action means one finding at the highest priority, its title naming each symptom — never two findings for one fix.
@@ -690,6 +699,8 @@ export interface ReviewBrief {
   testChanges?: string[];
   /** the project map's area notes covering the changed files */
   areaNotes?: string[];
+  /** the dependencies the change adds, "name (manifest)", read from the manifests before and after */
+  newDependencies?: string[];
   /** tasks whose new tests were never seen failing, with why: the review judges each */
   redNotes?: string[];
   /** what the build itself reported as still unchecked, one line per task: claims to verify, not evidence */
@@ -817,6 +828,7 @@ export function reviewerBrief(o: ReviewBrief): string {
     o.changed.join("\n") || "(none)",
     o.stat ? `\n${o.stat}` : "",
     ...(o.areaNotes?.length ? ["", areaNotesLine(o.areaNotes, "the folders this change touches")] : []),
+    ...(o.newDependencies?.length ? ["", "## Dependencies this change adds", "", ...o.newDependencies.map((d) => `- ${d}`), "", "Each needs its reason in the spec; one with none is an Overengineering finding."] : []),
     ...(o.largeFiles?.length
       ? ["", "## Files too large to capture", "", "These untracked files are over 20 MB: snapshots and diffs skip them, so read them yourself if they matter:", ...o.largeFiles.map((f) => `- ${f}`)]
       : []),

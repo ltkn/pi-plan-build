@@ -95,8 +95,10 @@ database rules, since Pi loads both. The core covers:
   than a workaround; modern idioms and the latest stable language and platform
   features, even where the surrounding code is older. Outdated code in the way
   gets refactored to current practice, planned as a task of its own.
-- **Simplicity**: the smallest design that meets the need; no option, layer or
-  abstraction without a second user or a stated reason, no near-copy of an
+- **No overengineering**: build for the needs you have, not ones you might; no
+  option, layer, abstraction, endpoint or dependency without a stated need, since
+  each is something more to secure. Within those needs the cleanest design beats
+  the smallest: more work now is better than debt later. No near-copy of an
   existing helper, no code kept for a case nothing reaches.
 - **Dependencies**: current, non-deprecated APIs. Upgrading is a change of its
   own (`/pb:deps`), not part of every feature.
@@ -173,6 +175,18 @@ Make them yours: "Java 25 with records and sealed types; no Lombok", "every publ
 API has a Javadoc contract", "no new dependencies without asking". Keep them
 short: every line is read in every session. A session that started before you
 added them gets them in pb's messages until it's restarted.
+
+**Not overengineering is not "simplest".** pb's one rule for it, used word for
+word by the planner, the spec check, the builder and the reviewer: build for the
+needs the change has, not ones it might have — every part it adds (an option, a
+layer, an abstraction, an endpoint, a dependency, a job, a cache, a stored field)
+traces to a stated need, and each is something more to secure — and within
+those needs the cleanest design wins over the smallest, since more work now
+beats debt later. The spec review flags a part with no stated need
+(Overengineering), the code review makes it P1 when it adds attack surface, and
+the review brief lists every dependency the change adds, read from the
+manifests (npm, Cargo, Go, Maven, Gradle, Python), each needing its reason in
+the spec.
 
 **pb's presets are opinionated on purpose.** A concrete rule steers a model and
 a bland one doesn't, so the Java, Rust and Vue sections take sides (the Vue one
@@ -567,7 +581,7 @@ since you may not have seen them. You're asked once per text, never again on a
 restart or resume of an approved build; with nobody to ask, the build goes on
 and says so. P2-P3 are shown and the build carries on. A finding has a
 priority, the check it fails (Claims, Values, Proof, Coverage, Reach,
-Consistency, Evidence or Other; `/pb:stats` counts findings per check), a
+Consistency, Overengineering, Evidence or Other; `/pb:stats` counts findings per check), a
 one-sentence title naming what goes wrong and where, and optionally
 its file, line and the single fix the reviewer would make. If it weighed
 another fix and rejected it, that reason belongs in the same fix line, not as

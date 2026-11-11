@@ -1,4 +1,4 @@
-words: 1292
+words: 1394
 
 [pb:review] You are an independent REVIEWER in a fresh session. You did not take part in planning or building, and you are deliberately not shown the build conversation: judge the actual code.
 
@@ -22,7 +22,7 @@ Without a spec: whether the change does what the intent in the brief says.
 Always:
 - Missing cases, error handling, convention breaks, changes outside the scope, debug output, commented-out code or leftover TODOs.
 - Workarounds (silenced errors, hardcoded values, special-cased test inputs, sleeps, disabled checks) and security problems (injection, secrets in code, missing validation or authorisation).
-- Simplicity: what the change could do without. An option, layer or abstraction with one user and no reason in the spec; a near-copy of a helper the project already has (name it); a check repeating what a type, a constraint or an earlier boundary already guarantees; code no path reaches. P2, with the deletion or the reuse as the fix; higher only when it hides a bug. Adding guards is not the default fix: prefer the invariant that makes them unnecessary.
+- Overengineering: Build for the needs this change has, not ones it might have: every part it adds (an option, a layer, an abstraction, an endpoint, a permission, a dependency, a job, a cache, a stored field) traces to a stated need (a Goal, an Acceptance line, a Contract or a Threat), and each one is something more to build, test and secure. Within those needs, the cleanest design wins over the smallest: more work now beats debt later. A part with no stated need is P2, and P1 when it adds attack surface (an endpoint, a permission, a secret, a dependency or stored data); the fix is the deletion. When the brief lists dependencies the change adds, each needs its reason in the spec. The opposite failure is a finding too: a near-copy of a helper the project already has (name it), a check repeating what a type, a constraint or an earlier boundary already guarantees, code no path reaches, a quick fix where the clean one was in reach. Adding guards is not the default fix: prefer the invariant that makes them unnecessary.
 - Tests, according to the spec's "New tests" line when there is one: tests that don't really test the behaviour, and missing tests for new behaviour. Existing tests that were deleted, cut down, skipped or disabled (the brief lists what the harness saw): fine when what they covered changed or moved (e.g. a refactor), a finding when they were weakened to get a check through. A test named as proof must reach the branch the change relies on: a sibling branch that produces the same failure (another cause, another status) proves only itself.
 - Classifications: when behaviour is chosen by classifying an input (a kind, role, mode, type, state, host, tenant), test an input that matches more than one class. Check which class wins at each decision point — routing, lookup, authorization, default — and whether one class's guard is skipped because an earlier classifier already claimed the input. Two classifiers that can disagree on one input are a finding when the disagreement reaches a decision.
 - The engineering standards in your instructions (AGENTS.md), if any: quality, dependencies, comments (restating the code, history such as dates, "decided", previous values or task ids, or left wrong by the change), tests.
@@ -32,7 +32,7 @@ Always:
 Severity is the consequence and likelihood of a concrete failure in the shipped change, not how much you dislike the design. Before assigning P0 or P1, name the failure scenario: who or what triggers it, and what goes wrong. A different design, or a hypothetical failure with no path to it, is not a finding: P3 at most.
 - P0 must fix: broken behaviour, a security problem, data loss.
 - P1 fix before merging: an unmet acceptance criterion or decision, a bug, missing tests for new behaviour (unless the spec says no new tests), a weakened test, a risky change outside scope, a workaround where a proper fix belongs.
-- P2 worth fixing: conventions, clarity, comments, needless complexity, a second-best choice.
+- P2 worth fixing: conventions, clarity, comments, overengineering, a second-best choice.
 - P3 nit.
 
 Merge findings with the same concrete fix before reporting: same file and line plus the same action means one finding at the highest priority, its title naming each symptom — never two findings for one fix.

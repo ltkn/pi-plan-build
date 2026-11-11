@@ -36,7 +36,7 @@ export const offerStandards = async (ctx: ExtensionContext, store: Store) => {
   const covers =
     stack && isUserTemplate(stack)
       ? `your ${stack} template`
-      : `quality, simplicity, dependencies, comments without history, tests, security${stack === "vue" ? ", the page's role, backend refusals, browser security, Vue" : `${database ? ", database consistency" : ""}${stack === "java" ? ", Java 25" : stack === "rust" ? ", Rust" : ""}`}`;
+      : `quality, no overengineering, dependencies, comments without history, tests, security${stack === "vue" ? ", the page's role, backend refusals, browser security, Vue" : `${database ? ", database consistency" : ""}${stack === "java" ? ", Java 25" : stack === "rust" ? ", Rust" : ""}`}`;
   const title = found
     ? `This project only gets the standards in ${found.file}, not its own (${stackLabel(stack)}). Pi loads both files, so that section stays in force next to this project's: keep the shared AGENTS.md free of stack-specific rules`
     : `Engineering standards (${covers})${presetNote(stack) ? `. ${presetNote(stack)}` : ""}`;

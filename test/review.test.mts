@@ -1,16 +1,24 @@
 /** Reviews: the code review, its verifier and abuse pass, the ledger, and /pb:fix laps. */
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, provedFixed, repairLap, setup, SPEC, taskOf, written } from "./harness.mts";
 
-test("review: the reviewer looks for what the change could do without, and prefers an invariant to another guard", async () => {
-  const { REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
-  assert.match(REVIEWER_SYSTEM, /- Simplicity: what the change could do without\. An option, layer or abstraction with one user and no reason in the spec; a near-copy of a helper the project already has \(name it\); a check repeating what a type, a constraint or an earlier boundary already guarantees; code no path reaches\. P2, with the deletion or the reuse as the fix/);
+test("overengineering: one rule — build for the needs the change has, the cleanest design within them — carried word for word by the planner, the spec check, the builder and the reviewer", async () => {
+  const { REVIEWER_SYSTEM, PLANNER_ROLE, CRAFT_RULE, SPEC_REVIEWER_SYSTEM, SPEC_CHECK_NAMES, OVERENGINEERING_RULE } = await import("../extensions/pb/prompts.ts");
+  assert.match(OVERENGINEERING_RULE, /^Build for the needs this change has, not ones it might have:[\s\S]*Within those needs, the cleanest design wins over the smallest: more work now beats debt later\.$/);
+  for (const [name, text] of Object.entries({ PLANNER_ROLE, CRAFT_RULE, SPEC_REVIEWER_SYSTEM, REVIEWER_SYSTEM })) assert.ok(text.includes(OVERENGINEERING_RULE), name);
+  assert.ok(SPEC_CHECK_NAMES.includes("Overengineering"), "a spec check of its own, counted per check");
+  // Nothing in pb asks for the smallest change any more: "simpler" never reads as "less code at the price of debt".
+  for (const [name, text] of Object.entries({ PLANNER_ROLE, CRAFT_RULE, REVIEWER_SYSTEM })) assert.doesNotMatch(text, /the smallest change that meets|the simplest thing that would work/, name);
+  // The review weighs it by what it costs to secure, and keeps the opposite failure a finding too.
+  assert.match(REVIEWER_SYSTEM, /- Overengineering: [\s\S]*A part with no stated need is P2, and P1 when it adds attack surface \(an endpoint, a permission, a secret, a dependency or stored data\); the fix is the deletion\./);
+  assert.match(REVIEWER_SYSTEM, /The opposite failure is a finding too: a near-copy of a helper the project already has \(name it\)[\s\S]*a quick fix where the clean one was in reach\./);
   assert.match(REVIEWER_SYSTEM, /Adding guards is not the default fix: prefer the invariant that makes them unnecessary\./);
-  assert.match(REVIEWER_SYSTEM, /- P2 worth fixing: conventions, clarity, comments, needless complexity, a second-best choice\./);
+  assert.match(REVIEWER_SYSTEM, /- P2 worth fixing: conventions, clarity, comments, overengineering, a second-best choice\./);
 });
 
 test("every reviewer reports through its tool before writing its reply", async () => {
@@ -1967,4 +1975,34 @@ test("review: findings are tagged against the project map, and the first review'
   await t.run("stats", "compare");
   assert.match(t.posts.at(-1)!.split("\n").find((l) => l.startsWith("order-cancellation"))!, / 1\/1 /);
   assert.equal(findingLine({ priority: "P3", title: "x" }), "[P3] x");
+});
+
+test("overengineering: the review brief names the dependencies the change adds, read from the manifests before and after", async () => {
+  const { dependenciesIn, addedDependencies } = await import("../extensions/pb/manifest.ts");
+  // Each stack's manifest, its own way; lists that aren't dependencies are not read as ones.
+  assert.deepEqual(dependenciesIn("Cargo.toml", `[package]\nname = "x"\n[dependencies]\nserde = "1"\n[dev-dependencies]\nproptest = "1"\n[dependencies.reqwest]\nversion = "0.12"\n`), ["serde", "proptest", "reqwest"]);
+  assert.deepEqual(dependenciesIn("go.mod", `module m\nrequire (\n\tgithub.com/a/b v1.0.0\n\tgithub.com/c/d v1.0.0 // indirect\n)\n`), ["github.com/a/b"]);
+  assert.deepEqual(dependenciesIn("pom.xml", `<dependency><groupId>org.x</groupId><artifactId>y</artifactId></dependency>`), ["org.x:y"]);
+  assert.deepEqual(dependenciesIn("build.gradle.kts", `implementation("org.a:b:1.0")`), ["org.a:b"]);
+  assert.deepEqual(dependenciesIn("pyproject.toml", `[project]\ndependencies = [\n  "Requests>=2",\n]\nclassifiers = ["Framework :: Django"]\n[tool.poetry.dependencies]\npython = "^3.12"\nFlask = "^3"\n`), ["requests", "flask"]);
+  assert.deepEqual(dependenciesIn("requirements.txt", "# pinned\nDjango==5.0\n-r base.txt\n"), ["django"]);
+  assert.deepEqual(dependenciesIn("package.json", "{ not json"), []);
+
+  const t = setup({ verify: "true" });
+  fs.writeFileSync(path.join(t.repo, "package.json"), JSON.stringify({ name: "shop", dependencies: { express: "5" } }));
+  execSync("git add package.json && git commit -qm pkg", { cwd: t.repo });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  // The change adds one dependency to an existing manifest and a new manifest with one of its own.
+  fs.writeFileSync(path.join(t.repo, "package.json"), JSON.stringify({ name: "shop", dependencies: { express: "5", "left-pad": "1" } }));
+  fs.mkdirSync(path.join(t.repo, "tools"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "tools/requirements.txt"), "requests==2.32\n");
+  const base = t.progress("order-cancellation").baseCommit;
+  assert.deepEqual(addedDependencies(t.repo, base, ["package.json", "tools/requirements.txt", "README"]), [
+    { file: "package.json", names: ["left-pad"] },
+    { file: "tools/requirements.txt", names: ["requests"] },
+  ]);
+  await t.run("review");
+  assert.match(briefOf(t), /## Dependencies this change adds\n\n- left-pad \(package\.json\)\n- requests \(tools\/requirements\.txt\)\n\nEach needs its reason in the spec; one with none is an Overengineering finding\./);
 });

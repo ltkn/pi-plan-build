@@ -387,13 +387,13 @@ test("final gate: when the last task already ran the suite and lint, neither re-
   assert.match(t.posts.find((p) => p.includes("Build complete"))!, /lint PASS/); // the task's lint is the build's lint gate
 });
 
-test("build: a task is told to follow the codebase, keep the change small, and re-read its diff before reporting", async () => {
+test("build: a task is told to follow the codebase, build only what the spec needs in the cleanest way, and re-read its diff before reporting", async () => {
   const { taskPrompt } = await import("../extensions/pb/prompts.ts");
   const prompt = taskPrompt(parseSpec(SPEC()).spec!.tasks[0], 1, 3, ["npx tsc --noEmit"], false, "", "", "npm run lint --silent");
   assert.match(prompt, /find where the project solves the same kind of problem \(the spec's Findings name the code to imitate\), match its conventions/);
   assert.match(prompt, /Where that code falls short of the engineering standards \(outdated, insecure, a workaround\), don't copy the flaw: write the new code to the standards and name the old pattern under open/);
   assert.match(prompt, /extend an existing helper rather than adding a near-copy/);
-  assert.match(prompt, /no options, layers or abstractions nothing needs yet/);
+  assert.match(prompt, /Meet the Acceptance lines with the cleanest change, not the smallest: Build for the needs this change has, not ones it might have/);
   assert.match(prompt, /Before reporting, re-read your diff and fix what it shows: duplicated or dead code, debug output/);
   assert.match(prompt, /it runs `npx tsc --noEmit` then `npm run lint --silent` itself, so don't run those just before/);
   assert.ok(prompt.indexOf("Before reporting") < prompt.indexOf("call pb_task_done")); // the look comes before the report

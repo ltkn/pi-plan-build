@@ -1,4 +1,4 @@
-words: 1801
+words: 1917
 
 [pb:spec]
 
@@ -53,6 +53,7 @@ Add "## Out of scope" only when it helps. When you include a section that does n
   - Coverage: each Contract and each Decision that changes behaviour has an Acceptance line that pins it; what no line pins is not built.
   - Reach: the existing tests, callers, links and docs that assert the behaviour being changed are named, and a task owns updating each.
   - Consistency: Goal, Decisions, Contracts, Migration, Threats and Tasks say the same thing.
+  - Overengineering: Build for the needs this change has, not ones it might have: every part it adds (an option, a layer, an abstraction, an endpoint, a permission, a dependency, a job, a cache, a stored field) traces to a stated need (a Goal, an Acceptance line, a Contract or a Threat), and each one is something more to build, test and secure. Within those needs, the cleanest design wins over the smallest: more work now beats debt later. A part for a need the spec doesn't have is cut, or named under Out of scope. Where the plan takes a quick path over a clean one, Decisions says why and names the debt it leaves.
   Re-open the lines your claims rest on yourself; call pb_explore once, with the list, only for the claims you can't place.
 - The approach follows the engineering standards (AGENTS.md).
 - Status: ready only if nothing is left open. Transcribe the conversation's ledger: what was decided goes into Decisions with its reason (an objection I overruled stays beside its decision as the risk), and anything undecided goes under Open questions and the spec stays Status: planning; never invent a decision to close a gap. Ask me (pb_ask, all independent questions at once) only about a choice that changes behaviour, an API or data and that we didn't settle.

@@ -15,7 +15,7 @@ const END = "<!-- /pb:standards -->";
 const QUALITY =
   "- Quality: the best current practice for this stack: clean, maintainable, secure; a proper fix, never a workaround. Use modern idioms and the latest stable language and platform features, even where the surrounding code doesn't. When outdated code stands in the way, refactor it to current practice, planned as a task of its own.";
 const SIMPLICITY =
-  "- Simplicity: the smallest design that meets the need. No option, layer or abstraction without a second user or a stated reason; no near-copy of an existing helper; no code kept for a case nothing reaches. Less code is the default; every addition earns its place.";
+  "- No overengineering: build for the needs you have, not ones you might. No option, layer, abstraction, endpoint or dependency without a stated need: each is something more to secure. Within those needs, the cleanest design beats the smallest: more work now is better than debt later. No near-copy of an existing helper; no code kept for a case nothing reaches.";
 const DEPENDENCIES = "- Dependencies: current, non-deprecated APIs and versions only. Upgrading dependencies is a change of its own, not part of a feature.";
 const TESTS =
   "- Tests: test behaviour, written to current best practice for this stack even where existing tests aren't; new test tooling is proposed as a task of its own. Never weaken an existing test. A test proves a fix only if it fails without it.";
@@ -65,6 +65,7 @@ export const DEFAULT_STANDARDS = backend(false);
 /** For a Vue project: the page renders what the backend decides. */
 export const FRONTEND_STANDARDS = section([
   QUALITY,
+  SIMPLICITY,
   DEPENDENCIES,
   `- Comments: explain why, never history (no dates, "decided", previous values or task ids). Every platform-integration step (sessions, CSRF, redirects, problem types, where-to-go-next) says why it works that way.`,
   TESTS,

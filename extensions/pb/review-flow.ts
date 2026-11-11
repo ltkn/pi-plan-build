@@ -24,6 +24,7 @@ import { markReviewed, unfinishedPhase } from "./phase.ts";
 
 import { confirmLiveBuild } from "./build-loop.ts";
 import { areaNotesFor } from "./map.ts";
+import { addedDependencies } from "./manifest.ts";
 import type { ReplacedSessionContext } from "./kit.ts";
 export function registerReviewFlow(pi: ExtensionAPI) {
   pi.registerTool({
@@ -689,11 +690,16 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         if (!r.root) return [];
         const since = p?.repoBases?.[r.name];
         const files = changedSince(r.root, since);
-        return files.length ? [{ name: r.name, files, diff: `${gitDiff(r.root, since)}${untrackedText(r.root, files)}`.trim() }] : [];
+        return files.length ? [{ name: r.name, files, since, root: r.root, diff: `${gitDiff(r.root, since)}${untrackedText(r.root, files)}`.trim() }] : [];
       });
       const siblingDiffs = siblings.map((s) => `\n\n# The change in ${s.name} (the paths in this diff are inside ${s.name}/)\n\n${s.diff}`).join("");
       const reviewDiff = cap(`${gitDiff(ctx.cwd, base)}${untrackedText(ctx.cwd, changed)}${siblingDiffs}`.trim(), REVIEW_DIFF_CHARS);
       const changedEverywhere = [...changed, ...siblings.flatMap((s) => s.files.map((f) => inRepo(s.name, f)))];
+      // What the change adds to the projects' manifests, read exactly rather than left to the reviewer to notice.
+      const newDependencies = [
+        ...addedDependencies(ctx.cwd, base, changed),
+        ...siblings.flatMap((s) => addedDependencies(s.root, s.since, s.files).map((d) => ({ ...d, file: inRepo(s.name, d.file) }))),
+      ].flatMap((d) => d.names.map((n) => `${n} (${d.file})`));
       // Fresh ground truth first: the reviewer should judge what's on disk now. pb runs the build's final-step
       // checks, then each finished task's Test: command — the reviewer has no shell, so these runs are the
       // evidence it can cite for an acceptance line. A red one caps the verdict: a review never passes over it.
@@ -771,6 +777,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         diff: reviewDiff,
         changed: changedEverywhere,
         areaNotes: areaNotesFor(ctx.cwd, changedEverywhere),
+        newDependencies,
         stat: diffStat(ctx.cwd, base),
         check,
         focus: name ? focusRest : "",

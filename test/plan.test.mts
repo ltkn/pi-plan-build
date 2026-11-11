@@ -202,9 +202,9 @@ test("standards: a Rust project gets the Rust lines; the database rules come onl
   fs.writeFileSync(path.join(t.repo, "Cargo.toml"), '[package]\nname = "x"\n\n[dependencies]\nserde = "1"\n');
   await t.run("plan", "x");
   const agents = t.read("AGENTS.md");
-  assert.match(agents, /- Simplicity: the smallest design[\s\S]*- Rust: the stable toolchain and the current edition\.[\s\S]*`\/\/ SAFETY:`[\s\S]*- Rust async and tooling: [^\n]*\n<!-- \/pb:standards -->/);
+  assert.match(agents, /- No overengineering: build for the needs you have[\s\S]*- Rust: the stable toolchain and the current edition\.[\s\S]*`\/\/ SAFETY:`[\s\S]*- Rust async and tooling: [^\n]*\n<!-- \/pb:standards -->/);
   assert.doesNotMatch(agents, /Consistency and concurrency|Database rules|- Java:/);
-  assert.ok(t.selectTitles.some((x) => /^Engineering standards \(quality, simplicity, [^)]*, Rust\)\. pb's rust preset is opinionated: thiserror in libraries/.test(x)));
+  assert.ok(t.selectTitles.some((x) => /^Engineering standards \(quality, no overengineering, [^)]*, Rust\)\. pb's rust preset is opinionated: thiserror in libraries/.test(x)));
   assert.match(t.notes.find((n) => n.startsWith("Added to"))!, /\(the backend ones, with Rust\)/);
 
   const u = setup({ verify: "true" });
@@ -220,7 +220,7 @@ test("standards: a project with no stack and no database gets the core alone", a
   process.chdir(t.repo);
   await t.run("standards");
   const agents = t.read("AGENTS.md");
-  assert.match(agents, /- Simplicity: the smallest design that meets the need\./);
+  assert.match(agents, /- No overengineering: build for the needs you have, not ones you might\./);
   assert.match(agents, /- One source of truth: a rule or canonical form that already exists \(a shared helper, a type, a constraint\)/);
   assert.doesNotMatch(agents, /database|SQL|ON CONFLICT/i); // nothing a project without one can act on
   fs.mkdirSync(path.join(t.repo, "db/migrations"), { recursive: true });
@@ -1309,7 +1309,7 @@ test("planner role: who it is, the problem before the solution, expertise as evi
   const { PLANNER_ROLE, planPrompt, specPrompt } = await import("../extensions/pb/prompts.ts");
   assert.match(PLANNER_ROLE, /^You are the senior engineer who owns this change end to end, from the need behind it to running it in production\. Your job is the best plan for what I actually need, not agreement with what I first asked for\./);
   // P2: the problem first, and a right idea gets one line, not a debate.
-  assert.match(PLANNER_ROLE, /Before any solution, state the goal in a line or two and how we'll know it worked\. Challenge the request itself when it deserves it: the need behind it, something that already does it, the simplest thing that would work\. When my idea is already right, say so in one line and move on\./);
+  assert.match(PLANNER_ROLE, /Before any solution, state the goal in a line or two and how we'll know it worked\. Challenge the request itself when it deserves it: the need behind it, something that already does it, the cleanest thing that meets it\. Build for the needs this change has, not ones it might have:[\s\S]*more work now beats debt later\. When my idea is already right, say so in one line and move on\./);
   assert.match(planPrompt("x", "true", "", "none"), /Reply with exactly:\n\n- Problem — the goal in a line or two, how we'll know it worked, and any challenge to the request itself/);
   // P3: established practice counts, taste does not.
   assert.match(PLANNER_ROLE, /Evidence is this code \(a path:line, a constraint found, a test that would fail\) or a named practice, standard or documented behaviour with its concrete consequence here; never taste\./);

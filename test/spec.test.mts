@@ -2105,7 +2105,7 @@ test("spec review: each finding names the check it fails, and the stats count fi
   const { SPEC_CHECK_NAMES, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
   const { renderCard, summarize } = await import("../extensions/pb/stats.ts");
   // The tags are the writer's checks by name, read off the one list, plus the evidence rule and a catch-all.
-  assert.deepEqual(SPEC_CHECK_NAMES, ["Claims", "Values", "Proof", "Coverage", "Reach", "Consistency", "Evidence", "Other"]);
+  assert.deepEqual(SPEC_CHECK_NAMES, ["Claims", "Values", "Proof", "Coverage", "Reach", "Consistency", "Overengineering", "Evidence", "Other"]);
   assert.match(SPEC_REVIEWER_SYSTEM, /Give each finding the check it fails in its check field: one of the names above, Evidence when it breaks the evidence rule below, or Other\./);
   const t = setup({ verify: "true" });
   await written(t);
