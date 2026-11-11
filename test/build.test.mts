@@ -2564,3 +2564,36 @@ test("sibling repositories: /pb:undo puts the sibling back with the project", as
     fs.rmSync(sibling, { recursive: true, force: true });
   }
 });
+
+test("one build per working tree: a build running in another session refuses a second; one that left uncommitted files is named on the build-start screen", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store, gitHead } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  store.markAsked("standards");
+  await written(t);
+  assert.equal((await t.callTool("pb_write_spec", { name: "refund-flow", content: SPEC() })).error, undefined);
+  // refund-flow is building in another session: its session file was written a moment ago.
+  const other = path.join(t.repo, "..", `other-session-${process.pid}.jsonl`);
+  fs.writeFileSync(other, "{}\n");
+  const p = store.progress("refund-flow")!;
+  store.saveProgress({ ...p, phase: "building", session: other, baseCommit: gitHead(t.repo) });
+  fs.writeFileSync(path.join(t.repo, "refund.txt"), "half done\n");
+  await t.run("build", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /^refund-flow is building in another session right now \(.+\)\. Two builds in one working tree mix their files: each one's undo points, review, checks and commit would see both\. Let it finish or pause, then \/pb:build order-cancellation\.$/);
+  assert.equal(t.progress("order-cancellation").phase, "written", "refused: nothing approved");
+  // Its session went quiet long ago (a crash, a closed terminal): not running, but its files are still here.
+  const old = Date.now() / 1000 - 3 * 24 * 3600;
+  fs.utimesSync(other, old, old);
+  t.selects.push("Stop here");
+  await t.run("build", "order-cancellation");
+  assert.match(t.selectTitles.at(-1)!, /- ⚠ refund-flow's build stopped without finishing and 1 file changed since it began is uncommitted \(refund\.txt\): this build's undo points, review and commit would include it — \/pb:commit refund-flow first, unless they belong to this one/);
+  // Committed: nothing left to mix, and the build goes ahead without asking.
+  execSync("git add refund.txt && git commit -qm refund", { cwd: t.repo });
+  t.agent.script = diligent;
+  const screens = t.selectTitles.length;
+  await t.run("build", "order-cancellation");
+  assert.equal(t.selectTitles.length, screens);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  fs.rmSync(other, { force: true });
+});

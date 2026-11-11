@@ -14,7 +14,7 @@ import { runVerify } from "./verify.ts";
 import { COHERE_MIN_TASKS, agree, approvalDrift, buildOfSession, changedFilesSection, checkCommand, cmd, commands, driftStop, evidenceLine, finalExtras, loadBuildSpec, nextLine, pauseBuild, phaseHeader, post, redNotes, reply, resetLimit, retryCount, runtime, showProgress, specRef, repoSnapshots, specTasks, stepPrompt, stop, taskLine, text, tree, withChecking } from "./kit.ts";
 import { enterStep, finishBuild, lintsEachStep, nextStep } from "./phase.ts";
 
-const staleness = (updatedAt?: string): string => {
+export const staleness = (updatedAt?: string): string => {
   const ms = updatedAt ? Date.now() - new Date(`${updatedAt.replace(" ", "T")}Z`).getTime() : NaN;
   if (!(ms >= 0)) return "with no recent activity";
   const m = Math.floor(ms / 60000);

@@ -1,4 +1,5 @@
 /** /pb:build: the build-start screen, its checks and baseline questions, launching here or fresh, the pending-build offer, and resuming a paused build. */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
   ExtensionAPI,
@@ -10,11 +11,11 @@ import { tip } from "./help.ts";
 import { buildIntro, coherePrompt, continuePrompt, findingLine, finishSpecPrompt, fixText, specPrompt } from "./prompts.ts";
 import { type ParsedSpec, contractHash, specHash, specTextBlocks } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type Progress, COHERE_TASK_ID, Store, cap, gitHead, now, readEvents } from "./store.ts";
-import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
+import { type Progress, COHERE_TASK_ID, Store, cap, changedSince, gitHead, now, readEvents } from "./store.ts";
+import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, commands, findModel, instruct, liftPlanning, loadSpec, longCommandSec, normSpecArg, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
 import { offerStandards } from "./plan.ts";
 import { dryRunTests, editSpec, readySpecs, showSpec } from "./spec-tools.ts";
-import { COHERE_MARKER, beginCohereEntry, beginTask, confirmLiveBuild, needsCohere } from "./build-loop.ts";
+import { COHERE_MARKER, beginCohereEntry, beginTask, confirmLiveBuild, needsCohere, staleness } from "./build-loop.ts";
 import { ensureSpecReviewed, recordedFindings, reviewDoor } from "./spec-review.ts";
 import { advanceSpecFix, fixLive } from "./repair.ts";
 import { enterStep, nextPhase, nextTodo, unfinishedPhase } from "./phase.ts";
@@ -37,6 +38,44 @@ const resetExhausted = (tp: { attempts: number } | undefined, max: number): bool
    */
 
 export function registerBuildStart(pi: ExtensionAPI) {
+  /**
+   * Another spec's build in this working tree: one running now (its session written to within the longest a
+   * command may run silently, plus a margin), or one that left uncommitted files since its build began. The
+   * first refuses a second build; the rest are concerns on the build-start screen, since this build's base is
+   * HEAD and its undo points, review and commit would include those files.
+   */
+  /** When a file was last written, in ms; 0 when it's gone, so a deleted session never reads as live. */
+  const fileMtime = (file: string) => {
+    try {
+      return fs.statSync(file).mtimeMs;
+    } catch {
+      return 0;
+    }
+  };
+
+  const otherBuilds = (ctx: ExtensionContext, store: Store, name: string, cfg: ReturnType<Store["config"]>) => {
+    const silentMs = ((longCommandSec(cfg) || 3600) + 600) * 1000;
+    const uncommitted = new Set(changedSince(ctx.cwd));
+    let live: { name: string; updatedAt?: string } | undefined;
+    const leftovers: string[] = [];
+    for (const n of store.specNames()) {
+      if (n === name) continue;
+      const p = store.progress(n);
+      if (!p || p.phase === "written") continue;
+      const active = p.phase === "building" && !!p.session && Date.now() - fileMtime(p.session) < silentMs;
+      if (active) {
+        live ??= { name: n, updatedAt: p.updatedAt };
+        continue;
+      }
+      const files = p.baseCommit ? changedSince(ctx.cwd, p.baseCommit).filter((f) => uncommitted.has(f)) : [];
+      if (!files.length) continue;
+      const state = p.phase === "building" ? "build stopped without finishing" : p.phase === "paused" ? "build is paused" : "build is done";
+      const shown = files.slice(0, 5).join(", ") + (files.length > 5 ? `, … ${files.length - 5} more` : "");
+      leftovers.push(`${n}'s ${state} and ${files.length} file${files.length === 1 ? "" : "s"} changed since it began ${files.length === 1 ? "is" : "are"} uncommitted (${shown}): this build's undo points, review and commit would include ${files.length === 1 ? "it" : "them"} — /${cmd("commit")} ${n} first, unless they belong to this one`);
+    }
+    return { live, leftovers };
+  };
+
   const preBuildChecks = async (
     ctx: ExtensionContext,
     store: Store,
@@ -62,6 +101,12 @@ export function registerBuildStart(pi: ExtensionAPI) {
       return undefined;
     }
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
+    // One build per working tree: a second one would share its undo points, review diff, checks and commit.
+    const other = otherBuilds(ctx, store, name, cfg);
+    if (other.live) {
+      ctx.ui.notify(`${other.live.name} is building in another session right now (${staleness(other.live.updatedAt)}). Two builds in one working tree mix their files: each one's undo points, review, checks and commit would see both. Let it finish or pause, then /${cmd("build")} ${name}.`, "warning");
+      return undefined;
+    }
     if (spec.gate === "tests" && !testCmd) {
       ctx.ui.notify(`Verification is "tests" but no test command is set: set "verify" in ${store.rel("config.json")}, or use Verification: build/none in the spec.`, "warning");
       return undefined;
@@ -72,7 +117,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
     }
     // What could make you hold the build is collected, not asked one dialog at a time: the build-start screen
     // shows it all once, after the spec review, with the one choice it leads to.
-    const concerns: string[] = [];
+    const concerns: string[] = [...other.leftovers];
     if (spec.dependsOn && !store.finishedPhase(spec.dependsOn)) concerns.push(`${name} depends on ${spec.dependsOn}, which isn't built yet`);
     if (!o.checked && spec.gate === "tests" && baselineApplies(ctx, store, testCmd)) {
       const b = store.baseline(ctx.sessionManager.getSessionFile() ?? undefined)!;

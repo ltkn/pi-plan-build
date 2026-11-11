@@ -336,6 +336,13 @@ a fresh session can't be opened at that point), keep files changed while
 planning, build despite a red baseline or an unbuilt dependency. The build
 summary lists what was decided without you.
 
+**One build per working tree.** A build's undo points, review, checks and commit
+see the whole tree, so `/pb:build` refuses while another spec is building in
+another session right now (its session written to recently), and the build-start
+screen names another spec whose build left uncommitted files: `/pb:commit` that
+one first, or build anyway if they belong to this one. Build in sequence, and
+commit between specs.
+
 **Coming back later.** Reopen the session (`/resume`): after a checkpoint it
 starts small, from the spec as it was at that checkpoint plus what followed.
 Or start clean from the spec as it is on disk now (including your own edits):
