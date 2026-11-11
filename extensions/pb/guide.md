@@ -830,7 +830,9 @@ into Pi's own compaction, pb writes that summary too, adding the files the task
 has changed so far and the files read before, so it carries on instead of
 starting over. `/pb:undo` to a task from before a reset restores the files only
 (the old conversation would bring the whole context back) and says what was
-undone.
+undone. Undo restores the whole tree, so when a file differs that no finished
+step changed (your own edit, or the step in progress), it names those files and
+asks: restore all, or only what the finished steps changed and keep the rest.
 
 While it runs, this is an ordinary Pi session: watch, interrupt with Esc, ask
 things. **Decisions you make here** are written into the spec's Decisions

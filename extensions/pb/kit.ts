@@ -679,7 +679,7 @@ export const stepPrompt = (ctx: ExtensionContext, store: Store, spec: ParsedSpec
   const { cfg, testCmd, buildCmd, lintCmd } = commands(ctx.cwd, store);
   const tp = p.tasks.find((t) => t.id === task.id);
   const red = needsRed(spec, task);
-  return taskPrompt(task, attempts, cfg.maxAttempts, checkCommand(spec, task, testCmd, buildCmd, false, cfg.taskChecks === "each"), red && !tp?.redCommand, specRef(store, p.spec), doneHandoff(store, p, task.id), lintsEachStep(p) ? lintCmd : null);
+  return taskPrompt(task, attempts, cfg.maxAttempts, taskDoneCommands(spec, task, testCmd, buildCmd, cfg.taskChecks === "each"), red && !tp?.redCommand, specRef(store, p.spec), doneHandoff(store, p, task.id), lintsEachStep(p) ? lintCmd : null);
 };
 
 /**
@@ -877,6 +877,16 @@ export const checkCommand = (spec: ParsedSpec, task: SpecTask | undefined, testC
   // exists): type drift then fails fast at the task, inside the same pb_task_done call.
   if (!each) return buildCmd;
   return spec.gate === "tests" ? (task?.test ?? buildCmd) : buildCmd;
+};
+
+/**
+ * What pb runs when a task reports done: its check (above), then — for a task that proves itself red first —
+ * its own Test:, so the green half of that proof is pb's too, not the model's word. Without per-task checks
+ * that is the only time pb runs a task's Test: before the final suite.
+ */
+export const taskDoneCommands = (spec: ParsedSpec, task: SpecTask | undefined, testCmd: string | null, buildCmd: string | null, each: boolean): string[] => {
+  const own = spec.gate === "tests" && task?.test && needsRed(spec, task) ? task.test : null;
+  return [...new Set([checkCommand(spec, task, testCmd, buildCmd, false, each), own].filter((x): x is string => !!x))];
 };
 
 // Checks running right now: the prompt cache is certain to be needed afterwards.

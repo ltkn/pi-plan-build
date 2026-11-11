@@ -59,7 +59,7 @@ export interface ReportStats {
     exploreIn: number;
     exploreOut: number;
   };
-  cost: { build: number; review: number; explore: number };
+  cost: { build: number; review: number; explore: number; fix: number };
   context: { compactions: number; resets: number; nudges: number };
   ms: number;
   /** the spec phase (reviews, claim checks, repair laps and the fresh runs' cost); null before any ran */
@@ -166,7 +166,7 @@ const reportStats = (spec: SpecStats): ReportStats => {
       exploreIn: x.explorer.prompt,
       exploreOut: x.explorer.output,
     },
-    cost: { build: x.build.cost, review: x.review.cost, explore: x.explorer.cost },
+    cost: { build: x.build.cost, review: x.review.cost, explore: x.explorer.cost, fix: x.fix.cost },
     context: x.context,
     ms: x.ms,
     spec: x.spec ?? null,

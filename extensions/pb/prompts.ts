@@ -188,7 +188,7 @@ export function approachPrompt(focus: string, standards: string): string {
 
 ${which}
 
-Ground it first: the files and roles involved, the existing code to imitate (by path, not pasted), and the constraints found. Check the project map in AGENTS.md first; broad questions go to pb_explore, anything needing running code to pb_try. Don't change the project's files.
+Ground it first: the files and roles involved, the existing code to imitate (by path, not pasted), and the constraints found. ${MAP_FIRST} Broad questions go to pb_explore, anything needing running code to pb_try. Don't change the project's files.
 
 Reply with exactly:
 
@@ -360,7 +360,7 @@ ${SPEC_SELF_CHECK}${answersBlock(answers)}${extraBlock(extra)}`;
 function gateLine(spec: ParsedSpec, buildCmd: string | null, each: boolean): string {
   if (spec.gate === "none") return `no checks run (${spec.gateReason})`;
   const end = spec.gate === "tests" ? "the full suite" : `a compile${buildCmd ? ` (\`${buildCmd}\`)` : ""}, no tests (${spec.gateReason})`;
-  if (!each) return `after the last task the harness runs ${end}${buildCmd ? `; each task is also compiled (\`${buildCmd}\`) when done` : ""}; check each task yourself`;
+  if (!each) return `after the last task the harness runs ${end}${buildCmd ? `; each task is also compiled (\`${buildCmd}\`) when done` : ""}, and a task that proved its tests red has its own Test: run when it reports done`;
   return spec.gate === "tests" ? "it runs the task's Test: command (a compile when there is none), and the full suite after the last task" : `it runs ${end}`;
 }
 
@@ -428,8 +428,9 @@ export const SELF_REVIEW_RULE = "Before reporting, re-read your diff and fix wha
  * reference: the spec file and the sections that bind the task; read at the source, never pasted.
  * handoff: where the finished tasks left their code (a later task starts from the code, not from memory).
  */
-export function taskPrompt(task: SpecTask, attempt: number, max: number, check: string | null, red = false, reference = "", handoff = "", lint: string | null = null): string {
-  const runs = [check, lint].filter((c): c is string => !!c).map((c) => `\`${c}\``).join(" then ");
+export function taskPrompt(task: SpecTask, attempt: number, max: number, checks: string[], red = false, reference = "", handoff = "", lint: string | null = null): string {
+  const all = [...checks, ...(lint ? [lint] : [])];
+  const runs = all.map((c) => `\`${c}\``).join(" then ");
   return `[pb:build] Task ${task.id}${attempt > 1 ? ` (attempt ${attempt} of ${max})` : ""}. Do only this task:
 
 ${task.text}
@@ -438,7 +439,7 @@ ${reference ? `${reference}\n\n` : ""}${handoff ? `${handoff}\n\n` : ""}Keep the
 
 ${CRAFT_RULE}
 
-${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}${SELF_REVIEW_RULE} When done, call pb_task_done with task "${task.id}"${runs ? `: it runs ${runs} itself, so don't run ${check && lint ? "those" : "that"} just before${!check && task.test ? `; run \`${task.test}\` first` : ""}` : task.test ? ` once \`${task.test}\` passes` : ""} plus changed/caveat/rejected/open (each required: what changed, what the next task must respect, what was tried and discarded, what is still unchecked — "none" where there is genuinely nothing). If the Goal or a Contract cannot be built as written, status "blocked" with the evidence: the build stops for a revised spec and a new approval.`;
+${red ? `Tests first: write the tests for its Acceptance lines, then call pb_tests_red. The harness runs \`${task.test}\` and needs it to fail for the behaviour that is missing (stubs of new signatures are fine, so the tests compile). Then make the change. ` : ""}${SELF_REVIEW_RULE} When done, call pb_task_done with task "${task.id}"${runs ? `: it runs ${runs} itself, so don't run ${all.length > 1 ? "those" : "that"} just before${task.test && !checks.includes(task.test) ? `; run \`${task.test}\` first` : ""}` : task.test ? ` once \`${task.test}\` passes` : ""} plus changed/caveat/rejected/open (each required: what changed, what the next task must respect, what was tried and discarded, what is still unchecked — "none" where there is genuinely nothing). If the Goal or a Contract cannot be built as written, status "blocked" with the evidence: the build stops for a revised spec and a new approval.`;
 }
 
 export function continuePrompt(task: SpecTask): string {

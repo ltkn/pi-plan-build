@@ -161,6 +161,8 @@ export interface Summary {
   reviewMs?: number;
   /** What getting the spec ready cost: its reviews, claim checks and repair laps. Present once any ran. */
   spec?: SpecPhase;
+  /** What the /pb:fix laps' own sessions cost. */
+  fix: { prompt: number; output: number; cost: number };
   /** The first code review's findings against the project map: rules it stated that the change broke, lines it got wrong. Present once a review recorded them. */
   map?: { stated: number; wrong: number };
 }
@@ -188,7 +190,7 @@ export interface SpecPhase {
   rebutted: number;
   parked: number;
   assumed: number;
-  /** tokens and cost of the fresh review and claim-check runs (a lap runs in the planning session: not counted) */
+  /** tokens and cost of the fresh review and claim-check runs and of the repair laps' own sessions */
   prompt: number;
   output: number;
   cost: number;
@@ -201,7 +203,7 @@ function specPhase(e: Ev[]): SpecPhase | undefined {
   const reviews = e.filter((x) => x.type === "spec-review" && x.verdict !== "error");
   const checks = e.filter((x) => x.type === "spec-check" && x.verdict !== "error");
   const laps = e.filter((x) => x.type === "spec-fix");
-  const runs = e.filter((x) => x.type === "spec-review" || x.type === "spec-check");
+  const runs = e.filter((x) => x.type === "spec-review" || x.type === "spec-check" || (x.type === "lap-usage" && x.phase === "spec-fix"));
   if (!runs.length && !laps.length) return undefined;
   const findings: [number, number, number, number] = [0, 0, 0, 0];
   const byCheck = new Map<string, number>();
@@ -331,6 +333,9 @@ export function summarize(s: SpecStats): Summary {
     specReviewMs: lastMs("spec-review"),
     reviewMs: typeof lastReview?.ms === "number" ? lastReview.ms : undefined,
     spec: specPhase(e),
+    fix: e
+      .filter((x) => x.type === "lap-usage" && x.phase === "fix")
+      .reduce((a, x) => ({ prompt: a.prompt + num(x.input) + num(x.cacheRead) + num(x.cacheWrite), output: a.output + num(x.output), cost: a.cost + num(x.cost) }), { prompt: 0, output: 0, cost: 0 }),
     map: firstMapTally(e),
   };
 }
@@ -375,6 +380,7 @@ export function renderCard(s: SpecStats): string {
     ...(phases.length ? [`Time      ${phases.join(" · ")}`] : []),
     `Context   peak ${human(b.peak)}${b.window ? ` (${pct(b.peak, b.window)} of ${human(b.window)})` : ""}`,
     `Reviewer  in ${human(x.review.prompt)} · out ${human(x.review.output)} · $${x.review.cost.toFixed(2)}`,
+    ...(x.fix.prompt + x.fix.output > 0 ? [`Fix laps  in ${human(x.fix.prompt)} · out ${human(x.fix.output)} · $${x.fix.cost.toFixed(2)}`] : []),
     `Explorer  ${x.explorer.calls ? `${x.explorer.calls} calls · in ${human(x.explorer.prompt)} · out ${human(x.explorer.output)}${x.explorer.ms > 0 ? ` @ ${outRate(x.explorer.prompt + x.explorer.output, x.explorer.ms)} tok/s` : ""} · $${x.explorer.cost.toFixed(2)}` : "not used"}`,
     `Session   ${x.context.compactions} compactions · ${x.context.resets} resets · ${x.context.nudges} reminders`,
     "",
@@ -389,7 +395,7 @@ export function renderAll(list: SpecStats[]): string {
   const lp = (v: string, n: number) => v.padStart(n);
   const rows = list.map((s) => {
     const x = summarize(s);
-    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 10)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost + x.explorer.cost + (x.spec?.cost ?? 0)).toFixed(2)}`, 9)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
+    return `${pad(s.name, 26)}${lp(`${x.done}/${x.tasks}`, 7)}${lp(pct(...x.firstTry), 9)}${lp(String(x.failed), 8)}${lp(String(Object.values(x.pauses).reduce((a, b) => a + b, 0)), 8)}  ${pad(x.reviews.at(-1)?.replace("changes_needed", "changes") ?? "–", 10)}${lp(human(x.build.prompt + x.build.output), 9)}${lp(pct(x.build.cached, x.build.prompt), 7)}${lp(`$${(x.build.cost + x.review.cost + x.explorer.cost + (x.spec?.cost ?? 0) + x.fix.cost).toFixed(2)}`, 9)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
   });
   return ["```", `${pad("spec", 26)}${lp("tasks", 7)}${lp("1st try", 9)}${lp("failed", 8)}${lp("pauses", 8)}  ${pad("review", 10)}${lp("tokens", 9)}${lp("cache", 7)}${lp("cost", 9)}${lp("time", 9)}`, ...rows, "```"].join("\n");
 }
@@ -413,16 +419,16 @@ export function renderCompare(list: SpecStats[], n: number): string {
     const firstReview = s.events.find((e) => e.type === "review");
     const reviewFound = firstReview ? (Array.isArray(firstReview.p) ? (firstReview.p as unknown[]).reduce<number>((a, v) => a + num(v), 0) : 0) + num(firstReview.dismissed) : undefined;
     const fixLaps = s.events.filter((e) => e.type === "fix").length;
-    return `${pad(s.name, 24)}${lp(firstSpecReview ? specFound : "–", 10)}${lp(String(x.spec?.laps ?? 0), 6)}${lp(pct(...x.firstTry), 8)}${lp(reviewFound === undefined ? "–" : String(reviewFound), 8)}${lp(String(fixLaps), 6)}${lp(x.map ? `${x.map.stated}/${x.map.wrong}` : "–", 6)}${lp(money(x.spec?.cost ?? 0), 8)}${lp(money(x.build.cost), 8)}${lp(money(x.review.cost), 9)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
+    return `${pad(s.name, 24)}${lp(firstSpecReview ? specFound : "–", 10)}${lp(String(x.spec?.laps ?? 0), 6)}${lp(pct(...x.firstTry), 8)}${lp(reviewFound === undefined ? "–" : String(reviewFound), 8)}${lp(String(fixLaps), 6)}${lp(x.map ? `${x.map.stated}/${x.map.wrong}` : "–", 6)}${lp(money(x.spec?.cost ?? 0), 8)}${lp(money(x.build.cost), 8)}${lp(money(x.review.cost), 9)}${lp(money(x.fix.cost), 7)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
   });
   return [
     "```",
-    `${pad("spec", 24)}${lp("spec P0-3", 10)}${lp("laps", 6)}${lp("1st try", 8)}${lp("review", 8)}${lp("fixes", 6)}${lp("map", 6)}${lp("$spec", 8)}${lp("$build", 8)}${lp("$review", 9)}${lp("build", 9)}`,
+    `${pad("spec", 24)}${lp("spec P0-3", 10)}${lp("laps", 6)}${lp("1st try", 8)}${lp("review", 8)}${lp("fixes", 6)}${lp("map", 6)}${lp("$spec", 8)}${lp("$build", 8)}${lp("$review", 9)}${lp("$fix", 7)}${lp("build", 9)}`,
     ...rows,
     "",
     "spec P0-3: the first spec review's findings · laps: spec repair laps · review: findings the first code review reported",
     "map: of the first code review's findings, how many broke a rule the project map states / found a map line wrong",
-    "fixes: /pb:fix laps · $: each phase's fresh runs and build turns (the planning conversation isn't counted) · oldest first",
+    "fixes: /pb:fix laps · $: each phase's fresh runs and sessions — the spec's reviews and repair laps, the build, the review, the fix laps (the planning conversation isn't counted) · oldest first",
     "```",
   ].join("\n");
 }

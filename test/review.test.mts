@@ -1774,7 +1774,7 @@ test("review: a task's Test: command is the proof; there is no marker mapping", 
   assert.match(REVIEWER_SYSTEM, /an id you leave out is not verified/i);
   assert.match(REVIEWER_SYSTEM, /not met.*P1 finding/);
   const spec = parseSpec(SPEC()).spec!;
-  assert.match(taskPrompt(spec.tasks[0], 1, 3, null, true), /then call pb_tests_red\. The harness runs `test -f T1\.txt` and needs it to fail/);
+  assert.match(taskPrompt(spec.tasks[0], 1, 3, [], true), /then call pb_tests_red\. The harness runs `test -f T1\.txt` and needs it to fail/);
 });
 
 test("review: a contract edited after approval is refused until /pb:build re-approves", async () => {

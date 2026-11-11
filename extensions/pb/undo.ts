@@ -18,9 +18,8 @@ export function registerUndo(pi: ExtensionAPI) {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
-      // A repair lap runs in the session that owns the spec, which may be neither the build session
-      // nor the one that originally wrote it: the open lap names it first, then the session's spec,
-      // then the newest spec it wrote.
+      // Which spec: an open repair lap's (run from its own session), else this session's build, else the
+      // newest spec this session wrote — the planning session a lap or a fresh build comes back to.
       const here = specOfSession(ctx);
       const repair = store.fixOfSession(session);
       const written = store.writtenSpec(session);
@@ -70,8 +69,22 @@ export function registerUndo(pi: ExtensionAPI) {
       ]
         .filter(Boolean)
         .join("\n");
-      if (ctx.hasUI && !(await ctx.ui.confirm(`Undo to before ${target.id === "start" ? "the build" : target.id}?`, summary))) return;
-      const reverted = restore(ctx.cwd, cur.commit, target.commit);
+      // A file no finished step recorded changing is yours, or the step in progress's: pb can't tell which, so
+      // it names them and lets you keep them. Without anyone to ask, everything goes back, as it always did.
+      const stepFiles = new Set(cps.slice(idx).flatMap((c) => c.files ?? []));
+      const others = files.filter((f) => !stepFiles.has(f));
+      const ours = files.filter((f) => stepFiles.has(f));
+      const question = `Undo to before ${target.id === "start" ? "the build" : target.id}?`;
+      let only: string[] | undefined;
+      if (ctx.hasUI && others.length) {
+        const ALL = `Restore all ${files.length} file${files.length === 1 ? "" : "s"}`;
+        const STEPS = `Restore only the ${ours.length} file${ours.length === 1 ? "" : "s"} finished steps changed; keep the other ${others.length}`;
+        const shownOthers = others.slice(0, 20).join(", ") + (others.length > 20 ? ` … (+${others.length - 20})` : "");
+        const choice = await ctx.ui.select(`${question}\n${summary}\nNo finished step changed these (your edits, or the step in progress): ${shownOthers}`, [ALL, STEPS, "Cancel"]);
+        if (choice !== ALL && choice !== STEPS) return;
+        if (choice === STEPS) only = ours;
+      } else if (ctx.hasUI && !(await ctx.ui.confirm(question, summary))) return;
+      const reverted = only && !only.length ? { restored: [], guardFailed: false } : restore(ctx.cwd, cur.commit, target.commit, only ?? []);
       if (reverted.guardFailed) return ctx.ui.notify("Nothing was undone: the guard snapshot for the drift check failed (is git healthy?). Your files are as they were; try again.", "error");
       // The spec lives outside the snapshots, so it is restored from the row's own text — and the same
       // guard as the files: a spec that changed while the question was open is named, never clobbered.
@@ -79,7 +92,8 @@ export function registerUndo(pi: ExtensionAPI) {
       const specChanged = target.spec !== undefined && specNow !== currentSpec;
       const specRestored = target.spec !== undefined && !specChanged && specNow !== target.spec;
       if (specRestored) store.writeSpec(name, target.spec!);
-      const skipped = files.filter((f) => !reverted.restored.includes(f));
+      const kept = only ? others : [];
+      const skipped = files.filter((f) => !reverted.restored.includes(f) && !kept.includes(f));
       let siblingsRestored = 0;
       for (const s of siblings) {
         if (!s.root || !s.now) {
@@ -163,11 +177,12 @@ export function registerUndo(pi: ExtensionAPI) {
       const note = beforeCompaction
         ? `\nThe conversation wasn't rewound (that point is before a context reset or compaction). What was undone: ${undoneRows.map((c) => c.summary ?? `${c.id} (unfinished)`).join("; ") || "nothing finished"}.`
         : "";
+      const keptNote = kept.length ? `\nKept as you asked: ${kept.join(", ")}.` : "";
       const leftAlone = skipped.length
         ? `\nLeft alone because they changed again since the diff was taken: ${skipped.join(", ")} — restore them by hand if that wasn't you.`
         : "";
       post(
-        `**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${reverted.restored.length + siblingsRestored + (specRestored ? 1 : 0)} file(s) restored${rewound ? ", the conversation rewound" : ""}.\n${summary}${note}${leftAlone}\n\n${tip("undo.done", { id: undoEntry.id })}`,
+        `**↺ Undone to before ${target.id === "start" ? "the build" : target.id}** — ${reverted.restored.length + siblingsRestored + (specRestored ? 1 : 0)} file(s) restored${rewound ? ", the conversation rewound" : ""}.\n${summary}${note}${keptNote}${leftAlone}\n\n${tip("undo.done", { id: undoEntry.id })}`,
       );
     },
   });

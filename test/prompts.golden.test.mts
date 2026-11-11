@@ -62,7 +62,7 @@ const RENDERED: Record<string, () => string> = {
   "checkpoint": () => prompts.checkpointPrompt(72, ["order-cancellation"]),
   "continue-plan": () => prompts.continuePlanPrompt("order-cancellation", SPEC, ""),
   "build-intro": () => prompts.buildIntro("order-cancellation", parsed, "npx tsc --noEmit", false, ""),
-  "task": () => prompts.taskPrompt(task, 1, 3, "npx tsc --noEmit", true, reference, "Already done: T0 (src/order.ts [Order])", "npm run lint --silent"),
+  "task": () => prompts.taskPrompt(task, 1, 3, ["npx tsc --noEmit", task.test!], true, reference, "Already done: T0 (src/order.ts [Order])", "npm run lint --silent"),
   "cohere": () => prompts.coherePrompt("abc1234", 1, 3, reference),
   "check-failed": () => prompts.fixText("T1", "`npm test -- order-cancel`", "1 failing: expected 409, got 200", 1, 3, false, reference),
   "nudge": () => prompts.nudgePrompt("T1"),

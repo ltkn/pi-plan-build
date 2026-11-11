@@ -1,4 +1,4 @@
-words: 247
+words: 260
 
 [pb:build order-cancellation] Build .pi/pb/specs/order-cancellation/spec.md. The planning is done: implement it as written.
 
@@ -8,4 +8,4 @@ words: 247
 - Don't commit or discard with git; leave .pi/ alone.
 - Production: a read-only query only when local code and data cannot answer, stating why, the table and a row cap (at most ~500 rows); never a production write, channel or real notification.
 - Tests quiet, full log to a temp file outside the project; failures back only.
-- Finish each task with pb_task_done (changed/caveat/rejected/open): after the last task the harness runs the full suite; each task is also compiled (`npx tsc --noEmit`) when done; check each task yourself. It gives you the next task.
+- Finish each task with pb_task_done (changed/caveat/rejected/open): after the last task the harness runs the full suite; each task is also compiled (`npx tsc --noEmit`) when done, and a task that proved its tests red has its own Test: run when it reports done. It gives you the next task.

@@ -351,8 +351,17 @@ export function registerHooks(pi: ExtensionAPI) {
       return;
     }
     const { store, name, progress } = specOfSession(ctx);
-    if (!name || !progress) return;
     const u = m.usage;
+    // A lap runs in a session of its own: its turns are that phase's cost, for the spec it repairs or fixes.
+    const session = ctx.sessionManager.getSessionFile();
+    const repairLap = store.fixOfSession(session);
+    const fixLap = repairLap ? undefined : store.fixSession(session);
+    const lap = repairLap ? { spec: repairLap.name, phase: "spec-fix" } : fixLap ? { spec: fixLap.spec, phase: "fix" } : undefined;
+    if (lap) {
+      store.event(lap.spec, { type: "lap-usage", phase: lap.phase, input: u.input ?? 0, output: u.output ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0, cost: u.cost?.total ?? 0 });
+      return;
+    }
+    if (!name || !progress) return;
     store.event(name, {
       type: "usage",
       task: progress.current ?? "chat",

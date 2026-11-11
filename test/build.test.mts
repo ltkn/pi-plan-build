@@ -334,7 +334,7 @@ test("task gate: lint runs after each task's check and fails that task like any 
   await t.run("build");
   assert.match(said[0], /The check for T1 failed[\s\S]*`false`/); // at the task that caused it, not at the end
   assert.ok(!said.some((s) => /Task T2/.test(s))); // a red lint never hands out the next task
-  assert.match(t.instructions.find((i) => /Task T1/.test(i))!, /it runs `false` itself/); // the handout names the lint it will run
+  assert.match(t.instructions.find((i) => /Task T1/.test(i))!, /it runs `test -f T1\.txt` then `false` itself/); // the handout names the task's own test and the lint it will run
   assert.ok(t.events("order-cancellation").some((e: any) => e.type === "check" && e.task === "T1" && e.lint === false && e.ok === false));
   assert.equal(t.progress("order-cancellation").phase, "paused");
 });
@@ -389,7 +389,7 @@ test("final gate: when the last task already ran the suite and lint, neither re-
 
 test("build: a task is told to follow the codebase, keep the change small, and re-read its diff before reporting", async () => {
   const { taskPrompt } = await import("../extensions/pb/prompts.ts");
-  const prompt = taskPrompt(parseSpec(SPEC()).spec!.tasks[0], 1, 3, "npx tsc --noEmit", false, "", "", "npm run lint --silent");
+  const prompt = taskPrompt(parseSpec(SPEC()).spec!.tasks[0], 1, 3, ["npx tsc --noEmit"], false, "", "", "npm run lint --silent");
   assert.match(prompt, /find where the project solves the same kind of problem \(the spec's Findings name the code to imitate\), match its conventions/);
   assert.match(prompt, /Where that code falls short of the engineering standards \(outdated, insecure, a workaround\), don't copy the flaw: write the new code to the standards and name the old pattern under open/);
   assert.match(prompt, /extend an existing helper rather than adding a near-copy/);
@@ -493,7 +493,7 @@ test("lint gate: an auto-detected lint the baseline ran clean gates every task",
   assert.equal(p.lintGate, "task");
   assert.equal(p.phase, "built");
   assert.ok(t.events("order-cancellation").some((e: any) => e.type === "check" && e.task === "T1" && e.lint === true));
-  assert.match(t.instructions.find((i) => /Task T1/.test(i))!, /it runs `npm run lint --silent` itself/);
+  assert.match(t.instructions.find((i) => /Task T1/.test(i))!, /it runs `test -f T1\.txt` then `npm run lint --silent` itself/);
   assert.ok(!t.notes.some((n) => /gates only the final check/.test(n)));
 });
 
@@ -1057,11 +1057,11 @@ test("prompts: task, retry and coherence messages name the spec instead of pasti
   const reference = specReference("order-cancellation");
   assert.match(reference, /^The spec that binds this work is \.pi\/pb\/specs\/order-cancellation\/spec\.md: read "Goal"/);
   const task = parseSpec(SPEC()).spec!.tasks[0];
-  assert.match(taskPrompt(task, 1, 3, null, false, reference), /Do only this task:[\s\S]*The spec that binds this work[\s\S]*before you change anything/);
-  assert.doesNotMatch(taskPrompt(task, 1, 3, null, false, reference), /## Goal|## Contracts/); // no copy
+  assert.match(taskPrompt(task, 1, 3, [], false, reference), /Do only this task:[\s\S]*The spec that binds this work[\s\S]*before you change anything/);
+  assert.doesNotMatch(taskPrompt(task, 1, 3, [], false, reference), /## Goal|## Contracts/); // no copy
   assert.match(fixText("T1", "`true` failed", "output", 1, 3, false, reference), /output\n\nThe spec that binds this work[\s\S]*Fix the cause/);
   assert.match(coherePrompt("abc", 1, 3, reference), /never weaken an existing test\.[\s\S]*The spec that binds this work/);
-  assert.doesNotMatch(taskPrompt(task, 1, 3, null, false), /The spec that binds/);
+  assert.doesNotMatch(taskPrompt(task, 1, 3, [], false), /The spec that binds/);
 });
 
 test("build: verification none runs no checks; no new tests reaches the agent", async () => {
@@ -1094,7 +1094,7 @@ test("build: existing tests cut down or skipped don't fail a task: they are list
   assert.match(t.instructions.filter((i) => i.startsWith("[pb:review]")).at(-1)!, /## Existing tests the build changed[\s\S]*judge whether each was justified:\n- T1: tests\/test_a\.py: 2 → 1 test cases/);
 });
 
-test("build: by default, tasks aren't checked one by one; the full suite runs after the last, and a failure goes back", async () => {
+test("build: by default, a task runs only its own red-proven Test:, never the suite; the full suite runs after the last, and a failure goes back", async () => {
   const t = setup({ verify: "test -f T1.txt && test -f T2.txt && test -f fixed.txt" });
   await written(t);
   t.agent.script = async (text, tool) => {
@@ -1104,14 +1104,14 @@ test("build: by default, tasks aren't checked one by one; the full suite runs af
   await t.run("build");
   const checks = t.events("order-cancellation").filter((e) => e.type === "check");
   assert.deepEqual(checks.map((c) => [c.task, c.command, c.ok]), [
-    ["T1", null, true],
-    ["T2", null, true],
+    ["T1", "test -f T1.txt", true], // the green half of T1's red proof, run by pb
+    ["T2", "test -f T2.txt", true],
     ["final", "test -f T1.txt && test -f T2.txt && test -f fixed.txt", false],
     ["final", "test -f T1.txt && test -f T2.txt && test -f fixed.txt", true],
   ]);
-  assert.match(t.instructions[0], /after the last task the harness runs the full suite; check each task yourself/);
-  assert.match(t.instructions[0], /When done, call pb_task_done with task "T1" once `test -f T1\.txt` passes/);
-  assert.match(t.results[0], /✓ T1 done \(checked after the last task\)/);
+  assert.match(t.instructions[0], /after the last task the harness runs the full suite, and a task that proved its tests red has its own Test: run when it reports done/);
+  assert.match(t.instructions[0], /When done, call pb_task_done with task "T1": it runs `test -f T1\.txt` itself, so don't run that just before/);
+  assert.match(t.results[0], /✓ T1 passed \(`test -f T1\.txt`\)/);
   assert.match(t.results[1], /The final check failed \(attempt 2 of 2\)/); // the last task's done runs the whole suite
   assert.equal(t.progress("order-cancellation").phase, "built");
   assert.equal(t.stat.runs, 1);
@@ -2408,7 +2408,7 @@ test("build: a rename that orphans a prose citation is flagged at completion", a
 test("build: a task stays narrow, edits structured files literally, and leaves the full suite to the harness", async () => {
   const { taskPrompt, specPrompt, finishSpecPrompt } = await import("../extensions/pb/prompts.ts");
   const spec = parseSpec(SPEC()).spec!;
-  const prompt = taskPrompt(spec.tasks[0], 1, 3, null);
+  const prompt = taskPrompt(spec.tasks[0], 1, 3, []);
   assert.match(prompt, /Keep the change to this task/);
   assert.match(prompt, /finish the smallest coherent part and report the rest as open/);
   assert.match(prompt, /Don't run the full suite/);
@@ -2596,4 +2596,42 @@ test("one build per working tree: a build running in another session refuses a s
   assert.equal(t.selectTitles.length, screens);
   assert.equal(t.progress("order-cancellation").phase, "built");
   fs.rmSync(other, { force: true });
+});
+
+test("build: a task whose own Test: still fails is sent back, even without per-task checks: pb runs the green half of the red proof", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const said: string[] = [];
+  t.agent.script = async (text, tool) => {
+    const task = taskOf(text);
+    if (!task) return;
+    await tool("pb_tests_red", { task });
+    // The model claims done without creating the file its Test: checks for.
+    said.push((await tool("pb_task_done", { task, status: "done", changed: `did ${task}`, caveat: "none", rejected: "none", open: "none" })).content![0].text);
+  };
+  await t.run("build");
+  assert.match(said[0], /The check for T1 failed[\s\S]*`test -f T1\.txt`/);
+  assert.ok(!said.some((s) => /Task T2/.test(s)));
+});
+
+test("undo: files no finished step changed are named, and you can keep them", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  // After the build: an edit of yours, which no step of the build made.
+  fs.writeFileSync(path.join(t.repo, "notes.md"), "mine\n");
+  t.selects.push("Restore only the 1 file finished steps changed; keep the other 1");
+  await t.run("undo", "T2");
+  assert.match(t.selectTitles.at(-1)!, /^Undo to before T2\?\n[\s\S]*No finished step changed these \(your edits, or the step in progress\): notes\.md$/);
+  assert.ok(!fs.existsSync(path.join(t.repo, "T2.txt")), "the step's file went back");
+  assert.equal(t.read("notes.md"), "mine\n", "yours stayed");
+  assert.match(t.posts.at(-1)!, /Kept as you asked: notes\.md\./);
+  // Redo, then undo everything: your file goes too, because you said so.
+  await t.run("undo", "u1");
+  assert.ok(fs.existsSync(path.join(t.repo, "T2.txt")), "redone");
+  t.selects.push("Restore all 3 files");
+  await t.run("undo", "T1");
+  assert.ok(!fs.existsSync(path.join(t.repo, "notes.md")));
+  assert.ok(!fs.existsSync(path.join(t.repo, "T1.txt")));
 });

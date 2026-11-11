@@ -11,7 +11,7 @@ import { type ParsedSpec, type SpecTask, buildTask, earlierProof, needsRed } fro
 import { buildTimeLabel, buildTiming } from "./stats.ts";
 import { type Progress, COHERE_TASK_ID, Store, appendCheckpoint, diffStat, gitHead, now, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { COHERE_MIN_TASKS, agree, approvalDrift, buildOfSession, changedFilesSection, checkCommand, cmd, commands, driftStop, evidenceLine, finalExtras, loadBuildSpec, nextLine, pauseBuild, phaseHeader, post, redNotes, reply, resetLimit, retryCount, runtime, showProgress, specRef, repoSnapshots, specTasks, stepPrompt, stop, taskLine, text, tree, withChecking } from "./kit.ts";
+import { COHERE_MIN_TASKS, agree, approvalDrift, buildOfSession, changedFilesSection, checkCommand, cmd, commands, driftStop, evidenceLine, finalCheckCommands, loadBuildSpec, nextLine, pauseBuild, phaseHeader, post, redNotes, reply, resetLimit, retryCount, runtime, showProgress, specRef, repoSnapshots, specTasks, stepPrompt, stop, taskDoneCommands, taskLine, text, tree, withChecking } from "./kit.ts";
 import { enterStep, finishBuild, lintsEachStep, nextStep } from "./phase.ts";
 
 export const staleness = (updatedAt?: string): string => {
@@ -217,14 +217,17 @@ const checkAndAdvance = async (
 
   let failure: string | undefined;
   let what = "";
-  // o.suiteDone: the suite passed as the previous step's own check with no work since (the
-  // final step was pushed because the last task already ran it) — run only the extra gates.
-  // Inferred from lastVerify instead would go stale across later tasks, so callers say so.
-  const ran = checkCommand(spec, task, testCmd, buildCmd, final, each);
-  const suiteDone = !!final && !!ran && !!o.suiteDone;
-  if (ran && !suiteDone) {
-    showProgress(ctx, p, `checking ${final ? "everything" : p.current}: ${ran}`);
-    p.lastVerify = await withChecking(() => runVerify(ran, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
+  // The step's own check: a task's from taskDoneCommands (its check, then its own Test: when it proved
+  // itself red), the final step's suite from finalCheckCommands — the list the review and fix laps run too.
+  // o.suiteDone: the suite passed as the previous step's own check with no work since (the final step was
+  // pushed because the last task already ran it) — run only the extra gates. Inferred from lastVerify
+  // instead would go stale across later tasks, so callers say so.
+  const suite = final ? checkCommand(spec, undefined, testCmd, buildCmd, true, each) : null;
+  const finalList = final ? finalCheckCommands(spec, { testCmd, buildCmd, lintCmd: o.lintDone ? null : lintCmd, extraCmds }) : [];
+  const own = final ? (suite && !o.suiteDone ? [suite] : []) : taskDoneCommands(spec, task, testCmd, buildCmd, each);
+  for (const cmd of own) {
+    showProgress(ctx, p, `checking ${final ? "everything" : p.current}: ${cmd}`);
+    p.lastVerify = await withChecking(() => runVerify(cmd, ctx.cwd, cfg.verifyTimeoutSec, cfg.testOutputCap, signal));
     store.saveProgress(p);
     if (signal?.aborted) {
       pauseBuild(ctx, store, p, `you stopped the check of ${p.current}.`, "build.paused", "stopped");
@@ -232,14 +235,16 @@ const checkAndAdvance = async (
     }
     if (p.lastVerify.ok === false) {
       failure = p.lastVerify.summary;
-      what = `\`${ran}\``;
+      what = `\`${cmd}\``;
+      break;
     }
   }
+  const ran = final ? suite : own.join(" then ") || null;
   // Lint gates every step after its own check, so a style, unused-code or type finding fails the
   // task that caused it while that task's context is still loaded. The final step adds the
   // project's own checks, and skips lint when the step it follows just passed it (o.lintDone).
   // lastVerify keeps the step's own check, so the completion summary still names it.
-  const gates = final ? finalExtras(o.lintDone ? null : lintCmd, extraCmds) : lintCmd && lintsEachStep(p) ? [lintCmd] : [];
+  const gates = final ? finalList.filter((c) => c !== suite) : lintCmd && lintsEachStep(p) ? [lintCmd] : [];
   let lint: boolean | undefined;
   for (const cmd of failure ? [] : gates) {
     showProgress(ctx, p, `checking ${final ? "final" : p.current}: ${cmd}`);
@@ -262,7 +267,7 @@ const checkAndAdvance = async (
   store.event(p.spec, { type: "check", task: p.current, attempt: tp?.attempts ?? 1, ok: !failure, command: ran, notices: found, ...(!final && lint !== undefined ? { lint } : {}) });
 
   if (failure) return failedCheck(ctx, store, p, what, failure);
-  return advanceAfterCheck(ctx, store, p, spec, signal, found, ran);
+  return advanceAfterCheck(ctx, store, p, spec, signal, found, own, ran);
 };
 
 /**
@@ -277,6 +282,7 @@ const advanceAfterCheck = async (
   spec: ParsedSpec,
   signal: AbortSignal | undefined,
   found: string[],
+  own: string[],
   ran: string | null,
 ): Promise<ReturnType<typeof reply> | ReturnType<typeof stop>> => {
   const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
@@ -291,7 +297,8 @@ const advanceAfterCheck = async (
     store.saveCheckpoints(p.spec, cps);
   }
   const notices = found.length ? `\n⚠ ${found.join("\n⚠ ")}` : "";
-  const passed = `✓ ${p.current} ${ran ? `passed (\`${ran}\`)` : spec.gate === "none" ? "done (no checks for this feature)" : each ? "done (no check for this task)" : "done (checked after the last task)"}${notices}`;
+  const shownRuns = own.length ? own : ran ? [ran] : [];
+  const passed = `✓ ${p.current} ${shownRuns.length ? `passed (${shownRuns.map((c) => `\`${c}\``).join(" then ")})` : spec.gate === "none" ? "done (no checks for this feature)" : each ? "done (no check for this task)" : "done (checked after the last task)"}${notices}`;
 
   // A hand edit to the contract while the check ran: the task stays done, but the build
   // neither hands out another task nor closes against a spec nobody approved.
@@ -305,7 +312,8 @@ const advanceAfterCheck = async (
   const { lintCmd, extraCmds } = commands(ctx.cwd, store);
   // Lint left to the end is a final-gate check like the project's own.
   const lintAtEnd = !!lintCmd && !lintsEachStep(p);
-  const step = nextStep(p, { cohere: needsCohere(spec), endCommand: endCmd, ran, extraChecks: extraCmds.length > 0 || lintAtEnd });
+  // The suite counts as run by this step when it was one of the step's own commands.
+  const step = nextStep(p, { cohere: needsCohere(spec), endCommand: endCmd, ran: endCmd && own.includes(endCmd) ? endCmd : ran, extraChecks: extraCmds.length > 0 || lintAtEnd });
   if (step.kind === "task") {
     const t = beginTask(ctx, store, p, step.id, { inTool: true });
     if (!t) {

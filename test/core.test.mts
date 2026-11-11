@@ -1256,3 +1256,38 @@ test("map: new lines are checked against the code before they're written; a cont
     fs.rmSync(repair, { force: true });
   }
 });
+
+test("stats: a lap's own session is counted — repair laps in the spec phase, /pb:fix laps as their own cost", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  const ctx = t.runtime().ctx;
+  const session = ctx.sessionManager.getSessionFile()!;
+  const turn = (cost: number) => ({ type: "message_end", message: { role: "assistant", usage: { input: 1000, output: 200, cacheRead: 0, cacheWrite: 0, cost: { total: cost } } } });
+  const fire = async (cost: number) => {
+    for (const h of t.runtime().handlers.message_end ?? []) await h(turn(cost), ctx);
+  };
+  // A /pb:fix lap's session: its turns are the fix phase's.
+  store.saveFixSession(session, { spec: "order-cancellation", findings: [{ priority: "P1", title: "x" }] });
+  await fire(0.5);
+  store.clearFixSession(session);
+  // A repair lap's session: its turns are the spec phase's.
+  const p = store.progress("order-cancellation")!;
+  store.saveProgress({ ...p, fix: { session, driver: false, stage: "lap", startedAt: Date.now(), hash: "h", work: "findings" } as any });
+  await fire(0.25);
+  const laps = t.events("order-cancellation").filter((e: any) => e.type === "lap-usage");
+  assert.deepEqual(laps.map((e: any) => [e.phase, e.cost]), [["fix", 0.5], ["spec-fix", 0.25]]);
+  assert.ok(!t.events("order-cancellation").some((e: any) => e.type === "usage"), "never counted as the build's");
+  await t.run("stats", "order-cancellation");
+  assert.match(t.posts.at(-1)!, /Spec .*\$0\.25/);
+  assert.match(t.posts.at(-1)!, /Fix laps +in 1\.0k · out 200 · \$0\.50/);
+  await t.run("stats", "compare");
+  const row = t.posts.at(-1)!.split("\n").find((l) => l.startsWith("order-cancellation"))!;
+  assert.match(row, /\$0\.25 .*\$0\.50/);
+});
+
+test("approach: it reads the map like every planning prompt, area notes included", async () => {
+  const { approachPrompt } = await import("../extensions/pb/prompts.ts");
+  assert.match(approachPrompt("", ""), /Check the project map in AGENTS\.md first: its whole-project headings, then the area notes its "Area notes" list names/);
+});

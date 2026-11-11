@@ -240,7 +240,9 @@ produce several (`Depends on:` orders them).
 harness runs after the last task: `tests` (the full suite), `build` (compile or
 typecheck only) or `none`. With `taskChecks: "each"` it also runs each task's
 `Test:` command (a compile when it has none); with `"end"` each task is still
-compiled when done, when a compile command exists. `lint` runs after every
+compiled when done, when a compile command exists, and a task that proved its
+tests red has its own `Test:` run then too, so pb sees the green half of that
+proof itself. `lint` runs after every
 task's check and fails that task like any check, so a lint finding goes back to
 the task that caused it. An auto-detected lint does so only when the planning
 baseline ran it clean on this commit; otherwise it gates just the final check,
@@ -268,7 +270,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `probeTimeoutSec` | 900 | how long one `pb_try` probe may run before pb kills it; 0 = no limit |
 | `maxAttempts` | 3 | failed checks (the final one, or a task's) before the build pauses |
 | `maxConcurrent` | 0 (uncapped) | cap on concurrent fresh runs (explorer, try, spec-review, map, verifier share one engine); extra runs queue FIFO; `~/.pi/agent/pb/config.json` caps every project, and `PI_PB_MAX_CONCURRENT` outranks both |
-| `taskChecks` | `"end"` | `"end"`: the full check after the last task; `"each"`: also a check after every task |
+| `taskChecks` | `"end"` | `"end"`: the full check after the last task (each task compiled, and its own `Test:` run when it proved itself red); `"each"`: also a check after every task |
 | `askTimeoutSec` | 300 | how long a planning or spec-writing dialog waits before the question stays open; a dialog on the way into a build takes pb's choice; 0 = forever |
 | `specWaitSec` | 0 | how long `/pb:build` waits for the spec before yielding to the pending offer; 0 = wait as long as it takes (for slow local models) |
 | `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
