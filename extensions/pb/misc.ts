@@ -4,14 +4,14 @@ import * as path from "node:path";
 import { HELP_PATH, topic, topics } from "./help.ts";
 import { buildReport } from "./report.ts";
 import { findStandards, isUserTemplate, projectStack, stackNames, templatesDir, usesDatabase, writeStandards } from "./standards.ts";
-import { loadStats, renderAll, renderCard } from "./stats.ts";
+import { loadStats, renderAll, renderCard, renderCompare } from "./stats.ts";
 import { Store } from "./store.ts";
 import { whereHere, whereNext } from "./next.ts";
 import { cmd, loadSpec, post, sessionIdOf, specCompletions, specOfSession, stackLabel, taskLine } from "./kit.ts";
 
 export function registerMisc(pi: ExtensionAPI) {
   pi.registerCommand(cmd("stats"), {
-    description: "How a build went: tasks, first-try rate, checks, pauses, tokens and cache. A spec name, or all; --json for pb.report/2",
+    description: "How a build went: tasks, first-try rate, checks, pauses, tokens and cache. A spec name, all, compare [n] (the last n specs phase by phase), or --json for pb.report/2",
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
@@ -19,6 +19,8 @@ export function registerMisc(pi: ExtensionAPI) {
       if (arg.split(/\s+/).includes("--json")) return post(JSON.stringify(buildReport(store, { stats: true, review: true }), null, 2));
       const all = loadStats(store);
       if (arg === "all") return post(renderAll(all));
+      const compare = arg.match(/^compare(?:\s+(\d+))?$/);
+      if (compare) return post(renderCompare(all, Math.max(1, Number(compare[1] ?? 10))));
       const name = arg || specOfSession(ctx).name || (all.length === 1 ? all[0].name : undefined);
       const one = all.find((s) => s.name === name);
       if (!one) return all.length ? post(renderAll(all)) : ctx.ui.notify("No stats yet: they are collected while building.", "info");
@@ -61,7 +63,9 @@ export function registerMisc(pi: ExtensionAPI) {
       const store = new Store(ctx.cwd);
       if (args.trim().split(/\s+/).includes("--json")) return post(JSON.stringify(buildReport(store, { review: true }), null, 2));
       const names = store.specNames();
-      if (!names.length) return ctx.ui.notify(`No specs yet. Start with /${cmd("plan")} <feature>.`, "info");
+      const problems = store.configProblems();
+      const config = problems.length ? ["", "config — ignored or replaced:", ...problems.map((x) => `    ${x}`)] : [];
+      if (!names.length) return ctx.ui.notify([`No specs yet. Start with /${cmd("plan")} <feature>.`, ...config].join("\n"), problems.length ? "warning" : "info");
       const here = store.specForSession(ctx.sessionManager.getSessionFile());
       const lines = names.flatMap((n) => {
         const p = store.progress(n);
@@ -71,7 +75,7 @@ export function registerMisc(pi: ExtensionAPI) {
         const head = `${n === here ? "▸ " : ""}${n} — ${next.state}${where}${s ? ` · verification ${s.gate}${s.newTests ? "" : " · no new tests"}${s.dependsOn ? ` · depends on ${s.dependsOn}` : ""}` : " · ⚠ doesn't parse"}${p?.pause ? ` · paused: ${p.pause}` : ""}${p?.fix ? ` · repair lap ${p.fix.laps} open (${p.fix.driver ? "hardening" : "one lap"})` : ""}`;
         return [head, `    next: ${next.next}`, ...(p && p.phase !== "written" ? p.tasks.map((t) => `    ${taskLine(t)}`) : [])];
       });
-      ctx.ui.notify([...lines, `help: /${cmd("help")}`].join("\n"), "info");
+      ctx.ui.notify([...lines, ...config, `help: /${cmd("help")}`].join("\n"), problems.length ? "warning" : "info");
     },
   });
 

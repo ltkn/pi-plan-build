@@ -39,7 +39,7 @@ build. Your engineering standards live in AGENTS.md, written once.
                     budgets specFix.maxLaps / specFix.maxReviews
 /pb:commit [spec]     commit the work now (after build, fixes, review or archive): the change's files and a
                       message built from the spec, in an editor where you adjust both; pb never commits by itself
-/pb:undo · /pb:status [--json] · /pb:stats [--json] · /pb:archive · /pb:help
+/pb:undo · /pb:status [--json] · /pb:stats [all|compare [n]|--json] · /pb:archive · /pb:help
 alt+n                 the next step's command into the editor; the footer always shows where you are and what's next
 pb-report [--cwd dir] [--stats] [--review]   # the same pb.report/2 JSON, for scripts
 ```
@@ -255,7 +255,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 
 ## Configuration
 
-`.pi/pb/config.json`, created on first use:
+`.pi/pb/config.json`, created on first use. A key pb doesn't know (with the nearest real one), a value it replaces, a setting the user-level file isn't read for, or a file that isn't JSON is named at startup and in `/pb:status`, never silently ignored.
 
 | Key | Default | Meaning |
 |---|---|---|

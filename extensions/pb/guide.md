@@ -1194,6 +1194,9 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
   compacted, reset or reminded. Only explorer calls show an
   output rate: they are a single measured run, while build and review time
   covers many turns. `/pb:stats all` compares every spec, archived ones included.
+  `/pb:stats compare [n]` lines up the last n specs (default 10) phase by phase:
+  what the first spec review and the first code review found, the repair and fix
+  laps, the first-try rate and each phase's cost, to judge a change to pb itself.
   `/pb:stats --json` prints the same report with each spec's stats.
 - **`pb-report`**: the report without Pi, for scripts and dashboards:
   `pb-report [--cwd dir] [--stats] [--review]`. The `schema` field is

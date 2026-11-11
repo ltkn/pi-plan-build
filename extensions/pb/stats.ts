@@ -383,3 +383,35 @@ export function renderAll(list: SpecStats[]): string {
   });
   return ["```", `${pad("spec", 26)}${lp("tasks", 7)}${lp("1st try", 9)}${lp("failed", 8)}${lp("pauses", 8)}  ${pad("review", 10)}${lp("tokens", 9)}${lp("cache", 7)}${lp("cost", 9)}${lp("time", 9)}`, ...rows, "```"].join("\n");
 }
+
+/**
+ * The last `n` specs side by side, oldest first, on what each phase caught and cost: the spec's first review
+ * (findings P0/P1/P2/P3) and its repair laps, the build's first-try rate, the code review's first report and
+ * the fix laps after it. What a change to pb's prompts or rules is judged by.
+ */
+export function renderCompare(list: SpecStats[], n: number): string {
+  const shown = list.filter((s) => s.events.length).slice(-n);
+  if (!shown.length) return "No stats yet: they are collected while building.";
+  const pad = (v: string, w: number) => (v.length > w ? `${v.slice(0, w - 1)}…` : v.padEnd(w));
+  const lp = (v: string, w: number) => v.padStart(w);
+  const money = (v: number) => (v ? `$${v.toFixed(2)}` : "–");
+  const rows = shown.map((s) => {
+    const x = summarize(s);
+    const firstSpecReview = s.events.find((e) => e.type === "spec-review" && e.verdict !== "error");
+    const reported = Array.isArray(firstSpecReview?.reported) ? (firstSpecReview.reported as { priority?: unknown }[]) : [];
+    const specFound = PRIORITIES.map((p) => reported.filter((f) => f.priority === p).length).join("/");
+    const firstReview = s.events.find((e) => e.type === "review");
+    const reviewFound = firstReview ? (Array.isArray(firstReview.p) ? (firstReview.p as unknown[]).reduce<number>((a, v) => a + num(v), 0) : 0) + num(firstReview.dismissed) : undefined;
+    const fixLaps = s.events.filter((e) => e.type === "fix").length;
+    return `${pad(s.name, 24)}${lp(firstSpecReview ? specFound : "–", 10)}${lp(String(x.spec?.laps ?? 0), 6)}${lp(pct(...x.firstTry), 8)}${lp(reviewFound === undefined ? "–" : String(reviewFound), 8)}${lp(String(fixLaps), 6)}${lp(money(x.spec?.cost ?? 0), 8)}${lp(money(x.build.cost), 8)}${lp(money(x.review.cost), 9)}${lp(x.activeMs || x.ms ? duration(x.activeMs || x.ms) : "–", 9)}`;
+  });
+  return [
+    "```",
+    `${pad("spec", 24)}${lp("spec P0-3", 10)}${lp("laps", 6)}${lp("1st try", 8)}${lp("review", 8)}${lp("fixes", 6)}${lp("$spec", 8)}${lp("$build", 8)}${lp("$review", 9)}${lp("build", 9)}`,
+    ...rows,
+    "",
+    "spec P0-3: the first spec review's findings · laps: spec repair laps · review: findings the first code review reported",
+    "fixes: /pb:fix laps · $: each phase's fresh runs and build turns (the planning conversation isn't counted) · oldest first",
+    "```",
+  ].join("\n");
+}

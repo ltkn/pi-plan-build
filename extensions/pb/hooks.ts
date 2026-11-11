@@ -154,6 +154,11 @@ export function registerHooks(pi: ExtensionAPI) {
       const where = whereHere(store, session ?? undefined);
       if (where?.spec) ctx.ui.notify(`pb · ${where.spec}: ${where.state} — next: ${where.next}${where.command ? ` (alt+n puts \`${where.command}\` in the editor)` : ""}.`, "info");
     }
+    // A mistyped or invalid setting falls back to its default without a word otherwise: say so once, at startup.
+    if (ev.reason === "startup" && ctx.hasUI) {
+      const problems = store.configProblems();
+      if (problems.length) ctx.ui.notify(`pb config — these settings are ignored or replaced:\n${problems.map((x) => `- ${x}`).join("\n")}`, "warning");
+    }
     if (!carry) return;
     if (carry.model) {
       const model = findModel(ctx, carry.model);

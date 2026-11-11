@@ -1054,3 +1054,63 @@ test("dialogs: the footer says pb is waiting for you, and a timed-out choice say
   assert.equal(t.posts.at(-1), '**No answer within 1 min**, so pb went on with its default — "Build anyway" — for: Build order-cancellation?');
   assert.equal(notes.length, 1);
 });
+
+test("config: a mistyped or replaced setting is named at startup and in /pb:status, with the nearest real key; null turns a command off", async () => {
+  const t = setup({ comandTimeoutSec: 5, maxAttempts: 0, reviewer: { idelSec: 1 }, planner: { thinking: "ultra" }, verify: null, lint: null });
+  const globalFile = path.join(process.env.PI_CODING_AGENT_DIR!, "pb", "config.json");
+  fs.mkdirSync(path.dirname(globalFile), { recursive: true });
+  fs.writeFileSync(globalFile, JSON.stringify({ verifyTimeoutSec: 60 }));
+  try {
+    for (const h of t.runtime().handlers.session_start ?? []) await h({ type: "session_start", reason: "startup" }, t.runtime().ctx);
+    const warning = t.notes.at(-1)!;
+    assert.match(warning, /^pb config — these settings are ignored or replaced:/);
+    assert.match(warning, /\.pi\/pb\/config\.json: `comandTimeoutSec` is not a pb setting — did you mean `commandTimeoutSec`\?/);
+    assert.match(warning, /`maxAttempts`: 0 is not valid — pb uses 1/);
+    assert.match(warning, /`reviewer\.idelSec` is not a pb setting — did you mean `reviewer\.idleSec`\?/);
+    assert.match(warning, /`planner\.thinking`: "ultra" is not valid/);
+    assert.match(warning, /the user-level pb config\.json: `verifyTimeoutSec` is read only from a project's \.pi\/pb\/config\.json/);
+    // null is the documented way to turn a command off: it is honoured, and not reported.
+    assert.doesNotMatch(warning, /`verify`|`lint`|`build`/);
+    const { Store } = await import("../extensions/pb/store.ts");
+    const config = new Store(t.repo).config();
+    assert.equal(config.verify, null);
+    assert.equal(config.lint, null);
+    // /pb:status says the same while Pi runs, specs or not; resuming a session does not repeat the warning.
+    await t.run("status");
+    assert.match(t.notes.at(-1)!, /No specs yet[\s\S]*config — ignored or replaced:[\s\S]*comandTimeoutSec/);
+    const notes = t.notes.length;
+    for (const h of t.runtime().handlers.session_start ?? []) await h({ type: "session_start", reason: "resume" }, t.runtime().ctx);
+    assert.equal(t.notes.length, notes);
+    // A file that is not JSON is named rather than silently replaced by the defaults.
+    fs.writeFileSync(path.join(t.repo, ".pi/pb/config.json"), "{ verify: true");
+    assert.match(new Store(t.repo).configProblems()[0], /^\.pi\/pb\/config\.json is not valid JSON \(.+\): pb uses the defaults$/);
+  } finally {
+    fs.rmSync(globalFile);
+  }
+});
+
+test("stats compare: the last specs side by side — what the first spec review and code review found, laps, first try, cost per phase", async () => {
+  const { renderCompare } = await import("../extensions/pb/stats.ts");
+  const spec = (name: string, events: Record<string, unknown>[]) => ({ name, phase: "reviewed", events: events.map((e) => ({ at: "2026-10-01 10:00:00", ...e })), explore: [] });
+  const list = [
+    spec("oldest", [{ type: "usage", cost: 9 }]),
+    spec("before", [
+      { type: "spec-review", verdict: "error" },
+      { type: "spec-review", verdict: "block", reported: [{ priority: "P0" }, { priority: "P1" }, { priority: "P1" }], cost: 0.5 },
+      { type: "spec-fix", applied: ["a"] },
+      { type: "spec-review", verdict: "pass", reported: [{ priority: "P3" }], cost: 0.25 },
+      { type: "usage", cost: 2 },
+      { type: "review", verdict: "changes_needed", p: [0, 2, 1, 0], dismissed: 1, cost: 1 },
+      { type: "fix", fixed: ["x"] },
+      { type: "review", verdict: "pass", p: [0, 0, 0, 0] },
+    ]),
+    spec("after", [{ type: "spec-review", verdict: "pass", reported: [] }, { type: "usage", cost: 1.5 }]),
+  ];
+  const out = renderCompare(list as any, 2);
+  assert.ok(!out.split("\n").some((l) => l.startsWith("oldest")), "only the last n specs");
+  const before = out.split("\n").find((l) => l.startsWith("before"))!;
+  assert.deepEqual(before.trim().split(/\s+/).slice(1, 9), ["1/2/0/0", "1", "–", "4", "1", "$0.75", "$2.00", "$1.00"]);
+  const after = out.split("\n").find((l) => l.startsWith("after"))!;
+  assert.deepEqual(after.trim().split(/\s+/).slice(1, 9), ["0/0/0/0", "0", "–", "–", "0", "–", "$1.50", "–"]);
+  assert.ok(out.indexOf("before") < out.indexOf("after"), "oldest first");
+});

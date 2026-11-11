@@ -151,7 +151,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
   const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : d);
   const bool = (v: unknown, d: boolean) => (typeof v === "boolean" ? v : d);
   const oneOf = <T extends string>(v: unknown, allowed: readonly T[], d: T): T => (allowed.includes(v as T) ? (v as T) : d);
-  const strOrNull = (v: unknown, d: string | null) => (v === null || v === undefined ? d : typeof v === "string" ? v : d);
+  const strOrNull = (v: unknown, d: string | null) => (v === null ? null : typeof v === "string" ? v : d);
   const reviewerRaw = typeof raw.reviewer === "object" && raw.reviewer !== null ? raw.reviewer : {};
   const specReviewerRaw = typeof raw.specReviewer === "object" && raw.specReviewer !== null ? raw.specReviewer : {};
   const specFixRaw = typeof raw.specFix === "object" && raw.specFix !== null ? raw.specFix : {};
@@ -214,6 +214,78 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     notify: bool((raw as { notify?: unknown }).notify, true),
     extra: typeof raw.extra === "object" && raw.extra !== null ? raw.extra : undefined,
   };
+}
+
+/** Every setting pb reads, and the keys inside each object-valued one. */
+const CONFIG_KEYS: Record<string, readonly string[] | null> = {
+  ...Object.fromEntries(Object.keys(DEFAULT_CONFIG).map((k) => [k, null])),
+  maxConcurrent: null,
+  buildModel: null,
+  extra: ROLES,
+  reviewer: ["model", "thinking", "verify", "security", "idleSec"],
+  specReviewer: ["model", "thinking"],
+  specFix: ["model", "thinking", "maxLaps", "maxReviews"],
+  explorer: ["model", "thinking", "idleSec", "timeoutSec", "commandTimeoutSec"],
+  planner: ["model", "thinking"],
+};
+/** What the user-level config is read for; everything else is the project's. */
+const GLOBAL_CONFIG_KEYS = ["maxConcurrent", "extra"];
+
+const editDistance = (a: string, b: string): number => {
+  let row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= b.length; j++) next[j] = Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1].toLowerCase() === b[j - 1].toLowerCase() ? 0 : 1));
+    row = next;
+  }
+  return row[b.length];
+};
+const nearest = (key: string, known: readonly string[]) =>
+  known.map((k) => [k, editDistance(key, k)] as const).filter(([k, d]) => d <= Math.max(2, Math.floor(k.length / 4))).sort((a, b) => a[1] - b[1])[0]?.[0];
+const shown = (v: unknown) => {
+  const s = JSON.stringify(v) ?? String(v);
+  return s.length > 40 ? `${s.slice(0, 39)}…` : s;
+};
+
+/**
+ * What in a config file pb ignores or replaces, in words: unknown keys (with the nearest real one), values the
+ * sanitizer replaces, and settings the user-level file is not read for. Pure: the sanitizer stays the one
+ * judge of a value, this only says when it overruled one.
+ */
+export function configProblems(raw: unknown, scope: "project" | "global"): string[] {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return ["it is not a JSON object: pb uses the defaults"];
+  const out: string[] = [];
+  const unknown = (key: string, known: readonly string[]) => {
+    const near = nearest(key.split(".").at(-1)!, known);
+    return `\`${key}\` is not a pb setting${near ? ` — did you mean \`${key.replace(/[^.]+$/, near)}\`?` : ": pb ignores it"}`;
+  };
+  for (const [key, value] of Object.entries(raw)) {
+    if (!(key in CONFIG_KEYS)) {
+      out.push(unknown(key, Object.keys(CONFIG_KEYS)));
+      continue;
+    }
+    if (scope === "global" && !GLOBAL_CONFIG_KEYS.includes(key)) {
+      out.push(`\`${key}\` is read only from a project's .pi/pb/config.json: the user-level file is read for ${GLOBAL_CONFIG_KEYS.join(" and ")}`);
+      continue;
+    }
+    const nested = CONFIG_KEYS[key];
+    const clean = (sanitizeConfig({ [key]: value } as Partial<Config>) as unknown as Record<string, unknown>)[key];
+    if (!nested) {
+      if (JSON.stringify(clean) !== JSON.stringify(value)) out.push(`\`${key}\`: ${shown(value)} is not valid — pb uses ${shown(clean ?? null)}`);
+      continue;
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      out.push(`\`${key}\` must be an object of ${nested.join(", ")}: pb ignores ${shown(value)}`);
+      continue;
+    }
+    for (const [sub, v] of Object.entries(value)) {
+      const name = `${key}.${sub}`;
+      if (!nested.includes(sub)) out.push(unknown(name, nested));
+      else if (key === "extra" ? typeof v !== "string" : JSON.stringify((clean as Record<string, unknown>)[sub]) !== JSON.stringify(v))
+        out.push(`\`${name}\`: ${shown(v)} is not valid — pb uses ${key === "extra" ? "nothing" : shown((clean as Record<string, unknown>)[sub] ?? null)}`);
+    }
+  }
+  return out;
 }
 
 export interface VerifyResult {
@@ -741,6 +813,28 @@ export class Store {
     const raw = readJson<Partial<Config>>(path.join(this.root, "config.json"));
     const mine = raw?.extra?.[role];
     return [global, mine].filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => x.trim()).join("\n");
+  }
+  /** What pb ignores or replaces in this project's config and the user-level one, each line naming its file. Never creates files. */
+  configProblems(): string[] {
+    const files = [
+      { file: path.join(this.root, "config.json"), label: `${PB_DIR}/config.json`, scope: "project" as const },
+      { file: path.join(agentDir(), "pb", "config.json"), label: "the user-level pb config.json", scope: "global" as const },
+    ];
+    return files.flatMap(({ file, label, scope }) => {
+      let text: string;
+      try {
+        text = fs.readFileSync(file, "utf8");
+      } catch {
+        return [];
+      }
+      let raw: unknown;
+      try {
+        raw = JSON.parse(text);
+      } catch (e) {
+        return [`${label} is not valid JSON (${(e as Error).message}): pb uses the defaults`];
+      }
+      return configProblems(raw, scope).map((p) => `${label}: ${p}`);
+    });
   }
   /** Change settings in config.json, keeping everything else in it as written. */
   updateConfig(patch: (raw: Partial<Config>) => Partial<Config>): void {
