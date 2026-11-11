@@ -53,8 +53,12 @@ export interface RunOptions {
   /** extra environment for the spawned process (merged over pb's own), e.g. the fresh-guard settings */
   env?: Record<string, string>;
   signal?: AbortSignal;
-  /** Each tool call the fresh model makes, as it happens: a one-line preview and the call itself. */
+  /** Each tool call the fresh model makes, as it happens: the action in words (`describeCall`) and the call itself. */
   onActivity?: (line: string, call: ToolCall) => void;
+  /** The run's tokens so far, after each of its messages. */
+  onUsage?: (tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }) => void;
+  /** The file the run's session is saved to, as soon as it exists (with `sessionDir`). */
+  onSession?: (file: string) => void;
   /** The model's current message (text and thinking) as it's written. */
   onText?: (text: string) => void;
   /** Save the run's session here, to open it later with `pi --session <file>`; unset = not saved. */
@@ -190,14 +194,39 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
 export const runUsage = (r: RunResult) => ({ input: r.tokens.input, output: r.tokens.output, cacheRead: r.tokens.cacheRead, cacheWrite: r.tokens.cacheWrite, cost: r.cost });
 
 /** One-line live activity for fresh runs: what is being searched, and where. */
-export function previewCall(args: Record<string, unknown>): string {
+/**
+ * A tool call as a person reads it: the tool and its target, paths relative to the project, a shell command
+ * without its leading `cd …&&` and capped. "read extensions/pb/store.ts", "grep ReviewState in extensions/pb".
+ */
+export function describeCall(call: ToolCall, cwd = ""): string {
   const str = (v: unknown) => (typeof v === "string" ? v : "");
-  const cmd = str(args.command).replace(/\s+/g, " ");
-  if (cmd) return cmd.length > 120 ? `${cmd.slice(0, 119)}…` : cmd;
-  const pattern = str(args.pattern);
-  const at = str(args.path ?? args.file_path);
-  if (pattern && at) return `${pattern} in ${at}`;
-  return (pattern || at).replace(/\s+/g, " ");
+  // The project as given and as the run sees it (a linked folder, like macOS's /var → /private/var).
+  const roots = cwd ? [...new Set([cwd, realPath(cwd)].map((r) => `${r.replace(/\/+$/, "")}/`))] : [];
+  const rel = (p: string) => {
+    for (const root of roots) {
+      if (p.startsWith(root)) return p.slice(root.length);
+      if (`${p}/` === root) return ".";
+    }
+    return p;
+  };
+  const capped = (s: string) => (s.length > 100 ? `${s.slice(0, 99)}…` : s);
+  const a = call.arguments;
+  const at = rel(str(a.path ?? a.file_path));
+  const pattern = str(a.pattern).replace(/\s+/g, " ");
+  if (call.name === "bash") {
+    let cmd = str(a.command).replace(/\s+/g, " ").trim();
+    for (;;) {
+      const next = cmd.replace(/^cd \S+ && /, "");
+      if (next === cmd) break;
+      cmd = next;
+    }
+    return capped(roots.reduce((c, root) => c.split(root).join(""), cmd));
+  }
+  if (call.name === "read") return capped(`read ${at}`);
+  if (call.name === "grep" || call.name === "find") return capped(`${call.name} ${pattern}${at ? ` in ${at}` : ""}`);
+  if (call.name === "ls") return capped(`ls ${at || "."}`);
+  if (/^(pb_)?report_/.test(call.name)) return "writing its report";
+  return capped(`${call.name} ${pattern || at}`.trim());
 }
 
 async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
@@ -221,6 +250,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
 
   const started = Date.now();
   let sessionId: string | undefined;
+  let sessionNamed = false;
   let streaming = "";
   const res: RunResult = {
     text: "",
@@ -265,6 +295,14 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
         }
         if (ev.type === "session") sessionId = ev.id ?? ev.sessionId ?? ev.session_id;
         if (ev.type !== "message_update") armIdle(); // progress: a tool call, a result, a finished message
+        // The run's file, named as soon as Pi has written it: the whole transcript, to follow while it runs.
+        if (!sessionNamed && o.onSession && o.sessionDir && sessionId && ev.type !== "message_update") {
+          const file = sessionFileIn(o.sessionDir, sessionId);
+          if (file) {
+            sessionNamed = true;
+            o.onSession(file);
+          }
+        }
         if (ev.type === "message_update") {
           const d = ev.assistantMessageEvent;
           if ((d?.type === "text_delta" || d?.type === "thinking_delta") && typeof d.delta === "string") {
@@ -285,6 +323,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
         t.cacheRead += u.cacheRead ?? u.cached_tokens ?? 0;
         t.cacheWrite += u.cacheWrite ?? 0;
         t.peakContext = Math.max(t.peakContext, (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0));
+        o.onUsage?.({ input: t.input, output: t.output, cacheRead: t.cacheRead, cacheWrite: t.cacheWrite });
         if (m.stopReason) res.stopReason = m.stopReason;
         if (m.errorMessage) res.error = m.errorMessage;
         const texts: string[] = [];
@@ -293,7 +332,7 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
           else if (part.type === "toolCall") {
             const call = { name: part.name, arguments: part.arguments ?? {} };
             res.toolCalls.push(call);
-            o.onActivity?.(`${part.name} ${previewCall(call.arguments)}`, call);
+            o.onActivity?.(describeCall(call, o.cwd), call);
           }
         }
         // Every message's text is kept: answers routinely span turns (analysis, calls, conclusion).
@@ -377,14 +416,30 @@ async function runFreshUncapped(o: RunOptions): Promise<RunResult> {
     await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
   res.ms = Date.now() - started;
-  if (o.sessionDir && sessionId) {
-    const files = await fs.promises.readdir(o.sessionDir).catch(() => [] as string[]);
-    const exact = files.find((f) => f === `${sessionId}.jsonl`);
-    const contains = files.filter((f) => f.endsWith(".jsonl") && f.includes(sessionId!));
-    const file = exact ?? (contains.length === 1 ? contains[0] : undefined);
-    if (file) res.sessionFile = path.join(o.sessionDir, file);
-  }
+  if (o.sessionDir && sessionId) res.sessionFile = sessionFileIn(o.sessionDir, sessionId);
   return res;
+}
+
+const realPath = (p: string) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+};
+
+/** The session file Pi saved for this id in `dir`: named by the id exactly, or the one file whose name holds it. */
+function sessionFileIn(dir: string, id: string): string | undefined {
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  const exact = files.find((f) => f === `${id}.jsonl`);
+  const contains = files.filter((f) => f.endsWith(".jsonl") && f.includes(id));
+  const file = exact ?? (contains.length === 1 ? contains[0] : undefined);
+  return file ? path.join(dir, file) : undefined;
 }
 
 /** The run's usage in Pi's shape, so a tool that made the call can report it and session totals stay right. */

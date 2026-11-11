@@ -6,7 +6,7 @@
  */
 import { fileURLToPath } from "node:url";
 import { VERIFIER_SYSTEM, verifierBrief } from "./prompts.ts";
-import { runFresh } from "./runner.ts";
+import { type RunOptions, runFresh } from "./runner.ts";
 import type { AcceptanceCheck, AcceptanceCriterion, AcceptanceStatus, Finding, Priority } from "./store.ts";
 
 export const REVIEW_TOOLS = fileURLToPath(new URL("./review-tools.ts", import.meta.url));
@@ -149,7 +149,9 @@ export async function verifyFindings(o: {
   maxConcurrent?: number;
   signal?: AbortSignal;
   sessionDir?: string;
-  onActivity?: (line: string) => void;
+  onActivity?: RunOptions["onActivity"];
+  onUsage?: RunOptions["onUsage"];
+  onSession?: RunOptions["onSession"];
   onText?: (text: string) => void;
 }): Promise<{ findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; aborted: boolean; error?: string; sessionFile?: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: number; ms: number }> {
   const toCheck = o.findings.filter(blocking);
@@ -169,6 +171,8 @@ export async function verifyFindings(o: {
     signal: o.signal,
     sessionDir: o.sessionDir,
     onActivity: o.onActivity,
+    onUsage: o.onUsage,
+    onSession: o.onSession,
     onText: o.onText,
   });
   const t = v.tokens;

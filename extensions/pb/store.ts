@@ -297,6 +297,14 @@ export interface VerifyResult {
 
 export type TaskStatus = "todo" | "doing" | "done" | "blocked";
 
+/** A proposed project map awaiting the human: `base` is the map it was made against, `at` when. */
+export interface MapProposal {
+  map: string;
+  base: string;
+  at: number;
+  warnings: string[];
+}
+
 /** Synthetic build step between the last task and the final check (not a spec task): re-read the whole
  * diff and consolidate what task slicing split apart. Mirrored with "final" everywhere progress tasks appear. */
 export const COHERE_TASK_ID = "cohere";
@@ -1301,6 +1309,23 @@ export class Store {
   }
   saveMapPrevious(body: string): void {
     writeFileAtomic(path.join(this.root, "map-previous.md"), body);
+  }
+
+  /** A proposed map nobody answered for, kept so hours of cartography are not lost to a dialog; `base` is the map it would replace. */
+  mapProposal(): MapProposal | undefined {
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(this.root, "map-proposed.json"), "utf8")) as Partial<MapProposal>;
+      if (typeof raw.map !== "string" || typeof raw.base !== "string" || typeof raw.at !== "number") return undefined;
+      return { map: raw.map, base: raw.base, at: raw.at, warnings: Array.isArray(raw.warnings) ? raw.warnings.filter((w): w is string => typeof w === "string") : [] };
+    } catch {
+      return undefined;
+    }
+  }
+  saveMapProposal(proposal: MapProposal): void {
+    writeFileAtomic(path.join(this.root, "map-proposed.json"), JSON.stringify(proposal));
+  }
+  clearMapProposal(): void {
+    fs.rmSync(path.join(this.root, "map-proposed.json"), { force: true });
   }
 
   /** The test suite's result when planning began. Per session when known, global last otherwise. */

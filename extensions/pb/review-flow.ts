@@ -19,11 +19,12 @@ import { KEBAB_NAME } from "./names.ts";
 import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, mapCounts, mapTagOf, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
 import { runVerify } from "./verify.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
-import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, watchable, withChecking } from "./kit.ts";
+import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, withChecking } from "./kit.ts";
 import { markReviewed, unfinishedPhase } from "./phase.ts";
 
 import { confirmLiveBuild } from "./build-loop.ts";
 import { areaNotesFor } from "./map.ts";
+import { freshProgress } from "./progress.ts";
 import { addedDependencies } from "./manifest.ts";
 import type { ReplacedSessionContext } from "./kit.ts";
 export function registerReviewFlow(pi: ExtensionAPI) {
@@ -154,11 +155,8 @@ export function registerReviewFlow(pi: ExtensionAPI) {
 
   const runAbusePass = async (ctx: ExtensionContext, store: Store, run: ReviewRun): Promise<ReviewRun["passes"][number]> => {
     const cfg = store.config();
-    const started = Date.now();
-    let lastStep: string | undefined;
-    const paint = () => safely(() => ctx.ui.setWidget("pb-review", [`pb review ${run.label} — adversarial pass · ${Math.round((Date.now() - started) / 1000)}s`, ...(lastStep ? [`  ↳ ${lastStep}`] : [])]));
-    paint();
-    const beat = watchable(ctx) ? setInterval(paint, 1000) : undefined;
+    const progress = freshProgress(ctx, "pb-review", `pb review ${run.label}`, { sessionsRoot: run.cwd });
+    progress.step("adversarial pass");
     let res: Awaited<ReturnType<typeof runFresh>>;
     try {
       res = await runFresh({
@@ -173,14 +171,10 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         thinking: run.thinking,
         maxConcurrent: cfg.maxConcurrent,
         sessionDir: run.name ? store.specSessionsDir(run.name, "abuse") : store.sessionsDir("abuse"),
-        onActivity: (line) => {
-          lastStep = line;
-          paint();
-        },
+        ...progress.hooks,
       });
     } finally {
-      if (beat !== undefined) clearInterval(beat);
-      safely(() => ctx.ui.setWidget("pb-review", undefined));
+      progress.stop();
     }
     const call = res.toolCalls.filter((c) => c.name === "report_findings").at(-1);
     const raw = call && Array.isArray(call.arguments.findings) ? call.arguments.findings : undefined;
@@ -429,8 +423,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
 
   const reviewFinish = async (from: ExtensionCommandContext, store: Store, run: ReviewRun): Promise<void> => {
     const cfg = store.config();
-    const widget = (t?: string[]) => safely(() => from.ui.setWidget("pb-review", t));
     const all = mergeFindings(allFindings(run));
+    const progress = freshProgress(from, "pb-review", `pb review ${run.label}`, { sessionsRoot: run.cwd });
+    progress.step("verifying P0/P1 findings");
     const checked =
       cfg.reviewer.verify === false
         ? { findings: all, dismissed: [], error: undefined as string | undefined, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0 }
@@ -446,9 +441,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
             sessionDir: run.name ? store.specSessionsDir(run.name, "verifier") : store.sessionsDir("verifier"),
             // Activity only, never the verifier's streaming prose: the verdict lands in the session,
             // and the saved run holds the whole transcript for audit.
-            onActivity: (a) => widget([`pb review ${run.label} — verifying P0/P1 findings`, `  ↳ ${a}`]),
-          });
-    widget(undefined);
+            ...progress.hooks,
+          }).finally(() => progress.stop());
+    progress.stop();
     run.ms = (run.ms ?? 0) + checked.ms;
     const after = run.before ? snapshot(run.cwd, `pb: after review ${run.label}`) : undefined;
     // The reviewer has no shell and cannot edit or write, so anything that changed while it ran is

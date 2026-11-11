@@ -1235,10 +1235,11 @@ test("map: new lines are checked against the code before they're written; a cont
     const calls = t.read(".pi/pb/explore.jsonl").trim().split("\n").length;
     fs.rmSync(checkBrief);
     process.env.MOCK_MAP_CHECK = "stubborn";
+    t.selects.push("Keep the current map");
     await t.run("map");
     assert.ok(t.read(".pi/pb/explore.jsonl").trim().split("\n").length > calls);
-    // A cartographer that keeps a contradicted line word for word: you decide, and unanswered, the map stays.
-    t.selects.push("<timeout>");
+    // A cartographer that keeps a contradicted line word for word: you decide, and kept, the map stays.
+    t.selects.push("Keep the current map");
     fs.writeFileSync(path.join(t.repo, "src/extra.ts"), "export {}\n");
     await t.run("map", "transactions");
     assert.match(t.selectTitles.at(-1)!, /The proposed project map needs a look: the code contradicts "- Services own transactions; controllers never call repositories\." \(src\/order\.ts:3 the controller calls the repository\)/);
@@ -1290,4 +1291,31 @@ test("stats: a lap's own session is counted — repair laps in the spec phase, /
 test("approach: it reads the map like every planning prompt, area notes included", async () => {
   const { approachPrompt } = await import("../extensions/pb/prompts.ts");
   assert.match(approachPrompt("", ""), /Check the project map in AGENTS\.md first: its whole-project headings, then the area notes its "Area notes" list names/);
+});
+
+test("fresh runs show where they are: the step, time and tokens, the last few actions in words, and the run's file", async () => {
+  const t = setup({ verify: "true" });
+  fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/auth/Login.java"), "class Login {}\n");
+  process.chdir(t.repo);
+  await t.run("map");
+  const frames = t.widgetLog.filter((w) => w.id === "pb-map" && w.lines).map((w) => w.lines!);
+  // The first step, with what it has done so far: actions in words, paths from the project, the cd dropped.
+  const reading = frames.filter((f) => f[0].startsWith("pb map — reading the project"));
+  assert.ok(reading.some((f) => /^pb map — reading the project · [^·]+ · 3\.4k tokens$/.test(f[0])), "time and tokens so far");
+  assert.ok(reading.some((f) => f.includes("  · read src/order.ts") && f.includes("  ↳ git log --oneline -5")), reading.map((f) => f.join("\n")).join("\n---\n"));
+  assert.ok(reading.some((f) => f.at(-2) === "  ↳ writing its report" || f.at(-1) === "  ↳ writing its report"), "the report, in words");
+  assert.ok(reading.some((f) => f.some((l) => /^ {2}the whole run: \.pi\/pb\/sessions\/cartographer\/.+\.jsonl$/.test(l))), "the run's file while it runs");
+  // The later steps are numbered, each starting with a clean list of actions.
+  assert.ok(frames.some((f) => /^pb map — step 2: checking \d+ new lines? against the code/.test(f[0])));
+  assert.ok(frames.some((f) => /^pb map — step 3: checking \d+ paths?/.test(f[0])));
+  assert.equal(t.widgets.get("pb-map"), undefined, "gone when the run ends");
+  // At most five recent actions are kept, the newest marked.
+  const { freshProgress } = await import("../extensions/pb/progress.ts");
+  const drawn: string[][] = [];
+  const p = freshProgress({ hasUI: false, ui: { setWidget: (_k: string, l?: string[]) => void (l && drawn.push(l)) } } as any, "k", "pb x");
+  for (let i = 1; i <= 7; i++) p.hooks.onActivity!(`a${i}`, { name: "read", arguments: {} });
+  assert.deepEqual(drawn.at(-1)!.slice(1), ["  · a3", "  · a4", "  · a5", "  · a6", "  ↳ a7"]);
+  p.stop();
 });

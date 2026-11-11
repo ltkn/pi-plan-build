@@ -1157,6 +1157,11 @@ touch.
   left out); `"mapOnArchive": false` turns that off.
 - **Any time**, `/pb:map [focus]` refreshes it from the code as it is now.
 - **`/pb:map undo`** puts the previous map back (again: swaps them back).
+- A proposal that looks off (paths that don't resolve, lines the code
+  contradicts, much of the map removed) asks first. Unanswered, it is written
+  and pb posts what it was flagged for: `/pb:map undo` goes back.
+- **`/pb:map apply`** writes a proposal you dismissed. It is written only onto
+  the map it was made against; if the map changed since, run `/pb:map` again.
 
 Nothing pb writes there can break the section: text it stores — a finding's file,
 title or fix, a proposed line — loses control characters and HTML comment markers

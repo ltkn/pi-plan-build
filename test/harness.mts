@@ -47,6 +47,8 @@ export function setup(config: object = {}) {
   const confirmBodies: string[] = [];
   const confirmAnswers: (boolean | undefined)[] = [];
   const widgets = new Map<string, string[] | undefined>();
+  /** every widget frame drawn, in order: what was on screen while a run worked */
+  const widgetLog: { id: string; lines?: string[] }[] = [];
   const instructions: string[] = [];
   /** The system-prompt sections extensions set for each run, in run order (before_agent_start). */
   const systemSections: Record<string, string>[] = [];
@@ -215,7 +217,10 @@ export function setup(config: object = {}) {
       },
       ui: {
         notify: (m: string) => notes.push(m),
-        setWidget: (id: string, lines?: string[]) => void widgets.set(id, lines),
+        setWidget: (id: string, lines?: string[]) => {
+          widgets.set(id, lines);
+          widgetLog.push({ id, lines });
+        },
         setStatus: (id: string, text?: string) => void (text === undefined ? statuses.delete(id) : statuses.set(id, text)),
         setTitle: (t: string) => (stat.title = t),
         setEditorText: (t: string) => (stat.editorText = t),
@@ -412,6 +417,7 @@ export function setup(config: object = {}) {
     confirmBodies,
     confirmAnswers,
     widgets,
+    widgetLog,
     instructions,
     systemSections,
     results,

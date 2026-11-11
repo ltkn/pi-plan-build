@@ -1007,20 +1007,22 @@ test("pb_explore live view keeps a wider, bounded window over bursts", async () 
   assert.deepEqual(lines, [...steps.slice(-8).map((s) => `↳ ${s}`), ...writing.slice(-4).map((l) => `│ ${l}`), "12 steps · 18s"]);
 });
 
-test("map: it asks only when something looks off (unanswered: the current map stays); /pb:plan warns about paths that vanished", async () => {
+test("map: it asks only when something looks off (unanswered: it is written and the flags are posted); /pb:plan warns about paths that vanished", async () => {
   const t = setup({ verify: "true", askTimeoutSec: 0.001 });
   fs.mkdirSync(path.join(t.repo, "src"), { recursive: true });
   fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
   process.chdir(t.repo);
   process.env.MOCK_MAP_STUBBORN = "1"; // the cartographer doesn't fix src/gone.ts
-  t.selects.push("<timeout>");
+  t.selects.push("Keep the current map");
   await t.run("map");
   assert.match(t.selectTitles.at(-1)!, /The proposed project map needs a look: `auth\/Login` doesn't resolve; `src\/gone\.ts` doesn't resolve/);
-  assert.ok(!fs.existsSync(path.join(t.repo, "AGENTS.md"))); // nobody answered: nothing written
-  t.selects.push("Apply it anyway");
+  assert.ok(!fs.existsSync(path.join(t.repo, "AGENTS.md"))); // kept on purpose: nothing written
+  // Nobody answers: a run is not thrown away; it is written, and what it was flagged for is said where you'll look.
+  t.selects.push("<timeout>");
   await t.run("map");
   delete process.env.MOCK_MAP_STUBBORN;
   assert.match(t.read("AGENTS.md"), /gone\.ts/);
+  assert.match(t.posts.at(-1)!, /^\*\*The project map was written without your answer\*\*, with what it was flagged for:\n- `auth\/Login` doesn't resolve\n- `src\/gone\.ts` doesn't resolve\n\n`\/pb:map undo` puts the previous map back\.$/);
 
   const u = setup({ verify: "true", mapOnArchive: false });
   await written(u);
@@ -1035,6 +1037,51 @@ test("map: it asks only when something looks off (unanswered: the current map st
   u.selects.push("No thanks");
   await u.run("plan", "next feature");
   assert.ok(u.notes.some((n) => /The project map in AGENTS\.md names 1 path\(s\) that no longer exist \(src\/billing\/Invoice\.java\): \/pb:map refreshes it/.test(n)));
+});
+
+test("map: a dismissed proposal is kept for /pb:map apply, written only onto the map it was made against; a deliberate keep drops it", async () => {
+  const t = setup({ verify: "true", askTimeoutSec: 600 });
+  fs.mkdirSync(path.join(t.repo, "src"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  process.chdir(t.repo);
+  process.env.MOCK_MAP_STUBBORN = "1";
+  try {
+    await t.run("map", "apply");
+    assert.match(t.notes.at(-1)!, /No proposed map is waiting/);
+    // Dismissed (Esc, not a timeout): nothing written, the run's result kept, and the human told how to take it.
+    t.selects.push("<timeout>");
+    await t.run("map");
+    assert.ok(!fs.existsSync(path.join(t.repo, "AGENTS.md")));
+    assert.match(t.notes.at(-1)!, /Map not changed\. The proposal is kept: `\/pb:map apply` writes it as it is\./);
+    await t.run("map", "apply");
+    assert.match(t.read("AGENTS.md"), /gone\.ts/);
+    assert.match(t.notes.at(-1)!, /The proposed project map \(made .+ ago\) is now in AGENTS\.md, with what it was flagged for: `auth\/Login` doesn't resolve/);
+    await t.run("map", "apply");
+    assert.match(t.notes.at(-1)!, /No proposed map is waiting/, "applied once, then gone");
+    await t.run("map", "undo");
+    assert.ok(!fs.existsSync(path.join(t.repo, "AGENTS.md")) || !/gone\.ts/.test(t.read("AGENTS.md")), "undo puts the map before the apply back");
+
+    // A map changed since the proposal was made is never overwritten by it.
+    t.selects.push("<timeout>");
+    await t.run("map");
+    const { writeMap } = await import("../extensions/pb/map.ts");
+    writeMap(t.repo, "### Layout\n- `src/order.ts`: written by hand meanwhile");
+    const before = t.read("AGENTS.md");
+    await t.run("map", "apply");
+    assert.match(t.notes.at(-1)!, /The project map changed since this proposal was made, so pb didn't write it over your changes/);
+    assert.equal(t.read("AGENTS.md"), before);
+
+    // A deliberate "Keep the current map" drops it.
+    t.selects.push("<timeout>");
+    await t.run("map");
+    assert.ok(fs.existsSync(path.join(t.repo, ".pi/pb/map-proposed.json")));
+    t.selects.push("Keep the current map");
+    await t.run("map");
+    assert.equal(t.notes.at(-1), "Map not changed.");
+    assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/map-proposed.json")));
+  } finally {
+    delete process.env.MOCK_MAP_STUBBORN;
+  }
 });
 
 test("extra instructions: added to each role's prompt, global ones first, pb's own kept", async () => {

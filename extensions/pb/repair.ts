@@ -9,12 +9,13 @@ import type {
 import { snapshot } from "./checkpoint.ts";
 import { claimCheckBrief, extraBlock, findingLine, reportRegister, SPEC_CLAIM_CHECK_SYSTEM, specFixPrompt } from "./prompts.ts";
 import { REVIEW_TOOLS } from "./review.ts";
+import { freshProgress } from "./progress.ts";
 import { runFresh, runUsage } from "./runner.ts";
 import { notifyDesktop } from "./notify.ts";
 import { specHash, tokensOf } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type Checkpoint, type Finding, type Progress, Store, appendCheckpoint, cap, gitHead, now, pathExists } from "./store.ts";
-import { agree, choose, cmd, evidenceLine, loadSpec, nextLine, phaseHeader, post, reply, revertFreshRun, safely, sessionGone, sessionModel, sessionIdOf, specCompletions, specFixCompletions, syncTasks, tree, unresolvedAnchors, warnLater, watchable } from "./kit.ts";
+import { agree, choose, cmd, evidenceLine, loadSpec, nextLine, phaseHeader, post, reply, revertFreshRun, sessionGone, sessionModel, sessionIdOf, specCompletions, specFixCompletions, syncTasks, tree, unresolvedAnchors, warnLater } from "./kit.ts";
 import { ensureSpecReviewed, recordedFindings, repairable, reviewDoor, reviewTarget, toFindings, verdictOn } from "./spec-review.ts";
 import { unfinishedPhase } from "./phase.ts";
 
@@ -191,11 +192,8 @@ const runClaimCheck = async (
   const cwd = ctx.cwd;
   const before = snapshot(cwd, "pb: before spec-check");
   post(`\u25b7 **Claim check** — which load-bearing claims in **${name}** carry no evidence and no \`assumed\` tag.`);
-  const started = Date.now();
-  let lastStep: string | undefined;
-  const paint = () => safely(() => ctx.ui.setWidget("pb-spec-check", [`pb spec-check ${name} · ${Math.round((Date.now() - started) / 1000)}s`, ...(lastStep ? [`  ↳ ${lastStep}`] : [])]));
-  paint();
-  const beat = watchable(ctx) ? setInterval(paint, 1000) : undefined;
+  const progress = freshProgress(ctx, "pb-spec-check", `pb spec-check ${name}`, { sessionsRoot: cwd });
+  progress.step("which load-bearing claims stand on nothing");
   let res: Awaited<ReturnType<typeof runFresh>>;
   try {
     res = await runFresh({
@@ -210,11 +208,10 @@ const runClaimCheck = async (
       thinking,
       maxConcurrent: cfg.maxConcurrent,
       sessionDir: store.sessionsDir("spec-check"),
-      onActivity: (line) => { lastStep = line; paint(); },
+      ...progress.hooks,
     });
   } finally {
-    if (beat !== undefined) clearInterval(beat);
-    safely(() => ctx.ui.setWidget("pb-spec-check", undefined));
+    progress.stop();
     revertFreshRun(cwd, (m) => warnLater(ctx, m), "the claim check", before, snapshot(cwd, "pb: after spec-check"));
   }
   const call = res.toolCalls.filter((c) => c.name === "report_findings").at(-1);

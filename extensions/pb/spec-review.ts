@@ -4,13 +4,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { snapshot } from "./checkpoint.ts";
 import { findingLine, specReviewBrief, SPEC_REVIEWER_SYSTEM, SPEC_CHECK_NAMES } from "./prompts.ts";
 import { REVIEW_TOOLS } from "./review.ts";
+import { freshProgress } from "./progress.ts";
 import { runFresh, runUsage } from "./runner.ts";
 import { specAssumptions, acceptanceCriteria, parseSpec, specHash } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type Finding, Store, cap, gitHead, readEvents } from "./store.ts";
 import { safeLine } from "./markdown.ts";
-import { P_ORDER, cmd, evidenceLine, loadSpec, nextLine, phaseHeader, post, revertFreshRun, safely, sessionGone, sessionModel, specCompletions, specOfSession, warnLater, watchable } from "./kit.ts";
+import { P_ORDER, cmd, evidenceLine, loadSpec, nextLine, phaseHeader, post, revertFreshRun, sessionGone, sessionModel, specCompletions, specOfSession, warnLater } from "./kit.ts";
 import { unfinishedPhase } from "./phase.ts";
 
 /**
@@ -132,11 +133,8 @@ const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, 
   const cwd = ctx.cwd;
   const reviewBefore = snapshot(cwd, "pb: before spec-review");
   post(door.opening);
-  const started = Date.now();
-  let lastStep: string | undefined;
-  const paint = () => safely(() => ctx.ui.setWidget("pb-spec-review", [`pb spec-review ${name} · ${Math.round((Date.now() - started) / 1000)}s`, ...(lastStep ? [`  ↳ ${lastStep}`] : [])]));
-  paint();
-  const beat = watchable(ctx) ? setInterval(paint, 1000) : undefined;
+  const progress = freshProgress(ctx, "pb-spec-review", `pb spec-review ${name}`, { sessionsRoot: cwd });
+  progress.step("one fresh reviewer reads the frozen draft");
   let res: Awaited<ReturnType<typeof runFresh>>;
   try {
     res = await runFresh({
@@ -153,14 +151,10 @@ const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, 
       thinking: cfg.specReviewer.thinking,
       maxConcurrent: cfg.maxConcurrent,
       sessionDir: store.sessionsDir("spec-review"),
-      onActivity: (line) => {
-        lastStep = line;
-        paint();
-      },
+      ...progress.hooks,
     });
   } finally {
-    if (beat !== undefined) clearInterval(beat);
-    safely(() => ctx.ui.setWidget("pb-spec-review", undefined));
+    progress.stop();
     revertFreshRun(cwd, (m) => warnLater(ctx, m), "the spec reviewer", reviewBefore, snapshot(cwd, "pb: after spec-review"));
   }
   const call = res.toolCalls.filter((c) => c.name === "report_findings").at(-1);

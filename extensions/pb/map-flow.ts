@@ -9,8 +9,10 @@ import { extraBlock } from "./prompts.ts";
 import { CARTOGRAPHER_SYSTEM, MAP_BULLET_CHARS, MAP_CHECK_LINES, MAP_CHECK_SYSTEM, MAP_MARKERS, MAP_TOKENS, areaNotes, bulletsOf, cartographerBrief, changedBullets, longBullets, mapCheckBrief, readCore, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { REVIEW_TOOLS } from "./review.ts";
 import { runFresh } from "./runner.ts";
+import { duration } from "./format.ts";
+import { freshProgress } from "./progress.ts";
 import { type ReviewLedgerEntry, Store } from "./store.ts";
-import { appendEntry, choose, cmd, revertFreshRun, safely, sessionModel, warnLater } from "./kit.ts";
+import { appendEntry, choose, cmd, post, revertFreshRun, sessionModel, warnLater } from "./kit.ts";
 
 export const mapRefusal = (cwd: string): string => {
   const defect = mapDefect(cwd);
@@ -22,7 +24,7 @@ export const mapRefusal = (cwd: string): string => {
  * Update the project map in a fresh, read-only call (the session doesn't grow). Paths that don't resolve,
  * and a map over the budget, go back to it once to be corrected; then the map is written, with the change shown and /pb:map undo to
  * go back. It asks first only when something looks off: paths that still don't resolve, or a large part of
- * the existing map removed (unanswered: the current map stays). Returns the changes when it wrote the map.
+ * the existing map removed (unanswered: it is written and what it was flagged for is posted; dismissed: the proposal is kept for `/pb:map apply`). Returns the changes when it wrote the map.
  */
 
 export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?: { name: string; findings: string }; changed?: string[]; focus?: string; reviewFindings?: ReviewLedgerEntry[] } = {}): Promise<string[] | undefined> => {
@@ -37,14 +39,14 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
   const abort = new AbortController();
   const canEsc = ctx.hasUI && ctx.mode === "tui" && typeof ctx.ui.onTerminalInput === "function";
   const unsubEsc = canEsc ? ctx.ui.onTerminalInput((d) => (d === "\x1b" ? (abort.abort(), { consume: true }) : undefined)) : undefined;
-  const render = (phase: string, activity?: string) =>
-    safely(() => ctx.ui.setWidget("pb-map", [`pb map — ${phase}${canEsc ? "   (Esc to stop)" : ""}`, ...(activity ? [`  ↳ ${activity}`] : [])]));
+  const progress = freshProgress(ctx, "pb-map", "pb map", { esc: canEsc, sessionsRoot: cwd });
   let mapSession: string | undefined;
   // The cartographer gets bash for inspection but must leave the project untouched, like the
   // explorer: anything it writes is put back, so the map update never carries stray files with it.
   const mapGuardBefore = snapshot(cwd, "pb: before map");
-  const cartographer = (brief: string, phase: string) =>
-    runFresh({
+  const cartographer = (brief: string, phase: string) => {
+    progress.step(phase);
+    return runFresh({
       cwd,
       role: "cartographer",
       systemPrompt: CARTOGRAPHER_SYSTEM + extraBlock(store.extra("map")),
@@ -58,12 +60,13 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
       signal: abort.signal,
       // Activity only, never the cartographer's streaming prose: the proposed map arrives
       // via the approve step, and the saved run holds the whole transcript for audit.
-      onActivity: (a) => render(phase, a),
+      ...progress.hooks,
       sessionDir: store.sessionsDir("cartographer"),
     }).then((r) => {
       mapSession = r.sessionFile ?? mapSession;
       return r;
     });
+  };
   const mapOf = (r: Awaited<ReturnType<typeof runFresh>>) => {
     const call = r.toolCalls.filter((c) => c.name === "report_map").at(-1);
     return {
@@ -83,7 +86,7 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
     const lines = changedBullets(current, proposed);
     if (!lines.length) return;
     const shown = lines.slice(0, MAP_CHECK_LINES);
-    render(`checking ${shown.length} new line${shown.length === 1 ? "" : "s"} against the code`);
+    progress.step(`checking ${shown.length} new line${shown.length === 1 ? "" : "s"} against the code`);
     const r = await runFresh({
       cwd,
       role: "map-check",
@@ -96,7 +99,7 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
       thinking: cfg.explorer.thinking ?? "high",
       maxConcurrent: cfg.maxConcurrent,
       signal: abort.signal,
-      onActivity: (a) => render(`checking ${shown.length} new line${shown.length === 1 ? "" : "s"} against the code`, a),
+      ...progress.hooks,
       sessionDir: store.sessionsDir("map-check"),
     });
     store.exploreEvent({ session: sessionFile, ...r.tokens, cost: r.cost, ms: r.ms });
@@ -112,7 +115,6 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
     checkNote = ` ${shown.length} new line${shown.length === 1 ? " was" : "s were"} checked against the code${lines.length > shown.length ? ` (${lines.length - shown.length} more were not)` : ""}.`;
   };
   try {
-    render("reading the project");
     const first = await cartographer(cartographerBrief({ current, ...o }), "reading the project");
     store.exploreEvent({ session: sessionFile, ...first.tokens, cost: first.cost, ms: first.ms });
     if (first.aborted) return void ctx.ui.notify("Map update stopped.", "info");
@@ -138,7 +140,7 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
     }
   } finally {
     unsubEsc?.();
-    safely(() => ctx.ui.setWidget("pb-map", undefined));
+    progress.stop();
     revertFreshRun(cwd, (m) => warnLater(ctx, m), "the cartographer", mapGuardBefore, snapshot(cwd, "pb: after map"));
   }
 
@@ -156,21 +158,34 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
     ...(currentLines >= 6 && removed / currentLines > 0.3 ? [`it removes ${removed} of the map's ${currentLines} lines`] : []),
   ];
   appendEntry("pb-map", { diff, warnings, tokens, map: body, changes });
+  let unanswered = false;
   if (warnings.length) {
-    const APPLY = "Apply it anyway";
+    // Saved before asking: a dismissed dialog or a closed editor must not throw away the run that made it.
+    store.saveMapProposal({ map: body, base: current, at: Date.now(), warnings });
+    const kept = `Map not changed. The proposal is kept: \`/${cmd("map")} apply\` writes it as it is.`;
+    const APPLY = "Apply it";
     const EDIT = "Edit it first";
     const KEEP = "Keep the current map";
-    const choice = await choose(ctx, store, `The proposed project map needs a look: ${warnings.join("; ")}`, [KEEP, APPLY, EDIT], KEEP);
+    // Unanswered, it is applied: a wrong map costs one /pb:map undo, a discarded one the whole run again.
+    const timedOut: string[] = [];
+    const choice = await choose(ctx, store, `The proposed project map needs a look: ${warnings.join("; ")}`, [APPLY, KEEP, EDIT], APPLY, timedOut);
+    unanswered = timedOut.length > 0;
     if (choice === EDIT) {
       const edited = await ctx.ui.editor("Edit the project map", body);
-      if (edited === undefined) return void ctx.ui.notify("Map not changed.", "info");
+      if (edited === undefined) return void ctx.ui.notify(kept, "info");
       body = normalizeMap(edited);
-    } else if (choice !== APPLY) return void ctx.ui.notify("Map not changed.", "info");
+    } else if (choice === KEEP) {
+      store.clearMapProposal();
+      return void ctx.ui.notify("Map not changed.", "info");
+    } else if (choice !== APPLY) return void ctx.ui.notify(kept, "info");
   }
   // The write has the last word on whether the file can be written at all (it may have been edited
   // while the cartographer ran), and the copy undo goes back to is stored only once it did write.
   if (!writeMap(ctx.cwd, body)) return void ctx.ui.notify(mapRefusal(ctx.cwd), "error");
   store.saveMapPrevious(current);
+  store.clearMapProposal();
+  // Said where you will look when you come back: these lines are read by every session until someone fixes them.
+  if (unanswered) post(`**The project map was written without your answer**, with what it was flagged for:\n${warnings.map((w) => `- ${w}`).join("\n")}\n\n\`/${cmd("map")} undo\` puts the previous map back.`);
   const notes = areaNotes(ctx.cwd);
   const where = notes.length ? `AGENTS.md (~${mapTokens(readCore(ctx.cwd))} tokens read in every session) and ${notes.length} area note${notes.length === 1 ? "" : "s"}` : "AGENTS.md";
   ctx.ui.notify(
@@ -180,12 +195,32 @@ export const updateMap = async (ctx: ExtensionContext, store: Store, o: { spec?:
   return changes;
 };
 
+/**
+ * `/pb:map apply`: write the proposal a "needs a look" dialog left unanswered. Only onto the map it was made
+ * against: a map changed since (by hand, an undo, another run) would be silently overwritten, so that is refused.
+ */
+const applyMapProposal = (ctx: ExtensionContext, store: Store): void => {
+  const proposal = store.mapProposal();
+  if (!proposal) return ctx.ui.notify(`No proposed map is waiting. \`/${cmd("map")}\` makes one.`, "info");
+  if (mapDefect(ctx.cwd)) return ctx.ui.notify(mapRefusal(ctx.cwd), "error");
+  const current = readMap(ctx.cwd);
+  if (current !== proposal.base) return ctx.ui.notify(`The project map changed since this proposal was made, so pb didn't write it over your changes. \`/${cmd("map")}\` makes a new one.`, "warning");
+  if (!writeMap(ctx.cwd, normalizeMap(proposal.map))) return ctx.ui.notify(mapRefusal(ctx.cwd), "error");
+  store.saveMapPrevious(current);
+  store.clearMapProposal();
+  ctx.ui.notify(
+    `The proposed project map (made ${duration(Date.now() - proposal.at)} ago) is now in AGENTS.md${proposal.warnings.length ? `, with what it was flagged for: ${proposal.warnings.join("; ")}` : ""}. \`/${cmd("map")} undo\` puts the previous one back.`,
+    "info",
+  );
+};
+
 export function registerMapFlow(pi: ExtensionAPI) {
   pi.registerCommand(cmd("map"), {
-    description: "Refresh the project map in AGENTS.md (layout, patterns, constraints) from the code as it is now. Optional: what to focus on; /pb:map undo puts the previous map back",
+    description: "Refresh the project map in AGENTS.md (layout, patterns, constraints) from the code as it is now. Optional: what to focus on; /pb:map apply writes a proposal you dismissed; /pb:map undo puts the previous map back",
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
+      if (args.trim() === "apply") return applyMapProposal(ctx, store);
       if (args.trim() === "undo") {
         const previous = store.mapPrevious();
         if (previous === undefined) return ctx.ui.notify("No previous map to go back to.", "info");

@@ -133,6 +133,8 @@ if (sys.includes("ATTACKER")) {
   const long = process.env.MOCK_MAP_LONG && (!repairing || process.env.MOCK_MAP_LONG === "stubborn") ? `\n- Orders settle in one transaction: ${"the mechanism, case by case, ".repeat(20)}see \`src/order.ts\`.` : "";
   const big = process.env.MOCK_MAP_BIG && !repairing ? `\n### Filler\n${"- `src/order.ts`: a line that saves nobody anything at all.\n".repeat(2000)}` : "";
   const map = `## Layout\n- \`src/\`: the application\n### Orders\n- \`src/order.ts\`: the order model and its transitions\n- Sign-in: follow \`auth/Login\`.${gone}${repairing && brief.includes("# Lines the code contradicts") && process.env.MOCK_MAP_CHECK !== "stubborn" ? "" : "\n- Services own transactions; controllers never call repositories."}${long}\n### Empty${process.env.MOCK_MAP_AREA ? "\n### Auth (src/auth/)\n- Sign-in goes through \`Login.java\`; nothing else issues sessions." : ""}${big}`;
+  // It reads before it reports, as a real cartographer does: the progress display shows these as they happen.
+  if (!repairing) say([call("read", { path: `${process.cwd()}/src/order.ts` }), call("bash", { command: `cd ${process.cwd()} && git log --oneline -5` })]);
   report("report_map", { map, changes: ["added Orders", "noted transactions"] });
 } else if (sys.includes("EXPLORER")) {
   // MOCK_FRESH_ARGS_OUT captures argv and the guard settings pb handed the process; MOCK_EXPLORE_HANG goes silent

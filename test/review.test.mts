@@ -1720,13 +1720,17 @@ test("legacy review-run.json migrates to its per-run file", async () => {
   assert.equal(s.interruptedReview("/h.jsonl"), undefined); // no interrupted pass recorded: nothing to offer
 });
 
-test("fresh runs preview what and where: pattern in path, full command capped", async () => {
-  const { previewCall } = await import("../extensions/pb/runner.ts");
-  assert.equal(previewCall({ pattern: "tradingview", path: "src/main/java" }), "tradingview in src/main/java");
-  assert.equal(previewCall({ path: "src/order/Order.java" }), "src/order/Order.java");
-  assert.equal(previewCall({ command: "cd /tmp && python3 probe.py" }), "cd /tmp && python3 probe.py");
-  assert.equal(previewCall({ command: `x${"y".repeat(200)}` }), `x${"y".repeat(118)}…`);
-  assert.equal(previewCall({ pattern: "*.java" }), "*.java");
+test("fresh runs describe each action as a person reads it: the tool and its target, paths from the project, a command without its cd", async () => {
+  const { describeCall } = await import("../extensions/pb/runner.ts");
+  const cwd = "/repo/shop";
+  const d = (name: string, args: Record<string, unknown>) => describeCall({ name, arguments: args }, cwd);
+  assert.equal(d("read", { path: "/repo/shop/extensions/pb/store.ts" }), "read extensions/pb/store.ts");
+  assert.equal(d("grep", { pattern: "ReviewState", path: "/repo/shop/extensions/pb" }), "grep ReviewState in extensions/pb");
+  assert.equal(d("find", { pattern: "*.java" }), "find *.java");
+  assert.equal(d("ls", { path: "/repo/shop" }), "ls .");
+  assert.equal(d("bash", { command: 'cd /repo/shop/extensions/pb && grep -n "ReviewState" -A 12 /repo/shop/extensions/pb/store.ts' }), 'grep -n "ReviewState" -A 12 extensions/pb/store.ts');
+  assert.equal(d("bash", { command: `x${"y".repeat(200)}` }), `x${"y".repeat(98)}…`);
+  assert.equal(d("report_map", { map: "…" }), "writing its report");
 });
 
 test("map: completed review findings reach the cartographer as a separate lead section", async () => {

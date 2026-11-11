@@ -24,7 +24,7 @@ never saw the build. Your engineering standards live in AGENTS.md, written once.
                       no spec? reviews the uncommitted change against its intent
 /pb:deps [which]      review dependencies (versions, deprecations, vulnerabilities, runtime) with the stack's own
                       read-only commands, and propose upgrades grouped into changes of their own
-/pb:map [focus|undo]  refresh the project map in AGENTS.md (done at /pb:archive too); undo puts the previous back
+/pb:map [focus|apply|undo]  refresh the project map in AGENTS.md (done at /pb:archive too); apply writes a proposal you dismissed; undo puts the previous back
 /pb:standards [stack] write the current standards into this project's AGENTS.md (created if missing; only pb's
                       section is replaced); java, vue, rust, plain or your own template, detected by default
 /pb:spec [which]      write or revise a spec without building (optional)
