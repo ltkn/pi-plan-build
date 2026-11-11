@@ -4,6 +4,7 @@
 
 - **Archiving a feature no longer re-audits the whole project map.** `/pb:archive` used to have the cartographer re-prove every line of the map after each feature, which on a large map and a local model took hours. It now reads only the feature's change: it re-checks the lines that cite a changed file, reads the change against every rule on the map (a new caller that skips a rule's enforcement point is a change too), adds what the change establishes, and keeps every other line as it is. `/pb:map` is still the whole-map audit, run when you choose. The first map is always a full read.
 - **The cartographer keeps its reading short.** It is asked for narrow greps and line ranges instead of whole files, because everything it reads stays in its context: a long audit no longer fills the model's window and gets compacted halfway.
+- **"It removes 98 of the map's 159 lines" meant 2 rules.** The warning compared lines, so every reworded or split line counted as removed, and a careful rewrite read as a map being gutted. It now counts rules nothing in the proposal still says (a reworded, split or moved rule is carried), names two of them in the question, and the result names the rules a map update dropped even when nothing was asked.
 
 ## 1.40.0
 

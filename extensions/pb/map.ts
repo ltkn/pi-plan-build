@@ -520,6 +520,30 @@ export const longBullets = (body: string): { text: string; chars: number }[] =>
     .filter((b) => b.text.length > MAP_BULLET_CHARS)
     .map((b) => ({ text: b.text, chars: b.text.length }));
 
+/** The words a rule is recognised by: backticked names whole, and every other word of four letters or more. */
+const ruleWords = (text: string): Set<string> => {
+  const names = [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1].toLowerCase());
+  const words = text.replace(/`[^`]+`/g, " ").toLowerCase().match(/[\p{L}\p{N}_]{4,}/gu) ?? [];
+  return new Set([...names, ...words]);
+};
+
+/**
+ * The current map's bullets the proposal no longer carries: a rule is carried when at least half of its words
+ * and names appear in one proposed bullet or two consecutive ones, so a reworded, split or moved rule (area notes
+ * are one text here) is not counted as removed; only a rule nothing in the proposal still says is.
+ */
+export function droppedBullets(current: string, proposed: string): { heading?: string; text: string }[] {
+  const next = bulletsOf(proposed);
+  const exact = new Set(next.map((b) => b.text));
+  const spans = next.map((b, i) => ruleWords(`${b.text} ${next[i + 1]?.text ?? ""}`));
+  return bulletsOf(current).filter((b) => {
+    if (exact.has(b.text)) return false;
+    const words = [...ruleWords(b.text)];
+    if (!words.length) return false;
+    return !spans.some((span) => words.filter((w) => span.has(w)).length * 2 >= words.length);
+  });
+}
+
 /** How many new or changed lines one map check reads: a first map is checked in its first lines, and says so. */
 export const MAP_CHECK_LINES = 60;
 

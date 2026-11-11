@@ -443,6 +443,46 @@ test("map: /pb:archive reads only the feature's change against the map, marking 
   }
 });
 
+test("map: a rule counts as dropped only when nothing in the proposal still says it; reworded, split or moved rules are kept", async () => {
+  const { droppedBullets } = await import("../extensions/pb/map.ts");
+  const current = [
+    "### Security invariants",
+    "- Every request is tenant-scoped by `TenantScopeFilter` on `/api/*`; controllers must not query repositories directly.",
+    "- Order transitions are guarded by the current state in `src/order.ts`, so repeating one is a no-op, proven by the transition test.",
+    "### Layout",
+    "- `scripts/release.sh` publishes the package; never run it from a feature branch.",
+  ].join("\n");
+  const proposed = [
+    "### Security invariants",
+    "- Controllers never query repositories directly: `TenantScopeFilter` scopes every `/api/*` request to its tenant.", // reworded
+    "### Orders (src/)",
+    "- Order transitions are guarded by the current state in `src/order.ts`.", // split into two, and moved to an area
+    "- Repeating a transition is a no-op, proven by the transition test.",
+  ].join("\n");
+  assert.deepEqual(droppedBullets(current, proposed).map((b) => b.text), ["- `scripts/release.sh` publishes the package; never run it from a feature branch."]);
+  assert.deepEqual(droppedBullets(current, current), []);
+});
+
+test("map: the removal warning counts rules dropped, not lines rewritten, and the result names what was dropped", async () => {
+  const t = setup({ verify: "true", askTimeoutSec: 600 });
+  fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/auth/Login.java"), "class Login {}\n");
+  process.chdir(t.repo);
+  const { writeMap } = await import("../extensions/pb/map.ts");
+  // The same rules the cartographer reports, every one reworded: lines all differ, no rule is dropped.
+  writeMap(t.repo, "### Layout\n- The application lives in `src/`.\n### Orders\n- The order model and its transitions: `src/order.ts`.\n- For sign-in, follow `auth/Login`.\n- Controllers never call repositories; services own transactions.\n- `src/order.ts` exports the order model transitions.\n- The application code is `src/`.");
+  await t.run("map");
+  assert.ok(!t.selectTitles.some((x) => /of the map's/.test(x)), "a rewrite is not a removal");
+  assert.doesNotMatch(t.notes.at(-1)!, /It dropped/);
+  // Rules nothing in the proposal still says: asked, and named.
+  writeMap(t.repo, ["### Billing", ...["invoices are numbered per tenant", "refunds need a second approver", "currency is stored in minor units", "tax is computed at checkout only", "a voided invoice keeps its number", "payment retries stop after three days"].map((r) => `- Billing: ${r}.`)].join("\n"));
+  t.selects.push("Apply it");
+  await t.run("map");
+  assert.match(t.selectTitles.at(-1)!, /it drops 6 of the map's 6 rules, e\.g\. "Billing: invoices are numbered per tenant\.", "Billing: refunds need a second approver\."/);
+  assert.match(t.notes.at(-1)!, /It dropped 6 rules: "Billing: invoices are numbered per tenant\.", "Billing: refunds need a second approver\.", "Billing: currency is stored in minor units\.", …\./);
+});
+
 test("map: a map over the budget goes back once to be trimmed, by the same cartographer that can read the code", async () => {
   const t = setup({ verify: "true" });
   fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });

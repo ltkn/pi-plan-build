@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
 import { extraBlock } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_BULLET_CHARS, MAP_CHECK_LINES, MAP_CHECK_SYSTEM, MAP_MARKERS, MAP_TOKENS, areaNotes, bulletsCiting, bulletsOf, cartographerBrief, changedBullets, longBullets, mapCheckBrief, readCore, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_BULLET_CHARS, MAP_CHECK_LINES, MAP_CHECK_SYSTEM, MAP_MARKERS, MAP_TOKENS, areaNotes, bulletsCiting, bulletsOf, cartographerBrief, droppedBullets, changedBullets, longBullets, mapCheckBrief, readCore, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { REVIEW_TOOLS } from "./review.ts";
 import { runFresh } from "./runner.ts";
 import { duration } from "./format.ts";
@@ -154,15 +154,17 @@ export const updateMap = async (
   const diff = mapDiff(current, body);
   if (!diff.length) return void ctx.ui.notify("The project map is up to date: nothing to change.", "info");
   const tokens = mapTokens(body);
-  const currentLines = current.split("\n").filter((l) => l.trim()).length;
-  const removed = diff.filter((l) => l.startsWith("-")).length;
+  // Rules, not lines: a reworded, split or moved rule is still in the map; only one nothing carries counts.
+  const rules = bulletsOf(current).length;
+  const dropped = droppedBullets(current, body);
+  const quote = (t: string) => `"${t.replace(/^[-*]\s+/, "").slice(0, 80)}${t.length > 82 ? "…" : ""}"`;
   // A contradicted line the repair kept word for word is still contradicted: the human decides.
   const kept = new Set(bulletsOf(body).map((b) => b.text));
   const stillWrong = disproved.filter((d) => kept.has(d.text));
   const warnings = [
     ...stillWrong.map((d) => `the code contradicts "${d.text.slice(0, 120)}${d.text.length > 120 ? "…" : ""}" (${d.evidence})`),
     ...unresolved.map((u) => `\`${u.path}\` doesn't resolve`),
-    ...(currentLines >= 6 && removed / currentLines > 0.3 ? [`it removes ${removed} of the map's ${currentLines} lines`] : []),
+    ...(rules >= 6 && dropped.length / rules > 0.3 ? [`it drops ${dropped.length} of the map's ${rules} rules, e.g. ${dropped.slice(0, 2).map((b) => quote(b.text)).join(", ")}`] : []),
   ];
   appendEntry("pb-map", { diff, warnings, tokens, map: body, changes });
   let unanswered = false;
@@ -196,7 +198,7 @@ export const updateMap = async (
   const notes = areaNotes(ctx.cwd);
   const where = notes.length ? `AGENTS.md (~${mapTokens(readCore(ctx.cwd))} tokens read in every session) and ${notes.length} area note${notes.length === 1 ? "" : "s"}` : "AGENTS.md";
   ctx.ui.notify(
-    `Project map ${current ? "updated" : "written"} in ${where} (~${tokens} tokens in ${Math.max(1, Math.round((Date.now() - started) / 1000))}s${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}).${scope ? ` Only ${o.spec?.name ?? "the feature"}'s change was read against the map; \`/${cmd("map")}\` audits the whole map.` : ""}${long.length ? ` ${long.length} bullet${long.length === 1 ? " is" : "s are"} still over ${MAP_BULLET_CHARS} characters.` : ""}${checkNote} \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
+    `Project map ${current ? "updated" : "written"} in ${where} (~${tokens} tokens in ${Math.max(1, Math.round((Date.now() - started) / 1000))}s${changes.length ? `: ${changes.slice(0, 3).join("; ")}${changes.length > 3 ? "; …" : ""}` : ""}).${dropped.length ? ` It dropped ${dropped.length} rule${dropped.length === 1 ? "" : "s"}: ${dropped.slice(0, 3).map((b) => quote(b.text)).join(", ")}${dropped.length > 3 ? ", …" : ""}.` : ""}${scope ? ` Only ${o.spec?.name ?? "the feature"}'s change was read against the map; \`/${cmd("map")}\` audits the whole map.` : ""}${long.length ? ` ${long.length} bullet${long.length === 1 ? " is" : "s are"} still over ${MAP_BULLET_CHARS} characters.` : ""}${checkNote} \`/${cmd("map")} undo\` puts the previous one back.${mapSession ? ` The whole run: \`pi --session ${path.relative(ctx.cwd, mapSession)}\`` : ""}`,
     "info",
   );
   return changes;
