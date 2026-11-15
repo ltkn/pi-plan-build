@@ -150,7 +150,7 @@ const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, 
       model: reviewModel,
       thinking: cfg.specReviewer.thinking,
       maxConcurrent: cfg.maxConcurrent,
-      sessionDir: store.sessionsDir("spec-review"),
+      sessionDir: store.specSessionsDir(name, "spec-review"),
       ...progress.hooks,
     });
   } finally {

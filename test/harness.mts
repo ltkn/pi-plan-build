@@ -557,7 +557,7 @@ export const until = async (cond: () => boolean) => {
 /* ------------------------------ /pb:spec-review ------------------------------ */
 
 export const specRel = ".pi/pb/specs/order-cancellation/spec.md";
-export const reviewRuns = (t: ReturnType<typeof setup>) => fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length;
+export const reviewRuns = (t: ReturnType<typeof setup>) => fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")).length;
 export const reviewEvents = (t: ReturnType<typeof setup>) => t.events("order-cancellation").filter((e: any) => e.type === "spec-review");
 
 /* ------------------------- spec repair laps / harden ------------------------ */

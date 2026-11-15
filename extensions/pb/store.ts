@@ -1225,7 +1225,11 @@ export class Store {
     if (run) return run;
     return this.reviewRuns().find((r) => r.interrupted?.session === session || r.passes.some((p) => p.session === session));
   }
-  saveReviewRun(run: ReviewRun): void {
+  /** Whether a review of this spec is still kept as running or interrupted: archiving would end it. */
+  reviewOpen(name: string): boolean {
+    return this.reviewRuns().some((r) => r.name === name);
+  }
+    saveReviewRun(run: ReviewRun): void {
     if (!run.id) throw new Error("a review run needs an id");
     this.migrateReviewRuns();
     writeFileAtomic(this.reviewRunFile(run.id), `${JSON.stringify(run, null, 2)}\n`);
@@ -1262,7 +1266,10 @@ export class Store {
     return dir;
   }
 
-  /** At /pb:archive: the archived spec's review runs, and the explorer and map runs so far. */
+  /**
+   * At /pb:archive: the archived spec's own sessions and review runs, and the project-wide fresh runs so far
+   * (explorer, probes, map). Another spec's runs are saved under that spec, so they stay.
+   */
   dropSessions(name: string): void {
     fs.rmSync(path.join(this.specDir(name), "sessions"), { recursive: true, force: true });
     fs.rmSync(path.join(this.root, "sessions"), { recursive: true, force: true });

@@ -208,7 +208,7 @@ const runClaimCheck = async (
       model,
       thinking,
       maxConcurrent: cfg.maxConcurrent,
-      sessionDir: store.sessionsDir("spec-check"),
+      sessionDir: store.specSessionsDir(name, "spec-check"),
       ...progress.hooks,
     });
   } finally {

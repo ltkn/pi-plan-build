@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { briefOf, diligent, repairLap, setup, SPEC, taskOf, until, written } from "./harness.mts";
+import { briefOf, diligent, repairLap, setup, SPEC, specRel, taskOf, until, written } from "./harness.mts";
 
 test("skippedLargeFiles: oversized untracked files are reported because snapshots can't see them", async () => {
   const t = setup();
@@ -74,7 +74,7 @@ test("a field pb had to clip names the run log that holds the uncut text", async
   }
   const digest = t.posts.at(-1)!;
   assert.match(digest, /Some fields above are clipped by pb's length bound/);
-  assert.match(digest, /pi --session \.pi\/pb\/sessions\/spec-check\//, "the pointer names the run log");
+  assert.match(digest, /pi --session \.pi\/pb\/specs\/order-cancellation\/sessions\/spec-check\//, "the pointer names the run log");
 });
 
 test("stale sessions read as gone without throwing, live ones as present", async () => {
@@ -357,6 +357,47 @@ test("archive: a spec with work left asks first and says what — never reviewed
   await t.run("archive", "order-cancellation");
   assert.equal(t.confirms.length, asked, "nothing owed, nothing asked");
   assert.ok(!live());
+});
+
+test("archive: only the archived spec's runs go, a running review is named first, and a review or fix session cannot archive", async () => {
+  const { Store } = await import("../extensions/pb/store.ts");
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  const store = new Store(t.repo);
+  const ownRuns = path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review");
+  assert.ok(fs.readdirSync(ownRuns).length > 0, "the spec review saved its session with the spec");
+  // Another spec's spec-review and claim-check sessions live under that spec, out of this archive's reach.
+  const otherRuns = path.join(t.repo, ".pi/pb/specs/other-spec/sessions");
+  for (const role of ["spec-review", "spec-check"]) {
+    fs.mkdirSync(path.join(otherRuns, role), { recursive: true });
+    fs.writeFileSync(path.join(otherRuns, role, "run.jsonl"), "{}\n");
+  }
+  const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+  const p = JSON.parse(fs.readFileSync(progressFile, "utf8"));
+  fs.writeFileSync(progressFile, JSON.stringify({ ...p, phase: "reviewed", review: { at: "2026-10-01 10:00:00", verdict: "pass", findings: [] } }));
+  // A clean pass, but a review of it is still kept as running: archiving would end it, so it asks.
+  store.saveReviewRun({ id: "run-9", name: "order-cancellation", cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] } as any);
+  t.confirmAnswers.push(false);
+  await t.run("archive", "order-cancellation");
+  assert.equal(t.confirms.at(-1), "order-cancellation isn't finished: a review of it is running or was interrupted: archiving ends it");
+  assert.ok(fs.existsSync(ownRuns), "a no keeps everything");
+  store.clearReviewRun("run-9");
+  await t.run("archive", "order-cancellation");
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")));
+  for (const role of ["spec-review", "spec-check"]) assert.ok(fs.existsSync(path.join(otherRuns, role, "run.jsonl")), `another spec's ${role} run stays`);
+
+  // From inside a review session the command is refused before anything is touched: archiving would drop the
+  // record that keeps that session read-only.
+  const r = setup({ verify: "true" });
+  await written(r);
+  const reviewer = new Store(r.repo);
+  reviewer.saveReviewSession(r.runtime().ctx.sessionManager.getSessionFile(), { role: "review", spec: "order-cancellation", run: "run-1", findings: [] });
+  await r.run("archive", "order-cancellation");
+  assert.match(r.notes.at(-1)!, /This is a review or fix session/);
+  assert.ok(fs.existsSync(path.join(r.repo, specRel)));
+  assert.ok(reviewer.reviewSession(r.runtime().ctx.sessionManager.getSessionFile()), "its guard record stays");
 });
 
 test("map: /pb:archive updates it by itself: paths that don't resolve go back once to be fixed, then it's written, and undo swaps back", async () => {

@@ -11,15 +11,18 @@ import { cmd, nextLine, post, specCompletions } from "./kit.ts";
 import { updateMap } from "./map-flow.ts";
 
 /**
- * What a spec still owes before it is put away: a build that never finished, a review never run or whose last
- * verdict was not a pass, and the P0-P2 findings still open. Empty when it is done.
+ * What a spec still owes before it is put away: a build that never finished, a review still running or
+ * interrupted, a review never run or whose last verdict was not a pass, and the P0-P2 findings still open.
+ * Empty when it is done.
  */
-export const owedOnArchive = (p: Progress | undefined): string[] => {
+export const owedOnArchive = (p: Progress | undefined, reviewOpen = false): string[] => {
   if (!p || !["built", "reviewed"].includes(p.phase)) return [`its build is ${p?.phase ?? "not started"}`];
+  const running = reviewOpen ? ["a review of it is running or was interrupted: archiving ends it"] : [];
   const review = p.review;
-  if (!review) return ["it was never reviewed"];
+  if (!review) return [...running, "it was never reviewed"];
   const open = review.findings.filter((f) => f.priority !== "P3").length;
   return [
+    ...running,
     ...(review.verdict !== "pass" ? [`its last review was ${review.verdict === "changes_needed" ? "CHANGES NEEDED" : review.verdict === "unverified" ? "UNVERIFIED" : "without a verdict"}`] : []),
     ...(open ? [`${open} review finding${open === 1 ? "" : "s"} still open`] : []),
   ];
@@ -31,6 +34,9 @@ export function registerArchive(pi: ExtensionAPI) {
     getArgumentCompletions: specCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
+      // Archiving drops the records that keep a review or fix session to its own tools: never from inside one.
+      const here = ctx.sessionManager.getSessionFile();
+      if (store.reviewSession(here) || store.fixSession(here)) return ctx.ui.notify(`This is a review or fix session: run /${cmd("archive")} from the session you build in.`, "warning");
       const candidates = store.specNames().filter((n) => ["built", "reviewed"].includes(store.progress(n)?.phase ?? ""));
       let name = args.trim() || undefined;
       if (!name) {
@@ -42,7 +48,7 @@ export function registerArchive(pi: ExtensionAPI) {
       if (!KEBAB_NAME.test(name)) return ctx.ui.notify(`\`${name}\` isn't a valid spec name (spec names are lowercase with hyphens). /${cmd("status")} lists the specs.`, "warning");
       if (!store.readSpec(name)) return ctx.ui.notify(`No spec "${name}".`, "warning");
       // Archived findings are out of /pb:fix's reach: what the spec still owes is said before it goes, not after.
-      const owed = owedOnArchive(store.progress(name));
+      const owed = owedOnArchive(store.progress(name), store.reviewOpen(name));
       if (owed.length) {
         if (ctx.hasUI && !(await ctx.ui.confirm(`${name} isn't finished: ${owed.join("; ")}`, "Archive it anyway? Its open findings leave /pb:fix's reach."))) return;
         if (!ctx.hasUI) ctx.ui.notify(`Archiving ${name} with work left: ${owed.join("; ")}.`, "warning");

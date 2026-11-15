@@ -66,7 +66,7 @@ test("spec review: one pass on the frozen draft, with the whole text in its brie
   assert.match(brief, /# Your job[\s\S]*empty list is a pass; only a P0 blocks/);
   // one pass: one saved run for this build, however many times the start is repeated
   await t.run("build", "order-cancellation");
-  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length, 1);
+  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")).length, 1);
 });
 
 test("spec review: a P0 stops the build before T1 and is recorded against the spec text", async () => {
@@ -159,7 +159,7 @@ test("spec review: only a P1 is weighed; P2 and P3 alone build without asking", 
 test("spec review: an unchanged spec re-posts the block without a second run; an edit reviews again", async () => {
   const t = setup({ verify: "true" });
   await written(t);
-  const runs = () => fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length;
+  const runs = () => fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")).length;
   process.env.MOCK_SPEC_REVIEW = "block";
   try {
     await t.run("build", "order-cancellation");
@@ -530,8 +530,8 @@ test("spec-fix lap: the report is recorded, the claim check runs on what it wrot
   assert.equal(t.progress("order-cancellation").fix, undefined);
   // the check is a read-only pass with its reporting tool, and it is not a review: a build on this text
   // still has to earn its own pass
-  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-check")).length, 1);
-  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length, 1);
+  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-check")).length, 1);
+  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")).length, 1);
   const reviewed = () => t.events("order-cancellation").filter((e: any) => e.type === "spec-review" && e.hash === specHash(t.read(specRel))).length;
   assert.equal(reviewed(), 0, "the repair's claim check is no verdict on the new text");
   t.agent.script = diligent;
@@ -556,7 +556,7 @@ test("spec-fix: a manual lap stops after one lap even when the claim check finds
   assert.equal(specFixEvents(t, "spec-check").length, 1, "the check is the lap's last step");
   assert.match(t.posts.at(-1)!, /🔧 Spec fix — order-cancellation[\s\S]*2 un-evidenced[\s\S]*Claims with nothing behind them/);
   assert.equal(t.progress("order-cancellation").fix, undefined);
-  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length, 1, "a manual lap does not run a confirming review");
+  assert.equal(fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")).length, 1, "a manual lap does not run a confirming review");
 });
 
 test("spec-fix lap: it cannot write another spec or the project, and still writes its own", async () => {
@@ -672,8 +672,8 @@ test("spec-fix: a lap whose turn ends without reporting stops and records nothin
 test("spec-harden: plan, review, lap, one claim check, confirming review, last lap — then it stops and reports", async () => {
   const t = setup({ verify: "true" });
   await written(t);
-  const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length : 0);
-  const checks = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-check")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-check")).length : 0);
+  const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")).length : 0);
+  const checks = () => (fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-check")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-check")).length : 0);
   t.selects.push("Yes, go on"); // the plan
   t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
   process.env.MOCK_SPEC_REVIEW = "advisory";
@@ -724,7 +724,7 @@ test("spec-harden: a clean pass on record is named as a pass, not 'no verdict'",
 test("spec-harden: claim laps never spend the lap the confirming review's findings need", async () => {
   const t = setup({ verify: "true", specFix: { maxLaps: 2, maxReviews: 2 } });
   await written(t);
-  const checks = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-check")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-check")).length : 0);
+  const checks = () => (fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-check")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-check")).length : 0);
   process.env.MOCK_SPEC_REVIEW = "advisory";
   process.env.MOCK_SETTLE = "claims"; // the check always finds un-evidenced claims
   t.selects.push("Yes, go on");
@@ -748,7 +748,7 @@ test("spec-harden: claim laps never spend the lap the confirming review's findin
 test("spec-harden: without a confirming review the one claim check's claims get a lap, and the digest never calls them cleared", async () => {
   const t = setup({ verify: "true", specFix: { maxLaps: 3, maxReviews: 0 } });
   await written(t);
-  const checks = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-check")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-check")).length : 0);
+  const checks = () => (fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-check")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-check")).length : 0);
   process.env.MOCK_SPEC_REVIEW = "advisory";
   process.env.MOCK_SETTLE = "claims";
   t.selects.push("Yes, go on");
@@ -841,7 +841,7 @@ test("spec-review: no name and several ready specs refuse headless instead of ju
   await written(t);
   const other = await t.callTool("pb_write_spec", { name: "other-spec", content: SPEC().replace("# Order cancellation", "# Other spec") });
   assert.equal(other.error, undefined, other.error ?? "");
-  const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length : 0);
+  const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")).length : 0);
   t.runtime().hasUI = false;
   try {
     await t.run("spec-review");
@@ -855,7 +855,7 @@ test("spec-review: no name and several ready specs refuse headless instead of ju
 test("spec-review: --fresh pays for another pass at the same text instead of reusing", async () => {
   const t = setup({ verify: "true" });
   await written(t);
-  const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/sessions/spec-review")).length : 0);
+  const reviews = () => (fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")) ? fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")).length : 0);
   process.env.MOCK_SPEC_REVIEW = "advisory";
   try {
     await t.run("spec-review", "order-cancellation");
