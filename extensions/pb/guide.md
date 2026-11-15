@@ -1002,6 +1002,14 @@ and an unchanged tree gets no second look at all. Any confirmed P0 or P1 means
 the highest priority. When the code is right and only the spec's framing is
 imprecise, that's a P3 note with a proposed rewording, not a defect.
 
+**What a PASS is made of.** Only pb's own checks are executed proof: the
+evidence line starts with them (`checks 3/3 green`, or `no checks run` when the
+project has no command to run). Everything after that — the passes, the
+second look, the criteria met — is model judgement: more eyes, not proof. A
+PASS over `no checks run` rests on judgement alone. A finding that rests on a
+rule the project map states is confirmed only when the code bears the rule
+out, because the map is model-written too.
+
 Every finding also carries a **class**: in this change, or **outside the
 change** (a problem that pre-dates it). An outside finding is still a finding:
 reported with its file, line, priority and fix, capped at P2 and advisory, so

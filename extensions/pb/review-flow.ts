@@ -366,6 +366,8 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const tipKey = verdict === "pass" ? (midBuild.length ? "review.mid-build" : "review.pass") : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
     const passMark = finished("review") ? "✓" : run.passes.some((x) => x.role === "review" && x.error) ? "✗" : "—";
     const abuseMark = run.security ? (finished("abuse") ? "✓" : run.passes.some((x) => x.role === "abuse" && x.error) ? "✗" : "—") : "";
+    // What pb executed, ahead of what the models judged: a verdict over no checks is judgement alone and says so.
+    const checksFact = run.checksRun === undefined ? "" : run.checksRun === 0 ? "no checks run" : `checks ${run.checksRun - failedChecks.length}/${run.checksRun} green`;
     const stat = diffStat(run.cwd, run.before?.commit ?? run.base).split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
     const scopeFacts = [stat, run.base ? `base ${run.base.slice(0, 7)}` : ""];
     const result = lost ? "NO VERDICT" : verdict === "pass" ? "PASS" : verdict === "changes_needed" ? "CHANGES NEEDED" : verdict === "unverified" ? "UNVERIFIED" : "no verdict";
@@ -373,7 +375,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       phaseHeader(verdict === "pass" ? "✅" : verdict === "changes_needed" ? "❌" : "⚠", "Review", `${run.label}${run.followUp ? " (follow-up)" : ""}`, result, tally, finished("abuse") ? "with an adversarial pass" : "", run.ms !== undefined ? duration(run.ms) : ""),
       "",
       nextLine(next),
-      evidenceLine(`${run.name ? "spec" : "intent"} pass ${passMark}`, abuseMark ? `adversarial ${abuseMark}` : "", doubleCheckLines.mark, coverage.enforced ? `${coverage.met}/${coverage.lines.length} criteria met` : "", ...scopeFacts, midBuildView.length ? `mid-build · ${midBuildView.join(", ")} still to build` : ""),
+      evidenceLine(checksFact, `${run.name ? "spec" : "intent"} pass ${passMark}`, abuseMark ? `adversarial ${abuseMark}` : "", doubleCheckLines.mark, coverage.enforced ? `${coverage.met}/${coverage.lines.length} criteria met` : "", ...scopeFacts, midBuildView.length ? `mid-build · ${midBuildView.join(", ")} still to build` : ""),
       ...(o.partial
         ? ["", `⚠ You left the review before it finished: this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),
@@ -844,6 +846,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         thinking: cfg.reviewer.thinking ?? (pi.getThinkingLevel() as string | undefined),
         passes: [],
         ...(failedChecks.length ? { failedChecks } : {}),
+        checksRun: results.length,
       };
       await reviewNext(ctx, store, run);
     },

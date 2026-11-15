@@ -648,6 +648,8 @@ export interface ReviewRun {
   interrupted?: { role: "review" | "abuse"; session: string };
   /** the checks pb ran before the review that failed: the verdict can't be PASS over them */
   failedChecks?: string[];
+  /** how many checks pb ran before the review: the part of a verdict that was executed, not judged */
+  checksRun?: number;
 }
 
 export const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);

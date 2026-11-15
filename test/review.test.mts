@@ -1735,6 +1735,29 @@ test("review: works without a spec, on the uncommitted change and its intent", a
   assert.match(briefOf(t), /Intent: src\/README warm the greeting/); // the whole line went through as intent
 });
 
+test("review: the evidence line leads with what pb executed, and a review over no checks says so", async () => {
+  // Only pb's own checks are proof; the passes after them are judgement. A PASS with nothing executed must not
+  // read like one backed by a green suite.
+  const bare = setup({});
+  process.chdir(bare.repo);
+  fs.writeFileSync(path.join(bare.repo, "README"), "hello\n");
+  await bare.run("review", "greet more warmly");
+  assert.match(bare.posts.at(-1)!, /· PASS/);
+  assert.match(bare.posts.at(-1)!, /^\*\*Evidence:\*\* no checks run · intent pass ✓/m);
+
+  const checked = setup({ verify: "true" });
+  process.chdir(checked.repo);
+  fs.writeFileSync(path.join(checked.repo, "README"), "hello\n");
+  await checked.run("review", "greet more warmly");
+  assert.match(checked.posts.at(-1)!, /^\*\*Evidence:\*\* checks 1\/1 green · intent pass ✓/m);
+
+  const red = setup({ verify: "false" });
+  process.chdir(red.repo);
+  fs.writeFileSync(path.join(red.repo, "README"), "hello\n");
+  await red.run("review", "greet more warmly");
+  assert.match(red.posts.at(-1)!, /^\*\*Evidence:\*\* checks 0\/1 green · intent pass ✓/m);
+});
+
 test("review: a file edited while the review ran is reported, never reverted", async () => {
   const t = setup({ verify: "true" });
   await written(t);

@@ -664,6 +664,8 @@ export const VERIFIER_SYSTEM = `You are a VERIFIER in a fresh context. A reviewe
 
 A finding marked "outside the change" is pre-existing: confirm it when the problem is real and still present, whether or not this change caused it. Never reject a finding for being outside or pre-existing — that is its class, not a reason to dismiss it.
 
+A finding marked "The map states this rule" stands on the code, not on the map: the map is model-written and can be wrong. Confirm it only when the rule holds where the code is read (the rest of the project follows it, or a test, type or constraint enforces it); when the code contradicts the map line, reject the finding and say so in the evidence.
+
 ${READ_ONLY_PREAMBLE} Report with the report_verdicts tool: one entry per finding, by its number. An entry you leave out is not verified, never confirmed or rejected: report an entry for every finding in the brief, not only the ones you got to.`;
 
 /**
