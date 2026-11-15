@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 // Stand-in for the fresh `pi --mode json -p` explorer, reviewer and verifier.
-// MOCK_VERIFY=reject makes the verifier reject findings (MOCK_VERIFY=crash blows it up).
+// MOCK_VERIFY (what the verifier reports): unset confirms every finding · reject rejects every finding ·
+// silent ends without calling report_verdicts · partial answers every finding but the last ·
+// partial-crash does that, then dies · full-crash answers every finding (confirmed), then dies ·
+// reject-crash answers every finding rejected, then dies · padded answers the first finding three times
+// and invents a number outside the brief · crash dies before reporting anything.
+// MOCK_MAP_CHECK (what the map checker reports): unset confirms every line · reject/stubborn reject the
+// line about controllers (stubborn: the cartographer's repair keeps it) · silent reports nothing ·
+// partial answers every line but the last.
 import * as fs from "node:fs";
 const argv = process.argv.slice(2);
 const sys = fs.readFileSync(argv[argv.indexOf("--append-system-prompt") + 1], "utf8");
@@ -107,20 +114,34 @@ if (sys.includes("ATTACKER")) {
   say([{ type: "text", text: "Acceptance: all met." }]);
 } else if (sys.includes("VERIFIER")) {
   if (process.env.MOCK_VERIFIER_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_VERIFIER_BRIEF_OUT, brief);
-  if (process.env.MOCK_VERIFY === "crash") {
+  // MOCK_VERIFY modes are listed in this file's header.
+  const mode = process.env.MOCK_VERIFY ?? "";
+  if (mode === "crash") {
     console.error("verifier exploded");
     process.exit(1);
   }
-  const n = (brief.match(/^\d+\. \[P/gm) ?? []).length;
-  const verdict = process.env.MOCK_VERIFY === "reject" ? "rejected" : "confirmed";
-  report("report_verdicts", { verdicts: Array.from({ length: n }, (_, i) => ({ finding: i + 1, verdict, evidence: "src/order.ts:11 already guards it" })) });
+  if (mode === "silent") {
+    say([{ type: "text", text: "Looked; nothing came of it." }]);
+  } else {
+    const n = (brief.match(/^\d+\. \[P/gm) ?? []).length;
+    const verdict = mode === "reject" || mode === "reject-crash" ? "rejected" : "confirmed";
+    const verdicts = Array.from({ length: n }, (_, i) => ({ finding: i + 1, verdict, evidence: "src/order.ts:11 already guards it" }));
+    const first = verdicts.slice(0, 1);
+    const picked = mode === "padded" ? [...first, ...first, ...first, { finding: n + 99, verdict, evidence: "no such finding" }] : mode === "partial" || mode === "partial-crash" ? verdicts.slice(0, -1) : verdicts;
+    report("report_verdicts", { verdicts: picked });
+    if (mode === "partial-crash" || mode === "full-crash" || mode === "reject-crash") {
+      console.error("verifier exploded");
+      process.exit(1);
+    }
+  }
 } else if (sys.includes("MAP CHECKER")) {
-  // MOCK_MAP_CHECK: "reject" or "stubborn" rejects the line about controllers (stubborn: the repair keeps it); "silent" reports nothing.
+  // MOCK_MAP_CHECK modes are listed in this file's header.
   if (process.env.MOCK_CHECK_BRIEF_OUT) fs.writeFileSync(process.env.MOCK_CHECK_BRIEF_OUT, brief);
   if (process.env.MOCK_MAP_CHECK !== "silent") {
     const lines = [...brief.matchAll(/^(\d+)\. (.*)$/gm)];
     const wrong = (text) => (process.env.MOCK_MAP_CHECK === "reject" || process.env.MOCK_MAP_CHECK === "stubborn") && text.includes("controllers never call repositories");
-    report("report_verdicts", { verdicts: lines.map((m) => ({ finding: Number(m[1]), verdict: wrong(m[2]) ? "rejected" : "confirmed", evidence: wrong(m[2]) ? "src/order.ts:3 the controller calls the repository" : "src/order.ts:1" })) });
+    const verdicts = lines.map((m) => ({ finding: Number(m[1]), verdict: wrong(m[2]) ? "rejected" : "confirmed", evidence: wrong(m[2]) ? "src/order.ts:3 the controller calls the repository" : "src/order.ts:1" }));
+    report("report_verdicts", { verdicts: process.env.MOCK_MAP_CHECK === "partial" ? verdicts.slice(0, -1) : verdicts });
   }
 } else if (sys.includes("CARTOGRAPHER")) {
   // MOCK_MAP_BIG: the first map is far over the budget; the repair call trims it.

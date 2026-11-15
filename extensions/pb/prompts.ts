@@ -664,7 +664,7 @@ export const VERIFIER_SYSTEM = `You are a VERIFIER in a fresh context. A reviewe
 
 A finding marked "outside the change" is pre-existing: confirm it when the problem is real and still present, whether or not this change caused it. Never reject a finding for being outside or pre-existing — that is its class, not a reason to dismiss it.
 
-${READ_ONLY_PREAMBLE} Report with the report_verdicts tool: one entry per finding, by its number.`;
+${READ_ONLY_PREAMBLE} Report with the report_verdicts tool: one entry per finding, by its number. An entry you leave out is not verified, never confirmed or rejected: report an entry for every finding in the brief, not only the ones you got to.`;
 
 /**
  * A finding's detail lines, in the one order every reader sees them: post, brief and fix seed alike.

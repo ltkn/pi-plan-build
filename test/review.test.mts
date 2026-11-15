@@ -166,6 +166,49 @@ test("review: acceptance coverage treats silence as unverified, never met", asyn
   assert.equal(verdictOf([{ priority: "P0", title: "broken" }], acceptanceCoverage([], [])), "changes_needed");
 });
 
+test("review: a verdict entry counts as its number's answer only with a known word, an in-range number and non-blank evidence", async () => {
+  const { rejectedAnswers, reportedVerdicts, verdictAnswers } = await import("../extensions/pb/verdict-answers.ts");
+  const reported = (verdicts: unknown) => ({ name: "report_verdicts", arguments: { verdicts } });
+  const answers = verdictAnswers(
+    [
+      reported([
+        { finding: 2, verdict: "confirmed", evidence: "  src/order.ts:12 guards it  " },
+        { finding: 2, verdict: "rejected", evidence: "src/order.ts:12 has no guard" }, // the last entry for a number wins
+        { finding: 3, verdict: "maybe", evidence: "a word pb never defined" }, // not an answer, so finding 3 stays unanswered
+        { finding: 0, verdict: "rejected", evidence: "outside the brief" },
+        { finding: 4, verdict: "rejected", evidence: "one past what was handed over" },
+        { finding: 1.5, verdict: "rejected", evidence: "not a numbered item" },
+        { finding: 1, verdict: "rejected" }, // no evidence: not an answer
+        null, // a broken entry is skipped, not a crash
+        { finding: 3, verdict: "confirmed", evidence: "   " }, // blank evidence: not an answer
+        { finding: 1, verdict: "rejected", evidence: "src/order.ts:3\nthe controller\u0007 calls it" }, // flattened to one safe line, still an answer
+      ]),
+      reported("not a list"), // a broken payload is nothing, not a crash
+      reported([{ finding: 3, verdict: "confirmed", evidence: "src/order.ts:44" }]), // a later call answers it
+    ],
+    3,
+  );
+  assert.deepEqual(
+    [...answers],
+    [
+      [2, { verdict: "rejected", evidence: "src/order.ts:12 has no guard" }],
+      [1, { verdict: "rejected", evidence: "src/order.ts:3 the controller calls it" }],
+      [3, { verdict: "confirmed", evidence: "src/order.ts:44" }],
+    ],
+  );
+  assert.equal(answers.size, 3); // duplicates, invented numbers and evidence-less entries add none
+  // The map check's "reported nothing" sentence keys on what arrived, not on what counted.
+  assert.equal(reportedVerdicts([reported([{ finding: 9, verdict: "maybe" }])]).length, 1);
+  assert.equal(reportedVerdicts([reported([null])]).length, 1);
+  assert.equal(reportedVerdicts([{ name: "report_findings", arguments: { findings: [] } }]).length, 0);
+
+  // A rejection stays rejected when a later entry for the same number says confirmed: the count is
+  // last-wins, but the map check's repair pass must still see the contradiction.
+  const sticky = [reported([{ finding: 1, verdict: "rejected", evidence: "src/order.ts:3 the controller calls the repository" }, { finding: 1, verdict: "confirmed", evidence: "read again" }])];
+  assert.deepEqual([...rejectedAnswers(sticky, 2)], [[1, "src/order.ts:3 the controller calls the repository"]]);
+  assert.equal(verdictAnswers(sticky, 2).get(1)?.verdict, "confirmed");
+});
+
 test("review: the harness check's own artifacts are reported, not reverted behind your back", async () => {
   const t = setup({ verify: "touch review-artifact.txt" });
   await written(t);
@@ -1273,6 +1316,9 @@ test("review: findings carry priorities; P0/P1 are double-checked; only line-lea
   await t.run("review", "--full");
   delete process.env.MOCK_VERIFY;
   assert.match(t.posts.at(-1)!, /PASS · P0 0 · P1 0 · P2 1 · P3 0[\s\S]*Dismissed after a second look:\n- \[P1\] consider a guard clause — src\/order\.ts:11 already guards it/);
+  // Every finding answered and the run clean: that is the one state that earns the bare ✓.
+  assert.match(t.posts.at(-1)!, /verifier ✓/);
+  assert.doesNotMatch(t.posts.at(-1)!, /The second look/);
   t.reviewer.silent = true; // no tool call: the prose's line-leading tags are the findings
   t.reviewer.prose = "No [P0] or [P1] issues found.\n\n1. [P2] src/order.ts:30 — name the constant.";
   await t.run("review", "--full");
@@ -1297,6 +1343,148 @@ test("review: the second look reads the same frozen diff, with no shell to re-de
   assert.match(brief, /^# Findings to verify[\s\S]*# The change\n\n(Base commit: [0-9a-f]+\. )?The diff below is from (that commit|HEAD) to the tree the review started on\./);
   assert.match(brief, /\n\+x/); // an untracked file's content is in the diff, not behind a git command
   assert.doesNotMatch(brief, /git diff/);
+});
+
+/** The blocking findings the double-check tests hand over: two P1s the same-fix merge will not collapse. */
+const twoBlocking = [
+  { priority: "P1", file: "src/order.ts", line: 11, title: "guard the empty cart", fix: "return early when the cart is empty" },
+  { priority: "P1", file: "src/order.ts", line: 22, title: "charge before shipping", fix: "take the payment before the order ships" },
+];
+
+const lastReview = (t: ReturnType<typeof setup>) => t.events("order-cancellation").filter((e: any) => e.type === "review").at(-1)!;
+
+test("review: a verifier that reports nothing says the double-check did not happen", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = twoBlocking;
+  process.env.MOCK_VERIFY = "silent";
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_VERIFY;
+  }
+  const post = t.posts.at(-1)!;
+  assert.match(post, /verifier ⚠ 0\/2/);
+  assert.match(post, /\n⚠ The second look at the blocking findings reported nothing: they are reported unconfirmed\.\n/);
+  assert.match(post, /CHANGES NEEDED · P0 0 · P1 2 · P2 0 · P3 0/);
+  assert.match(post, /\*\*Next:\*\* `\/pb:fix 1 2` \(or fix them by hand\), then `\/pb:review` again\. The second look didn't complete, and a follow-up re-reads only what changed — use `\/pb:review --full`\./);
+  // nothing was dismissed: both findings stand as the reviewer wrote them
+  assert.match(post, /^1\. \[P1\] src\/order\.ts:11 — guard the empty cart\n   Fix: return early when the cart is empty$/m);
+  assert.match(post, /^2\. \[P1\] src\/order\.ts:22 — charge before shipping\n   Fix: take the payment before the order ships$/m);
+  assert.doesNotMatch(post, /Dismissed after a second look/);
+  assert.deepEqual([lastReview(t).verified, lastReview(t).verifiable], [0, 2]);
+
+  // a payload that repeats one finding three times and invents a fourth number cannot be counted as more
+  // answers than there are findings: one finding stands unconfirmed, not the whole set answered.
+  process.env.MOCK_VERIFY = "padded";
+  try {
+    await t.run("review", "--full");
+  } finally {
+    delete process.env.MOCK_VERIFY;
+  }
+  assert.match(t.posts.at(-1)!, /verifier ⚠ 1\/2/);
+  assert.match(t.posts.at(-1)!, /\n⚠ The second look at the blocking findings reported 1 of 2 blocking findings: the other 1 are reported unconfirmed\.\n/);
+  assert.deepEqual([lastReview(t).verified, lastReview(t).verifiable], [1, 2]);
+});
+
+test("review: a verifier that answers some blocking findings says how many it missed", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = twoBlocking;
+  process.env.MOCK_VERIFY = "partial";
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_VERIFY;
+  }
+  const post = t.posts.at(-1)!;
+  assert.match(post, /verifier ⚠ 1\/2/);
+  assert.match(post, /\n⚠ The second look at the blocking findings reported 1 of 2 blocking findings: the other 1 are reported unconfirmed\.\n/);
+  assert.match(post, /CHANGES NEEDED · P0 0 · P1 2 · P2 0 · P3 0/);
+  // the finding it did answer stands untouched, prescription and all
+  assert.match(post, /^1\. \[P1\] src\/order\.ts:11 — guard the empty cart\n   Fix: return early when the cart is empty$/m);
+  assert.deepEqual([lastReview(t).verified, lastReview(t).verifiable], [1, 2]);
+
+  // a run that both answered and failed shows the failing verdict and the error inside the sentence
+  process.env.MOCK_VERIFY = "partial-crash";
+  try {
+    await t.run("review", "--full");
+  } finally {
+    delete process.env.MOCK_VERIFY;
+  }
+  const failed = t.posts.at(-1)!;
+  assert.match(failed, /verifier ✗ 1\/2/);
+  assert.match(failed, /\n⚠ The second look at the blocking findings reported 1 of 2 blocking findings \(verifier exploded\): the other 1 are reported unconfirmed\.\n/);
+  assert.deepEqual([lastReview(t).verified, lastReview(t).verifiable], [1, 2]);
+});
+
+test("review: a verifier that answers everything and then fails is never a clean check", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = twoBlocking;
+  process.env.MOCK_VERIFY = "reject-crash"; // both blocking findings rejected, then the run dies
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_VERIFY;
+  }
+  const post = t.posts.at(-1)!;
+  assert.doesNotMatch(post, /verifier ✓/);
+  assert.match(post, /verifier ✗ 2\/2/);
+  assert.match(post, /\n⚠ The second look at the blocking findings answered 2 of 2, but its run failed \(verifier exploded\): treat the double-check as incomplete\.\n/);
+  // The rejection still dismisses both findings, so the verdict is PASS — but the failed run keeps the spec
+  // unreviewed and sends the human back through a full review instead of the commit.
+  assert.match(post, /PASS · P0 0 · P1 0 · P2 0 · P3 0/);
+  assert.match(post, /Dismissed after a second look:[\s\S]*- \[P1\] guard the empty cart — src\/order\.ts:11 already guards it/);
+  assert.match(post, /\*\*Next:\*\* `\/pb:review --full` runs the second look again: its run failed, so the spec stays unreviewed\./);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  // The event keeps the counts truthful (2 of 2 answered) and records the failure apart from any shortfall.
+  const event = lastReview(t);
+  assert.deepEqual([event.verified, event.verifiable], [2, 2]);
+  assert.equal(event.verificationError, "verifier exploded");
+});
+
+test("review: a skipped verifier, nothing to check and a crashed double-check keep their wording", async () => {
+  const t = setup({ verify: "true", reviewer: { verify: false } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = twoBlocking;
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /verifier skipped/);
+  assert.ok(!/The second look/.test(t.posts.at(-1)!));
+  assert.equal("verified" in lastReview(t), false);
+  assert.equal("verifiable" in lastReview(t), false);
+
+  // with the double check on but no blocking finding, the state line still reads "verifier —"
+  const quiet = setup({ verify: "true" });
+  await written(quiet);
+  quiet.agent.script = diligent;
+  await quiet.run("build");
+  quiet.reviewer.review = [{ priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" }];
+  await quiet.run("review");
+  assert.match(quiet.posts.at(-1)!, /verifier —/);
+  assert.ok(!/The second look/.test(quiet.posts.at(-1)!));
+  assert.equal("verified" in lastReview(quiet), false);
+
+  // a run that died before reporting anything is unchanged: the failing verdict names the reason
+  quiet.reviewer.review = twoBlocking;
+  process.env.MOCK_VERIFY = "crash";
+  try {
+    await quiet.run("review", "--full");
+  } finally {
+    delete process.env.MOCK_VERIFY;
+  }
+  assert.match(quiet.posts.at(-1)!, /verifier ✗ 0\/2/);
+  assert.match(quiet.posts.at(-1)!, /\n⚠ The second look at the blocking findings couldn't run \(verifier exploded\): they are reported unconfirmed\.\n/);
+  // the run was given two findings and answered none: the counts say so
+  assert.deepEqual([lastReview(quiet).verified, lastReview(quiet).verifiable], [0, 2]);
 });
 
 test("review findings: display numbers run continuously across the change and outside it, and are the /pb:fix ids", async () => {
@@ -1923,18 +2111,20 @@ test("verify-test: refuses to prove a skipped, missing or failing test", async (
   assert.notEqual(run([...fixture, "verify fixture fails one"]).status, 0);
 });
 
+/** A stats card built from these events alone: the event-derived lines need no build, tasks or sessions. */
+const specCard = (events: unknown[]) =>
+  ({
+    name: "demo",
+    phase: "reviewed",
+    events,
+    explore: [],
+    progress: { spec: "demo", phase: "reviewed", session: "s", tasks: [], updatedAt: "2026-10-01 10:08:00" },
+  }) as any;
+
 test("stats: review precision line reports reported dismissed and fixed", async () => {
   const { renderCard } = await import("../extensions/pb/stats.ts");
-  const spec = (events: unknown[]) =>
-    ({
-      name: "demo",
-      phase: "reviewed",
-      events,
-      explore: [],
-      progress: { spec: "demo", phase: "reviewed", session: "s", tasks: [], updatedAt: "2026-10-01 10:08:00" },
-    }) as any;
   const card = renderCard(
-    spec([
+    specCard([
       { type: "review", at: "2026-10-01 10:08:00", verdict: "pass", p: [1, 2, 0, 1], dismissed: 2, ms: 60_000 },
       { type: "fix", at: "2026-10-01 10:20:00", fixed: ["a", "b"], skipped: [], tests: "green" },
       { type: "fix", at: "2026-10-01 10:30:00", fixed: ["b", "c"], skipped: [], tests: "green" }, // b reported twice, fixed once
@@ -1942,12 +2132,39 @@ test("stats: review precision line reports reported dismissed and fixed", async 
   );
   assert.match(card, /^Precision 6 reported · 2 dismissed \(33%\) · 3 fixed$/m);
   // No review happened: the line is absent, not zero-filled.
-  assert.doesNotMatch(renderCard(spec([{ type: "build-start", at: "2026-10-01 10:00:00" }])), /Precision/);
+  assert.doesNotMatch(renderCard(specCard([{ type: "build-start", at: "2026-10-01 10:00:00" }])), /Precision/);
   // A clean review has no share to show: pct(0, 0) is the same dash the rest of the card uses.
   assert.match(
-    renderCard(spec([{ type: "review", at: "2026-10-01 10:08:00", verdict: "pass", p: [0, 0, 0, 0], dismissed: 0, ms: 60_000 }])),
+    renderCard(specCard([{ type: "review", at: "2026-10-01 10:08:00", verdict: "pass", p: [0, 0, 0, 0], dismissed: 0, ms: 60_000 }])),
     /^Precision 0 reported · 0 dismissed \(–\) · 0 fixed$/m,
   );
+});
+
+test("stats: blocking findings the verifier never answered show on the Precision line", async () => {
+  const { renderCard } = await import("../extensions/pb/stats.ts");
+  const review = (counts: Record<string, number>) => ({ type: "review", at: "2026-10-01 10:08:00", verdict: "changes_needed", p: [0, 2, 0, 0], dismissed: 0, ms: 60_000, ...counts });
+  const precision = (events: unknown[]) => renderCard(specCard(events)).match(/^Precision.*$/m)![0];
+  assert.equal(precision([review({ verified: 1, verifiable: 4 })]), "Precision 2 reported · 0 dismissed (0%) · 0 fixed · 3 blocking never double-checked");
+  // shortfalls add up across a spec's reviews
+  assert.equal(precision([review({ verified: 1, verifiable: 4 }), review({ verified: 0, verifiable: 2 })]), "Precision 4 reported · 0 dismissed (0%) · 0 fixed · 5 blocking never double-checked");
+  // a complete double-check, a review recorded before these counts existed, and a skipped verifier: the line is exactly as it was
+  for (const events of [[review({ verified: 2, verifiable: 2 })], [review({})], [review({ verified: 0, verifiable: 0 })]]) {
+    assert.equal(precision(events), "Precision 2 reported · 0 dismissed (0%) · 0 fixed");
+  }
+});
+
+test("stats: a verifier run that failed is counted apart from the answers it never got", async () => {
+  const { renderCard } = await import("../extensions/pb/stats.ts");
+  const review = (counts: Record<string, unknown>) => ({ type: "review", at: "2026-10-01 10:08:00", verdict: "pass", p: [0, 0, 0, 0], dismissed: 0, ms: 60_000, ...counts });
+  const precision = (events: unknown[]) => renderCard(specCard(events)).match(/^Precision.*$/m)![0];
+  // Every finding was answered, so there is no shortfall; the failed run is still named.
+  assert.equal(precision([review({ verified: 2, verifiable: 2, verificationError: "verifier exploded" })]), "Precision 0 reported · 0 dismissed (–) · 0 fixed · 1 verifier run failed");
+  assert.equal(
+    precision([review({ verified: 1, verifiable: 2 }), review({ verified: 2, verifiable: 2, verificationError: "verifier exploded" }), review({ verified: 2, verifiable: 2, verificationError: "again" })]),
+    "Precision 0 reported · 0 dismissed (–) · 0 fixed · 1 blocking never double-checked · 2 verifier runs failed",
+  );
+  // A clean run leaves the line exactly as it was.
+  assert.equal(precision([review({ verified: 2, verifiable: 2 })]), "Precision 0 reported · 0 dismissed (–) · 0 fixed");
 });
 
 test("review: findings are tagged against the project map, and the first review's tally is what /pb:stats judges the map by", async () => {

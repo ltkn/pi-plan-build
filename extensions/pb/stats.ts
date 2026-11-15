@@ -143,8 +143,10 @@ export interface Summary {
   proof: { proven: number; sentBack: number; unproven: number };
   /** Confirmed P0/P1 of the latest review (post double-check). */
   confirmed: { p0: number; p1: number };
-  /** Review honesty: findings reported (post-verification tally + verifier-dismissed), dismissed, and distinct titles fixed in fix laps. Present once a review ran. */
-  precision?: { reported: number; dismissed: number; fixed: number };
+  /** Review honesty: findings reported (post-verification tally + verifier-dismissed), dismissed, distinct
+   * titles fixed in fix laps, blocking findings the double check never answered, and verifier runs that failed.
+   * Present once a review ran. */
+  precision?: { reported: number; dismissed: number; fixed: number; unchecked: number; verifierFailures: number };
   build: { prompt: number; cached: number; output: number; cost: number; peak: number; window?: number; turns: number };
   review: { prompt: number; output: number; cost: number };
   explorer: { calls: number; prompt: number; output: number; cost: number; ms: number };
@@ -305,6 +307,12 @@ export function summarize(s: SpecStats): Summary {
   const reported = reviewEvents.reduce((n, x) => n + (Array.isArray(x.p) ? (x.p as unknown[]).reduce<number>((a, v) => a + num(v), 0) : 0) + num(x.dismissed), 0);
   const dismissed = reviewEvents.reduce((n, x) => n + num(x.dismissed), 0);
   const fixedTitles = new Set(e.filter((x) => x.type === "fix" && Array.isArray(x.fixed)).flatMap((x) => (x.fixed as unknown[]).filter((t): t is string => typeof t === "string")));
+  // What the double checks left unanswered, summed over the spec's reviews; a review from before these
+  // counts, or one where the verifier was skipped, carries neither number and counts as nothing missed.
+  const unchecked = reviewEvents.reduce((n, x) => n + Math.max(0, num(x.verifiable) - num(x.verified)), 0);
+  // A run that failed after answering everything has no shortfall, so it is counted apart, never folded
+  // into `unchecked`: the counts stay what the verifier answered, the failure is its own fact.
+  const verifierFailures = reviewEvents.filter((x) => typeof x.verificationError === "string").length;
   return {
     tasks: tasks.length,
     done: done.length,
@@ -322,7 +330,7 @@ export function summarize(s: SpecStats): Summary {
       unproven: unprovenIds.size,
     },
     confirmed: { p0: num(pp[0]), p1: num(pp[1]) },
-    precision: reviewEvents.length ? { reported, dismissed, fixed: fixedTitles.size } : undefined,
+    precision: reviewEvents.length ? { reported, dismissed, fixed: fixedTitles.size, unchecked, verifierFailures } : undefined,
     build,
     review,
     explorer,
@@ -374,7 +382,11 @@ export function renderCard(s: SpecStats): string {
     `Pauses    ${pauses || "none"}${x.undo ? ` · undo ${x.undo}` : ""}`,
     `Review    ${x.reviews.length ? `${x.reviews.join(" → ")} · P0/P1 confirmed (latest): ${x.confirmed.p0 + x.confirmed.p1}` : "not run"}`,
     ...(x.map ? [`Map       first review: ${x.map.stated} broke a rule the map states · ${x.map.wrong} found a map line wrong`] : []),
-    ...(x.precision ? [`Precision ${x.precision.reported} reported · ${x.precision.dismissed} dismissed (${pct(x.precision.dismissed, x.precision.reported)}) · ${x.precision.fixed} fixed`] : []),
+    ...(x.precision
+      ? [
+          `Precision ${x.precision.reported} reported · ${x.precision.dismissed} dismissed (${pct(x.precision.dismissed, x.precision.reported)}) · ${x.precision.fixed} fixed${x.precision.unchecked ? ` · ${x.precision.unchecked} blocking never double-checked` : ""}${x.precision.verifierFailures ? ` · ${x.precision.verifierFailures} verifier run${x.precision.verifierFailures === 1 ? "" : "s"} failed` : ""}`,
+        ]
+      : []),
     ...(hasRed ? [`Proof     ${x.proof.proven} proven · ${x.proof.sentBack} sent back · ${x.proof.unproven} no run could prove`] : []),
     `Build     ${b.turns} turns · in ${human(b.prompt)} (${pct(b.cached, b.prompt)} cached) · out ${human(b.output)} · $${b.cost.toFixed(2)}`,
     ...(phases.length ? [`Time      ${phases.join(" · ")}`] : []),

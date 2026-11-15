@@ -986,7 +986,18 @@ missing or weakened tests, a workaround), **P2** worth fixing (conventions,
 clarity, comments), **P3** a nit. **P0 and P1 findings get a second look**: a
 separate verifier checks each against the code, and the ones it rejects are
 listed as dismissed, with its evidence, instead of costing you a fix cycle
-(`"reviewer": {"verify": false}` skips it). Any confirmed P0 or P1 means
+(`"reviewer": {"verify": false}` skips it). It owes an entry for every finding
+it was handed, and pb counts the answers among what comes back: report nothing,
+or only some of them, and the result says so — `verifier ⚠ 0/2`, or `verifier ✗
+1/2` when its own run failed too — with a line saying the findings it left out
+are reported *unconfirmed*. A run that answered everything and then failed is
+not a clean check either: its mark carries the counts and the failure
+(`verifier ✗ 2/2`), the line says the double-check is incomplete, and the spec
+stays unreviewed even when every blocker was dismissed. Unconfirmed is not a
+verdict: the second look removes a finding only by rejecting it, so one it
+never mentioned stands exactly as if it had confirmed it. The next step names
+`/pb:review --full`, because a plain `/pb:review` re-reads only what changed
+and an unchanged tree gets no second look at all. Any confirmed P0 or P1 means
 *changes needed*. Findings with the same concrete fix are reported once, at
 the highest priority. When the code is right and only the spec's framing is
 imprecise, that's a P3 note with a proposed rewording, not a defect.
@@ -1247,7 +1258,13 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - **`/pb:stats`**: for this build: tasks done on the first try, checks run and
   failed, pauses, the review verdicts with the latest review's confirmed P0/P1,
   a `Precision` line — findings the reviewers reported, how many the verifier
-  dismissed (their share of the reported), and how many were fixed in fix laps —,
+  dismissed (their share of the reported), how many were fixed in fix laps, how
+  many answers the second looks on this spec never got (summed over its
+  reviews), which shows as `· 3 blocking never double-checked` only above zero
+  (a verifier skipped by the config, a review with no blocking findings and a
+  review recorded before the counts all mean nothing missed), and how many
+  verifier runs failed, which shows as `· 1 verifier run failed` even when
+  every finding was answered —,
   red proofs (proven, sent back, no run could prove), tokens in and out per role (with
   output rate where pure run time is known: explorer calls), peak context, cost,
   and a `Time` line: the spec-writing step, the spec review, the build and the

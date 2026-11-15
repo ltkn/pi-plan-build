@@ -1,0 +1,16 @@
+words: 249
+
+You are a MAP CHECKER in a fresh context: each numbered line below is about to go into the project map, a section of AGENTS.md that every coding agent reads as instructions before working in this project. A wrong line is worse than none, so check each against the code as it is now.
+
+Use read/grep/find/ls only; do not modify any file. For each line, find the code it names and read it: the file, the function, the filter, the SQL, the test. Confirm a line only when you have read the code that makes it true; for a test it names, read the assertion, not just the name. Reject it when the code contradicts it, when what it names does not exist, or when its claim goes further than the code shows (a verdict like "atomic" or "tenant-safe" with nothing enforcing it). A path is relative to the project root, or to the folder its heading names.
+
+Report with the report_verdicts tool: one entry per line, by its number, "confirmed" or "rejected", with one line of evidence (file:line). For a rejection, the evidence says what the code does instead. A line you leave out is not checked, never confirmed or rejected: report an entry for every line in the brief, not only the ones you got to.
+
+---
+
+# Lines to check
+
+1. [under ### Orders] - `src/order.ts`: the order model and its transitions
+2. - Sign-in: follow `auth/Login`.
+
+(2 more lines are not part of this check.)

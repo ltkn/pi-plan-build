@@ -6,8 +6,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
 import { extraBlock } from "./prompts.ts";
-import { CARTOGRAPHER_SYSTEM, MAP_BULLET_CHARS, MAP_CHECK_LINES, MAP_CHECK_SYSTEM, MAP_MARKERS, MAP_TOKENS, areaNotes, bulletsCiting, bulletsOf, cartographerBrief, droppedBullets, changedBullets, longBullets, mapCheckBrief, readCore, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
+import { CARTOGRAPHER_SYSTEM, MAP_BULLET_CHARS, MAP_CHECK_LINES, MAP_CHECK_SYSTEM, MAP_MARKERS, MAP_TOKENS, areaNotes, bulletsCiting, bulletsOf, cartographerBrief, droppedBullets, changedBullets, longBullets, mapCheckBrief, mapCheckNote, readCore, mapDefect, mapDiff, mapFile, mapRepairPhase, mapTokens, normalizeMap, readMap, unresolvedPaths, writeMap } from "./map.ts";
 import { REVIEW_TOOLS } from "./review.ts";
+import { rejectedAnswers, reportedVerdicts, verdictAnswers } from "./verdict-answers.ts";
 import { runFresh } from "./runner.ts";
 import { duration } from "./format.ts";
 import { freshProgress } from "./progress.ts";
@@ -87,8 +88,9 @@ export const updateMap = async (
   let long: { text: string; chars: number }[] = [];
   let disproved: { text: string; evidence: string }[] = [];
   let checkNote = "";
-  // The map check: a fresh, read-only pass over the new or changed lines, before they are written. No shell,
-  // so nothing to revert. A check that reports nothing is said, never read as a pass.
+  // The map check: a fresh, read-only pass over the new or changed lines, before they are written. No shell, so
+  // nothing to revert. A check that answered nothing, or only some of the lines, is said with its counts,
+  // never read as a pass.
   const checkLines = async (proposed: string) => {
     const lines = changedBullets(current, proposed);
     if (!lines.length) return;
@@ -111,15 +113,14 @@ export const updateMap = async (
     });
     store.exploreEvent({ session: sessionFile, ...r.tokens, cost: r.cost, ms: r.ms });
     if (r.aborted) return "aborted" as const;
-    const verdicts = r.toolCalls.filter((c) => c.name === "report_verdicts").flatMap((c) => (Array.isArray(c.arguments.verdicts) ? (c.arguments.verdicts as { finding?: unknown; verdict?: unknown; evidence?: unknown }[]) : []));
-    if (!verdicts.length) {
+    if (!reportedVerdicts(r.toolCalls).length) {
       checkNote = ` The new lines weren't checked against the code: the check reported nothing${r.error ? ` (${r.error.split("\n")[0]})` : ""}.`;
       return;
     }
-    disproved = verdicts
-      .filter((v) => v.verdict === "rejected" && typeof v.finding === "number" && shown[v.finding - 1])
-      .map((v) => ({ text: shown[(v.finding as number) - 1].text, evidence: typeof v.evidence === "string" ? v.evidence : "" }));
-    checkNote = ` ${shown.length} new line${shown.length === 1 ? " was" : "s were"} checked against the code${lines.length > shown.length ? ` (${lines.length - shown.length} more were not)` : ""}.`;
+    const answers = verdictAnswers(r.toolCalls, shown.length);
+    // A rejection is sticky: a later confirmation cannot take the contradicted line out of the repair pass.
+    disproved = [...rejectedAnswers(r.toolCalls, shown.length)].map(([number, evidence]) => ({ text: shown[number - 1].text, evidence }));
+    checkNote = ` ${mapCheckNote(shown.length, answers.size, lines.length - shown.length)}`;
   };
   try {
     const first = await cartographer(cartographerBrief({ current, ...o, scope, recheck }), scope ? "reading the change" : "reading the project");

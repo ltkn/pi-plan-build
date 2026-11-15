@@ -7,6 +7,7 @@
 import { fileURLToPath } from "node:url";
 import { VERIFIER_SYSTEM, verifierBrief } from "./prompts.ts";
 import { type RunOptions, runFresh } from "./runner.ts";
+import { verdictAnswers } from "./verdict-answers.ts";
 import type { AcceptanceCheck, AcceptanceCriterion, AcceptanceStatus, Finding, Priority } from "./store.ts";
 
 export const REVIEW_TOOLS = fileURLToPath(new URL("./review-tools.ts", import.meta.url));
@@ -16,6 +17,44 @@ const INSPECT = ["read", "grep", "find", "ls"];
 export type Verdict = "pass" | "changes_needed" | "unverified" | "none";
 
 export const blocking = (f: Finding) => f.priority === "P0" || f.priority === "P1";
+
+/**
+ * What the double check of the blocking findings came to: `checked` of `of` — the findings it holds a usable
+ * verdict for, out of the ones it was handed (the parse cannot answer more than it was given, so `checked`
+ * never passes `of`). `skipped` is the config's no; `error` is why a run fell short.
+ */
+export type Verification = { checked: number; of: number; skipped?: boolean; error?: string };
+
+/**
+ * The double check's lines: the mark on the evidence line, the note saying what is reported unconfirmed when
+ * the check fell short of the findings it was handed, and `fellShort` for anything else that has to say so —
+ * the next step, which sends an unanswered finding back through a full review.
+ *
+ * A run that failed is never a clean check, even when it answered every finding before dying: the failure is
+ * the one thing the mark must not hide. A review that never reached the double check (`undefined`) prints no
+ * mark and no note and did not fall short.
+ */
+export function verificationLines(v: Verification | undefined): { mark: string; note?: string; fellShort: boolean } {
+  if (v === undefined) return { mark: "", fellShort: false };
+  if (v.skipped) return { mark: "verifier skipped", fellShort: false };
+  if (v.of === 0) return { mark: "verifier —", fellShort: false };
+  const { checked, of } = v;
+  const failed = v.error?.split("\n")[0];
+  if (!failed && checked >= of) return { mark: "verifier ✓", fellShort: false };
+  const mark = failed ? `verifier ✗ ${checked}/${of}` : `verifier ⚠ ${checked}/${of}`;
+  // A run that answered nothing says the check did not happen; one that answered some says which it left
+  // out; one that answered everything and still failed says the failure and that the check is incomplete.
+  const note = failed
+    ? checked === 0
+      ? `⚠ The second look at the blocking findings couldn't run (${failed}): they are reported unconfirmed.`
+      : checked >= of
+        ? `⚠ The second look at the blocking findings answered ${checked} of ${of}, but its run failed (${failed}): treat the double-check as incomplete.`
+        : `⚠ The second look at the blocking findings reported ${checked} of ${of} blocking findings (${failed}): the other ${of - checked} are reported unconfirmed.`
+    : checked === 0
+      ? "⚠ The second look at the blocking findings reported nothing: they are reported unconfirmed."
+      : `⚠ The second look at the blocking findings reported ${checked} of ${of} blocking findings: the other ${of - checked} are reported unconfirmed.`;
+  return { mark, note, fellShort: true };
+}
 
 /** A criterion the reviewer did not report: missing is not a pass. */
 export interface AcceptanceLine {
@@ -153,9 +192,9 @@ export async function verifyFindings(o: {
   onUsage?: RunOptions["onUsage"];
   onSession?: RunOptions["onSession"];
   onText?: (text: string) => void;
-}): Promise<{ findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; aborted: boolean; error?: string; sessionFile?: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: number; ms: number }> {
+}): Promise<{ findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; checked: number; of: number; aborted: boolean; error?: string; sessionFile?: string; tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost: number; ms: number }> {
   const toCheck = o.findings.filter(blocking);
-  const none = { findings: o.findings, dismissed: [], aborted: false, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0 };
+  const none = { findings: o.findings, dismissed: [], checked: 0, of: toCheck.length, aborted: false, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0 };
   if (!toCheck.length) return none;
   const v = await runFresh({
     cwd: o.cwd,
@@ -178,19 +217,13 @@ export async function verifyFindings(o: {
   const t = v.tokens;
   const usage = { tokens: { input: t.input, output: t.output, cacheRead: t.cacheRead, cacheWrite: t.cacheWrite }, cost: v.cost, sessionFile: v.sessionFile };
   if (v.aborted) return { ...none, ...usage, aborted: true, ms: v.ms };
-  const verdicts = v.toolCalls.filter((c) => c.name === "report_verdicts").flatMap((c) => (Array.isArray(c.arguments.verdicts) ? (c.arguments.verdicts as { finding: number; verdict: string; evidence: string }[]) : []));
-  // Last verdict wins per finding; out-of-range numbers are ignored (model miscounted, harness keeps all).
-  const byIndex = new Map<number, { verdict: string; evidence: string }>();
-  for (const x of verdicts) {
-    if (!Number.isInteger(x.finding) || x.finding < 1 || x.finding > toCheck.length) continue;
-    if (x.verdict !== "rejected" && x.verdict !== "confirmed") continue;
-    byIndex.set(x.finding, { verdict: x.verdict, evidence: typeof x.evidence === "string" ? x.evidence : "" });
-  }
+  // Numbers outside 1..toCheck.length are dropped by the parse (the model miscounted; the harness keeps all findings).
+  const answers = verdictAnswers(v.toolCalls, toCheck.length);
   const rejected = new Map<Finding, string>();
-  for (const [n, v] of byIndex) if (v.verdict === "rejected") rejected.set(toCheck[n - 1], v.evidence);
-  // A failed run with no usable verdicts must not look like agreement: report it, keep everything.
-  const error = byIndex.size === 0 && v.error ? v.error : undefined;
-  return { ...usage, aborted: false, error, findings: o.findings.filter((f) => !rejected.has(f)), dismissed: [...rejected].map(([finding, evidence]) => ({ finding, evidence })), ms: v.ms };
+  for (const [n, answer] of answers) if (answer.verdict === "rejected") rejected.set(toCheck[n - 1], answer.evidence);
+  // A run that failed never reads as agreement, whether or not it got through some of the findings: the
+  // report says it fell short, and everything it did not reject stays.
+  return { ...usage, checked: answers.size, of: toCheck.length, aborted: false, error: v.error, findings: o.findings.filter((f) => !rejected.has(f)), dismissed: [...rejected].map(([finding, evidence]) => ({ finding, evidence })), ms: v.ms };
 }
 
 /**

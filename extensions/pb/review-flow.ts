@@ -11,7 +11,7 @@ import type {
 import { changedPaths, commitTime, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { tip } from "./help.ts";
 import { acceptanceDrift, designProvenance, extraBlock, findingLine, isNone, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief } from "./prompts.ts";
-import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, unparsedReport, verdictOf, verifyFindings } from "./review.ts";
+import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, type Verification, unparsedReport, verdictOf, verificationLines, verifyFindings } from "./review.ts";
 import { runFresh } from "./runner.ts";
 import { acceptanceCriteria } from "./spec.ts";
 import { duration } from "./format.ts";
@@ -21,6 +21,7 @@ import { runVerify } from "./verify.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
 import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, withChecking } from "./kit.ts";
 import { markReviewed, unfinishedPhase } from "./phase.ts";
+import { safeLine } from "./markdown.ts";
 
 import { confirmLiveBuild } from "./build-loop.ts";
 import { areaNotesFor } from "./map.ts";
@@ -283,7 +284,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
 
   const reviewMessage = (
     run: ReviewRun,
-    o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; changedDuring: string[]; partial: boolean; verificationFailed?: string; verified?: boolean; verificationMs?: number; thrash?: boolean; midBuild?: string[] },
+    o: { findings: Finding[]; dismissed: { finding: Finding; evidence: string }[]; changedDuring: string[]; partial: boolean; verification?: Verification; thrash?: boolean; midBuild?: string[] },
   ) => {
     const findings = [...o.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
     const inChange = findings.filter((f) => !f.outside);
@@ -326,6 +327,11 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const stepName = (id: string) => (id === COHERE_TASK_ID ? "coherence pass" : id === "final" ? "final check" : id);
     const midBuildView = midBuild.map(stepName);
     const fixIds = fixable.map((_, i) => i + 1).join(" ");
+    // The double check's own words, read once: the mark, the shortfall note, and whether it fell short at all.
+    // A follow-up review re-reads only what changed since the one it follows, so a finding the second look left
+    // unconfirmed would go unanswered again: only a full review takes it back.
+    const doubleCheckLines = verificationLines(o.verification);
+    const fullAgain = doubleCheckLines.fellShort ? ` The second look didn't complete, and a follow-up re-reads only what changed — use \`/${cmd("review")} --full\`.` : "";
     // /pb:fix resolves against the recorded review (progress.review.findings), which only a
     // complete run writes: an incomplete one (the adversarial pass missing) would send the
     // human after ids that resolve to nothing — or, on a follow-up, to the previous review.
@@ -339,24 +345,27 @@ export function registerReviewFlow(pi: ExtensionAPI) {
           : verdict === "unverified"
           ? `check each unverified criterion (or amend the spec), then \`/${cmd("review")}\` again — \`/${cmd("review")} --full\` if nothing else changed.`
           : verdict === "changes_needed"
-            ? run.name && fixIds && complete
-              ? `\`/${cmd("fix")} ${fixIds}\` (or fix them by hand), then \`/${cmd("review")}\` again.`
-              : run.name && fixIds
-                ? `fix them by hand for now, then \`/${cmd("review")}\` again — this result is incomplete, so \`/${cmd("fix")}\` does not see these findings yet.`
-                : run.name
-                  ? `fix the P3 nits by hand if you want them, then \`/${cmd("review")}\` again.`
-                  : `fix what is above, then \`/${cmd("review")}\` again.`
+            ? `${
+                run.name && fixIds && complete
+                  ? `\`/${cmd("fix")} ${fixIds}\` (or fix them by hand), then \`/${cmd("review")}\` again`
+                  : run.name && fixIds
+                    ? `fix them by hand for now, then \`/${cmd("review")}\` again — this result is incomplete, so \`/${cmd("fix")}\` does not see these findings yet`
+                    : run.name
+                      ? `fix the P3 nits by hand if you want them, then \`/${cmd("review")}\` again`
+                      : `fix what is above, then \`/${cmd("review")}\` again`
+              }.${fullAgain}`
             : verdict === "pass"
               ? midBuild.length
                 ? `\`/${cmd("build")}\` continues the build${midBuildView.length ? `; ${midBuildView.join(", ")} still to do` : ""}.`
-                : run.name
-                  ? `\`/${cmd("commit")} ${run.name}\` (you see the files and the message first), then \`/${cmd("archive")} ${run.name}\`.`
-                  : "commit when ready."
+                : doubleCheckLines.fellShort
+                  ? `\`/${cmd("review")} --full\` runs the second look again: its run failed, so the spec stays unreviewed.`
+                  : run.name
+                    ? `\`/${cmd("commit")} ${run.name}\` (you see the files and the message first), then \`/${cmd("archive")} ${run.name}\`.`
+                    : "commit when ready."
               : `\`/${cmd("review")}\` again, or read the sessions below.`;
     const tipKey = verdict === "pass" ? (midBuild.length ? "review.mid-build" : "review.pass") : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
     const passMark = finished("review") ? "✓" : run.passes.some((x) => x.role === "review" && x.error) ? "✗" : "—";
     const abuseMark = run.security ? (finished("abuse") ? "✓" : run.passes.some((x) => x.role === "abuse" && x.error) ? "✗" : "—") : "";
-    const verifier = o.verified === undefined ? "" : o.verificationFailed ? "verifier ✗" : !o.verified ? "verifier skipped" : (o.verificationMs ?? 1) > 0 ? "verifier ✓" : "verifier —";
     const stat = diffStat(run.cwd, run.before?.commit ?? run.base).split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
     const scopeFacts = [stat, run.base ? `base ${run.base.slice(0, 7)}` : ""];
     const result = lost ? "NO VERDICT" : verdict === "pass" ? "PASS" : verdict === "changes_needed" ? "CHANGES NEEDED" : verdict === "unverified" ? "UNVERIFIED" : "no verdict";
@@ -364,7 +373,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       phaseHeader(verdict === "pass" ? "✅" : verdict === "changes_needed" ? "❌" : "⚠", "Review", `${run.label}${run.followUp ? " (follow-up)" : ""}`, result, tally, finished("abuse") ? "with an adversarial pass" : "", run.ms !== undefined ? duration(run.ms) : ""),
       "",
       nextLine(next),
-      evidenceLine(`${run.name ? "spec" : "intent"} pass ${passMark}`, abuseMark ? `adversarial ${abuseMark}` : "", verifier, coverage.enforced ? `${coverage.met}/${coverage.lines.length} criteria met` : "", ...scopeFacts, midBuildView.length ? `mid-build · ${midBuildView.join(", ")} still to build` : ""),
+      evidenceLine(`${run.name ? "spec" : "intent"} pass ${passMark}`, abuseMark ? `adversarial ${abuseMark}` : "", doubleCheckLines.mark, coverage.enforced ? `${coverage.met}/${coverage.lines.length} criteria met` : "", ...scopeFacts, midBuildView.length ? `mid-build · ${midBuildView.join(", ")} still to build` : ""),
       ...(o.partial
         ? ["", `⚠ You left the review before it finished: this is what had been reported. \`/${cmd("review")}\` continues it.`]
         : []),
@@ -400,7 +409,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       ...(run.largeFiles?.length ? ["", `⚠ Untracked files over 20 MB are in no snapshot or diff (read them yourself): ${run.largeFiles.join(", ")}`] : []),
       ...(o.thrash ? ["", "⚠ A review pass compacted repeatedly without new reads and wrapped up early: treat its findings as a partial pass."] : []),
       ...(failed.length ? ["", `⚠ The adversarial pass failed (${failed.join("; ")}): its findings are missing, so this result is incomplete. Run \`/${cmd("review")}\` again.`] : []),
-      ...(o.verificationFailed ? ["", `⚠ The second look at the blocking findings couldn't run (${o.verificationFailed}): they are reported unconfirmed.`] : []),
+      ...(doubleCheckLines.note ? ["", doubleCheckLines.note] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
       "",
       tip(tipKey, { spec: run.label }),
@@ -413,7 +422,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
   /** Never lost: the result (or what was reported so far) is kept with the spec. */
 
   const writeReview = (store: Store, run: ReviewRun, partial: boolean) => {
-    const m = reviewMessage(run, { findings: allFindings(run), dismissed: [], changedDuring: [], partial, verificationFailed: undefined });
+    const m = reviewMessage(run, { findings: allFindings(run), dismissed: [], changedDuring: [], partial, verification: undefined });
     fs.mkdirSync(path.dirname(store.reviewFile(run.name)), { recursive: true });
     fs.writeFileSync(store.reviewFile(run.name), `${m.text}\n`);
     return m;
@@ -426,9 +435,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const all = mergeFindings(allFindings(run));
     const progress = freshProgress(from, "pb-review", `pb review ${run.label}`, { sessionsRoot: run.cwd });
     progress.step("verifying P0/P1 findings");
-    const checked =
+    const secondLook =
       cfg.reviewer.verify === false
-        ? { findings: all, dismissed: [], error: undefined as string | undefined, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0 }
+        ? { findings: all, dismissed: [], checked: 0, of: 0, aborted: false, error: undefined as string | undefined, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, ms: 0 }
         : await verifyFindings({
             cwd: run.cwd,
             findings: all,
@@ -444,7 +453,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
             ...progress.hooks,
           }).finally(() => progress.stop());
     progress.stop();
-    run.ms = (run.ms ?? 0) + checked.ms;
+    run.ms = (run.ms ?? 0) + secondLook.ms;
     const after = run.before ? snapshot(run.cwd, `pb: after review ${run.label}`) : undefined;
     // The reviewer has no shell and cannot edit or write, so anything that changed while it ran is
     // someone else's (another session, an editor). Name the paths; never revert another writer's work.
@@ -458,27 +467,35 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     // Synthetic steps included: a review during a coherence pass or the final check must not
     // mark a build that still has work as reviewed.
     const remaining = p ? p.tasks.filter((t) => t.status !== "done").map((t) => t.id) : [];
+    // What the double check covered, in the form the report and the event read it. The config's no is its
+    // own state: a verifier that was never asked did not fall short of anything.
+    const verification: Verification = { checked: secondLook.checked, of: secondLook.of, error: secondLook.error, ...(cfg.reviewer.verify === false ? { skipped: true } : {}) };
     const m = reviewMessage(run, {
-      findings: checked.findings,
-      dismissed: checked.dismissed,
+      findings: secondLook.findings,
+      dismissed: secondLook.dismissed,
       changedDuring,
       partial: false,
-      verificationFailed: checked.error?.split("\n")[0],
-      verified: cfg.reviewer.verify !== false,
-      verificationMs: checked.ms,
+      verification,
       thrash,
       midBuild: remaining,
     });
     if (run.name && p) {
-      store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: checked.dismissed.length, ...mapCounts(checked.findings), followUp: run.followUp, ms: run.ms, ...checked.tokens, cost: checked.cost });
+      // What the second look covered, for /pb:stats: a verifier that was skipped or had nothing to check
+      // asked nothing, so neither number is recorded.
+      const doubleChecked = verification.of > 0 ? { verified: verification.checked, verifiable: verification.of } : {};
+      // The counts stay truthful (an error after every answer is still N/N); the failure is its own key, so
+      // /pb:stats can count it without pretending a finding went unanswered.
+      const verificationError = secondLook.error ? cap(safeLine(secondLook.error.split("\n")[0]), 300) : undefined;
+      store.event(run.name, { type: "review", security: m.abuse, verdict: m.verdict, p: m.counts, dismissed: secondLook.dismissed.length, ...doubleChecked, ...(verificationError ? { verificationError } : {}), ...mapCounts(secondLook.findings), followUp: run.followUp, ms: run.ms, ...secondLook.tokens, cost: secondLook.cost });
       // A lead for later features: completed findings survive the review's own files and the archive.
-      const ledger = ledgerFindings(checked.findings);
+      const ledger = ledgerFindings(secondLook.findings);
       if (ledger.length) store.event(run.name, { type: "review-findings", review: run.id, findings: ledger });
       if (m.complete) {
         p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings, acceptance: m.acceptance, ...(run.repoBefore ? { repos: run.repoBefore } : {}) };
         // A pass only finishes a finished build: with tasks still open the phase stays,
-        // or the next /pb:build strands and /pb:archive offers a half-built spec.
-        if (m.verdict === "pass" && !remaining.length) markReviewed(p);
+        // or the next /pb:build strands and /pb:archive offers a half-built spec. A failed verifier run
+        // keeps it unreviewed too: its answers cannot turn a failed check into a clean pass.
+        if (m.verdict === "pass" && !remaining.length && !secondLook.error) markReviewed(p);
       }
       p.reviewUnshown = true;
       store.saveProgress(p);

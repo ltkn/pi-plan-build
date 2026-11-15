@@ -561,7 +561,7 @@ export const MAP_CHECK_SYSTEM = `You are a MAP CHECKER in a fresh context: each 
 
 Use read/grep/find/ls only; do not modify any file. For each line, find the code it names and read it: the file, the function, the filter, the SQL, the test. Confirm a line only when you have read the code that makes it true; for a test it names, read the assertion, not just the name. Reject it when the code contradicts it, when what it names does not exist, or when its claim goes further than the code shows (a verdict like "atomic" or "tenant-safe" with nothing enforcing it). A path is relative to the project root, or to the folder its heading names.
 
-Report with the report_verdicts tool: one entry per line, by its number, "confirmed" or "rejected", with one line of evidence (file:line). For a rejection, the evidence says what the code does instead.`;
+Report with the report_verdicts tool: one entry per line, by its number, "confirmed" or "rejected", with one line of evidence (file:line). For a rejection, the evidence says what the code does instead. A line you leave out is not checked, never confirmed or rejected: report an entry for every line in the brief, not only the ones you got to.`;
 
 export function mapCheckBrief(lines: { heading?: string; text: string }[], skipped = 0): string {
   return [
@@ -570,6 +570,17 @@ export function mapCheckBrief(lines: { heading?: string; text: string }[], skipp
     ...lines.map((l, i) => `${i + 1}. ${l.heading ? `[under ${l.heading}] ` : ""}${l.text}`),
     ...(skipped ? ["", `(${skipped} more line${skipped === 1 ? "" : "s"} are not part of this check.)`] : []),
   ].join("\n");
+}
+
+/**
+ * What the map check says about its own coverage: the lines it got answers for, never the lines it was sent.
+ * A checker that left lines unanswered is a shortfall the human reads, not a pass; `notSent` are the lines
+ * the change had beyond what was sent at all (`MAP_CHECK_LINES`).
+ */
+export function mapCheckNote(shown: number, checked: number, notSent: number): string {
+  const more = notSent > 0 ? ` (${notSent} more were not)` : "";
+  if (checked >= shown) return `${shown} new line${shown === 1 ? " was" : "s were"} checked against the code${more}.`;
+  return `Only ${checked} of ${shown} new lines were checked against the code (${shown - checked} got no verdict)${more}.`;
 }
 
 /** Rough token count (4 characters a token). */

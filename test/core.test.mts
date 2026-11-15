@@ -443,6 +443,42 @@ test("map: /pb:archive reads only the feature's change against the map, marking 
   }
 });
 
+test("map: a check that answers only some new lines says how many it checked", async () => {
+  // The note counts the lines it got answers for, never the lines it was sent; the tail is the lines never sent.
+  const { mapCheckNote } = await import("../extensions/pb/map.ts");
+  assert.equal(mapCheckNote(5, 5, 0), "5 new lines were checked against the code.");
+  assert.equal(mapCheckNote(1, 1, 0), "1 new line was checked against the code.");
+  assert.equal(mapCheckNote(60, 60, 12), "60 new lines were checked against the code (12 more were not).");
+  assert.equal(mapCheckNote(5, 3, 0), "Only 3 of 5 new lines were checked against the code (2 got no verdict).");
+  assert.equal(mapCheckNote(60, 59, 12), "Only 59 of 60 new lines were checked against the code (1 got no verdict) (12 more were not).");
+
+  // Through the flow: the checker leaves the last line — the one the code contradicts — unanswered, so the
+  // note stops at 4 of 5 while the map still goes in. No verdict is not a contradiction: the line survives
+  // and never reaches the repair pass, which still runs for the unresolved src/gone.ts.
+  const t = setup({ verify: "true" });
+  fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(t.repo, "src/auth/Login.java"), "class Login {}\n");
+  process.chdir(t.repo);
+  const repair = path.join(os.tmpdir(), `pb-map-partial-repair-${process.pid}.md`);
+  process.env.MOCK_MAP_CHECK = "partial";
+  process.env.MOCK_REPAIR_OUT = repair;
+  try {
+    await t.run("map");
+    assert.match(t.notes.at(-1)!, /Only 4 of 5 new lines were checked against the code \(1 got no verdict\)/);
+    assert.match(t.read("AGENTS.md"), /### Orders/, "a check that fell short still writes the map");
+    assert.match(t.read("AGENTS.md"), /Services own transactions; controllers never call repositories\./, "a line with no verdict survives, contradiction and all");
+    const brief = fs.readFileSync(repair, "utf8");
+    assert.match(brief, /src\/gone\.ts/, "the repair pass ran for the unresolved path");
+    assert.doesNotMatch(brief, /# Lines the code contradicts/, "a line with no verdict is never handed to the repair pass");
+    assert.equal(t.selectTitles.length, 0, "no contradicted line the repair kept means no dialog");
+  } finally {
+    delete process.env.MOCK_MAP_CHECK;
+    delete process.env.MOCK_REPAIR_OUT;
+    fs.rmSync(repair, { force: true });
+  }
+});
+
 test("map: a rule counts as dropped only when nothing in the proposal still says it; reworded, split or moved rules are kept", async () => {
   const { droppedBullets } = await import("../extensions/pb/map.ts");
   const current = [
