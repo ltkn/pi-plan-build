@@ -830,14 +830,33 @@ export const choose = async (ctx: ExtensionContext, store: Store, title: string,
   const ms = store.config().askTimeoutSec * 1000;
   const { result: choice, timedOut } = await patiently(ctx, ms, (opts) => ctx.ui.select(title, options, opts));
   if (choice !== undefined) return choice;
-  if (timedOut) {
-    const minutes = Math.max(1, Math.round(ms / 60_000));
-    notes?.push(`${title} → ${fallback} (no answer within ${minutes} min)`);
-    // Said where you will look when you come back, not only in the notes a later summary may carry.
-    post(`**No answer within ${minutes} min**, so pb went on with its default — "${fallback}" — for: ${title.split("\n")[0]}`);
-    return fallback;
+  return timedOut ? wentOnWithout(title, fallback, ms, notes) : undefined;
+};
+
+/** A dialog nobody answered: pb's default is taken, noted for the summary, and said where you will look. */
+const wentOnWithout = (title: string, fallback: string, ms: number, notes?: string[]): string => {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  notes?.push(`${title} → ${fallback} (no answer within ${minutes} min)`);
+  post(`**No answer within ${minutes} min**, so pb went on with its default — "${fallback}" — for: ${title.split("\n")[0]}`);
+  return fallback;
+};
+
+/**
+ * Your own words, with `choose`'s patience: prefilled with `fallback`, which is taken (and noted) when
+ * nobody answers within askTimeoutSec. Esc, an empty answer or a replaced session is undefined.
+ */
+export const typeIn = async (ctx: ExtensionContext, store: Store, title: string, fallback: string, notes?: string[]): Promise<string | undefined> => {
+  try {
+    if (!ctx.hasUI) return fallback;
+  } catch (e) {
+    if (!sessionGone(ctx)) throw e;
+    return undefined;
   }
-  return undefined;
+  const ms = store.config().askTimeoutSec * 1000;
+  const { result, timedOut } = await patiently(ctx, ms, (opts) => ctx.ui.input(title, fallback, opts));
+  const text = result?.trim();
+  if (text) return text;
+  return timedOut ? wentOnWithout(title, fallback, ms, notes) : undefined;
 };
 /** A yes/no that goes on (yes) without you. */
 

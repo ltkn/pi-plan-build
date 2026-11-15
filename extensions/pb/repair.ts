@@ -15,9 +15,10 @@ import { notifyDesktop } from "./notify.ts";
 import { specHash, tokensOf } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type Checkpoint, type Finding, type Progress, Store, appendCheckpoint, cap, gitHead, now, pathExists } from "./store.ts";
-import { agree, choose, cmd, evidenceLine, loadSpec, nextLine, phaseHeader, post, reply, revertFreshRun, sessionGone, sessionModel, sessionIdOf, specCompletions, specFixCompletions, syncTasks, tree, unresolvedAnchors, warnLater } from "./kit.ts";
+import { agree, choose, cmd, typeIn, evidenceLine, loadSpec, nextLine, phaseHeader, post, reply, revertFreshRun, sessionGone, sessionModel, sessionIdOf, specCompletions, specFixCompletions, syncTasks, tree, unresolvedAnchors, warnLater } from "./kit.ts";
 import { ensureSpecReviewed, recordedFindings, repairable, reviewDoor, reviewTarget, toFindings, verdictOn } from "./spec-review.ts";
 import { unfinishedPhase } from "./phase.ts";
+import { safeLine } from "./markdown.ts";
 
 export const fixLive = (fix: NonNullable<Progress["fix"]>) => pathExists(fix.session) && Date.now() - fix.startedAt < 6 * 60 * 60 * 1000;
 
@@ -242,9 +243,12 @@ const askParked = async (
   const answers: string[] = [];
   for (const q of fix.parked) {
     const label = `${q.recommendation} (pb's recommendation)`;
-    const choice = await choose(ctx, store, q.question, [label, "Neither — let me say"], label, notes);
-    if (choice === undefined) return { answers, stopped: true };
-    answers.push(`"${q.question}" \u2192 ${choice === label ? q.recommendation : choice}`);
+    const OWN = "Something else (type it)";
+    const choice = await choose(ctx, store, q.question, [label, OWN], label, notes);
+    // The selector returns only what it offered: your own answer is asked for in words of its own.
+    const answer = choice === OWN ? await typeIn(ctx, store, q.question, q.recommendation, notes) : choice === label ? q.recommendation : undefined;
+    if (answer === undefined) return { answers, stopped: true };
+    answers.push(`"${q.question}" \u2192 ${safeLine(answer)}`);
     store.event(name, { type: "spec-fix-answer", run: fix.run, question: q.question, answer: answers[answers.length - 1] });
   }
   // on the record in the live object, not a copy: the caller saves this same progress after asking,

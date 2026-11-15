@@ -924,7 +924,8 @@ test("spec-harden: a lap's parked question reaches you with its recommendation, 
   await written(t);
   process.env.MOCK_SPEC_REVIEW = "advisory";
   t.selects.push("Yes, go on"); // the plan
-  t.selects.push("Drop the city column — stop_name already carries it"); // the parked question
+  t.selects.push("Something else (type it)"); // the parked question: neither offered answer
+  t.selects.push("Drop the city column — stop_name already carries it"); // typed, in the human's own words
   t.agent.script = async (text, tool) => {
     if (!text.includes("[pb:spec-fix]")) return;
     if (text.includes("Repair lap 1")) {
@@ -943,6 +944,7 @@ test("spec-harden: a lap's parked question reaches you with its recommendation, 
   assert.ok(t.selectTitles.some((s) => s.includes("originCity")), "the question was put to the human");
   const answer = specFixEvents(t, "spec-fix-answer").at(-1)!;
   assert.match(answer.answer, /Drop the city column/);
+  assert.doesNotMatch(answer.answer, /type it/, "the answer is what was typed, never the option's label");
   const second = t.instructions.filter((i) => i.includes("[pb:spec-fix]"))[1];
   assert.match(second, /What the human answered since the last lap:[\s\S]*Drop the city column/);
 });

@@ -238,6 +238,9 @@ export function setup(config: object = {}) {
             return undefined;
           }
           if (pick === "<timeout>") return undefined;
+          // Pi's selector returns one of the options it showed, never free text: a script that picks
+          // anything else is testing a dialog Pi does not have.
+          if (pick !== undefined && !opts.includes(pick)) throw new Error(`select "${title}": "${pick}" is not one of the options offered: ${JSON.stringify(opts)}`);
           return pick ?? opts[0];
         },
         onTerminalInput: (h: (d: string) => void) => {
