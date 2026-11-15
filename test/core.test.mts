@@ -1209,6 +1209,28 @@ test("build-start screen: an unbuilt dependency, the review's P1 and a full sess
   assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved");
 });
 
+test("build-start screen: without a UI, every concern it would have listed is in the build's closing summary", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  new Store(t.repo).markAsked("standards");
+  await t.callTool("pb_write_spec", { name: "base-feature", content: SPEC() });
+  assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("Depends on: none", "Depends on: base-feature") })).error, undefined);
+  t.runtime().usage = 80;
+  t.runtime().hasUI = false;
+  t.agent.script = diligent;
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const done = t.posts.find((x) => /Build complete/.test(x))!;
+  assert.match(done, /Decided without you[^\n]*:\n[\s\S]*- built although order-cancellation depends on base-feature, which isn't built yet \(no one to ask\)/);
+  assert.match(done, /- built although the spec review raised 1 P1 finding \(shown above\): the build would carry it \(no one to ask\)/);
+  assert.match(done, /- built here although this session is 80% full \(no one to ask\)/);
+});
+
 test("a build in the planning session renames it, so /resume shows what it became", async () => {
   const t = setup({ verify: "true" });
   await written(t);

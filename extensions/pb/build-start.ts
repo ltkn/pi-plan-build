@@ -337,7 +337,12 @@ export function registerBuildStart(pi: ExtensionAPI) {
       }
       if (placing) fresh = choice === FRESH;
     } else if (!fresh && !o.decided && switching) fresh = true;
-    if (!ctx.hasUI && p1s) notes.push(`built with ${p1s} P1 finding${p1s === 1 ? "" : "s"} from the spec review unaddressed (no one to ask)`);
+    // Without a UI the build-start screen is never shown: everything it would have listed goes on the record the
+    // build's closing summary reads, so a headless build says what it went ahead over.
+    if (!ctx.hasUI) {
+      for (const c of concerns) notes.push(`built although ${c} (no one to ask)`);
+      if (placing && !fresh) notes.push(`built here although ${why} (no one to ask)`);
+    }
     if (fresh && !canOpenSession) {
       ctx.ui.setEditorText(`/${cmd("build")} ${name} --fresh`);
       return ctx.ui.notify(`Press Enter to build ${name} in a fresh session.`, "info");
