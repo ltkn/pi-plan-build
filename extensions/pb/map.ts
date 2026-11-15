@@ -206,6 +206,9 @@ export function areaNotes(cwd: string): string[] {
   return [...new Set(dirs.filter((d) => areaDir(cwd, `### x (${d}/)`) === d))];
 }
 
+/** The files the map lives in, project-relative: the root AGENTS.md and each area note its index names. */
+export const mapFiles = (cwd: string): string[] => [AREA_FILE, ...areaNotes(cwd).map((d) => `${d}/${AREA_FILE}`)];
+
 /** The area notes covering any of these project-relative paths: what pb names to a session working there. */
 export function areaNotesFor(cwd: string, paths: string[]): string[] {
   const clean = paths.map((p) => p.replace(/^\.\//, "").replace(/[:#].*$/, ""));

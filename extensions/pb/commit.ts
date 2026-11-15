@@ -15,6 +15,7 @@ import { type Progress, Store, changedSince, now, readEvents } from "./store.ts"
 import { cmd, nextLine, post, specCompletions, specOfSession } from "./kit.ts";
 import { whereNext } from "./next.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
+import { mapFiles } from "./map.ts";
 
 /** The spec whose work is committed: live, or archived (a commit right after /pb:archive). */
 interface Target {
@@ -50,15 +51,16 @@ export function readCommitEditor(text: string, offered: string[]): { message: st
  * The message for this commit, from the spec and what pb recorded since its last commit of it: the feature the
  * first time; the review fixes, or the map update, or "follow-up changes" after that. Pure.
  */
-export function commitMessageFor(o: { md: string; name: string; events: Record<string, unknown>[]; files: string[] }): string {
+export function commitMessageFor(o: { md: string; name: string; events: Record<string, unknown>[]; files: string[]; mapFiles: string[] }): string {
   const title = parseSpec(o.md).spec?.title ?? o.name;
   const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
   const lastCommit = o.events.map((e) => e.type).lastIndexOf("commit");
   const since = o.events.slice(lastCommit + 1);
   const mapChanges = since.filter((e) => e.type === "map").flatMap((e) => strings(e.changes));
-  const mapOnly = o.files.length > 0 && o.files.every((f) => f === "AGENTS.md");
+  const isMap = (f: string) => o.mapFiles.includes(f);
+  const mapOnly = o.files.length > 0 && o.files.every(isMap);
   if (mapOnly) return [`Update the project map after ${title}`, ...(mapChanges.length ? ["", ...mapChanges.map((c) => `- ${c}`)] : [])].join("\n");
-  const withMap = o.files.includes("AGENTS.md") ? ["", "Also updates the project map in AGENTS.md."] : [];
+  const withMap = o.files.some(isMap) ? ["", "Also updates the project map in AGENTS.md."] : [];
   if (lastCommit < 0) return [commitMessage(o.md) ?? title, ...withMap].join("\n");
   const fixed = [...new Set(since.filter((e) => e.type === "fix").flatMap((e) => strings(e.fixed)))];
   if (fixed.length) return [`${title}: review fixes`, "", ...fixed.map((t) => `- ${t}`), ...withMap].join("\n");
@@ -122,7 +124,7 @@ export function registerCommit(pi: ExtensionAPI) {
       const files = groups.flatMap((g) => g.files.map((f) => shownPath(g, f)));
       if (!files.length) return ctx.ui.notify(`Nothing to commit${spec ? ` for ${spec.name}` : ""}: no change since the last commit.`, "info");
       const events = spec ? readEvents(path.join(spec.dir, "events.jsonl")) : [];
-      const message = spec ? commitMessageFor({ md: spec.md, name: spec.name, events, files }) : "";
+      const message = spec ? commitMessageFor({ md: spec.md, name: spec.name, events, files, mapFiles: mapFiles(ctx.cwd) }) : "";
       const shown = files.slice(0, LIST_CAP).map((f) => `- ${f}`).concat(files.length > LIST_CAP ? [`- … and ${files.length - LIST_CAP} more`] : []);
       if (!ctx.hasUI) {
         return post([`**Not committed** — nobody here to confirm. \`/${cmd("commit")}${spec ? ` ${spec.name}` : ""}\` would commit ${files.length} file${files.length === 1 ? "" : "s"}:`, "", ...shown, "", "with the message:", "", "```text", message || "(none: you write it)", "```"].join("\n"));

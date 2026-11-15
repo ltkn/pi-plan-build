@@ -1423,6 +1423,17 @@ test("/pb:commit: no phase writes a commit message any more; the command commits
   assert.equal(execSync("git rev-parse HEAD", { cwd: v.repo, encoding: "utf8" }), head);
 });
 
+
+test("commit: a change to an area note is a map update, like the root AGENTS.md", async () => {
+  const { commitMessageFor } = await import("../extensions/pb/commit.ts");
+  const md = SPEC();
+  const events = [{ type: "commit", sha: "abc1234", files: ["T1.txt"], subject: "Order cancellation" }, { type: "map", changes: ["added Orders"] }];
+  const mapFiles = ["AGENTS.md", "src/orders/AGENTS.md"];
+  assert.equal(commitMessageFor({ md, name: "order-cancellation", events, files: ["src/orders/AGENTS.md"], mapFiles }), "Update the project map after Order cancellation\n\n- added Orders");
+  assert.match(commitMessageFor({ md, name: "order-cancellation", events, files: ["T1.txt", "src/orders/AGENTS.md"], mapFiles }), /Also updates the project map/);
+  // An AGENTS.md the map does not name is the project's own file, not a map update.
+  assert.equal(commitMessageFor({ md, name: "order-cancellation", events, files: ["docs/AGENTS.md"], mapFiles }), "Order cancellation: follow-up changes");
+});
 test("/pb:commit: refused while a build is still writing files, and never without someone to confirm", async () => {
   const t = setup({ verify: "true" });
   await written(t);
