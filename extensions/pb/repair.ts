@@ -14,7 +14,7 @@ import { runFresh, runUsage } from "./runner.ts";
 import { notifyDesktop } from "./notify.ts";
 import { specHash, tokensOf } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type Checkpoint, type Finding, type Progress, Store, appendCheckpoint, cap, gitHead, now, pathExists } from "./store.ts";
+import { type Checkpoint, type Finding, type Progress, Store, appendCheckpoint, cap, gitHead, now, pathExists, readEvents } from "./store.ts";
 import { agree, choose, cmd, typeIn, evidenceLine, loadSpec, nextLine, phaseHeader, post, reply, revertFreshRun, sessionGone, sessionModel, sessionIdOf, specCompletions, specFixCompletions, syncTasks, tree, unresolvedAnchors, warnLater } from "./kit.ts";
 import { ensureSpecReviewed, recordedFindings, repairable, reviewDoor, reviewTarget, toFindings, verdictOn } from "./spec-review.ts";
 import { unfinishedPhase } from "./phase.ts";
@@ -270,6 +270,9 @@ const fixDigest = (
   session?: string,
 ): string => {
   const tokens = tokensOf(md);
+  // The parked questions are asked and cleared before any digest is written: what the run asked you is the
+  // answers it recorded.
+  const settled = readEvents(path.join(store.specDir(name), "events.jsonl")).filter((e) => e.type === "spec-fix-answer" && e.run === fix.run).length;
   const clipped = claims.some((f) => /…\[truncated \d+ chars\]/.test(f.title ?? "") || (f.fix !== undefined && /…\[truncated \d+ chars\]/.test(f.fix)));
   const verdict = verdictOn(store, name, md);
   const blocked = verdict === "block";
@@ -301,12 +304,13 @@ const fixDigest = (
       `${fix.laps} repair lap${fix.laps === 1 ? "" : "s"}`,
       driver ? `${fix.reviews} review${fix.reviews === 1 ? "" : "s"}` : "",
       tokens ? `spec now ~${tokens} tokens` : "",
-      fix.parked.length
-        ? `${fix.parked.length} question${fix.parked.length === 1 ? "" : "s"} it would not decide`
-        : fix.assumed
-          ? `${fix.assumed} claim${fix.assumed === 1 ? "" : "s"} tagged assumed`
-          : claims.length
-            ? `${claims.length} claim${claims.length === 1 ? "" : "s"} without a probe`
+      settled ? `${settled} question${settled === 1 ? "" : "s"} settled with you` : "",
+      fix.assumed
+        ? `${fix.assumed} claim${fix.assumed === 1 ? "" : "s"} tagged assumed`
+        : claims.length
+          ? `${claims.length} claim${claims.length === 1 ? "" : "s"} without a probe`
+          : settled
+            ? ""
             : "it decided everything it was shown",
     ),
     ...(clipped && session ? ["", `Some fields above are clipped by pb's length bound; the uncut text is in the run log: \`pi --session ${path.relative(path.join(store.root, "..", ".."), session)}\`.`] : []),

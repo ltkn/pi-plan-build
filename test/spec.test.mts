@@ -934,7 +934,7 @@ test("spec-harden: a lap's parked question reaches you with its recommendation, 
       await tool("pb_spec_fix_done", { applied: [1], rebutted: [], parked: [{ id: 2, question: "Is originCity worth a column the feed cannot fill?", recommendation: "Drop it: stop_name already carries the city" }], assumed: [], summary: "one settled, one parked" });
       return;
     }
-    await tool("pb_spec_fix_done", { applied: [2], rebutted: [], parked: [], assumed: [], summary: "the rest settled" });
+    await tool("pb_spec_fix_done", { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "the rest settled" });
   };
   try {
     await t.run("spec-harden", "order-cancellation");
@@ -945,6 +945,8 @@ test("spec-harden: a lap's parked question reaches you with its recommendation, 
   const answer = specFixEvents(t, "spec-fix-answer").at(-1)!;
   assert.match(answer.answer, /Drop the city column/);
   assert.doesNotMatch(answer.answer, /type it/, "the answer is what was typed, never the option's label");
+  // The run asked and cleared the parked question before its digest: the digest still names it.
+  assert.match(t.posts.find((x) => /^\*\*. Spec harden/.test(x))!, /1 question settled with you/);
   const second = t.instructions.filter((i) => i.includes("[pb:spec-fix]"))[1];
   assert.match(second, /What the human answered since the last lap:[\s\S]*Drop the city column/);
 });
