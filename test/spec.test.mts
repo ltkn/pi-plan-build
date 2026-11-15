@@ -1243,6 +1243,28 @@ test("spec citation: a gitignored file's cited line resolves, a past-the-end lin
   assert.equal((await write("cite-ignored-again", "deep/config.json:3")).error, undefined);
 });
 
+test("spec citation: a hyphenated name is cited whole, and every line of a list is checked", async () => {
+  const { specPathRefs } = await import("../extensions/pb/spec.ts");
+  const refs = (text: string) => specPathRefs(text).map((r) => `${r.path}:${r.line}`);
+  // A list after a backticked citation used to fail the backticked form and be read from inside the name.
+  assert.deepEqual(refs("(`build-start.ts:47-57,65`; the window)"), ["build-start.ts:47", "build-start.ts:65"]);
+  assert.deepEqual(refs("the rule at `build-start.ts:57, 65`"), ["build-start.ts:57", "build-start.ts:65"]);
+  assert.deepEqual(refs("`a.b.ts:5,6`"), ["a.b.ts:5", "a.b.ts:6"]);
+  assert.deepEqual(refs("(build-start.ts:47-57,65)"), ["build-start.ts:47", "build-start.ts:65"]);
+  assert.deepEqual(refs("`build-start.ts:617-618`"), ["build-start.ts:617"]);
+  assert.deepEqual(refs("see foo.ts:12, 14 tests pass"), ["foo.ts:12"], "in prose a number after a comma and space is not a line");
+
+  const t = setup();
+  process.chdir(t.repo);
+  fs.mkdirSync(path.join(t.repo, "src"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "src/build-start.ts"), Array.from({ length: 70 }, (_, i) => `// line ${i + 1}`).join("\n") + "\n");
+  const write = (name: string, ref: string) => t.callTool("pb_write_spec", { name, content: citingSpec(`\`${ref}\` holds the window.`) });
+  assert.equal((await write("cite-list", "src/build-start.ts:47-57,65")).error, undefined);
+  const past = (await write("cite-list-past", "src/build-start.ts:47,99")).error!;
+  assert.match(past, /`src\/build-start\.ts:99`, but `src\/build-start\.ts` has 70 lines/);
+  assert.doesNotMatch(past, /not in the project/);
+});
+
 test("spec citation: nothing above the project root resolves, for the write gate or for the map", async () => {
   const { resolveProjectPath, unresolvedPaths } = await import("../extensions/pb/map.ts");
 

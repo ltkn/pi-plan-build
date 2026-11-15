@@ -329,12 +329,14 @@ export const ROOT_FILE_REF = /^(?:Makefile|Dockerfile|LICENSE|README|CHANGELOG|C
 
 /**
  * `path:line` references in a spec, outside fences. A path may be backticked or
- * bare; a line range (`:40-80`) names its first line. New files without a line
- * are allowed: only a line claim must point at a real file and line.
+ * bare; a line range (`:40-80`) names its first line, and a list (`:47-57,65`) names
+ * each item's first line. A bare path never starts inside a name (after a letter, a
+ * hyphen, a dot or a slash), so `build-start.ts` is never read as `start.ts`. New files
+ * without a line are allowed: only a line claim must point at a real file and line.
  */
 export const specPathRefs = (md: string): Array<{ path: string; line: number; text: string }> => {
   const refs = new Map<string, { path: string; line: number; text: string }>();
-  const re = /`([^`\s]+):(\d+)(?:-\d+)?`|(?<![\w/`])([A-Za-z0-9_./-]+):(\d+)(?:-\d+)?/g;
+  const re = /`([^`\s]+):(\d+(?:-\d+)?(?:,\s?\d+(?:-\d+)?)*)`|(?<![\w/.`-])([A-Za-z0-9_./-]+):(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)/g;
   let inFence = false;
   for (const raw of md.split("\n")) {
     if (/^(\s*)```/.test(raw)) {
@@ -344,15 +346,18 @@ export const specPathRefs = (md: string): Array<{ path: string; line: number; te
     if (inFence) continue;
     for (const m of raw.matchAll(re)) {
       const p = (m[1] ?? m[3]).replace(/^\.\//, "").replace(/[/.,;:]+$/, "");
-      const line = Number(m[2] ?? m[4]);
-      if (!p || !Number.isFinite(line) || line < 1) continue;
+      const lines = (m[2] ?? m[4]).split(",").map((item) => Number(item.trim().split("-")[0]));
+      if (!p) continue;
       const before = raw.slice(Math.max(0, (m.index ?? 0) - 12), m.index ?? 0);
       if (before.includes("://") || p.startsWith("/") || p.startsWith("~") || p.includes("://") || p.includes("...")) continue;
       if (/[<>{}*$@=,;()[\]\s]/.test(p)) continue;
       if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(p) || /^v?\d+(?:\.\d+){1,3}$/i.test(p)) continue;
       if (!p.includes("/") && !/\.[A-Za-z0-9]{1,12}$/.test(p) && !ROOT_FILE_REF.test(p)) continue;
-      const key = `${p}:${line}`;
-      if (!refs.has(key)) refs.set(key, { path: p, line, text: raw.trim() });
+      for (const line of lines) {
+        if (!Number.isFinite(line) || line < 1) continue;
+        const key = `${p}:${line}`;
+        if (!refs.has(key)) refs.set(key, { path: p, line, text: raw.trim() });
+      }
     }
   }
   return [...refs.values()];
