@@ -31,6 +31,7 @@ export interface Config {
   lint: string | null;
   /** Extra project commands (e.g. standards scripts): explicit commands only, run at the final gate after the suite. */
   extraChecks: string[];
+  /** How long one of pb's own checks (suite, compile, lint, Test: lines) may take (seconds; 0 = no limit). */
   verifyTimeoutSec: number;
   /** How long one shell command the agent runs may take before Pi kills it (seconds; 0 = no limit). */
   commandTimeoutSec: number;

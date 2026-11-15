@@ -1031,6 +1031,20 @@ test("stats: the session line no longer counts questions", async () => {
   assert.ok(!/\basks\s*:/.test(source) && !source.includes('count("ask")'), "the dead asks counter must not remain in stats.ts");
 });
 
+test("verify: a check timeout of 0 is no limit, as for every other pb timeout; the dry run keeps its own cap", async () => {
+  const { runVerify } = await import("../extensions/pb/verify.ts");
+  const { dryRunLimitSec } = await import("../extensions/pb/spec-tools.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pb-timeout-"));
+  const unlimited = await runVerify("sleep 1.5", dir, 0, 1000);
+  assert.equal(unlimited.ok, true, unlimited.summary);
+  const limited = await runVerify("sleep 3", dir, 1, 1000);
+  assert.equal(limited.ok, false);
+  assert.match(limited.summary, /TIMEOUT after 1s/);
+  assert.equal(dryRunLimitSec(0), 120);
+  assert.equal(dryRunLimitSec(30), 30);
+  assert.equal(dryRunLimitSec(900), 120);
+});
+
 test("manifests: a pipe planted as package.json hangs no detection, and a script npm stubs out is not a command", async () => {
   const { detectVerify, detectLint } = await import("../extensions/pb/verify.ts");
   const { projectStack, usesDatabase } = await import("../extensions/pb/standards.ts");

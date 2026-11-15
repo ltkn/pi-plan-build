@@ -112,7 +112,8 @@ export async function runVerify(
   // agent can already run bash — this grants it no new privilege. Suspicious chaining (`;`, `|`,
   // `&&`, `&`, `$`, backticks, curl/wget) is flagged in specWarnings and skipped by the pre-approval dry-run.
   const started = Date.now();
-  const effectiveTimeoutSec = Math.max(1, Math.floor(timeoutSec || 0) || 1);
+  // 0 is no limit, as for every other pb timeout; anything else runs at least a whole second.
+  const effectiveTimeoutSec = timeoutSec > 0 ? Math.max(1, Math.floor(timeoutSec)) : undefined;
   let out = "";
   const push = (d: string) => {
     out += d;
@@ -149,10 +150,13 @@ export async function runVerify(
       }
     };
     const onAbort = () => kill();
-    const timer = setTimeout(() => {
-      timedOut = true;
-      kill(true);
-    }, effectiveTimeoutSec * 1000);
+    const timer =
+      effectiveTimeoutSec === undefined
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            kill(true);
+          }, effectiveTimeoutSec * 1000);
     signal?.addEventListener("abort", onAbort, { once: true });
     proc.stdout.on("data", (d) => push(d.toString()));
     proc.stderr.on("data", (d) => push(d.toString()));

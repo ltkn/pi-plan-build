@@ -12,6 +12,9 @@ import { appendDecision, appendEntry, cmd, evidenceLine, instruct, liveBuildOfSe
 
 const DRY_RUN_TIMEOUT_SEC = 120;
 
+/** A dry-run command's limit: the checks' own when shorter, never none — the human waits at the approval. */
+export const dryRunLimitSec = (verifyTimeoutSec: number) => (verifyTimeoutSec > 0 ? Math.min(verifyTimeoutSec, DRY_RUN_TIMEOUT_SEC) : DRY_RUN_TIMEOUT_SEC);
+
 /**
  * Each red-eligible task command, run once before the human approves the build: failing is expected
  * (nothing built yet), passing smells pre-existing behaviour, erroring smells a broken command. Advisory
@@ -49,7 +52,7 @@ export const dryRunTests = async (ctx: ExtensionContext, store: Store, name: str
       }
       current = { command, n: `${i + 1}`, since: Date.now() };
       paint();
-      const r = await withChecking(() => runVerify(command, cwd, Math.min(cfg.verifyTimeoutSec, DRY_RUN_TIMEOUT_SEC), cfg.testOutputCap));
+      const r = await withChecking(() => runVerify(command, cwd, dryRunLimitSec(cfg.verifyTimeoutSec), cfg.testOutputCap));
       const line = r.summary.split("\n")[0];
       const result = r.ok ? "pass" : /TIMEOUT|ENOENT|not found|No such file/i.test(r.summary) ? "unknown" : "fail";
       results.push({ command, result, line });

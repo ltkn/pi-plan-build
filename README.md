@@ -266,7 +266,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `build` | `"auto"` | compile/typecheck command: for `Verification: build`, a task without a `Test:` line, and the per-task compile under `taskChecks: "end"` |
 | `lint` | `"auto"` | lint command: package.json's `lint` script, else `cargo clippy -q --all-targets -- -D warnings` for a Cargo project (other stacks set it explicitly). Set explicitly, it runs after every task's check; auto-detected, only when the planning baseline ran it clean on this commit, else at the final gate only |
 | `extraChecks` | `[]` | extra project commands (e.g. standards scripts), run at the final gate after lint |
-| `verifyTimeoutSec` | 900 | how long the build's own test/compile/lint run may take; raise it together with `commandTimeoutSec` when the suite legitimately takes longer |
+| `verifyTimeoutSec` | 900 | how long the build's own test/compile/lint run may take; raise it together with `commandTimeoutSec` when the suite legitimately takes longer; 0 = no limit (the pre-approval dry run still stops each command at 120 s) |
 | `commandTimeoutSec` | 1800 | cap on one `bash`/`powershell` command, applied before Pi runs it, in pb's sessions and inside `pb_try` (a shorter timeout the model set stays). The project's own long commands (its suite, compile, lint, extra checks and the specs' `Test:` lines) get the larger of this and `verifyTimeoutSec`, never less; inside a probe no command outlasts the probe. A command stopped at a limit says which one and how to raise it; 0 = no limit |
 | `probeTimeoutSec` | 900 | how long one `pb_try` probe may run before pb kills it; 0 = no limit |
 | `maxAttempts` | 3 | failed checks (the final one, or a task's) before the build pauses |
