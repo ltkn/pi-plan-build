@@ -80,8 +80,18 @@ export function registerUndo(pi: ExtensionAPI) {
       if (ctx.hasUI && others.length) {
         const ALL = `Restore all ${files.length} file${files.length === 1 ? "" : "s"}`;
         const STEPS = `Restore only the ${ours.length} file${ours.length === 1 ? "" : "s"} finished steps changed; keep the other ${others.length}`;
-        const shownOthers = others.slice(0, 20).join(", ") + (others.length > 20 ? ` … (+${others.length - 20})` : "");
-        const choice = await ctx.ui.select(`${question}\n${summary}\nNo finished step changed these (your edits, or the step in progress): ${shownOthers}`, [ALL, STEPS, "Cancel"]);
+        // A file committed since the row and unedited after is the branch's own state: putting it back would
+        // quietly undo those commits in the working tree, so for those, keeping is what Enter does.
+        const committedSince = new Set(target.head && head && target.head !== head ? changedPaths(ctx.cwd, target.head, head) : []);
+        const editedSinceHead = new Set(head ? changedPaths(ctx.cwd, head, cur.commit) : []);
+        const committed = others.filter((f) => committedSince.has(f) && !editedSinceHead.has(f));
+        const uncommitted = others.filter((f) => !committed.includes(f));
+        const shown = (list: string[]) => list.slice(0, 20).join(", ") + (list.length > 20 ? ` … (+${list.length - 20})` : "");
+        const lines = [
+          ...(uncommitted.length ? [`No finished step changed these (your edits, or the step in progress): ${shown(uncommitted)}`] : []),
+          ...(committed.length ? [`Committed since then, so restoring them would undo those commits in your files: ${shown(committed)}`] : []),
+        ];
+        const choice = await ctx.ui.select(`${question}\n${summary}\n${lines.join("\n")}`, committed.length ? [STEPS, ALL, "Cancel"] : [ALL, STEPS, "Cancel"]);
         if (choice !== ALL && choice !== STEPS) return;
         if (choice === STEPS) only = ours;
       } else if (ctx.hasUI && !(await ctx.ui.confirm(question, summary))) return;

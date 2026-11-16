@@ -2649,6 +2649,23 @@ test("undo: files no finished step changed are named, and you can keep them", as
   assert.ok(!fs.existsSync(path.join(t.repo, "T1.txt")));
 });
 
+test("undo: files committed since the undo point are named as committed, and keeping them is the default", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  // After the build, a change of yours lands in a commit: the branch's state, not a step's leftover.
+  fs.writeFileSync(path.join(t.repo, "notes.md"), "committed\n");
+  execSync("git add notes.md && git commit -qm notes", { cwd: t.repo, shell: "/bin/sh" });
+  fs.writeFileSync(path.join(t.repo, "draft.md"), "mine\n"); // and one you have not committed
+  t.selects.push("Restore only the 1 file finished steps changed; keep the other 2");
+  await t.run("undo", "T2");
+  assert.deepEqual(t.selectOptions.at(-1), ["Restore only the 1 file finished steps changed; keep the other 2", "Restore all 3 files", "Cancel"], "keeping is the first, default choice");
+  assert.match(t.selectTitles.at(-1)!, /No finished step changed these \(your edits, or the step in progress\): draft\.md\nCommitted since then, so restoring them would undo those commits in your files: notes\.md$/);
+  assert.equal(t.read("notes.md"), "committed\n", "the committed file stayed");
+  assert.ok(!fs.existsSync(path.join(t.repo, "T2.txt")), "the step's file went back");
+});
+
 test("sibling repositories: a follow-up review isn't skipped when only the sibling changed since the last one", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
