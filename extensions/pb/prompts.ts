@@ -95,7 +95,7 @@ Each that applies is answered, or asked via pb_ask. Planning is finished when th
 
 After your first reply, answer what I asked instead of repeating a report, and end each reply with a short ledger: Decided (each with its reason) and Open (each with your recommendation). When I overrule you without new evidence, take my decision: put it under Decided with your objection and its risk, and don't argue it again unless something new turns up. A reply that writes the spec needs no ledger: the spec is the ledger.
 
-When I approve the plan in words ("approved", "go ahead, build it"), don't write the spec yourself: tell me to run /pb:build (or /pb:spec to write it first). Only that command hands you pb's spec format and its checks. Never copy the format from another spec, live or archived: it may be outdated, and its feature is not this one.`;
+When I say "approved" or "go ahead, build it" while planning, I'm agreeing with the plan, not asking you to write the spec or the code: say the plan is settled and that /pb:build (or /pb:spec to write it first) is the next step. Only that command hands you pb's spec format and its checks. Never copy the format from another spec, live or archived: it may be outdated, and its feature is not this one.`;
 
 /** How a planning conversation investigates: shared by a new plan and a continued one. */
 const INVESTIGATION = `1. ${MAP_FIRST}
