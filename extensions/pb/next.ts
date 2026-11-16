@@ -55,7 +55,10 @@ export function whereNext(store: Store, name: string): Where {
     // Committed since the review: archiving is next; otherwise the commit is.
     const events = readEvents(path.join(store.specDir(name), "events.jsonl")).map((e) => e.type);
     if (events.lastIndexOf("commit") > events.lastIndexOf("review")) return { spec: name, state: "reviewed and committed", next: `/${cmd("archive")} ${name}`, command: `/${cmd("archive")} ${name}` };
-    return { spec: name, state: "reviewed: PASS", next: `/${cmd("commit")} ${name}, then /${cmd("archive")} ${name}`, command: `/${cmd("commit")} ${name}` };
+    // A pass can leave findings open; P3 is polish, the rule /pb:archive's owed list uses too.
+    const open = (p?.review?.findings ?? []).filter((f) => f.priority !== "P3").length;
+    const state = open ? `reviewed: PASS (${open} finding${open === 1 ? "" : "s"} open)` : "reviewed: PASS";
+    return { spec: name, state, next: `/${cmd("commit")} ${name}, then /${cmd("archive")} ${name}`, command: `/${cmd("commit")} ${name}` };
   }
   // built: the review is next, or what the last review asked for.
   const review = p?.review;

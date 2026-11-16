@@ -801,7 +801,7 @@ export function reviewLedger(events: Record<string, unknown>[]): ReviewLedgerEnt
 }
 
 /** Session paths compare by realpath: /tmp vs /private/tmp must not orphan a lap or a build. */
-const samePath = (a: string, b: string): boolean => {
+export const samePath = (a: string, b: string): boolean => {
   if (a === b) return true;
   try {
     return fs.realpathSync(a) === fs.realpathSync(b);

@@ -441,6 +441,22 @@ export const longCommands = (cwd: string, store: Store): string[] => {
 export const longCommandSec = (cfg: { commandTimeoutSec: number; verifyTimeoutSec: number }) =>
   cfg.commandTimeoutSec === 0 || cfg.verifyTimeoutSec === 0 ? 0 : Math.max(cfg.commandTimeoutSec, cfg.verifyTimeoutSec);
 
+/**
+ * How long a build's session may stay silent and still count as live: the longest a command may run silently,
+ * plus a margin. With no command limit (0) a silent hour is the floor, so an unlimited suite never reads a
+ * build running it as dead.
+ */
+export const buildLivenessMs = (cfg: { commandTimeoutSec: number; verifyTimeoutSec: number }) => ((longCommandSec(cfg) || 3600) + 600) * 1000;
+
+/** Whether this session file was written inside the liveness window; a missing file never reads as live. */
+export const sessionLive = (cfg: { commandTimeoutSec: number; verifyTimeoutSec: number }, sessionFile: string): boolean => {
+  try {
+    return Date.now() - fs.statSync(sessionFile).mtimeMs < buildLivenessMs(cfg);
+  } catch {
+    return false;
+  }
+};
+
 /** What the fresh-guard in a pb_explore or pb_try process enforces, handed over in its environment. */
 export const guardSettings = (role: "explorer" | "trier", cwd: string, store: Store): GuardSettings => {
   const cfg = store.config();

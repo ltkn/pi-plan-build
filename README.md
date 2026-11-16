@@ -40,7 +40,7 @@ never saw the build. Your engineering standards live in AGENTS.md, written once.
                     budgets specFix.maxLaps / specFix.maxReviews
 /pb:commit [spec]     commit the work now (after build, fixes, review or archive): the change's files and a
                       message built from the spec, in an editor where you adjust both; pb never commits by itself
-/pb:undo · /pb:status [--json] · /pb:stats [all|compare [n]|--json] · /pb:archive · /pb:help
+/pb:undo · /pb:status [--json] · /pb:stats [all|compare [n]|--json] · /pb:archive [--force] · /pb:help
 alt+n                 the next step's command into the editor; the footer always shows where you are and what's next
 pb-report [--cwd dir] [--stats] [--review]   # the same pb.report/2 JSON, for scripts
 ```
@@ -286,7 +286,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `specFix` | `{}` | `{"model": "provider/id", "thinking": "low", "maxLaps": 3, "maxReviews": 2}` for the repair laps (`/pb:spec-fix`, `/pb:spec-harden`) and the claim check (after a manual lap; once per hardening run); unset thinking runs the claim check at `low`; the budgets cap a hardening run, which stops when nothing is left un-evidenced, a lap changes nothing, or a budget is spent |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
-| `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature |
+| `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature; `/pb:archive <name> --force` skips it for that one archive |
 | `notify` | true | a desktop notification when pb asks you something, when a build pauses or finishes, or when a spec review finishes while you're elsewhere |
 | `extra` | unset | your instructions added to a role's prompt: `{"plan", "spec", "build", "review", "adversarial", "map"}`; also read from `~/.pi/agent/pb/config.json`, applied first |
 | `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build uses it only when `buildReset` is `"threshold"`; 0 turns both off |

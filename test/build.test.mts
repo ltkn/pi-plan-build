@@ -1360,6 +1360,38 @@ test("stats: the Time line carries each phase that recorded a time, and old even
   assert.doesNotMatch(renderCard(spec([])), /\nTime /);
 });
 
+test("stats: a build that never finished ends its time at its last build event, not at a later turn or a line another command appended after it", async () => {
+  const { buildTiming, buildTimeLabel, loadStats } = await import("../extensions/pb/stats.ts");
+  const start = { type: "build-start", at: "2026-10-01 10:00:00" };
+  const check = { type: "check", task: "T1", at: "2026-10-01 10:00:30" };
+  const later = "2026-10-03 09:00:00"; // two days on: the day it was filed away
+  const toCheck = { activeMs: 30_000, wallMs: 30_000 };
+  for (const type of ["archive", "map", "undo", "review", "fix", "commit", "spec-check", "usage"]) {
+    assert.deepEqual(buildTiming([start, check, { type, at: later }]), toCheck, `a trailing ${type} does not end the build`);
+  }
+  // The turn that paused it does: the pause is the build's own line, the usage after it is not.
+  assert.deepEqual(buildTiming([start, check, { type: "pause", at: "2026-10-01 10:01:00" }, { type: "usage", at: later }]), { activeMs: 60_000, wallMs: 60_000 });
+  // Another phase's stamps of the same kinds are not the build's.
+  assert.deepEqual(buildTiming([start, check, { type: "check", task: "fix", at: later }, { type: "red", task: "fix", at: later }]), toCheck);
+  assert.deepEqual(buildTiming([start, check, { type: "compact", review: "reviewer", at: later }, { type: "compact", planning: true, at: later }]), toCheck);
+  assert.deepEqual(buildTiming([start, check, { type: "compact", task: "T2", at: "2026-10-01 10:02:00" }]), { activeMs: 120_000, wallMs: 120_000 }, "a build's own compaction counts");
+  // A build-start with nothing after it is the floor, not the gap to the archive.
+  assert.deepEqual(buildTiming([start, { type: "archive", at: later }]), { activeMs: 1, wallMs: 1 });
+  // A finished build is measured to its built, whatever follows.
+  assert.deepEqual(buildTiming([start, check, { type: "built", at: "2026-10-01 10:05:00" }, { type: "archive", at: later }]), { activeMs: 300_000, wallMs: 300_000 });
+
+  // The same, read from an archived folder the way /pb:stats reads it.
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const { Store } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  const dir = path.join(store.archiveRoot, "2026-10-03T09-00-00-abandoned");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "events.jsonl"), [start, check, { type: "usage", at: later }, { type: "archive", at: later, force: true }].map((e) => JSON.stringify(e)).join("\n") + "\n");
+  const abandoned = loadStats(store).find((s) => s.name === "abandoned")!;
+  assert.equal(buildTimeLabel(buildTiming(abandoned.events)), "30s");
+});
+
 test("/pb:commit: no phase writes a commit message any more; the command commits the change you confirm, with a message for the moment", async () => {
   const log = (repo: string) => execSync("git log --format=%B%x00 -n 1", { cwd: repo, encoding: "utf8" }).split("\0")[0].trim();
   const filesOf = (repo: string) => execSync("git show --name-only --format= HEAD", { cwd: repo, encoding: "utf8" }).trim().split("\n").sort();
@@ -1406,7 +1438,10 @@ test("/pb:commit: no phase writes a commit message any more; the command commits
   assert.equal(log(t.repo), "Order cancellation: review fixes\n\n- name the constant");
   // Archived, with the map updated: the map commit names what the map gained.
   await t.run("archive");
-  assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:commit order-cancellation` commits what's left \(the feature and the map update\), then `\/pb:plan <feature>`/);
+  assert.match(
+    t.posts.at(-1)!,
+    /\*\*Next:\*\* 1 file is still uncommitted against HEAD \(AGENTS\.md\): `\/pb:commit order-cancellation` offers them, or put them back by hand\. Then `\/pb:plan <feature>` for the next one\./
+  );
   t.editors.push((prefill) => prefill);
   await t.run("commit", "order-cancellation");
   assert.equal(log(t.repo), "Update the project map after Order cancellation\n\n- added Orders\n- noted transactions");

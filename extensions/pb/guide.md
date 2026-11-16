@@ -1184,7 +1184,8 @@ touch.
   established: its spec's Findings, the design the build settled on, the files
   it changed, and the completed reviews' P0–P2 findings as leads the
   cartographer must check against the code (a finding that no longer holds is
-  left out); `"mapOnArchive": false` turns that off. It reads only the
+  left out); `"mapOnArchive": false` turns that off, and `/pb:archive <name>
+  --force` skips it for that one archive. It reads only the
   feature's change: the lines that cite a changed file are re-checked, the
   change is read against every rule on the map, and every other line is kept
   as it is.
@@ -1322,6 +1323,15 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
   is archived only after you confirm, with what it still owes named: once
   archived, its findings are out of `/pb:fix`'s reach. The approved spec moves with it; the
   archive stays local, and git keeps the history of the specs that were live.
+  `/pb:archive <name> --force` puts away a spec you have abandoned in one step:
+  no question and no project-map update (`/pb:map` makes that one when you
+  choose). It needs the name spelled out, never touches your files, and ends a
+  review still kept as running rather than refusing it. A build live in another
+  session is refused either way, `--force` included; the build's own session
+  gets through once Pi is idle, since that is the build that crashed there.
+  Every archive records why it left and which files the tree still holds
+  against HEAD (in sibling repositories too), and the closing line names them
+  with the ways out: `/pb:commit <name>`, or putting them back by hand.
 <!-- /pb -->
 
 <!-- pb:topic rules -->

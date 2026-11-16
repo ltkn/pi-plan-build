@@ -400,6 +400,279 @@ test("archive: only the archived spec's runs go, a running review is named first
   assert.ok(reviewer.reviewSession(r.runtime().ctx.sessionManager.getSessionFile()), "its guard record stays");
 });
 
+/** An archived spec's folder: it moved out of `.pi/pb/specs/` to a stamped one under `.pi/pb-archive/`. */
+const archivedDir = (repo: string, name: string) => {
+  const root = path.join(repo, ".pi/pb-archive");
+  const dir = fs.readdirSync(root).filter((d) => d.endsWith(name)).sort().pop();
+  assert.ok(dir, `${name} is not archived`);
+  return path.join(root, dir!);
+};
+
+/** The events an archived spec carries away with it. */
+const archivedEvents = (repo: string, name: string) =>
+  fs
+    .readFileSync(path.join(archivedDir(repo, name), "events.jsonl"), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+
+/** progress.json, patched in place the way the tests that stand a build at a given phase do. */
+const patchProgress = (repo: string, name: string, patch: Record<string, unknown> & { drop?: string[] }) => {
+  const file = path.join(repo, `.pi/pb/specs/${name}/progress.json`);
+  const { drop = [], ...rest } = patch;
+  const p = JSON.parse(fs.readFileSync(file, "utf8"));
+  for (const key of drop) delete p[key];
+  fs.writeFileSync(file, JSON.stringify({ ...p, ...rest }));
+  return p;
+};
+
+test("archive: --force archives what the spec owes without asking, skips the map run, records why it left and says what is left uncommitted", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  process.chdir(t.repo);
+  // The feature and the map are committed: what the tree still holds is the abandoned attempt, nothing else.
+  fs.writeFileSync(path.join(t.repo, "AGENTS.md"), "# Shop\n");
+  execSync("git add T1.txt T2.txt AGENTS.md && git commit -qm feature", { cwd: t.repo });
+  fs.writeFileSync(path.join(t.repo, "half-done.txt"), "an abandoned attempt\n");
+  const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+  const builtProgress = patchProgress(t.repo, "order-cancellation", {
+    phase: "reviewed",
+    review: { at: "2026-10-01 10:00:00", verdict: "pass", findings: [{ priority: "P2", title: "a" }, { priority: "P2", title: "b" }] },
+  });
+  const mapBrief = path.join(os.tmpdir(), `pb-force-archive-brief-${process.pid}.md`);
+  fs.rmSync(mapBrief, { force: true });
+  process.env.MOCK_BRIEF_OUT = mapBrief;
+  try {
+    // --force never chooses the spec: with no name nothing moves and nothing is asked.
+    const asked = t.confirms.length;
+    await t.run("archive", "--force");
+    assert.match(t.notes.at(-1)!, /`--force` names nothing/);
+    assert.equal(t.confirms.length, asked);
+    assert.ok(fs.existsSync(progressFile), "the spec is where it was");
+    for (const bad of ["../order-cancellation", "a b"]) {
+      await t.run("archive", `--force ${bad}`);
+      assert.match(t.notes.at(-1)!, /isn't a valid spec name/);
+      assert.ok(fs.existsSync(progressFile), `\`${bad}\` never reached a path`);
+    }
+    const complete = t.runtime().cmds["pb:archive"].getArgumentCompletions!;
+    assert.deepEqual(complete("").map((i: any) => i.value).filter((v: string) => v === "--force"), ["--force"], "--force completes beside the spec names");
+    assert.ok(complete("").some((i: any) => i.value === "order-cancellation"), "and so do the specs");
+    // Without the flag: the same question as ever, and a no keeps everything where it is.
+    t.confirmAnswers.push(false);
+    await t.run("archive", "order-cancellation");
+    assert.equal(t.confirms.at(-1), "order-cancellation isn't finished: 2 review findings still open");
+    assert.equal(t.confirmBodies.at(-1), "Archive it anyway? Its open findings leave /pb:fix's reach.", "the body is word for word today's, whatever the reason");
+    assert.ok(fs.existsSync(progressFile), "a no keeps it live");
+    assert.equal(fs.existsSync(mapBrief), false, "a no runs no cartographer");
+    // Forced: no dialog, no cartographer, and the map the human reads is untouched.
+    const map = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
+    const questions = t.confirms.length;
+    await t.run("archive", "order-cancellation --force");
+    assert.equal(t.confirms.length, questions, "--force asks nothing");
+    assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")), "it went");
+    assert.match(t.notes.join("\n"), /Archiving order-cancellation with work left: 2 review findings still open\./, "the reasons it accepted are named");
+    assert.match(t.notes.join("\n"), /`--force` skipped the project map update/);
+    assert.equal(fs.existsSync(mapBrief), false, "no cartographer run");
+    assert.equal(fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8"), map, "the project map is byte-identical");
+    const ev = archivedEvents(t.repo, "order-cancellation").at(-1)!;
+    assert.equal(ev.type, "archive", "the record is the file's last line");
+    assert.equal(ev.force, true);
+    assert.deepEqual(ev.owed, ["2 review findings still open"]);
+    assert.equal(ev.base, builtProgress.baseCommit, "the build's own base, as context");
+    assert.deepEqual(ev.uncommitted, ["half-done.txt"], "what differs from HEAD, not everything the spec ever changed");
+    assert.match(ev.at as string, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    assert.match(
+      t.posts.at(-1)!,
+      /\*\*Next:\*\* 1 file is still uncommitted against HEAD \(half-done\.txt\): `\/pb:commit order-cancellation` offers them, or put them back by hand\. Then `\/pb:plan <feature>` for the next one\./
+    );
+  } finally {
+    delete process.env.MOCK_BRIEF_OUT;
+    fs.rmSync(mapBrief, { force: true });
+  }
+
+  // A review session is refused before any of this: --force does not reach that check.
+  const { Store } = await import("../extensions/pb/store.ts");
+  const r = setup({ verify: "true" });
+  await written(r);
+  const guard = new Store(r.repo);
+  guard.saveReviewSession(r.runtime().ctx.sessionManager.getSessionFile(), { role: "review", spec: "order-cancellation", run: "run-1", findings: [] });
+  await r.run("archive", "order-cancellation --force");
+  assert.match(r.notes.at(-1)!, /This is a review or fix session/);
+  assert.ok(fs.existsSync(path.join(r.repo, specRel)), "the spec stays");
+  assert.ok(guard.reviewSession(r.runtime().ctx.sessionManager.getSessionFile()), "and so does the record that keeps that session read-only");
+
+  // A clean pass owes nothing: the record says so, the tree says nothing is left, and the base it can't name is HEAD.
+  const u = setup({ verify: "true" });
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  execSync("git add T1.txt T2.txt && git commit -qm feature", { cwd: u.repo });
+  patchProgress(u.repo, "order-cancellation", {
+    drop: ["baseCommit"],
+    phase: "reviewed",
+    review: { at: "2026-10-01 10:00:00", verdict: "pass", findings: [] },
+  });
+  await u.run("archive", "order-cancellation --force");
+  const clean = archivedEvents(u.repo, "order-cancellation").at(-1)!;
+  assert.deepEqual(clean.owed, [], "nothing owed, nothing warned");
+  assert.equal(clean.base, "HEAD", "a spec with no usable base says HEAD, the same fallback changedSince uses");
+  assert.deepEqual(clean.uncommitted, []);
+  assert.match(u.posts.at(-1)!, /Nothing is left uncommitted — in the project or in a sibling the spec declares — against HEAD\. `\/pb:plan <feature>` for the next one\./);
+
+  // A build that stopped halfway is archivable and gets no commit offered, only git.
+  const w = setup({ verify: "true" });
+  await written(w);
+  w.agent.script = diligent;
+  await w.run("build");
+  execSync("git add T1.txt T2.txt && git commit -qm feature", { cwd: w.repo });
+  for (const f of ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt"]) fs.writeFileSync(path.join(w.repo, f), "half\n");
+  patchProgress(w.repo, "order-cancellation", { phase: "building" });
+  await w.run("archive", "order-cancellation --force");
+  const abandoned = archivedEvents(w.repo, "order-cancellation").at(-1)!;
+  assert.deepEqual(abandoned.owed, ["its build is building"]);
+  assert.equal((abandoned.uncommitted as string[]).length, 7);
+  assert.match(w.posts.at(-1)!, /7 files are still uncommitted against HEAD \([^)]*… 2 more\)/);
+  assert.match(w.posts.at(-1)!, /`\/pb:commit` refuses a build that didn't finish, so put them back by hand\./);
+  assert.ok(!w.posts.at(-1)!.includes("/pb:commit order-cancellation"), "a build that didn't finish is not offered a commit");
+
+  // The plain path is unchanged: the cartographer still runs, and its own file counts as left behind.
+  const v = setup({ verify: "true" });
+  fs.mkdirSync(path.join(v.repo, "src/auth"), { recursive: true });
+  fs.mkdirSync(path.join(v.repo, "src/main/auth"), { recursive: true });
+  fs.writeFileSync(path.join(v.repo, "src/order.ts"), "export {}\n");
+  fs.writeFileSync(path.join(v.repo, "src/auth/Login.java"), "class Login {}\n");
+  fs.writeFileSync(path.join(v.repo, "AGENTS.md"), "# Shop\n");
+  execSync("git add src AGENTS.md && git commit -qm src", { cwd: v.repo });
+  await written(v, SPEC().replace("## Context\nsrc/order.ts holds the model.", "## Findings\n- `src/order.ts` holds the model."));
+  v.agent.script = diligent;
+  await v.run("build");
+  patchProgress(v.repo, "order-cancellation", { phase: "reviewed", review: { at: "2026-10-01 10:00:00", verdict: "pass", findings: [] } });
+  const plainBrief = path.join(os.tmpdir(), `pb-plain-archive-brief-${process.pid}.md`);
+  fs.rmSync(plainBrief, { force: true });
+  process.env.MOCK_BRIEF_OUT = plainBrief;
+  try {
+    await v.run("archive", "order-cancellation");
+    assert.equal(v.confirms.length, 0, "a clean pass asks nothing");
+    assert.ok(fs.existsSync(plainBrief), "the plain archive still runs the cartographer");
+    assert.match(v.notes.join("\n"), /Updating the project map from order-cancellation…/);
+    const plain = archivedEvents(v.repo, "order-cancellation").at(-1)!;
+    assert.equal(plain.force, false);
+    assert.deepEqual(plain.owed, []);
+    assert.ok((plain.uncommitted as string[]).includes("AGENTS.md"), "the map it wrote counts as what was left");
+  } finally {
+    delete process.env.MOCK_BRIEF_OUT;
+    fs.rmSync(plainBrief, { force: true });
+  }
+});
+
+test("archive: a build live in another session refuses both archives, the build's own idle session gets through, and /pb:build judges liveness by the one rule", async () => {
+  const t = setup({ verify: "true", commandTimeoutSec: 0 });
+  process.chdir(t.repo);
+  const { Store, gitHead } = await import("../extensions/pb/store.ts");
+  const store = new Store(t.repo);
+  store.markAsked("standards");
+  await written(t);
+  const progressFile = path.join(t.repo, ".pi/pb/specs/refund-flow/progress.json");
+  /** refund-flow, standing at "building" in the given session, whose file was last written `agoMin` minutes ago (undefined: never written). */
+  const standBuilding = async (session: string, agoMin?: number) => {
+    if (!store.readSpec("refund-flow")) assert.equal((await t.callTool("pb_write_spec", { name: "refund-flow", content: SPEC() })).error, undefined);
+    store.saveProgress({ ...store.progress("refund-flow")!, phase: "building", session, baseCommit: gitHead(t.repo) });
+    fs.rmSync(session, { force: true });
+    if (agoMin === undefined) return;
+    fs.writeFileSync(session, "{}\n");
+    const at = Date.now() / 1000 - agoMin * 60;
+    fs.utimesSync(session, at, at);
+  };
+  const other = path.join(t.repo, "..", `archive-other-session-${process.pid}.jsonl`);
+  const own = t.runtime().ctx.sessionManager.getSessionFile()!;
+  try {
+    // Another session wrote a moment ago: refused forced or not, nothing moved, the window named in seconds.
+    // commandTimeoutSec 0 means no command limit, so the window is the floor: (3600 + 600) s.
+    await standBuilding(other, 0);
+    for (const args of ["refund-flow --force", "refund-flow"]) {
+      const asked = t.confirms.length;
+      await t.run("archive", args);
+      assert.match(t.notes.at(-1)!, /^refund-flow is building right now: its session was written within the last 4200 s, the window pb judges a build live by\. Archiving would orphan a build still writing the tree, so nothing was moved/);
+      assert.equal(t.confirms.length, asked, "refused before the owed question");
+      assert.ok(fs.existsSync(progressFile), `${args}: the spec stayed`);
+    }
+    assert.match(t.notes.at(-2)!, /, `--force` included\./);
+    // 45 minutes quiet is still inside the 4 200 s window: the build refuses a second one by the same rule.
+    await standBuilding(other, 45);
+    await t.run("archive", "refund-flow --force");
+    assert.match(t.notes.at(-1)!, /refund-flow is building right now/);
+    await t.run("build", "order-cancellation");
+    assert.match(t.notes.at(-1)!, /^refund-flow is building in another session right now/);
+    assert.equal(t.progress("order-cancellation").phase, "written");
+    // 90 minutes quiet is outside it: the build starts, and the archive goes.
+    await standBuilding(other, 90);
+    t.agent.script = diligent;
+    await t.run("build", "order-cancellation");
+    assert.notEqual(t.progress("order-cancellation").phase, "written", "the build started");
+    await t.run("archive", "refund-flow --force");
+    assert.ok(!fs.existsSync(progressFile), "an abandoned build can be forced away");
+
+    // The build's own session, a moment old: with Pi busy the forced call is refused...
+    await standBuilding(own, 0);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    t.agent.script = async () => {
+      await gate;
+    };
+    const rt = t.runtime();
+    rt.pi.sendUserMessage("still working");
+    assert.equal(rt.ctx.isIdle(), false);
+    await rt.cmds["pb:archive"].handler("refund-flow --force", rt.ctx);
+    assert.match(t.notes.at(-1)!, /refund-flow is building right now/, "mid-turn in this session is a build still going");
+    assert.ok(fs.existsSync(progressFile));
+    release();
+    await t.settle();
+    // ...and once Pi is idle it gets through: plainly to today's owed question, forced at once.
+    await standBuilding(own, 0);
+    t.confirmAnswers.push(false);
+    await t.run("archive", "refund-flow");
+    assert.equal(t.confirms.at(-1), "refund-flow isn't finished: its build is building");
+    assert.ok(fs.existsSync(progressFile), "a no keeps it");
+    await t.run("archive", "refund-flow --force");
+    assert.ok(!fs.existsSync(progressFile), "the crashed build's own session forces it away");
+
+    // A session file that is gone never reads as live.
+    await standBuilding(other);
+    await t.run("archive", "refund-flow --force");
+    assert.ok(!fs.existsSync(progressFile));
+  } finally {
+    fs.rmSync(other, { force: true });
+  }
+});
+
+test("archive: the leftover list reaches a sibling repository the way /pb:commit offers it", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  const sibling = fs.mkdtempSync(path.join(path.dirname(fs.realpathSync(t.repo)), "pb-front-"));
+  const name = `../${path.basename(sibling)}`;
+  try {
+    execSync("git init -q && git config user.email t@t && git config user.name t && echo base > README && git add . && git commit -qm base", { cwd: sibling, shell: "/bin/sh" });
+    await written(t, SPEC().replace("Depends on: none", `Depends on: none\nAlso changes: ${name}`));
+    t.agent.script = async (text, tool) => {
+      if (taskOf(text) === "T1") fs.writeFileSync(path.join(sibling, "front.txt"), "cancel button\n");
+      return diligent(text, tool);
+    };
+    await t.run("build");
+    execSync("git add T1.txt T2.txt && git commit -qm feature", { cwd: t.repo });
+    execSync("git add front.txt && git commit -qm front", { cwd: sibling });
+    fs.writeFileSync(path.join(t.repo, "notes.txt"), "half a feature\n");
+    fs.writeFileSync(path.join(sibling, "front.txt"), "cancel button, unfinished\n");
+    await t.run("archive", "order-cancellation --force");
+    const ev = archivedEvents(t.repo, "order-cancellation").at(-1)!;
+    assert.deepEqual(ev.uncommitted, ["notes.txt", `${name}/front.txt`], "the project's own paths first, the sibling's shown as /pb:commit shows them");
+    assert.match(t.posts.at(-1)!, /2 files are still uncommitted against HEAD \(notes\.txt, \.\.\/[\w.-]+\/front\.txt\)/);
+  } finally {
+    fs.rmSync(sibling, { recursive: true, force: true });
+  }
+});
+
 test("map: /pb:archive updates it by itself: paths that don't resolve go back once to be fixed, then it's written, and undo swaps back", async () => {
   const t = setup({ verify: "true" });
   fs.mkdirSync(path.join(t.repo, "src/main/auth"), { recursive: true });
@@ -1129,6 +1402,12 @@ test("what's next: one derivation names every state a spec can be in and the com
   assert.equal(at({ phase: "built", review: review("changes_needed", [{ priority: "P1", title: "x" }, { priority: "P3", title: "nit" }]) }), "review: CHANGES NEEDED (1 open) | /pb:fix order-cancellation");
   assert.equal(at({ phase: "built", review: review("unverified") }), "review: UNVERIFIED | /pb:review order-cancellation");
   assert.equal(at({ phase: "reviewed", review: review("pass") }), "reviewed: PASS | /pb:commit order-cancellation");
+  // A pass that left P0–P2 findings open says so; P3 polish is not open, the rule /pb:archive's owed list uses.
+  assert.equal(at({ phase: "reviewed", review: review("pass", [{ priority: "P2", title: "a" }, { priority: "P2", title: "b" }, { priority: "P3", title: "nit" }]) }), "reviewed: PASS (2 findings open) | /pb:commit order-cancellation");
+  assert.equal(at({ phase: "reviewed", review: review("pass", [{ priority: "P1", title: "a" }]) }), "reviewed: PASS (1 finding open) | /pb:commit order-cancellation");
+  assert.equal(at({ phase: "reviewed", review: review("pass", [{ priority: "P3", title: "nit" }]) }), "reviewed: PASS | /pb:commit order-cancellation");
+  fs.writeFileSync(progressFile, JSON.stringify({ ...base, phase: "reviewed", review: review("pass", [{ priority: "P2", title: "a" }]) }));
+  assert.equal(whereNext(store, name).next, "/pb:commit order-cancellation, then /pb:archive order-cancellation", "the next step is the same");
   store.event(name, { type: "review", verdict: "pass" });
   store.event(name, { type: "commit", sha: "abc", files: 2, subject: "Order cancellation" });
   assert.equal(at({ phase: "reviewed", review: review("pass") }), "reviewed and committed | /pb:archive order-cancellation", "committed since the review: archiving is next");

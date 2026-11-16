@@ -96,10 +96,24 @@ export interface BuildTiming {
   wallMs: number;
 }
 
+/**
+ * The kinds a build writes itself. A build that never finished ends at the last of these: the lines other
+ * commands append after it (a map, an archive, an undo, a review, a later turn's usage) say nothing about how
+ * long it ran.
+ */
+export const BUILD_EVENT_KINDS: ReadonlySet<string> = new Set(["build-start", "check", "red", "pause", "nudge", "reset", "compact", "built"]);
+
+/** A fix lap's check and red proof carry `task: "fix"`, and only a build's compaction names a task: neither of the others is the build's. */
+const isBuildEvent = (e: Record<string, unknown>) =>
+  typeof e.type === "string" &&
+  BUILD_EVENT_KINDS.has(e.type) &&
+  !((e.type === "check" || e.type === "red") && e.task === "fix") &&
+  !(e.type === "compact" && typeof e.task !== "string");
+
 /** Build time from its own events; a pause closes a running segment, a resume opens a new one. */
 export function buildTiming(events: Record<string, unknown>[]): BuildTiming {
   const start = events.find((x) => x.type === "build-start");
-  const end = [...events].reverse().find((x) => x.type === "built") ?? events.at(-1);
+  const end = [...events].reverse().find((x) => x.type === "built") ?? [...events].reverse().find(isBuildEvent);
   const at = (e: Record<string, unknown>) => (typeof e.at === "string" ? ts(e.at) : Number.NaN);
   // Events carry whole seconds: a segment that starts and ends inside one second is under a
   // second, not zero — a zero would read as "no time recorded" and hide it.

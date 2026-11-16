@@ -14,7 +14,9 @@
  *   /pb:deps [scope]       check dependencies and propose upgrades, as a change of their own
  *   /pb:undo [id]          restore the files, and rewind the conversation, to before a task
  *   /pb:stats [all]        tasks, attempts, checks, tokens and cache per spec
- *   /pb:archive [name]     move a finished spec out of the way
+ *   /pb:archive [--force] [name]  move a finished spec out of the way; --force puts an abandoned one away
+ *                          without asking or mapping (a live build is refused either way), and the closing
+ *                          line names what the tree still holds
  *   /pb:standards [stack]  write the current standards into this project's AGENTS.md (java | vue | rust | plain | yours)
  *   /pb:status             every spec and where it stands
  *   /pb:help [topic]       what to do next

@@ -1,5 +1,4 @@
 /** /pb:build: the build-start screen, its checks and baseline questions, launching here or fresh, the pending-build offer, and resuming a paused build. */
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
   ExtensionAPI,
@@ -12,7 +11,7 @@ import { buildIntro, coherePrompt, continuePrompt, findingLine, finishSpecPrompt
 import { type ParsedSpec, contractHash, specHash, specTextBlocks } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type Progress, COHERE_TASK_ID, Store, cap, changedSince, gitHead, now, readEvents } from "./store.ts";
-import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, commands, findModel, instruct, liftPlanning, loadSpec, longCommandSec, normSpecArg, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
+import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
 import { offerStandards } from "./plan.ts";
 import { dryRunTests, editSpec, readySpecs, showSpec } from "./spec-tools.ts";
 import { COHERE_MARKER, beginCohereEntry, beginTask, confirmLiveBuild, needsCohere, staleness } from "./build-loop.ts";
@@ -44,17 +43,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
    * first refuses a second build; the rest are concerns on the build-start screen, since this build's base is
    * HEAD and its undo points, review and commit would include those files.
    */
-  /** When a file was last written, in ms; 0 when it's gone, so a deleted session never reads as live. */
-  const fileMtime = (file: string) => {
-    try {
-      return fs.statSync(file).mtimeMs;
-    } catch {
-      return 0;
-    }
-  };
-
   const otherBuilds = (ctx: ExtensionContext, store: Store, name: string, cfg: ReturnType<Store["config"]>) => {
-    const silentMs = ((longCommandSec(cfg) || 3600) + 600) * 1000;
     const uncommitted = new Set(changedSince(ctx.cwd));
     let live: { name: string; updatedAt?: string } | undefined;
     const leftovers: string[] = [];
@@ -62,7 +51,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
       if (n === name) continue;
       const p = store.progress(n);
       if (!p || p.phase === "written") continue;
-      const active = p.phase === "building" && !!p.session && Date.now() - fileMtime(p.session) < silentMs;
+      const active = p.phase === "building" && !!p.session && sessionLive(cfg, p.session);
       if (active) {
         live ??= { name: n, updatedAt: p.updatedAt };
         continue;
