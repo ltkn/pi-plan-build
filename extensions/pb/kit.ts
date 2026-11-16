@@ -998,6 +998,18 @@ export const noSnapshotWarning = (checkpoints: boolean) =>
 
 /** The project map may have rotted since it was written: name the paths that no longer resolve. */
 
+/**
+ * The files planning changed: those differing from the planning snapshot, minus the ones that match HEAD now.
+ * A file committed since planning began is the branch's own state, not a planning edit: restoring it would
+ * quietly undo that commit in the working tree.
+ */
+export const planningEdits = (cwd: string, planningSnapshot: string, current: string): { edited: string[]; committed: string[] } => {
+  const changed = changedPaths(cwd, planningSnapshot, current);
+  const head = gitHead(cwd);
+  const differsFromHead = new Set(head ? changedPaths(cwd, head, current) : changed);
+  return { edited: changed.filter((f) => differsFromHead.has(f)), committed: changed.filter((f) => !differsFromHead.has(f)) };
+};
+
 export const reviewPlanningChanges = async (ctx: ExtensionContext, store: Store, notes?: string[]): Promise<boolean> => {
   const session = ctx.sessionManager.getSessionFile();
   const rec = session ? store.planning(session) : undefined;
@@ -1012,7 +1024,8 @@ export const reviewPlanningChanges = async (ctx: ExtensionContext, store: Store,
     ctx.ui.notify(noSnapshotWarning(store.config().checkpoints), "warning");
     return true;
   }
-  const files = changedPaths(ctx.cwd, snap, cur.commit);
+  const { edited: files, committed } = planningEdits(ctx.cwd, snap, cur.commit);
+  if (committed.length) ctx.ui.notify(`Committed since planning began, so left as they are: ${committed.slice(0, 10).join(", ")}${committed.length > 10 ? ` … (+${committed.length - 10})` : ""}.`, "info");
   const since = commitTime(ctx.cwd, snap);
   const big = skippedLargeFiles(ctx.cwd, since);
   if (big.length) ctx.ui.notify(`Large files changed while planning (not captured by pb's snapshots, so changes to them aren't in the list above and a restore won't touch them): ${big.slice(0, 5).join(", ")}${big.length > 5 ? ", …" : ""} — check them yourself.`, "warning");

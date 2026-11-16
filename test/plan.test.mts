@@ -115,6 +115,28 @@ test("plan: files changed while planning (e.g. through bash) are shown before th
   assert.equal(t.progress("order-cancellation").phase, "built");
 });
 
+test("plan: a file committed while planning is left alone by the restore, and only the uncommitted edits are offered", async () => {
+  const t = setup({ verify: "true" });
+  process.chdir(t.repo);
+  t.selects.push("No thanks"); // the standards offer
+  await t.run("plan", "x");
+  // A change you committed while this session planned (another session's work, say): the branch's state now.
+  fs.writeFileSync(path.join(t.repo, "README"), "committed meanwhile\n");
+  execSync("git add README && git commit -qm readme", { cwd: t.repo });
+  fs.writeFileSync(path.join(t.repo, "stray.txt"), "written by a shell command");
+  await t.fire("agent_settled", {});
+  const note = t.posts.filter((x) => x.startsWith("**Changed while planning**")).at(-1)!;
+  assert.match(note, /differ from when planning began: stray\.txt\n/, "the turn-end note names only the planning edit");
+  await written(t);
+  t.agent.script = diligent;
+  t.selects.push("Restore them to how they were when planning began");
+  await t.run("build");
+  assert.ok(t.selectTitles.includes("These project files changed while planning: stray.txt"));
+  assert.ok(t.notes.some((n) => n === "Committed since planning began, so left as they are: README."), t.notes.join("\n"));
+  assert.equal(t.read("README"), "committed meanwhile\n", "the commit is not undone in the working tree");
+  assert.ok(!fs.existsSync(path.join(t.repo, "stray.txt")), "the planning edit went back");
+});
+
 test("plan: the baseline runs in the background (no tokens) and a red suite warns before building", async () => {
   const t = setup({ verify: "exit 1", baseline: true });
   process.chdir(t.repo);

@@ -5,13 +5,13 @@ import type {
   ExtensionCommandContext,
   ExtensionContext
  } from "@earendil-works/pi-coding-agent";
-import { changedPaths, snapshot } from "./checkpoint.ts";
+import { snapshot } from "./checkpoint.ts";
 import { tip } from "./help.ts";
 import { buildIntro, coherePrompt, continuePrompt, findingLine, finishSpecPrompt, fixText, specPrompt } from "./prompts.ts";
 import { type ParsedSpec, contractHash, specHash, specTextBlocks } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type Progress, COHERE_TASK_ID, Store, cap, changedSince, gitHead, now, readEvents } from "./store.ts";
-import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
+import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, planningEdits, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
 import { offerStandards } from "./plan.ts";
 import { dryRunTests, editSpec, readySpecs, showSpec } from "./spec-tools.ts";
 import { COHERE_MARKER, beginCohereEntry, beginTask, confirmLiveBuild, needsCohere, staleness } from "./build-loop.ts";
@@ -583,7 +583,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
     const snapshotAtStart = session && store.planningSessions().includes(session) ? store.planning(session)?.snapshot : undefined;
     if (!session || !snapshotAtStart) return;
     const current = snapshot(ctx.cwd, "pb: planning turn");
-    const files = current ? changedPaths(ctx.cwd, snapshotAtStart, current.commit) : [];
+    const files = current ? planningEdits(ctx.cwd, snapshotAtStart, current.commit).edited : [];
     const key = [...files].sort().join("\n");
     if (files.length && planningWriteNotes.get(session) !== key) {
       planningWriteNotes.set(session, key);
