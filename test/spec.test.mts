@@ -2263,6 +2263,22 @@ test("spec rewrite: the write reports what it removed from the previous text, an
   assert.match(noteOf(dropped) ?? "", /1 Decisions entry \("Only PENDING orders can be cancelled/);
 });
 
+test("scope: the Goal is the need asked for, the spec reviewer reports at most five findings that change the build, and a repair lap never widens the Goal", async () => {
+  const { specPrompt, finishSpecPrompt, SPEC_REVIEWER_SYSTEM, SPEC_FIX_RULES, specFixPrompt } = await import("../extensions/pb/prompts.ts");
+  for (const writer of [specPrompt("", []), finishSpecPrompt("x")]) {
+    // An outcome nobody asked for goes to Out of scope by default: no question, the human adds it back.
+    assert.match(writer, /## Goal\n[^\n]*It is the need I asked for, in my terms, plus what the change itself must not break or let through[^\n]*name it under Out of scope, and I add it back if I want it\./);
+    // The spec is the builder's contract, sized to the change.
+    assert.match(writer, /Findings hold only facts that change what gets built; Decisions only the choices a competent builder could plausibly get wrong[^\n]*Keep the spec well under the size of the change it describes/);
+  }
+  assert.match(SPEC_REVIEWER_SYSTEM, /Report at most the five findings that matter most, highest priority first/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /Wiring the build catches by itself is not a finding: a test name, a Test: command that cannot select its test, a doc or caller left out of a task/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /a Goal that bundles a second outcome the change's own need does not require[^\n]*is a finding whose fix is the cut/);
+  // A finding that would grow the change is cut, reported as applied — never a question parked for the human.
+  assert.match(SPEC_FIX_RULES, /Repair within the Goal; never widen it\. A lap adds no task and no mechanism[^\n]*unless the finding shows the Goal cannot be met safely without it[^\n]*reported as applied, never parked/);
+  assert.ok(specFixPrompt({ name: "x", work: "findings", items: ["1. [P1] a"], lap: 1 }).includes(SPEC_FIX_RULES), "every lap reads it");
+});
+
 test("evidence: the writer, the spec reviewer, the claim check and a repair lap judge claims by one rule", async () => {
   const { specPrompt, finishSpecPrompt, SPEC_REVIEWER_SYSTEM, SPEC_CLAIM_CHECK_SYSTEM, SPEC_FIX_RULES } = await import("../extensions/pb/prompts.ts");
   const rule = specPrompt("", []).match(/A claim is load-bearing when[^\n]*?Anything else needs no evidence\./)?.[0];

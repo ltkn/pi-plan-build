@@ -576,6 +576,14 @@ session's model by default; set `"specReviewer": {"model": "provider/id",
 "thinking": "high"}` (or point it at `buildModel`) when you want another model,
 such as the implementer, to validate the plan.
 
+The reviewer reports at most the five findings that would make the build
+wrong — behaviour, a security or data hole, a contract the tasks can't all meet —
+and leaves out wiring the build catches by itself (a test name, a Test: command
+that can't select its test, a doc left out of a task). A Goal that grew past
+what you asked for is a finding too, fixed by the cut: the writer keeps the Goal
+to your request and puts anything else it thinks worth having under Out of
+scope, where you can take it back in.
+
 Only a **P0** blocks the build: a security or authorization hole, data loss or
 corruption, or a contract contradiction that cannot be built as written. P1-P3
 are advisory, but a **P1** is a known risk the build would carry, so before T1
@@ -704,7 +712,11 @@ the code, and both give it the same four ways to settle each item:
 It may also **push back**: when it is sure a finding is wrong, it writes the
 argument and the `path:line` citation into `## Decisions` and says so. It never
 silently drops a number it was given, and it never invents a worklist — a lap only
-repairs findings recorded against the exact text now on disk.
+repairs findings recorded against the exact text now on disk. It never widens
+the change: no new task or mechanism unless the Goal can't be met safely without
+it. A finding that would need one is cut — a "Not doing" line in Decisions and an
+Out of scope entry — rather than asked about, and a lap leaves the spec no
+longer than it found it.
 
 **`/pb:spec-fix [name] [ids]`** runs one lap, now, on your say-so — every P0–P2
 finding by default, or the numbers you name. After the lap it runs a claim check

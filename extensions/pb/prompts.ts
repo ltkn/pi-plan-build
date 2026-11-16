@@ -261,7 +261,7 @@ Verification: tests | build — <why> | none — <why>
 New tests: yes | no — <why>
 
 ## Goal
-The outcome in a few sentences: what is true after the change, for whom, and how we'll know it worked — no implementation. Every task and acceptance line serves it; anything beyond it belongs in Out of scope.
+The outcome in a few sentences: what is true after the change, for whom, and how we'll know it worked — no implementation. It is the need I asked for, in my terms, plus what the change itself must not break or let through (its abuse cases, the behaviour it changes). An outcome you think would also be worth having (a record, a recovery path, a report, a second use) is not in the Goal: name it under Out of scope, and I add it back if I want it. Every task and acceptance line serves the Goal; anything beyond it belongs in Out of scope.
 ## Findings
 What the analysis established, as short as a fresh session needs to not redo it: the files and classes involved and their roles, the existing code to imitate (by path and lines, not pasted), constraints found, the test command and baseline. A path:line must point at a real line: in this repo, or in a sibling repository the change also touches, cited from the project root as ../<repo>/<path>:<line>; a new file needs no line number. Dead ends too: what was tried or ruled out, and why.
 ## Decisions
@@ -291,7 +291,8 @@ One task, unless a slice is worth reviewing on its own; then vertical slices, ea
 Add "## Out of scope" only when it helps. When you include a section that does not apply, say so in one line ("none — <why>"), never an empty heading or TBD.
 
 - Evidence: ${EVIDENCE_RULE}
-- Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.`;
+- Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.
+- Write for the builder, not to win an argument: Findings hold only facts that change what gets built; Decisions only the choices a competent builder could plausibly get wrong, each in one or two sentences with its rejected alternative in one line. A claim nothing in the build depends on is left out, not cited. Keep the spec well under the size of the change it describes: every task, reviewer and repair lap reads all of it.`;
 
 /** What the human answered through pb_ask while planning: each one reaches the spec, so a reset or a long discussion can't lose it. */
 const answersBlock = (answers: { question: string; answer: string }[] = []) =>
@@ -896,6 +897,8 @@ ${SPEC_CHECKS}
 
 Give each finding the check it fails in its check field: one of the names above, Evidence when it breaks the evidence rule below, or Other. Attack the Decisions and each rejected alternative; probe undefined empty paths. A point the spec marks decided is settled: check for new evidence, and comment only when you find it. Do not reward length or polish. No findings is a valid result.
 
+Report what would make the build wrong: behaviour that would come out wrong, a security or data hole, a contract the tasks cannot all meet. Report at most the five findings that matter most, highest priority first; a fresh pass always finds more, and each one you add costs a repair lap and another review. Wiring the build catches by itself is not a finding: a test name, a Test: command that cannot select its test, a doc or caller left out of a task, a fixture's shape — the build's red proof and the code review catch those for almost nothing; report one only when it would let wrong behaviour through. Overengineering covers the spec's own text too: a Goal that bundles a second outcome the change's own need does not require, or a section that argues instead of pinning, is a finding whose fix is the cut.
+
 The evidence rule the spec was written to: ${EVIDENCE_RULE} A claim that is not load-bearing and carries no evidence is not a finding.
 
 A fork a read-only inspection can settle, settle before you write, with one cheap targeted read or grep, and put the file:line and result in the finding. Never ask for a test, build or install: you cannot run one. What no read settles, report as a finding with the question the human must answer. Be concise: conclusion first.`;
@@ -929,7 +932,9 @@ Route each answer to the section it belongs to; never append it where you stand:
 
 Push back in writing when you are sure. If a finding is wrong, do not comply with it: put the argument and its citation in "Decisions" and report the finding as rebutted — the next reviewer attacks that argument, which is the deal. The same holds for an instruction you were given that the repository contradicts: say so in your report instead of writing the contradiction into the spec.
 
-Keep the spec the same size or smaller. Evidence replaces the paragraph that argued about it: a Contracts line quoting the measured value has no use for the essay that guessed it.`;
+Repair within the Goal; never widen it. A lap adds no task and no mechanism (a helper, an event, a stored field, a flag, a guard) unless the finding shows the Goal cannot be met safely without it. A finding whose fix would add one for anything else is settled by the cut: remove what raised it, or write "Not doing X, because the Goal does not need it" in Decisions and name X under Out of scope — reported as applied, never parked, because it is not a question for the human.
+
+Keep the spec the same size or smaller. Evidence replaces the paragraph that argued about it: a Contracts line quoting the measured value has no use for the essay that guessed it. A spec a lap made longer gives the next review more to read and more to attack.`;
 
 /** One repair lap in the session that owns the spec: the worklist, the rules, the report it owes. */
 export function specFixPrompt(o: { name: string; work: "findings" | "claims"; items: string[]; lap: number; answers?: string[]; extra?: string }): string {

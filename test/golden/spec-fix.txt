@@ -1,4 +1,4 @@
-words: 950
+words: 1060
 
 [pb:spec-fix] Repair lap 1 on order-cancellation: 1 finding to settle.
 
@@ -17,7 +17,9 @@ Route each answer to the section it belongs to; never append it where you stand:
 
 Push back in writing when you are sure. If a finding is wrong, do not comply with it: put the argument and its citation in "Decisions" and report the finding as rebutted — the next reviewer attacks that argument, which is the deal. The same holds for an instruction you were given that the repository contradicts: say so in your report instead of writing the contradiction into the spec.
 
-Keep the spec the same size or smaller. Evidence replaces the paragraph that argued about it: a Contracts line quoting the measured value has no use for the essay that guessed it.
+Repair within the Goal; never widen it. A lap adds no task and no mechanism (a helper, an event, a stored field, a flag, a guard) unless the finding shows the Goal cannot be met safely without it. A finding whose fix would add one for anything else is settled by the cut: remove what raised it, or write "Not doing X, because the Goal does not need it" in Decisions and name X under Out of scope — reported as applied, never parked, because it is not a question for the human.
+
+Keep the spec the same size or smaller. Evidence replaces the paragraph that argued about it: a Contracts line quoting the measured value has no use for the essay that guessed it. A spec a lap made longer gives the next review more to read and more to attack.
 
 Settle them in the spec file itself (.pi/pb/specs/order-cancellation/spec.md), section by section with pb_update_spec: a whole rewrite with pb_write_spec only when most of the spec changes, because a rewrite regenerates text no finding asked you to touch. The format gates apply either way.
 
