@@ -28,7 +28,8 @@ export function registerUndo(pi: ExtensionAPI) {
       if (!name || !p) return ctx.ui.notify(`Run /${cmd("undo")} in the build session or the spec repair session of a spec.`, "warning");
       const cps = store.checkpoints(name);
       if (!cps.length) return ctx.ui.notify("No checkpoints for this spec.", "info");
-      const label = (c: Checkpoint) => (c.id === "start" ? `⌂ start of the build (${c.at})` : c.id.startsWith("u") ? `↺ before undo (${c.at})` : `${c.id}  ${c.summary ?? "(not finished)"}`);
+      // Ids repeat across runs (lap1, lap1-2), so each row also says when its step began: the newest is on top.
+      const label = (c: Checkpoint) => (c.id === "start" ? `⌂ start of the build (${c.at})` : c.id.startsWith("u") ? `↺ before undo (${c.at})` : `${c.id}  ${c.summary ?? "(not finished)"} · began ${c.at}`);
       const newest = [...cps].reverse();
       const [idArg] = args.trim().split(/\s+/);
       // Newest first: rows written before ids were made unique can share one, and the later row is
@@ -36,7 +37,7 @@ export function registerUndo(pi: ExtensionAPI) {
       let target = idArg ? newest.find((c) => c.id.toLowerCase() === idArg.toLowerCase()) : undefined;
       if (!target && ctx.hasUI && !idArg) {
         const labels = newest.map(label);
-        const choice = await ctx.ui.select("Restore the working tree to the state BEFORE…", labels);
+        const choice = await ctx.ui.select("Undo to the state before which step? (newest first)", labels);
         target = choice ? newest[labels.indexOf(choice)] : undefined;
       }
       if (!target) return idArg ? ctx.ui.notify(`No checkpoint "${idArg}".`, "warning") : post(["```", ...newest.map((c) => `${c.id.padEnd(6)} ${label(c)}`), "```", `\`/${cmd("undo")} <id>\``].join("\n"));

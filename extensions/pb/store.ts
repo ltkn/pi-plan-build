@@ -416,6 +416,8 @@ export interface SpecFixState {
   stage: "lap" | "advance";
   /** when the lap opened: a lap left by a session that has since died is dead, not blocking */
   startedAt: number;
+  /** the Pi process that drives the lap: once it has exited, nothing will ever report the lap */
+  pid?: number;
   /** the spec text the worklist was taken from: what the lap's report is bound to */
   hash: string;
   /** what the worklist was: a review's findings, or the claim check's un-evidenced claims */

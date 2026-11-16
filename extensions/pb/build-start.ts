@@ -94,11 +94,18 @@ export function registerBuildStart(pi: ExtensionAPI) {
       return undefined;
     }
     const prog = store.progress(name);
-    if (prog?.fix && fixLive(prog.fix)) {
+    if (prog?.fix && fixLive(name, prog.fix)) {
       // A lap is the model holding the plan in its hands: a build approved now would be built from
       // whichever half-written text the lap had reached when its turn happened to end.
       ctx.ui.notify(`A repair lap for ${name} is still open (the model is rewriting its plan). Let it report, or /${cmd("undo")} to drop the lap — then /${cmd("build")} ${name}.`, "warning");
       return undefined;
+    }
+    if (prog?.fix) {
+      // Nothing will report this lap again: the build reviews whatever text it left, like any other edit.
+      const edited = specHash(md) !== prog.fix.hash;
+      prog.fix = undefined;
+      store.saveProgress(prog);
+      ctx.ui.notify(`The repair lap left open for ${name} can no longer report (its session or the Pi running it is gone), so pb dropped it. ${edited ? `Its edits stay in the spec and are reviewed before T1; /${cmd("undo")} takes them back.` : "It had not changed the spec."}`, "info");
     }
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     // One build per working tree: a second one would share its undo points, review diff, checks and commit.

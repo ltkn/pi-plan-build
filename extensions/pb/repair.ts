@@ -20,7 +20,31 @@ import { ensureSpecReviewed, recordedFindings, repairable, reviewDoor, reviewTar
 import { unfinishedPhase } from "./phase.ts";
 import { safeLine } from "./markdown.ts";
 
-export const fixLive = (fix: NonNullable<Progress["fix"]>) => pathExists(fix.session) && Date.now() - fix.startedAt < 6 * 60 * 60 * 1000;
+/** The specs whose laps this Pi process is driving right now (driveRepair, start to finish). */
+const driving = new Set<string>();
+
+const processRunning = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM: the process exists but belongs to someone else, so it is not known to be gone.
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+/**
+ * Whether a recorded lap may still report. Its session file must exist and the lap be under six hours old;
+ * past that, the process that drives it decides: in this Pi, only while driveRepair is running it (a lap
+ * whose driver was interrupted or reloaded never reports); in another, only while that process runs. A
+ * record without a pid gets the benefit of the doubt, and so does a reused pid: either way the lap is
+ * kept, never dropped while it might still be writing.
+ */
+export const fixLive = (name: string, fix: NonNullable<Progress["fix"]>) => {
+  if (!pathExists(fix.session) || Date.now() - fix.startedAt >= 6 * 60 * 60 * 1000) return false;
+  if (fix.pid === undefined) return true;
+  return fix.pid === process.pid ? driving.has(name) : processRunning(fix.pid);
+};
 
 /**
  * Open a repair lap: the undo point first, so a lap that rewrote the plan can be dropped whole with
@@ -64,7 +88,7 @@ const beginFixLap = (
         kind: "lap",
         spec: store.readSpec(name) ?? "",
         phase: p.phase,
-        summary: `the spec repair in lap ${lap}`,
+        summary: `/${cmd(o.driver ? "spec-harden" : "spec-fix")} repair lap ${lap}`,
         entry: tree(ctx).getLeafId?.() ?? undefined,
       };
       if (appendCheckpoint(rows, row)) store.saveCheckpoints(name, rows);
@@ -75,6 +99,7 @@ const beginFixLap = (
     driver: o.driver,
     stage: "lap",
     startedAt: Date.now(),
+    pid: process.pid,
     hash: o.hash,
     work: o.work,
     ids: list.map((x) => x.id),
@@ -123,6 +148,15 @@ const driveRepair = async (ctx: ExtensionCommandContext, store: Store, name: str
     ctx.ui.notify(why, "warning");
   };
   if (!home || typeof ctx.newSession !== "function") return drop("This Pi can't open a session for the repair lap, so none was started.");
+  driving.add(name);
+  try {
+    await driveLaps(ctx, store, name, home, drop);
+  } finally {
+    driving.delete(name);
+  }
+};
+
+const driveLaps = async (ctx: ExtensionCommandContext, store: Store, name: string, home: string, drop: (why: string) => void): Promise<void> => {
   let live: ExtensionCommandContext = ctx;
   for (let lap = takeQueuedLap(name); lap; lap = takeQueuedLap(name)) {
     post(`\u25b6 spec-fix ${name} lap ${lap.lap} — in a fresh session seeded with the spec; pb brings you back with what it settled.`);
@@ -511,7 +545,7 @@ const openRepair = async (
   const session = ctx.sessionManager.getSessionFile();
   for (const other of store.fixesOfSession(session)) {
     if (other.name === name) continue; // the named spec's own lap is checked below
-    if (!fixLive(other.p.fix!)) {
+    if (!fixLive(other.name, other.p.fix!)) {
       other.p.fix = undefined;
       store.saveProgress(other.p);
       continue;
@@ -519,8 +553,8 @@ const openRepair = async (
     ctx.ui.notify(`A repair lap for ${other.name} is already open in this session; one session owns one lap. Let it report, or /${cmd("undo")} to take its lap back.`, "warning");
     return undefined;
   }
-  if (p.fix && !fixLive(p.fix)) {
-    ctx.ui.notify(`The repair lap recorded for ${name} was left open by a session that is gone; pb dropped it and opened this one.`, "info");
+  if (p.fix && !fixLive(name, p.fix)) {
+    ctx.ui.notify(`The repair lap recorded for ${name} was left open by a lap that can no longer report (its session or the Pi running it is gone); pb dropped it and opened this one.`, "info");
     p.fix = undefined;
     store.saveProgress(p);
   } else if (p.fix) {
@@ -701,8 +735,8 @@ export function registerRepair(pi: ExtensionAPI) {
       if (!loaded) return ctx.ui.notify(`${store.rel("specs", name, "spec.md")} doesn't parse. Rewrite it with /${cmd("spec")} ${name}.`, "error");
       if (loaded.spec.status === "planning") return ctx.ui.notify(`${name} is still being planned: there is no contract to harden yet. Finish it with /${cmd("spec")} ${name}.`, "warning");
       const p: Progress = store.progress(name) ?? { spec: name, phase: "written", tasks: syncTasks(loaded.spec, []), updatedAt: now() };
-      if (p.fix && !fixLive(p.fix)) {
-        ctx.ui.notify(`The repair lap recorded for ${name} was left open by a session that is gone; pb dropped it.`, "info");
+      if (p.fix && !fixLive(name, p.fix)) {
+        ctx.ui.notify(`The repair lap recorded for ${name} was left open by a lap that can no longer report (its session or the Pi running it is gone); pb dropped it.`, "info");
         p.fix = undefined;
         store.saveProgress(p);
       } else if (p.fix) return ctx.ui.notify(`A repair lap for ${name} is already open${p.fix.session ? ` in \`pi --session ${sessionIdOf(p.fix.session)}\`` : ""}.`, "warning");

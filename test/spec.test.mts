@@ -1,6 +1,6 @@
 /** Specs: the write tools and their gates, the spec review, repair laps and hardening. */
 import assert from "node:assert/strict";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1001,7 +1001,7 @@ test("spec-harden and spec-fix refuse a spec that is mid-build or already mid-la
   write({ phase: "written", fix: { session: path.join(t.repo, "gone.jsonl"), startedAt: Date.now(), driver: true, stage: "lap", hash: "x", work: "findings", ids: [1], run: "r", laps: 1, reviews: 0, applied: 0, rebutted: 0, assumed: 0, parked: [] } });
   t.agent.script = quietLap({ applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
   await t.run("spec-fix", "order-cancellation");
-  assert.match(t.notes.at(-1)!, /was left open by a session that is gone; pb dropped it/);
+  assert.match(t.notes.at(-1)!, /was left open by a lap that can no longer report \(its session or the Pi running it is gone\); pb dropped it/);
   assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 1, "the dropped lap's spec is repairable again");
   // and a build never starts over an open lap: the lap holds the plan in mid-air
   fs.writeFileSync(path.join(t.repo, "live.jsonl"), "");
@@ -1009,6 +1009,47 @@ test("spec-harden and spec-fix refuse a spec that is mid-build or already mid-la
   await t.run("build", "order-cancellation");
   assert.match(t.notes.at(-1)!, /A repair lap for order-cancellation is still open \(the model is rewriting its plan\)/);
   assert.equal(t.progress("order-cancellation").phase, "written", "the build refused before approving anything");
+});
+
+test("build: a repair lap whose Pi is gone is dropped, not obeyed; one whose Pi still runs holds the build", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+  const md = fs.readFileSync(path.join(t.repo, specRel), "utf8");
+  fs.writeFileSync(path.join(t.repo, "lap.jsonl"), ""); // the lap's session file is still on disk
+  const leaveLap = (pid: number) =>
+    fs.writeFileSync(progressFile, JSON.stringify({ spec: "order-cancellation", phase: "written", tasks: [], updatedAt: new Date().toISOString(), fix: { session: path.join(t.repo, "lap.jsonl"), startedAt: Date.now(), pid, driver: true, stage: "lap", hash: specHash(md), work: "findings", ids: [1], run: "r", laps: 1, reviews: 0, applied: 0, rebutted: 0, assumed: 0, parked: [] } }));
+  // Another Pi that is still running may still be writing the plan.
+  leaveLap(process.ppid);
+  await t.run("build", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /A repair lap for order-cancellation is still open/);
+  assert.equal(t.progress("order-cancellation").phase, "written");
+  // This Pi, with no lap being driven: the run that opened it was interrupted or reloaded away.
+  leaveLap(process.pid);
+  await t.run("build", "order-cancellation");
+  assert.ok(t.notes.some((n) => /The repair lap left open for order-cancellation can no longer report[\s\S]*It had not changed the spec/.test(n)), t.notes.join("\n"));
+  assert.equal(t.progress("order-cancellation").fix, undefined);
+  assert.equal(t.progress("order-cancellation").approval?.hash, specHash(md), "the build went on over the dead lap and approved the text");
+});
+
+test("spec-fix: a lap left by a Pi that has exited is dropped", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("spec-review", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  const exited = spawnSync(process.execPath, ["-e", ""]).pid!;
+  fs.writeFileSync(path.join(t.repo, "lap.jsonl"), "");
+  const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
+  const prog = JSON.parse(fs.readFileSync(progressFile, "utf8"));
+  fs.writeFileSync(progressFile, JSON.stringify({ ...prog, fix: { session: path.join(t.repo, "lap.jsonl"), startedAt: Date.now(), pid: exited, driver: false, stage: "lap", hash: "x", work: "findings", ids: [1], run: "r", laps: 1, reviews: 0, applied: 0, rebutted: 0, assumed: 0, parked: [] } }));
+  t.agent.script = quietLap({ applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+  await t.run("spec-fix", "order-cancellation");
+  assert.ok(t.notes.some((n) => /was left open by a lap that can no longer report/.test(n)), t.notes.join("\n"));
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 1, "the spec is repairable again");
 });
 
 test("spec fix: each lap runs in a fresh session of its own — no planner role, named and parented to yours — and you come back to its result", async () => {
