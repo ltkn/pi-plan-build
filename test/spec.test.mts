@@ -1659,7 +1659,9 @@ test("scope: the Goal is the need asked for, each citation is verified once, and
   assert.match(SPEC_REVIEWER_SYSTEM, /Check the spec against the code where the build depends on it: the claims a Contract, a Decision or an Acceptance line rests on/);
   assert.match(SPEC_REVIEWER_SYSTEM, /Read narrowly: grep for the symbol, then read the line range you need, never a whole file to find one line[^\n]*Stop after about 40 tool calls, or sooner once your findings are settled, and report\./);
   assert.match(SPEC_REVIEWER_SYSTEM, /Report at most the five findings that matter most, highest priority first/);
-  assert.match(SPEC_REVIEWER_SYSTEM, /Wiring the build catches by itself is not a finding: a test name, a Test: command that cannot select its test, a doc or caller left out of a task/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /Wiring the build catches by itself is not a finding: a test name, a doc or caller left out of a task/);
+  // A Test: command is not wiring: only the human may change it, so one that selects nothing would stop the build mid-way.
+  assert.match(SPEC_REVIEWER_SYSTEM, /A task's Test: command is the exception, since only the human may change it and the build stops when it can't prove anything: check each against the project's own runner \(its build file and how it selects tests\), and one that selects no test, so passes without proving anything, is a P1\./);
   assert.match(SPEC_REVIEWER_SYSTEM, /a Goal that bundles a second outcome the change's own need does not require[^\n]*is a finding whose fix is the cut/);
 });
 
