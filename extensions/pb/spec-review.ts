@@ -331,6 +331,18 @@ const lastReviewOn = (store: Store, name: string, md: string) => {
 };
 
 
+/**
+ * The P1s of the spec review a build rode on: the last pass recorded at or before its approval. With one review
+ * per spec, an edit after that pass is built unreviewed, so the pass on the earlier text is still the one the
+ * build carried. Leads for the code review, which otherwise judges the code only against the spec.
+ */
+export const carriedP1s = (store: Store, name: string, approvedAt: string): Finding[] => {
+  const pass = readEvents(path.join(store.specDir(name), "events.jsonl"))
+    .filter((e) => e.type === "spec-review" && e.verdict === "pass" && typeof e.at === "string" && e.at <= approvedAt)
+    .at(-1);
+  return (Array.isArray(pass?.reported) ? (pass.reported as Finding[]) : []).filter((f) => f.priority === "P1");
+};
+
 export const recordedFindings = (store: Store, name: string, md: string): { id: number; f: Finding }[] => {
   const last = lastReviewOn(store, name, md);
   const reported = last && Array.isArray(last.reported) ? (last.reported as Finding[]) : [];

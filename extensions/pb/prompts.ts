@@ -714,6 +714,8 @@ export interface ReviewBrief {
   redNotes?: string[];
   /** what the build itself reported as still unchecked, one line per task: claims to verify, not evidence */
   openNotes?: string[];
+  /** the spec review's P1s the build carried: the spec itself may be the flaw, so the code is checked for each */
+  specP1s?: Finding[];
   /** what the fix laps reported (fixed/skipped titles plus their test results): judge the evidence, not the claim */
   fixReports?: Array<{ fixed: string[]; skipped: string[]; tests: string }>;
   /** where the spec's Design comes from: how hard to look for drift between Design, Decisions and code */
@@ -853,6 +855,15 @@ export function reviewerBrief(o: ReviewBrief): string {
           "",
           "The build's own open items, one per task. They are claims to verify, not evidence: check each against the code and report what is still open.",
           ...o.openNotes.map((n) => `- ${n}`),
+        ]
+      : []),
+    ...(o.specP1s?.length
+      ? [
+          "",
+          "## What the spec review raised before the build",
+          "",
+          "These P1s were raised against the spec, and the build went ahead carrying them. The spec itself may be the flaw, so code that follows the spec faithfully does not settle one: check each against the code, and report one that still holds as a finding of its own, citing the code.",
+          ...o.specP1s.map((f) => `- ${findingLine(f)}`),
         ]
       : []),
     ...(o.fixReports?.length

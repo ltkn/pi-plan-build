@@ -1,4 +1,4 @@
-words: 180
+words: 259
 
 # The spec (.pi/pb/specs/order-cancellation/spec.md)
 
@@ -28,6 +28,12 @@ src/order.ts
 
  1 file changed, 1 insertion(+)
 
+
+## What the spec review raised before the build
+
+These P1s were raised against the spec, and the build went ahead carrying them. The spec itself may be the flaw, so code that follows the spec faithfully does not settle one: check each against the code, and report one that still holds as a finding of its own, citing the code.
+- [P1] src/order.ts:42 — Contracts — a shipped order's cancel has no stated outcome
+   Fix: pin the 409
 
 ## The checks the harness ran
 

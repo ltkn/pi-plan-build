@@ -17,6 +17,7 @@ import { acceptanceCriteria } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, mapCounts, mapTagOf, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
+import { carriedP1s } from "./spec-review.ts";
 import { runVerify } from "./verify.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
 import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, withChecking } from "./kit.ts";
@@ -818,6 +819,8 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         testChanges: p?.testChanges,
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
         openNotes: loaded && p ? p.tasks.flatMap((t) => (t.open && !isNone(t.open) ? [`${t.id}: ${t.open}`] : [])) : undefined,
+        // The first review of a build only: a follow-up looks at what changed since, and already judged these.
+        specP1s: name && p?.approval && !previous ? carriedP1s(store, name, p.approval.at) : undefined,
         fixReports,
         designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
         acceptanceDrift: loaded && name ? acceptanceDrift(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,

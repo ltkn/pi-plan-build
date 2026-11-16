@@ -581,6 +581,8 @@ scope, where you can take it back in.
 Only a **P0** blocks the build: a security or authorization hole, data loss or
 corruption, or a contract contradiction that cannot be built as written. P1-P3
 are information: the build carries them and the code review judges the result.
+The P1s reach the code reviewer as leads: the spec itself may be the flaw, so it
+checks each against the code and reports one that still holds.
 A pass recorded earlier posts its P1s again when the build starts, since you may
 not have seen them. A finding has a
 priority, the check it fails (Claims, Values, Proof, Coverage, Reach,

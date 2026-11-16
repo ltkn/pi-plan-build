@@ -81,6 +81,7 @@ const RENDERED: Record<string, () => string> = {
       stat: " 1 file changed, 1 insertion(+)",
       check: "`npm test` → PASS in 3s",
       focus: "",
+      specP1s: [{ priority: "P1", file: "src/order.ts", line: 42, title: "Contracts — a shipped order's cancel has no stated outcome", fix: "pin the 409" }],
     }),
   "attacker": () => prompts.ATTACKER_SYSTEM,
   "verifier": () => `${prompts.VERIFIER_SYSTEM}\n\n---\n\n${prompts.verifierBrief(findings, "abc1234", ".pi/pb/specs/order-cancellation/spec.md", "+export function cancel() {}")}`,

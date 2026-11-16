@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, provedFixed, setup, SPEC, taskOf, written } from "./harness.mts";
+import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, provedFixed, setup, SPEC, specRel, taskOf, written } from "./harness.mts";
 
 test("overengineering: one rule — build for the needs the change has, the cleanest design within them — carried word for word by the planner, the spec check, the builder, a fix lap and the reviewer", async () => {
   const { REVIEWER_SYSTEM, PLANNER_ROLE, CRAFT_RULE, SPEC_REVIEWER_SYSTEM, SPEC_CHECK_NAMES, OVERENGINEERING_RULE, fixSeedPrompt } = await import("../extensions/pb/prompts.ts");
@@ -87,6 +87,45 @@ test("review brief: every acceptance id is listed; a follow-up carries the previ
     /## This is a follow-up review[\s\S]*Acceptance at the previous review[\s\S]*- T1\.1: met — src\/order\.ts:12[\s\S]*## Acceptance checklist[\s\S]*Report every id below[\s\S]*- T1\.1 \(T1\): the test proves it/,
   );
   assert.match(brief, /an id left out counts as not verified/i);
+});
+
+test("review brief: the spec review's P1s the build carried reach the code reviewer as leads to check against the code", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  process.env.MOCK_SPEC_REVIEW = "advisory"; // one P1 and one P2
+  try {
+    await t.run("build");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  await t.run("review");
+  const lead = /## What the spec review raised before the build\n\nThese P1s were raised against the spec, and the build went ahead carrying them\. The spec itself may be the flaw, so code that follows the spec faithfully does not settle one: check each against the code, and report one that still holds as a finding of its own, citing the code\.\n- \[P1\] src\/order\.ts:42 — Context — the transition has no guard/;
+  assert.match(briefOf(t), lead);
+  assert.doesNotMatch(briefOf(t), /Contracts — unmeasured window/, "only the P1s: P2 and P3 are the build's to carry");
+
+  // Reviewed once, then edited: the build rides on the earlier pass, so its P1 is still the one carried.
+  const u = setup({ verify: "true" });
+  await written(u);
+  u.agent.script = diligent;
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await u.run("spec-review", "order-cancellation");
+    fs.writeFileSync(path.join(u.repo, specRel), u.read(specRel).replace("Refunds.", "Refunds. Settled with the planner."));
+    await u.run("build", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  await u.run("review");
+  assert.match(briefOf(u), lead);
+
+  // A clean pass carries nothing, and the brief has no such section.
+  const w = setup({ verify: "true" });
+  await written(w);
+  w.agent.script = diligent;
+  await w.run("build");
+  await w.run("review");
+  assert.doesNotMatch(briefOf(w), /What the spec review raised before the build/);
 });
 
 test("review brief: what the build left unchecked reaches the reviewer as a claim to verify", async () => {
