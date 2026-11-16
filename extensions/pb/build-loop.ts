@@ -433,7 +433,7 @@ export function registerBuildLoop(pi: ExtensionAPI) {
       }
       if (params.status === "blocked") {
         pauseBuild(ctx, store, p, `${params.task} cannot be built as written: ${params.summary}`, "build.contract", "contract");
-        return stop("The build stopped: the Goal or a Contract cannot be built as written. The human revises the spec and /pb:build re-approves it. Stop here.");
+        return stop("The build stopped: the spec cannot be built as written (its Goal, a Contract, or a task's Test: line). The human revises the spec and /pb:build re-approves it. Stop here.");
       }
       const drift = approvalDrift(store, p);
       if (drift) return driftStop(ctx, store, p, drift);

@@ -1338,10 +1338,10 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - Spec went wrong? Rewrite it with `/pb:spec {spec}` · more: `/pb:help stuck`
 <!-- /pb -->
 
-### Build stopped: a contract cannot be built
+### Build stopped: the spec cannot be built as written
 <!-- pb:tip build.contract -->
-**What now** — the build stopped: the Goal or a Contract cannot be built as written
-- Read the reason above: it names what the code or the repo contradicts, with the evidence.
+**What now** — the build stopped: the spec cannot be built as written (its Goal, a Contract, or a task's Test: line, which only you may change)
+- Read the reason above: it names what the code or the repo contradicts, with the evidence, and often the exact edit.
 - Fix the spec, then `/pb:build {spec}` — the revision is approved and the build carries on. Finished tasks stay done.
 - Spec went wrong? Rewrite it with `/pb:spec {spec}` first · more: `/pb:help spec`
 <!-- /pb -->

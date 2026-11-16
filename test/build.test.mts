@@ -683,7 +683,8 @@ test("build: without a shared proven command, a passing task still wedges honest
     if (task === "T2") {
       said.push((await tool("pb_tests_red", { task })).content![0].text);
       said.push((await tool("pb_task_done", { task, status: "done", changed: "nothing left", caveat: "none", rejected: "none", open: "none" })).content![0].text);
-      return void (await tool("pb_task_done", { task, status: "blocked", summary: "T1 already did it; my command passes and no earlier task proved it" }));
+      said.push((await tool("pb_task_done", { task, status: "blocked", summary: "T1 already did it; my command passes and no earlier task proved it" })).content![0].text);
+      return;
     }
     return diligent(text, tool);
   };
@@ -692,6 +693,8 @@ test("build: without a shared proven command, a passing task still wedges honest
   assert.doesNotMatch(said[1], /already passes/);
   assert.match(said[2], /T2's new tests were never seen failing/); // the refusal: no legitimate move but blocked
   assert.equal(t.progress("order-cancellation").phase, "paused");
+  // The fix is the task's Test: line, which only the human may change: the stop names it beside the Goal and Contracts.
+  assert.match(said[3], /the spec cannot be built as written \(its Goal, a Contract, or a task's Test: line\)/);
 });
 
 test("build: a spec edited while the placement dialog is open is not approved on the reviewed text", async () => {
