@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { type Result, type Script, briefOf, contractHash, diligent, parseSpec, PLANNING, repairLap, setup, SPEC, specRel, taskOf, TASKS_PLAIN, TASKS_WITH_A_REFACTOR, THREE_TASKS, until, withCohere, written } from "./harness.mts";
+import { type Result, type Script, briefOf, contractHash, diligent, parseSpec, PLANNING, setup, SPEC, taskOf, TASKS_PLAIN, TASKS_WITH_A_REFACTOR, THREE_TASKS, until, withCohere, written } from "./harness.mts";
 
 test("snapshot: works when .pi is gitignored wholesale (the recommended setup)", async () => {
   const t = setup();
@@ -255,48 +255,6 @@ test("red proof belongs to its command: edited tests do not re-require it, a rew
   const p = t.progress("order-cancellation");
   assert.equal(p.phase, "built");
   assert.equal(p.tasks.find((x: any) => x.id === "T1").redCommand, "test -f T1.txt");
-});
-
-test("undo: a repair lap is taken back whole, spec text and all, and a later run's lap gets its own row", async () => {
-  const t = setup({ verify: "true" });
-  await written(t);
-  const original = t.read(specRel);
-  const rows = () => JSON.parse(t.read(".pi/pb/specs/order-cancellation/checkpoints.json"));
-  const lapRows = () => rows().filter((c: any) => c.kind === "lap");
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("spec-review", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
-  await t.run("spec-fix", "order-cancellation");
-  const afterLap = t.read(specRel);
-  assert.notEqual(afterLap, original, "the lap changed the spec");
-  assert.equal(t.progress("order-cancellation").session, undefined, "the spec was never built: its repair session is the only one that can undo the lap");
-  assert.deepEqual(lapRows().map((c: any) => c.id), ["lap1"]);
-  assert.equal(lapRows()[0].spec, original, "the row holds the text before the lap");
-  assert.equal(lapRows()[0].phase, "written");
-  // A second run starts at lap 1 again; its row must not take the first run's id.
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  try {
-    await t.run("spec-review", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both again" });
-  await t.run("spec-fix", "order-cancellation");
-  const afterSecond = t.read(specRel);
-  assert.deepEqual(lapRows().map((c: any) => c.id), ["lap1", "lap1-2"]);
-  assert.equal(lapRows()[1].spec, afterLap, "the later row restores the text the second lap started from");
-  // /pb:undo in the repair session: no build session, no open lap — the spec it wrote names it.
-  await t.run("undo", "lap1-2");
-  assert.equal(t.read(specRel), afterLap, "the second lap's text change is gone");
-  assert.notEqual(t.read(specRel), afterSecond);
-  assert.equal(t.progress("order-cancellation").phase, "written", "the phase the lap opened in comes back");
-  assert.equal(t.progress("order-cancellation").fix, undefined);
-  assert.match(t.posts.at(-1)!, /Undone to before lap1-2[\s\S]*1 file\(s\) restored/);
-  assert.deepEqual(lapRows().map((c: any) => c.id), ["lap1"], "the undo drops its target and what came after it, not the earlier run's row");
 });
 
 test("build: with taskChecks end, each task is still compiled when a build command exists", async () => {
@@ -1402,7 +1360,7 @@ test("/pb:commit: no phase writes a commit message any more; the command commits
     fs.writeFileSync(path.join(repo, "src/auth/Login.java"), "class Login {}\n");
     execSync("git add . && git commit -qm src", { cwd: repo });
   };
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", mapOnArchive: true });
   project(t.repo);
   await written(t);
   t.agent.script = diligent;

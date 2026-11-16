@@ -560,55 +560,6 @@ export const specRel = ".pi/pb/specs/order-cancellation/spec.md";
 export const reviewRuns = (t: ReturnType<typeof setup>) => fs.readdirSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/sessions/spec-review")).length;
 export const reviewEvents = (t: ReturnType<typeof setup>) => t.events("order-cancellation").filter((e: any) => e.type === "spec-review");
 
-/* ------------------------- spec repair laps / harden ------------------------ */
-
-/**
- * The lap played by the session's own script: it settles the text (each lap's edit is a real byte
- * change, so the next step sees the text move), then reports. `report` may depend on which lap it is.
- */
-export const repairLap =
-  (t: ReturnType<typeof setup>, report: object | ((lap: number) => object)): Script => {
-    let laps = 0;
-    return async (text, tool) => {
-      if (!text.includes("[pb:spec-fix]")) return;
-      laps += 1;
-      const md = fs.readFileSync(path.join(t.repo, specRel), "utf8");
-      const w = await tool("pb_write_spec", { name: "order-cancellation", content: md.replace("Refunds.", `Refunds. Lap ${laps} cites the paths it probed.`) });
-      assert.equal(w.error, undefined, w.error ?? "");
-      const r = await tool("pb_spec_fix_done", typeof report === "function" ? report(laps) : report);
-      assert.equal(r.error, undefined, r.error ?? "");
-    };
-  };
-
-/** A lap that reports without touching the text: nothing to check, nothing to re-review. */
-export const quietLap =
-  (report: object): Script =>
-  async (text, tool) => {
-    if (!text.includes("[pb:spec-fix]")) return;
-    const r = await tool("pb_spec_fix_done", report);
-    assert.equal(r.error, undefined, r.error ?? "");
-  };
-
-/**
- * One hardening run that ends at its claim check: the review it runs finds the work, one lap settles it, and
- * with no lap or review left the check's claims land in the digest. The claim check runs only here: a manual
- * /pb:spec-fix lap runs none.
- */
-export const hardenToClaimCheck = async (t: ReturnType<typeof setup>, settle?: string) => {
-  t.selects.push("Yes, go on"); // the plan
-  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  if (settle) process.env.MOCK_SETTLE = settle;
-  try {
-    await t.run("spec-harden", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SETTLE;
-  }
-};
-
-export const specFixEvents = (t: ReturnType<typeof setup>, type: string) => t.events("order-cancellation").filter((e: any) => e.type === type);
-
 export const THREE_TASKS = `### T1: first file
 Create T1.txt.
 - Acceptance: T1.txt exists (tests: T1)

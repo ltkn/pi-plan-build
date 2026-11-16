@@ -44,12 +44,16 @@ type ReviewDoor = {
   repostStoredPass: boolean;
   /** shown to the human when the pass carries advisory findings: the next step pb offers, named */
   advisoryHint?: string;
+  /**
+   * The build's door reviews a spec once: an edit after a pass is not reviewed again (the code review judges the
+   * build against the final text); only an edit after a block is, since that edit is what settles the P0.
+   */
+  onePassPerSpec?: boolean;
 };
 
 /**
  * A fresh report's findings, normalized: an unknown priority or an empty title drops the item rather than
- * reaching the human as something they cannot act on. Shared by the spec review and the claim check, so a
- * report is read the same way wherever it comes from.
+ * reaching the human as something they cannot act on.
  */
 /** A finding's check tag, as SPEC_CHECK_NAMES spells it; a name outside the list counts as Other rather than minting a category from model text. */
 const checkName = (tag: string) => SPEC_CHECK_NAMES.find((n) => n.toLowerCase() === tag.trim().toLowerCase()) ?? "Other";
@@ -72,8 +76,7 @@ export const toFindings = (raw: unknown[] | undefined): Finding[] =>
     }];
   });
 
-/** `lapFollows` (harden only): whether the run has a repair lap left for what this review finds. */
-export const reviewDoor = (name: string, entry: "build" | "standalone" | "harden", lapFollows = true): ReviewDoor => {
+export const reviewDoor = (name: string, entry: "build" | "standalone"): ReviewDoor => {
   const fix = `fix the spec with \`/${cmd("spec")} ${name}\``;
   if (entry === "build") {
     return {
@@ -88,26 +91,10 @@ export const reviewDoor = (name: string, entry: "build" | "standalone" | "harden
       noReportNotify: "❌ Spec review did not report; nothing was recorded. Run the build again, or point specReviewer.model at a model that reports.",
       advisoryNotify: (n) => `✅ Spec review passed with ${n} advisory finding${n === 1 ? "" : "s"} (shown above); building now.`,
       repostStoredPass: false,
+      onePassPerSpec: true,
     };
   }
   const again = `/${cmd("spec-review")} ${name}`;
-  if (entry === "harden") {
-    return {
-      opening: `▶ **Spec review** — one fresh reviewer checks **${name}**; pb repairs what it finds.`,
-      retryCmd: `/${cmd("spec-harden")} ${name}`,
-      blockNext: `${fix}, then \`/${cmd("spec-harden")} ${name}\`.`,
-      blockEvidence: "a P0 is repaired before this spec is built",
-      passNext: lapFollows
-        ? "pb works through these in the next repair lap; the confirming review is its last act, then it is yours."
-        : "no repair lap is left in this run: the findings below are yours, and the digest that follows lists the ones still open.",
-      passEvidence: "the recorded verdict covers this text",
-      advisoryEvidence: lapFollows ? "the recorded verdict covers this text; the repair lap takes what it can settle" : "the recorded verdict covers this text; no repair lap is left for these",
-      blockNotify: lapFollows ? "❌ Spec review found a P0: pb works through it in the repair lap with the rest." : "❌ Spec review found a P0 and no repair lap is left: it is yours to settle before a build.",
-      noReportNotify: `❌ Spec review did not report; nothing was recorded. Run \`/${cmd("spec-harden")} ${name}\` again, or point specReviewer.model at a model that reports.`,
-      advisoryNotify: () => (lapFollows ? "✅ Spec review passed; pb takes the findings into the next repair lap." : "✅ Spec review passed; no repair lap is left, so its findings are yours (listed above)."),
-      repostStoredPass: true,
-    };
-  }
   return {
     opening: `▶ **Spec review** — one fresh reviewer checks **${name}** now; the verdict lands here, and \`/${cmd("build")} ${name}\` rides on it.`,
     retryCmd: again,
@@ -120,7 +107,7 @@ export const reviewDoor = (name: string, entry: "build" | "standalone" | "harden
     noReportNotify: `❌ Spec review did not report; nothing was recorded. Run \`${again}\` again, or point specReviewer.model at a model that reports.`,
     advisoryNotify: () => `✅ Spec review passed (shown above); /${cmd("build")} ${name} starts from this verdict.`,
     repostStoredPass: true,
-    advisoryHint: tip("spec.repair", { name }),
+    advisoryHint: tip("spec.findings", { name }),
   };
 };
 
@@ -234,6 +221,18 @@ export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, na
     ctx.ui.notify(`✅ ${name} already has a pass on this exact text: /${cmd("build")} ${name} starts without a second review.`, "info");
     return "pass";
   }
+  if (!opts?.fresh && !last && door.onePassPerSpec) {
+    // Reviewed once already, on an earlier text: a pass is not repeated for an edit (each new pass finds new
+    // subjects, and the code review judges the build against the final text). A block is, since the edit is
+    // what settles its P0.
+    const earlier = readEvents(path.join(store.specDir(name), "events.jsonl"))
+      .filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block"))
+      .at(-1);
+    if (earlier?.verdict === "pass") {
+      post(`**Spec review** — ${name} changed since its review passed; pb reviews a spec once, so this text goes to the build as it is, and the code review judges the result against it. \`/${cmd("spec-review")} ${name}\` reviews it again if you want.`);
+      return "pass";
+    }
+  }
   const review = await runSpecReview(ctx, store, name, md, door);
   if (sessionGone(ctx)) return "gone";
   if (store.readSpec(name) !== md) {
@@ -254,7 +253,7 @@ export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, na
     return "error";
   }
   if (review.findings.length) {
-    // Numbered as recorded: the numbers /pb:spec-fix takes.
+    // Numbered as recorded, so a finding can be named by its number.
     const numbered = review.findings.map((f, i) => `- ${findingLine(f, i + 1)}`);
     const p0 = numbered.filter((_, i) => review.findings[i].priority === "P0");
     const rest = numbered.filter((_, i) => review.findings[i].priority !== "P0");
@@ -331,8 +330,6 @@ const lastReviewOn = (store: Store, name: string, md: string) => {
     .at(-1);
 };
 
-/** What a lap repairs unless the human names numbers: P0-P2. P3 is polish, and polish adds text the next review reads. */
-export const repairable = (list: { id: number; f: Finding }[]) => list.filter((x) => x.f.priority !== "P3");
 
 export const recordedFindings = (store: Store, name: string, md: string): { id: number; f: Finding }[] => {
   const last = lastReviewOn(store, name, md);
@@ -380,12 +377,4 @@ export function registerSpecReview(pi: ExtensionAPI) {
       await ensureSpecReviewed(ctx, store, name, loaded.md, reviewDoor(name, "standalone"), underway, { fresh });
     },
   });
-
-  /* --------------------------- spec repair laps ---------------------------- */
-
-  /**
-   * The findings recorded against exactly this text, each numbered as its repair lap will be shown them.
-   * No verdict on these bytes means no worklist: findings judged different bytes, and pb never carries a
-   * finding across an edit — once a build has started, spec prose is the code reviewer's to judge.
-   */
 }

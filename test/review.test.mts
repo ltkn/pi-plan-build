@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, provedFixed, repairLap, setup, SPEC, taskOf, written } from "./harness.mts";
+import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, provedFixed, setup, SPEC, taskOf, written } from "./harness.mts";
 
 test("overengineering: one rule — build for the needs the change has, the cleanest design within them — carried word for word by the planner, the spec check, the builder, a fix lap and the reviewer", async () => {
   const { REVIEWER_SYSTEM, PLANNER_ROLE, CRAFT_RULE, SPEC_REVIEWER_SYSTEM, SPEC_CHECK_NAMES, OVERENGINEERING_RULE, fixSeedPrompt } = await import("../extensions/pb/prompts.ts");
@@ -31,20 +31,6 @@ test("every reviewer reports through its tool before writing its reply", async (
   assert.match(REVIEWER_SYSTEM, /pb_report_findings[^.]*made as soon as you have them and before your reply/);
   assert.match(ATTACKER_SYSTEM, /report_findings, in one call made as soon as you have them and before your reply/);
   assert.match(SPEC_REVIEWER_SYSTEM, /report_findings in one call[^.]*as soon as you have them, before writing your reply/);
-});
-
-test("a repair lap is told when the review cites a path that does not exist in the project", async () => {
-  const t = setup({ verify: "true" });
-  await written(t);
-  process.env.MOCK_SPEC_REVIEW = "badfile";
-  try {
-    await t.run("spec-review", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
-  t.agent.script = repairLap(t, { applied: [1], rebutted: [], parked: [], assumed: [], summary: "settled" });
-  await t.run("spec-fix", "order-cancellation");
-  assert.match(t.instructions.find((i) => i.includes("[pb:spec-fix]"))!, /The review cites paths that don't exist in this project: no\/such\/file\.ts — treat those locations as unverified/);
 });
 
 test("review brief: fix reports and acceptance drift render as sections", async () => {
@@ -1600,7 +1586,7 @@ test("review ledger: an injected marker cannot reach the project map", async () 
   assert.equal([LEDGER_FILE_CHARS, LEDGER_TITLE_CHARS, LEDGER_FIX_CHARS].join(), "300,300,500");
 
   // Written: the event line on disk is already clean, so no later reader has to know the rule.
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", mapOnArchive: true });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -1945,7 +1931,7 @@ test("fresh runs describe each action as a person reads it: the tool and its tar
 });
 
 test("map: completed review findings reach the cartographer as a separate lead section", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", mapOnArchive: true });
   const { writeMap } = await import("../extensions/pb/map.ts");
   writeMap(t.repo, "- `README`: readme");
   await written(t); // ## Context, no Findings; the build records no Design

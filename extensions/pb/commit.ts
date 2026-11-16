@@ -106,9 +106,8 @@ export function registerCommit(pi: ExtensionAPI) {
       const t = await target(ctx, store, word);
       if (t === undefined) return ctx.ui.notify(word ? `No spec "${word}", live or archived.` : `Which spec? Name it: /${cmd("commit")} <spec>.`, "warning");
       const spec = t === "none" ? undefined : t;
-      // Files mid-change are not a commit: a running build or an open repair lap is still writing them.
+      // Files mid-change are not a commit: a running build is still writing them.
       if (spec?.p?.phase === "building") return ctx.ui.notify(`${spec.name} is being built: commit when the build is done (or paused).`, "warning");
-      if (spec?.p?.fix) return ctx.ui.notify(`A repair lap for ${spec.name} is open: let it report first.`, "warning");
       // The change: what is uncommitted now (pb's state excluded), and — for a spec — what differs since its build began,
       // in the project and in each sibling repository the spec also changes (shown as ../<repo>/<path>).
       const pending = (root: string, base?: string) => {

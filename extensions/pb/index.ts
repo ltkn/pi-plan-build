@@ -8,8 +8,6 @@
  *   /pb:spec [which]       write or revise the spec(s) from the discussion
  *   /pb:build [name]       build a spec here (--fresh: in a new session); resumes after a pause
  *   /pb:spec-review [name] the pre-build review on its own: fresh eyes on a ready spec, nothing built
- *   /pb:spec-fix [name] [ids] one repair lap over the review's findings: probes, decides, argues, asks
- *   /pb:spec-harden [name]  auto-pilot: repair laps, a claim check after each, one confirming review, one last lap
  *   /pb:review [focus]     fresh, independent review against the spec, or of any uncommitted change
  *   /pb:deps [scope]       check dependencies and propose upgrades, as a change of their own
  *   /pb:undo [id]          restore the files, and rewind the conversation, to before a task
@@ -31,7 +29,6 @@
  *   plan.ts       /pb:plan, /pb:approach, /pb:deps — the baseline and the planning guard
  *   spec-tools.ts pb_write_spec, pb_update_spec, pb_record_decision and /pb:spec
  *   spec-review.ts the spec review and /pb:spec-review
- *   repair.ts     repair laps and the claim check: /pb:spec-fix, /pb:spec-harden, pb_spec_fix_done
  *   build-loop.ts a task's handout, checks and next step: pb_task_done, pb_tests_red, the coherence pass
  *   build-start.ts /pb:build: the build-start screen, launching, the pending-build offer, resume
  *   review-flow.ts pb_report_findings, the review passes and /pb:review
@@ -50,7 +47,6 @@ import { registerCommit } from "./commit.ts";
 import { registerFix } from "./fix.ts";
 import { registerBuildLoop } from "./build-loop.ts";
 import { registerBuildStart } from "./build-start.ts";
-import { registerRepair } from "./repair.ts";
 import { registerSpecReview } from "./spec-review.ts";
 import { registerSpecTools } from "./spec-tools.ts";
 import { registerFreshTools } from "./fresh-tools.ts";
@@ -76,7 +72,6 @@ export default function pb(pi: ExtensionAPI) {
   registerSpecTools(pi);
   registerBuildLoop(pi);
   registerSpecReview(pi);
-  registerRepair(pi);
   registerBuildStart(pi);
   registerReviewFlow(pi);
   registerFix(pi);

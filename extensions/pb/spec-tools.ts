@@ -161,9 +161,6 @@ export function registerSpecTools(pi: ExtensionAPI) {
       if (params.name === "off") throw new Error(`"off" is reserved (/${cmd("plan")} off ends planning): pick another spec name.`);
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
-      const repair = store.fixOfSession(session);
-      if (repair && params.name !== repair.name)
-        throw new Error(`A repair lap for ${repair.name} is open in this session: it may write that spec only, not ${params.name}. Finish the lap, or /${cmd("undo")} to drop it.`);
       const fixLap = store.fixSession(session);
       if (fixLap)
         throw new Error(
@@ -197,8 +194,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
         ...(prev ?? { spec: params.name, phase: "written" }),
         spec: params.name,
         tasks: syncTasks(spec, prev?.tasks),
-        // A repair lap runs in a session of its own: the spec stays owned by the session that wrote it.
-        writtenIn: repair && prev ? prev.writtenIn : session,
+        writtenIn: session,
         edited: false,
         updatedAt: now(),
       });
@@ -222,15 +218,12 @@ export function registerSpecTools(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
-      const repair = store.fixOfSession(session);
       const mine = store.specForSession(session);
       const live = mine ? store.progress(mine) : undefined;
       const building = live?.phase === "building" ? live : undefined;
       const fixLap = store.fixSession(session);
-      const name = params.name ?? repair?.name ?? fixLap?.spec ?? mine;
+      const name = params.name ?? fixLap?.spec ?? mine;
       if (!name) throw new Error("Which spec? Give its name.");
-      if (repair && name !== repair.name)
-        throw new Error(`A repair lap for ${repair.name} is open in this session: it may write that spec only, not ${name}. Finish the lap, or /${cmd("undo")} to drop it.`);
       if (building) {
         if (name !== building.spec)
           throw new Error(`The build of ${building.spec} is running in this session: only its Design and Decisions may change, not ${name}.`);
@@ -283,9 +276,9 @@ export function registerSpecTools(pi: ExtensionAPI) {
       if (specMs !== undefined && session) specStarted.delete(session);
       // A live build's task list is its approved one: a Design or Decisions edit never resyncs it
       // from the live file, and the build that owns the spec keeps its writtenIn.
-      // A fix lap's or a repair lap's edit is the same kind: the spec stays owned by the session that wrote it.
+      // A fix lap's edit is the same kind: the spec stays owned by the session that wrote it.
       const buildingNow = !!building || !!fixLap;
-      const ownerStays = buildingNow || !!repair;
+      const ownerStays = buildingNow;
       store.saveProgress({
         ...(prev ?? { spec: name, phase: "written" }),
         spec: name,

@@ -197,7 +197,7 @@ export function registerFix(pi: ExtensionAPI) {
 
   /**
    * An undo point before a fix lap: the files and the spec as they were, so /pb:undo takes the lap back like a
-   * build task or a repair lap. The lap runs in a session of its own, so the row carries no conversation point.
+   * build task. The lap runs in a session of its own, so the row carries no conversation point.
    */
   const checkpointLap = (cwd: string, store: Store, spec: string, lap: number) => {
     if (!store.config().checkpoints) return;

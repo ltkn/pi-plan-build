@@ -142,19 +142,16 @@ export function registerAsk(pi: ExtensionAPI) {
           'This build is autonomous: don\'t ask. Take the sensible reading and record it with pb_record_decision (assumption: true) as claim + settler + cost. Only if the Goal or a Contract cannot be built as written, stop with pb_task_done status "blocked" and the evidence.',
         );
       }
-      // Laps run in sessions of their own, often with nobody watching: they raise a question in their report.
+      // A fix lap runs in a session of its own, often with nobody watching: it raises a question in its report.
       if (store.fixSession(session))
         return reply("A fix lap doesn't ask: a finding that needs a decision is reported as skipped (it needs a spec revision); for anything else, take the sensible reading and say so in your report.");
-      const repair = store.fixOfSession(session);
-      if (repair?.p.fix?.driver)
-        return reply("A hardening lap doesn't ask: park the question in your pb_spec_fix_done report, with your recommendation — pb asks the human after the lap, and runs the recommendation if nobody answers.");
       const list: Question[] = [...(params.question?.trim() ? [{ question: params.question, options: params.options, recommended: params.recommended, multiple: params.multiple }] : []), ...(params.questions ?? [])]
         .filter((q) => q.question?.trim())
         .slice(0, MAX_QUESTIONS);
       if (!list.length) throw new Error("Nothing to ask: give question (and options), or questions for several.");
-      // The human may have walked away: while /pb:build writes the spec, while planning, and in a manual repair lap.
+      // The human may have walked away: while /pb:build writes the spec, and while planning.
       const planning = store.planningSessions().includes(session);
-      const unattended = specWriting.has(session) || store.pendingBuild(session) || planning || !!repair;
+      const unattended = specWriting.has(session) || store.pendingBuild(session) || planning;
       const show = (q: Question) => {
         const rec = recommendedIndex(q.recommended, q.options ?? []);
         return `${q.question}${q.options?.length ? `\n\n${q.options.map((o, i) => `${letter(i)}. ${o}${i === rec ? " (recommended)" : ""}`).join("\n")}` : ""}`;

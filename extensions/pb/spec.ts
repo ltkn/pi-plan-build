@@ -210,7 +210,7 @@ export function addDecision(md: string, decision: string): string {
 
 /**
  * Every assumption the spec states, in order: each line carrying the `assumed:` tag (the one notation the
- * writer and a repair lap are taught), plus the Decisions lines that start "Assumption" (the form specs used
+ * writer is taught), plus the Decisions lines that start "Assumption" (the form specs used
  * before the tag, kept readable). The build's own entries ("Assumption (build, T1): …") are left out: the
  * build lists those itself. Fenced code is not prose and is skipped.
  */

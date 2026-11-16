@@ -12,23 +12,22 @@ import { restorePhase } from "./phase.ts";
 
 export function registerUndo(pi: ExtensionAPI) {
   pi.registerCommand(cmd("undo"), {
-    description: "Go back to before a task of this build, a spec repair lap or a /pb:fix lap: files, task list and conversation, picked from a list",
+    description: "Go back to before a task of this build or a /pb:fix lap: files, task list and conversation, picked from a list",
     getArgumentCompletions: undoCompletions,
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
-      // Which spec: an open repair lap's (run from its own session), else this session's build, else the
-      // newest spec this session wrote — the planning session a lap or a fresh build comes back to.
+      // Which spec: this session's build, else the newest spec this session wrote — the planning session a
+      // fresh build comes back to.
       const here = specOfSession(ctx);
-      const repair = store.fixOfSession(session);
       const written = store.writtenSpec(session);
-      const name = repair?.name ?? here.name ?? written?.name;
-      const p = repair?.p ?? here.progress ?? written?.p;
-      if (!name || !p) return ctx.ui.notify(`Run /${cmd("undo")} in the build session or the spec repair session of a spec.`, "warning");
+      const name = here.name ?? written?.name;
+      const p = here.progress ?? written?.p;
+      if (!name || !p) return ctx.ui.notify(`Run /${cmd("undo")} in the build session of a spec.`, "warning");
       const cps = store.checkpoints(name);
       if (!cps.length) return ctx.ui.notify("No checkpoints for this spec.", "info");
-      // Ids repeat across runs (lap1, lap1-2), so each row also says when its step began: the newest is on top.
+      // Ids can repeat across runs, so each row also says when its step began: the newest is on top.
       const label = (c: Checkpoint) => (c.id === "start" ? `⌂ start of the build (${c.at})` : c.id.startsWith("u") ? `↺ before undo (${c.at})` : `${c.id}  ${c.summary ?? "(not finished)"} · began ${c.at}`);
       const newest = [...cps].reverse();
       const [idArg] = args.trim().split(/\s+/);
@@ -181,10 +180,9 @@ export function registerUndo(pi: ExtensionAPI) {
       // A start-of-build row always reintroduces the build instructions: even when the conversation
       // can't be rewound (it lies before a reset or compaction), the task starts fresh from them.
       p.needsIntro = target.intro ? true : undefined;
-      p.fix = undefined;
       store.saveProgress(p);
       showProgress(ctx, p);
-      store.event(name, { type: "undo", to: target.id, tasks: undone, rewound, ...(target.kind === "lap" ? { lap: true } : target.kind === "fix" ? { fix: true } : {}) });
+      store.event(name, { type: "undo", to: target.id, tasks: undone, rewound, ...(target.kind === "fix" ? { fix: true } : {}) });
       const note = beforeCompaction
         ? `\nThe conversation wasn't rewound (that point is before a context reset or compaction). What was undone: ${undoneRows.map((c) => c.summary ?? `${c.id} (unfinished)`).join("; ") || "nothing finished"}.`
         : "";

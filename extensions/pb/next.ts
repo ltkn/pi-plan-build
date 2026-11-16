@@ -34,18 +34,16 @@ export function whereNext(store: Store, name: string): Where {
   const spec = parseSpec(md).spec;
   if (!spec) return { spec: name, state: "spec doesn't parse", next: `rewrite it: /${cmd("spec")} ${name}`, command: `/${cmd("spec")} ${name}` };
   const p: Progress | undefined = store.progress(name);
-  if (p?.fix) return { spec: name, state: `${p.fix.driver ? "hardening" : "repairing"} the spec (lap ${p.fix.laps})`, next: "let the repair lap finish and report" };
   const phase = p?.phase ?? "written";
   if (phase === "written") {
     if (spec.status === "planning") return { spec: name, state: "planning", next: `answer the open questions, then /${cmd("spec")} ${name} finishes the spec`, command: `/${cmd("spec")} ${name}` };
     const review = specReviewOn(store, name, md);
     const reported = Array.isArray(review?.reported) ? (review.reported as { priority?: string }[]) : [];
-    // Numbered as the review recorded them: the numbers /pb:spec-fix takes.
-    const p1Ids = reported.flatMap((f, i) => (f.priority === "P1" ? [i + 1] : []));
-    const p1 = p1Ids.length;
-    if (review?.verdict === "block") return { spec: name, state: "spec review found a P0", next: `/${cmd("spec-fix")} ${name} repairs it, or /${cmd("spec")} ${name}`, command: `/${cmd("spec-fix")} ${name}` };
+    const p1 = reported.filter((f) => f.priority === "P1").length;
+    if (review?.verdict === "block")
+      return { spec: name, state: "spec review found a P0", next: `settle it with the planner (/${cmd("plan")} ${name}), then /${cmd("build")} ${name} reviews the new text`, command: `/${cmd("plan")} ${name}` };
     if (review?.verdict === "pass" && p1)
-      return { spec: name, state: `spec reviewed: ${p1} P1`, next: `/${cmd("spec-fix")} ${name} ${p1Ids.join(" ")} repairs the P1${p1 === 1 ? "" : "s"} in one lap, or /${cmd("build")} ${name} builds on ${p1 === 1 ? "it" : "them"}`, command: `/${cmd("build")} ${name}` };
+      return { spec: name, state: `spec reviewed: ${p1} P1`, next: `/${cmd("build")} ${name} builds and carries ${p1 === 1 ? "it" : "them"}; to settle one first, say so to the planner (/${cmd("plan")} ${name})`, command: `/${cmd("build")} ${name}` };
     if (review?.verdict === "pass") return { spec: name, state: "spec reviewed", next: `/${cmd("build")} ${name}`, command: `/${cmd("build")} ${name}` };
     return { spec: name, state: "spec ready", next: `/${cmd("build")} ${name} (it reviews the spec first), or /${cmd("spec-review")} ${name} on its own`, command: `/${cmd("build")} ${name}` };
   }
@@ -75,7 +73,7 @@ export function whereNext(store: Store, name: string): Where {
 }
 
 /**
- * Where this session stands: the session's own pb role first (a fix lap, a review, a repair lap, a build, a
+ * Where this session stands: the session's own pb role first (a fix lap, a review, a build, a
  * spec it wrote, planning), else the project's one live spec. Undefined when there is no pb work to point at.
  */
 export function whereHere(store: Store, session: string | undefined): Where | undefined {
@@ -83,8 +81,6 @@ export function whereHere(store: Store, session: string | undefined): Where | un
   if (fixing) return { spec: fixing.spec, state: "fix lap", next: "fix the findings, then report with pb_fix_done" };
   const reviewing = store.reviewSession(session);
   if (reviewing) return { spec: reviewing.spec, state: "review session (read-only)", next: `the review reports here; /${cmd("review")} done ends it` };
-  const repair = store.fixOfSession(session);
-  if (repair) return whereNext(store, repair.name);
   const own = store.specForSession(session) ?? store.writtenSpec(session)?.name;
   if (own) return whereNext(store, own);
   if (session && store.planningSessions().includes(session))

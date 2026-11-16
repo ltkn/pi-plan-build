@@ -23,7 +23,7 @@ import { type Stack, findStandards, isUserTemplate, standardsLoaded } from "./st
 import { buildTimeLabel, buildTiming } from "./stats.ts";
 import { type Checkpoint, type Progress, type TaskProgress, COHERE_TASK_ID, PREFIX, Store, gitHead, now, readEvents, type PlannerSettings, type ThinkingLevel, THINKING_LEVELS } from "./store.ts";
 import { lintsEachStep, pauseAt, unfinishedPhase } from "./phase.ts";
-import { specReviewOn, statusLine, whereHere } from "./next.ts";
+import { statusLine, whereHere } from "./next.ts";
 import type { GuardSettings } from "./fresh-guard.ts";
 import { resolveRepos } from "./repos.ts";
 import { resolveBuild, resolveLint, resolveVerify } from "./verify.ts";
@@ -129,19 +129,6 @@ export const fileLines = (file: string): number | undefined => {
   } catch {
     return undefined;
   }
-};
-
-/**
- * A repair lap is shown the reviewer's file:line anchors; one that does not resolve is usually the
- * reviewer guessing, and a lap that probes a file that doesn't exist finds nothing. The worklist is
- * not withheld — an unresolvable anchor may be real (outside the project) or not — but it is named,
- * so the lap verifies instead of trusting it.
- */
-export const unresolvedAnchors = (cwd: string, findings: { file?: string }[]): string[] => {
-  const files = projectFiles(cwd);
-  return [...new Set(findings.flatMap((f) => (f.file ? [f.file] : [])))]
-    .filter((p) => resolveProjectPath(cwd, p, files) === undefined && resolveSiblingFile(cwd, p) === undefined)
-    .sort();
 };
 
 /**
@@ -261,14 +248,6 @@ const oneLine = (t: string) => t.replace(/\s+/g, " ").trim().slice(0, 90);
 export const fixCompletions = (prefix: string) =>
   numberedCompletions(prefix, (store, name) => (store.progress(name)?.review?.findings ?? []).map((f, i) => ({ n: i + 1, label: `[${f.priority}] ${oneLine(f.title)}` })));
 
-/** `/pb:spec-fix [spec] <numbers>`: the findings recorded on the spec's current text, numbered as a lap is shown them. */
-export const specFixCompletions = (prefix: string) =>
-  numberedCompletions(prefix, (store, name) => {
-    const md = store.readSpec(name);
-    const reported = md === undefined ? [] : specReviewOn(store, name, md)?.reported;
-    return (Array.isArray(reported) ? (reported as { priority?: string; title?: string }[]) : []).map((f, i) => ({ n: i + 1, label: `[${f.priority ?? "?"}] ${oneLine(f.title ?? "")}` }));
-  });
-
 /** `/pb:undo <id>`: the checkpoints of the one spec that has any, newest first, each with what it undoes. */
 export const undoCompletions = (prefix: string) => {
   const store = new Store(process.cwd());
@@ -372,13 +351,6 @@ export type ReplacedSessionContext = Parameters<NonNullable<Parameters<Extension
 
 /** The tools a review session's model gets: read-only, plus the one it reports with. */
 export const REVIEW_SESSION_TOOLS = ["read", "grep", "find", "ls", "pb_report_findings"];
-
-/**
- * The tools a repair lap may use: read the repo and spec, probe read-only through pb_try, ask the
- * human, and write only through the spec tools. No shell, no edit/write: a lap repairs a plan, it
- * must not change the project or another spec.
- */
-export const REPAIR_SESSION_TOOLS = ["read", "grep", "find", "ls", "pb_write_spec", "pb_update_spec", "pb_try", "pb_ask", "pb_spec_fix_done"];
 
 /** A tool result that ends the agent's run: the build paused or finished. */
 export const stop = (t: string) => ({ content: text(t), details: undefined, terminate: true });
@@ -857,23 +829,6 @@ const wentOnWithout = (title: string, fallback: string, ms: number, notes?: stri
   return fallback;
 };
 
-/**
- * Your own words, with `choose`'s patience: prefilled with `fallback`, which is taken (and noted) when
- * nobody answers within askTimeoutSec. Esc, an empty answer or a replaced session is undefined.
- */
-export const typeIn = async (ctx: ExtensionContext, store: Store, title: string, fallback: string, notes?: string[]): Promise<string | undefined> => {
-  try {
-    if (!ctx.hasUI) return fallback;
-  } catch (e) {
-    if (!sessionGone(ctx)) throw e;
-    return undefined;
-  }
-  const ms = store.config().askTimeoutSec * 1000;
-  const { result, timedOut } = await patiently(ctx, ms, (opts) => ctx.ui.input(title, fallback, opts));
-  const text = result?.trim();
-  if (text) return text;
-  return timedOut ? wentOnWithout(title, fallback, ms, notes) : undefined;
-};
 /** A yes/no that goes on (yes) without you. */
 
 export const agree = async (ctx: ExtensionContext, store: Store, title: string, notes?: string[]) => {

@@ -1,4 +1,4 @@
-words: 2188
+words: 1831
 
 ## pb_ask
 
@@ -227,88 +227,6 @@ In a pb build, for a task with a Test: line: after writing its tests and before 
     "task": {
       "type": "string",
       "description": "the task id, e.g. \"T2\""
-    }
-  }
-}
-
-## pb_spec_fix_done
-
-At the end of a pb spec repair lap (started by /pb:spec-fix or /pb:spec-harden): report which numbered items you applied, which you rebutted (you wrote the argument in Decisions), which you park for the human (question + your recommendation), and which you marked assumed (the claim and what would falsify it), with one line on what the spec now says differently. Every number the brief showed you must appear in exactly one list. Then stop: pb takes the new text from there (a hardening run checks its claims and reviews it). Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.
-
-{
-  "type": "object",
-  "required": [
-    "applied",
-    "rebutted",
-    "parked",
-    "assumed",
-    "summary"
-  ],
-  "properties": {
-    "applied": {
-      "type": "array",
-      "items": {
-        "type": "number"
-      },
-      "description": "the numbers this lap settled by evidence, decision or deletion, as shown in its brief"
-    },
-    "rebutted": {
-      "type": "array",
-      "items": {
-        "type": "number"
-      },
-      "description": "the numbers you argued against, having written the argument and its citation into Decisions"
-    },
-    "parked": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": [
-          "id",
-          "question",
-          "recommendation"
-        ],
-        "properties": {
-          "id": {
-            "type": "number",
-            "description": "the number this question is about, as shown in the brief"
-          },
-          "question": {
-            "type": "string",
-            "description": "one question only the human can answer, in a sentence"
-          },
-          "recommendation": {
-            "type": "string",
-            "description": "what you recommend, and why — it is what runs if nobody answers"
-          }
-        }
-      },
-      "description": "only where two defensible answers genuinely differ; not a place to park work you could have settled"
-    },
-    "assumed": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": [
-          "id",
-          "claim"
-        ],
-        "properties": {
-          "id": {
-            "type": "number",
-            "description": "the number this claim was shown as, from the brief"
-          },
-          "claim": {
-            "type": "string",
-            "description": "the claim as you tagged it assumed, and what would falsify it"
-          }
-        }
-      },
-      "description": "items only the human or production can settle; every one must name what would falsify it"
-    },
-    "summary": {
-      "type": "string",
-      "description": "one line: what the spec says differently now"
     }
   }
 }

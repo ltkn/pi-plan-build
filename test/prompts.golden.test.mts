@@ -85,8 +85,6 @@ const RENDERED: Record<string, () => string> = {
   "attacker": () => prompts.ATTACKER_SYSTEM,
   "verifier": () => `${prompts.VERIFIER_SYSTEM}\n\n---\n\n${prompts.verifierBrief(findings, "abc1234", ".pi/pb/specs/order-cancellation/spec.md", "+export function cancel() {}")}`,
   "spec-reviewer": () => `${prompts.SPEC_REVIEWER_SYSTEM}\n\n---\n\n${prompts.specReviewBrief("order-cancellation", SPEC)}`,
-  "spec-fix": () => prompts.specFixPrompt({ name: "order-cancellation", work: "findings", items: ["1. [P1] The 409 is not pinned by any code path"], lap: 1 }),
-  "claim-check": () => `${prompts.SPEC_CLAIM_CHECK_SYSTEM}\n\n---\n\n${prompts.claimCheckBrief("order-cancellation", SPEC)}`,
   "cartographer": () => CARTOGRAPHER_SYSTEM,
   "map-check": () =>
     `${MAP_CHECK_SYSTEM}\n\n---\n\n${mapCheckBrief(

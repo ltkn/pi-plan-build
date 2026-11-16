@@ -9,7 +9,7 @@ import { changedPaths, cleanupIndexes, snapshot } from "./checkpoint.ts";
 import { PLANNER_ROLE, PLANNER_SECTION, checkpointPrompt, checkpointSummary, extraBlock, reviewStateSummary, nudgePrompt } from "./prompts.ts";
 import { tokensOf } from "./spec.ts";
 import { Store, now } from "./store.ts";
-import { COMPACT_STALL_LIMIT, REPAIR_SESSION_TOOLS, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, longCommandSec, longCommands, pauseBuild, pruneSession, refreshWhere, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
+import { COMPACT_STALL_LIMIT, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, longCommandSec, longCommands, pauseBuild, pruneSession, refreshWhere, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
 import { whereHere } from "./next.ts";
 import { TIMED_OUT, commandCap, isLongCommand, remoteWriteRefusal, timeoutNote } from "./command-guard.ts";
 import { siblingRepoOf } from "./repos.ts";
@@ -82,17 +82,6 @@ export function registerHooks(pi: ExtensionAPI) {
       if (!REVIEW_SESSION_TOOLS.includes(ev.toolName))
         return { block: true, reason: "This is a review session: read-only. Report what should change with pb_report_findings." };
       return;
-    }
-    // A repair lap gets the spec's pen, nothing else: read, probe through pb_try (itself read-only),
-    // ask, and write the one spec with the spec tools. A lap that could edit the project or run a
-    // shell is a build without its gates.
-    if (session) {
-      const repair = store.fixOfSession(session);
-      if (repair && !REPAIR_SESSION_TOOLS.includes(ev.toolName))
-        return {
-          block: true,
-          reason: `A repair lap for ${repair.name} is open in this session: read and probe with pb_try, ask with pb_ask, and change only that spec through pb_write_spec or pb_update_spec. Stop the project edits and report the lap with pb_spec_fix_done.`,
-        };
     }
     // Planning changes nothing outside this machine either: a shell command that writes to a database, a cluster,
     // a cloud or an API is refused, as in a probe (the same rule, command-guard.ts). Reads stay allowed.
@@ -352,13 +341,10 @@ export function registerHooks(pi: ExtensionAPI) {
     }
     const { store, name, progress } = specOfSession(ctx);
     const u = m.usage;
-    // A lap runs in a session of its own: its turns are that phase's cost, for the spec it repairs or fixes.
-    const session = ctx.sessionManager.getSessionFile();
-    const repairLap = store.fixOfSession(session);
-    const fixLap = repairLap ? undefined : store.fixSession(session);
-    const lap = repairLap ? { spec: repairLap.name, phase: "spec-fix" } : fixLap ? { spec: fixLap.spec, phase: "fix" } : undefined;
-    if (lap) {
-      store.event(lap.spec, { type: "lap-usage", phase: lap.phase, input: u.input ?? 0, output: u.output ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0, cost: u.cost?.total ?? 0 });
+    // A fix lap runs in a session of its own: its turns are that phase's cost, for the spec it fixes.
+    const fixLap = store.fixSession(ctx.sessionManager.getSessionFile());
+    if (fixLap) {
+      store.event(fixLap.spec, { type: "lap-usage", phase: "fix", input: u.input ?? 0, output: u.output ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0, cost: u.cost?.total ?? 0 });
       return;
     }
     if (!name || !progress) return;

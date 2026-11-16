@@ -68,14 +68,6 @@ export interface Config {
    * plan checked by the model that will implement it. Every ready spec gets one pass.
    */
   specReviewer: { model?: string; thinking?: string };
-  /**
-   * The spec fixer: the model for the claim check (unset = your session's — the question is narrow, so
-   * it does not need the reviewer's model), and the budget one `/pb:spec-harden` run may spend: repair
-   * laps (`maxLaps`, default 3) and spec reviews (`maxReviews`, default 2 — the pass that finds the work
-   * and the one that confirms the repair). A harden run spends no more than that on either: a third pass
-   * over a plan is a decision you make by hand, not a step an unattended run takes.
-   */
-  specFix: { model?: string; thinking?: string; maxLaps?: number; maxReviews?: number };
   /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
   freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
@@ -105,7 +97,10 @@ export interface Config {
    * "threshold": reset only past `checkpointAt`. "never": leave compaction to Pi (pb still writes the summary).
    */
   buildReset: "task" | "threshold" | "never";
-  /** /pb:archive updates the project map in AGENTS.md from the finished feature. */
+  /**
+   * /pb:archive updates the project map in AGENTS.md from the finished feature. Off by default: the cartographer
+   * is a long fresh run, so the map is updated when you choose (/pb:map), not as a side job of every archive.
+   */
   mapOnArchive: boolean;
   /** A desktop notification when pb asks you something (a question, or a dialog that goes on without you). */
   notify: boolean;
@@ -117,7 +112,7 @@ export interface Config {
 }
 
 /** The roles whose prompts take extra instructions. */
-export const ROLES = ["plan", "spec", "build", "review", "adversarial", "map", "spec-fix", "spec-check"] as const;
+export const ROLES = ["plan", "spec", "build", "review", "adversarial", "map"] as const;
 export type Role = (typeof ROLES)[number];
 
 export const DEFAULT_CONFIG: Config = {
@@ -136,14 +131,13 @@ export const DEFAULT_CONFIG: Config = {
   checkpoints: true,
   reviewer: { verify: true, security: "auto" },
   specReviewer: {},
-  specFix: { maxLaps: 3, maxReviews: 2 },
   freshAbove: 50,
   baseline: true,
   explorer: { idleSec: 600, timeoutSec: 1800, commandTimeoutSec: 120 },
   planner: {},
   checkpointAt: 75,
   buildReset: "task",
-  mapOnArchive: true,
+  mapOnArchive: false,
   notify: true,
 };
 
@@ -155,7 +149,6 @@ function sanitizeConfig(raw: Partial<Config>): Config {
   const strOrNull = (v: unknown, d: string | null) => (v === null ? null : typeof v === "string" ? v : d);
   const reviewerRaw = typeof raw.reviewer === "object" && raw.reviewer !== null ? raw.reviewer : {};
   const specReviewerRaw = typeof raw.specReviewer === "object" && raw.specReviewer !== null ? raw.specReviewer : {};
-  const specFixRaw = typeof raw.specFix === "object" && raw.specFix !== null ? raw.specFix : {};
   const explorerRaw = typeof raw.explorer === "object" && raw.explorer !== null ? raw.explorer : {};
   const plannerRaw = typeof raw.planner === "object" && raw.planner !== null ? raw.planner : {};
   const security = (reviewerRaw as { security?: unknown }).security;
@@ -187,14 +180,6 @@ function sanitizeConfig(raw: Partial<Config>): Config {
       model: typeof (specReviewerRaw as { model?: unknown }).model === "string" ? (specReviewerRaw as { model: string }).model : undefined,
       thinking: typeof (specReviewerRaw as { thinking?: unknown }).thinking === "string" ? (specReviewerRaw as { thinking: string }).thinking : undefined,
     },
-    specFix: {
-      model: typeof (specFixRaw as { model?: unknown }).model === "string" ? (specFixRaw as { model: string }).model : undefined,
-      thinking: typeof (specFixRaw as { thinking?: unknown }).thinking === "string" ? (specFixRaw as { thinking: string }).thinking : undefined,
-      // A repair lap is the model rewriting its own plan: three of them is already a long unattended run.
-      maxLaps: Math.max(1, Math.floor(num((specFixRaw as { maxLaps?: unknown }).maxLaps, DEFAULT_CONFIG.specFix.maxLaps!))),
-      // Two passes, no more: the one that finds the work and the one that confirms the repair.
-      maxReviews: Math.max(0, Math.floor(num((specFixRaw as { maxReviews?: unknown }).maxReviews, DEFAULT_CONFIG.specFix.maxReviews!))),
-    },
     freshAbove: num((raw as { freshAbove?: unknown }).freshAbove, DEFAULT_CONFIG.freshAbove),
     baseline: bool((raw as { baseline?: unknown }).baseline, true),
     planner: {
@@ -211,7 +196,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     buildModel: typeof (raw as { buildModel?: unknown }).buildModel === "string" ? (raw as { buildModel: string }).buildModel : undefined,
     checkpointAt: num((raw as { checkpointAt?: unknown }).checkpointAt, DEFAULT_CONFIG.checkpointAt),
     buildReset: oneOf((raw as { buildReset?: unknown }).buildReset, ["task", "threshold", "never"] as const, DEFAULT_CONFIG.buildReset),
-    mapOnArchive: bool((raw as { mapOnArchive?: unknown }).mapOnArchive, true),
+    mapOnArchive: bool((raw as { mapOnArchive?: unknown }).mapOnArchive, DEFAULT_CONFIG.mapOnArchive),
     notify: bool((raw as { notify?: unknown }).notify, true),
     extra: typeof raw.extra === "object" && raw.extra !== null ? raw.extra : undefined,
   };
@@ -225,7 +210,6 @@ const CONFIG_KEYS: Record<string, readonly string[] | null> = {
   extra: ROLES,
   reviewer: ["model", "thinking", "verify", "security", "idleSec"],
   specReviewer: ["model", "thinking"],
-  specFix: ["model", "thinking", "maxLaps", "maxReviews"],
   explorer: ["model", "thinking", "idleSec", "timeoutSec", "commandTimeoutSec"],
   planner: ["model", "thinking"],
 };
@@ -395,48 +379,12 @@ export interface SpecApproval {
   contractHash: string;
 }
 
-/**
- * Where an open spec repair stands (Progress.fix). A repair lap is a turn in the session that asked for
- * it, so the model can probe, ask and write through pb_write_spec; `stage` says who has the ball.
- */
 /** An open /pb:fix lap: its spec, the findings its brief numbered, and each finding's test seen failing (by number). */
 export interface FixSession {
   spec: string;
   findings: Finding[];
   /** finding number (1-based, as the brief shows it) → the test command pb saw fail before the fix */
   reds?: Record<string, string>;
-}
-
-export interface SpecFixState {
-  /** the session whose turn repairs the spec: only it may report a lap */
-  session: string;
-  /** true while /pb:spec-harden sequences the laps; false for one manual /pb:spec-fix lap */
-  driver: boolean;
-  /** "lap": the model has the turn and owes a report; "advance": it reported, the harness owes the next step */
-  stage: "lap" | "advance";
-  /** when the lap opened: a lap left by a session that has since died is dead, not blocking */
-  startedAt: number;
-  /** the Pi process that drives the lap: once it has exited, nothing will ever report the lap */
-  pid?: number;
-  /** the spec text the worklist was taken from: what the lap's report is bound to */
-  hash: string;
-  /** what the worklist was: a review's findings, or the claim check's un-evidenced claims */
-  work: "findings" | "claims";
-  /** the numbers this lap was handed, so its report cannot name a finding it was not shown */
-  ids: number[];
-  /** this run's stamp, written on every event it adds so a digest counts its own laps and nothing older */
-  run: string;
-  laps: number;
-  reviews: number;
-  applied: number;
-  rebutted: number;
-  assumed: number;
-  /** questions a lap refused to answer, each with its recommendation; the driver puts them to the human */
-  parked: { id: number; question: string; recommendation: string }[];
-  /** a harden run's one claim check: what it found that no lap took; empty when a lap took them all, absent until it ran */
-  claimCheck?: Finding[];
-  /** how many claims that check handed to a lap: pb does not re-check them, so the digest never calls them cleared */
-  claimsTaken?: number;
 }
 
 export interface Progress {
@@ -469,13 +417,6 @@ export interface Progress {
   reviewUnshown?: boolean;
   /** existing tests the build deleted, cut down or skipped, per task: for the reviewer to judge */
   testChanges?: string[];
-  /**
-   * An open spec repair: the laps run in the session that asked for them, and only that session may
-   * report one. `stage` says who has the ball: "lap" = the model has the turn and owes a report,
-   * "advance" = it reported and the harness owes the next step. `ids` are the finding numbers that
-   * lap was handed, so its report cannot name a finding it was not shown.
-   */
-  fix?: SpecFixState;
   pause?: string;
   /** the conversation was rewound to before the build's first message: a resume sends it again */
   needsIntro?: boolean;
@@ -514,8 +455,8 @@ export interface Checkpoint {
   pendingReset?: boolean;
   /** the build's first message comes after `entry`: rewinding here drops it */
   intro?: boolean;
-  /** a spec repair lap or a /pb:fix lap: its row restores `spec` and the files, and its task list is not a build task list */
-  kind?: "lap" | "fix";
+  /** a /pb:fix lap: its row restores `spec` and the files, and its task list is not a build task list */
+  kind?: "fix";
   /** the spec text at this point; /pb:undo restores it for a lap row */
   spec?: string;
   /** the progress phase at this point, restored with the row */
@@ -677,16 +618,6 @@ export function writeFileAtomic(file: string, content: string): void {
   fs.writeFileSync(tmp, content, "utf8");
   fs.renameSync(tmp, file);
 }
-
-/** Whether a path pb recorded earlier is still there: a repair lap whose session file is gone can never be reported. */
-
-export const pathExists = (p: string): boolean => {
-  try {
-    return fs.existsSync(p);
-  } catch {
-    return false;
-  }
-};
 
 export function readEvents(file: string): Record<string, unknown>[] {
   try {
@@ -1458,23 +1389,9 @@ export class Store {
     return mine.filter((x) => !x.p!.detached).sort((a, b) => (b.p!.updatedAt ?? "").localeCompare(a.p!.updatedAt ?? ""))[0]?.n;
   }
 
-  /** The spec whose open repair lap this session owns, newest first: usually one. */
-  fixesOfSession(sessionFile: string | undefined): { name: string; p: Progress }[] {
-    if (!sessionFile) return [];
-    return this.specNames()
-      .map((n) => ({ name: n, p: this.progress(n) }))
-      .filter((x): x is { name: string; p: Progress } => typeof x.p?.fix?.session === "string" && samePath(x.p.fix.session, sessionFile))
-      .sort((a, b) => (b.p.updatedAt ?? "").localeCompare(a.p.updatedAt ?? ""));
-  }
-
-  /** The spec whose open repair lap this session owns: the lap record, not the conversation. */
-  fixOfSession(sessionFile: string | undefined): { name: string; p: Progress } | undefined {
-    return this.fixesOfSession(sessionFile)[0];
-  }
-
   /**
-   * The spec this session wrote, newest first. A repair lap writes the spec it is fixing, so a session
-   * that owns no build (or open lap) can still be the one whose `/pb:undo` takes a lap back.
+   * The spec this session wrote, newest first: the planning session a fresh build comes back to owns no build,
+   * and can still be the one whose `/pb:undo` takes a step back.
    */
   writtenSpec(sessionFile: string | undefined): { name: string; p: Progress } | undefined {
     if (!sessionFile) return undefined;

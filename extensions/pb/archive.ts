@@ -130,6 +130,8 @@ export function registerArchive(pi: ExtensionAPI) {
         // An abandoned design may never have reached the tree, and a wrong map line is read by every later
         // session: the human decides that with /pb:map, not a forced archive.
         ctx.ui.notify(`\`--force\` skipped the project map update for ${name}: /${cmd("map")} makes that one deliberately.`, "info");
+      } else if (!store.config().mapOnArchive && mapNews) {
+        ctx.ui.notify(`The project map was not updated from ${name}: /${cmd("map")} does that when you choose, or set "mapOnArchive": true to have every archive do it.`, "info");
       } else if (willMap) {
         // The feature's change only: /pb:map is the whole-map audit, run when you choose.
         mapChanges = await updateMap(ctx, store, { spec: { name, findings }, changed, reviewFindings, scope: "change", base });

@@ -24,7 +24,7 @@ next: <command>` and follows every command and turn; the terminal title carries
 the spec and its state. **alt+n** puts that command in the editor (press Enter
 to run it); `/pb:help` with no topic opens with where you are and what's next,
 and `/pb:status` says it for every spec. Starting Pi on work in progress says it
-once. Finding numbers (`/pb:fix`, `/pb:spec-fix`) and checkpoint ids (`/pb:undo`)
+once. Finding numbers (`/pb:fix`) and checkpoint ids (`/pb:undo`)
 complete with what each one is.
 
 1. **`/pb:plan <what you want, in your own words>`**: Pi investigates (it can
@@ -38,8 +38,7 @@ complete with what each one is.
    first. Then Pi writes a short **spec** from the discussion (goal, findings,
    decisions, tasks); every spec gets one independent review before the first
    task — fresh eyes, read-only — and a P0 stops it for you to amend or rebut;
-   a P1 is shown and you choose whether to build on it; P2-P3 are shown and the
-   build goes on (see `/pb:help spec`). `/pb:spec-review
+   P1-P3 are shown and the build carries them (see `/pb:help spec`). `/pb:spec-review
    [name]` is that same review on its own, for a spec you want judged before
    deciding to build. Run `/pb:build` again to go on after a block. A clean or advisory-only review
    starts by itself, so you can walk away. The
@@ -47,15 +46,11 @@ complete with what each one is.
    last one; a failure goes back to Pi to fix. When the build pauses or finishes,
    pb sends a **desktop notification** — those are the moments you've reliably
    walked away from (`"notify": false` turns it off).
-3. **Repairing the plan** (optional): the model repairs the **plan** — it
-   measures what needs measuring, settles what it can defend, rebuts a finding
-   it can prove wrong in `## Decisions` — and asks you only where two defensible
-   answers differ. Pick the door by what the review found: P2–P3, and anything
-   about proofs, test names or docs, the build carries — its own checks and the
-   code review catch those for far less. One or two P1s: `/pb:spec-fix [name]
-   <numbers>`, one lap on just those. A P0, or a P1 that questions the design or
-   a security guard: `/pb:spec-harden`, laps and fresh reviews until its budget
-   is spent. See `/pb:help spec-harden`.
+3. **A finding you want settled before the build**: say so to the planner
+   (`/pb:plan <spec>` picks the planning up again). It has the whole discussion
+   and edits the spec; nothing else runs. Everything else the build carries —
+   its own checks and the code review catch most findings for far less. See
+   `/pb:help spec-review`.
 4. **`/pb:review`**: a fresh reviewer compares the change with the spec and
    your standards; blocking findings get a second look before you see them.
    Fix them right there, `/pb:review` again (it looks only at what changed),
@@ -314,9 +309,8 @@ if you don't answer one in time, the rest wait in the chat instead of in more
 dialogs. A question where several options can apply is a checklist: tick each
 one, then Done. What you answer while planning is kept with the planning
 session and handed to `/pb:spec`, so the spec carries every answer even after a
-long discussion or a reset. Laps never ask: a fix lap reports a finding that
-needs your decision as skipped, and a hardening lap parks its question with a
-recommendation for pb to ask you after the lap.
+long discussion or a reset. A fix lap never asks: it reports a finding that
+needs your decision as skipped.
 
 A question you didn't answer (it timed out, or you closed the dialog) **stays in
 the chat** with its options lettered: type your answer whenever you're back ("A"
@@ -448,8 +442,8 @@ Then the sections:
   party's webhook, another service's cron); a backticked command is a
   measurement, not an owner. A section that does not apply is one
   line, "none — why", never an empty heading or TBD.
-- **Evidence**, one rule for the whole spec, and the same one the spec reviewer,
-  the claim check and a repair lap judge by. A claim is *load-bearing* when the
+- **Evidence**, one rule for the whole spec, and the same one the spec reviewer
+  judges by. A claim is *load-bearing* when the
   build would act differently if it were false: a number or bound, what this
   repository, its build, runtime or configuration does, or how an external
   service behaves. Each load-bearing claim carries its evidence beside it: a
@@ -586,14 +580,9 @@ scope, where you can take it back in.
 
 Only a **P0** blocks the build: a security or authorization hole, data loss or
 corruption, or a contract contradiction that cannot be built as written. P1-P3
-are advisory, but a **P1** is a known risk the build would carry, so before T1
-you choose: build anyway, repair first (one `/pb:spec-fix` lap on the P1s), or
-stop. Build anyway when the P1s are about proofs, tests or docs; repair first
-when one changes behaviour or a guard. This
-applies to a pass recorded earlier too: its P1s are shown again at the build,
-since you may not have seen them. You're asked once per text, never again on a
-restart or resume of an approved build; with nobody to ask, the build goes on
-and says so. P2-P3 are shown and the build carries on. A finding has a
+are information: the build carries them and the code review judges the result.
+A pass recorded earlier posts its P1s again when the build starts, since you may
+not have seen them. A finding has a
 priority, the check it fails (Claims, Values, Proof, Coverage, Reach,
 Consistency, Overengineering, Evidence or Other; `/pb:stats` counts findings per check), a
 one-sentence title naming what goes wrong and where, and optionally
@@ -605,11 +594,13 @@ what it judges. A choice a read can settle, it settles itself and cites the
 file:line and what it found. The findings, the pass, the diff it saw and the
 full transcript are recorded beside the spec.
 
-A pass covers exactly the text it saw: a later `/pb:build` reuses that verdict
-while the spec is unchanged, re-posting a standing P0 instead of running again.
-Editing the spec makes the next build start review the new text. Once the first
-task has started, spec edits are the code reviewer's to judge, not re-reviewed
-at plan level.
+**A spec is reviewed once.** A later `/pb:build` reuses the verdict on the same
+text, re-posting a standing P0 instead of running again. After a pass, an edit
+is not reviewed again: a fresh pass always finds new subjects, and the code
+review judges the build against the final text (`/pb:spec-review` reviews it
+again when you want). After a P0, the edit that settles it is reviewed, since
+the P0 holds the build until a review sees it gone. Once the first task has
+started, spec edits are the code reviewer's to judge.
 
 **`/pb:spec-review [name]` runs that pass without the build**, for a spec that
 is written but must not be built yet — a plan you want judged before you commit
@@ -684,80 +675,25 @@ plan that is checkable but aimed at the wrong outcome.
   build pauses at its next step until `/pb:build` re-approves the edit.
 <!-- /pb -->
 
-<!-- pb:topic spec-harden -->
-## Reviewing and hardening a written spec
+<!-- pb:topic spec-review -->
+## Reviewing a written spec
 
-A written spec already has a verdict machine: `/pb:spec-review <name>` runs the
-same independent pass the build runs, records it, and builds nothing. On the same
-exact text, `/pb:build` then starts without a second review; edit one word and the
-verdict no longer covers it. The review's own cost and the code state it read are
-named under the findings — it is a reading of the code as it stands.
+`/pb:spec-review <name>` runs the same independent pass the build runs, records
+it, and builds nothing; `/pb:build` then starts without a second review. The
+review's own cost and the code state it read are named under the findings — it
+is a reading of the code as it stands.
 
-When that review comes back with a list you don't want to type through, that's
-what the repair doors are for. Most lists don't need one: P2–P3, and findings
-about proofs, test names or docs, are cheaper for the build and the code review
-to catch. One or two P1s take one `/pb:spec-fix` lap on their numbers;
-`/pb:spec-harden` is for a P0 or a P1 that questions the design or a security
-guard — each of its confirming reviews is a full fresh pass, and a fresh pass
-always finds something, so it runs until its budget is spent. Both doors make the model repair the **plan**, not
-the code, and both give it the same four ways to settle each item:
+**What to do with the findings**: most need nothing. P2–P3, and anything about
+proofs, test names or docs, the build carries — its own checks and the code
+review catch those for far less. A finding you want settled before the build —
+a P0, or a P1 about behaviour or a security guard — you settle with the planner:
+`/pb:plan <spec>` picks the planning up again, with the whole discussion, and it
+edits the spec. There is no separate repair run: the planner already has the
+context, and you keep the calls.
 
-- **point it at evidence** — it runs the probe itself (`pb_try`, read-only) and
-  writes what the probe returned into `## Findings`;
-- **delete it** — a claim that can't be evidenced and nothing depends on is cut,
-  not argued;
-- **decide it** — the spec picks, says why and names the alternative it rejected;
-- **tag it `assumed:`** — kept on purpose, only with what would falsify it.
-
-It may also **push back**: when it is sure a finding is wrong, it writes the
-argument and the `path:line` citation into `## Decisions` and says so. It never
-silently drops a number it was given, and it never invents a worklist — a lap only
-repairs findings recorded against the exact text now on disk. It never widens
-the change: no new task or mechanism unless the Goal can't be met safely without
-it. A finding that would need one is cut — a "Not doing" line in Decisions and an
-Out of scope entry — rather than asked about, and a lap leaves the spec no
-longer than it found it.
-
-**`/pb:spec-fix [name] [ids]`** runs one lap, now, on your say-so — every P0–P2
-finding by default, or the numbers you name. The lap re-checks what it wrote
-before it reports, and that is the run: no separate claim check and no re-review.
-The text changed, so the old verdict doesn't cover it, and `/pb:spec-review` (or
-the next `/pb:build`) decides on the new bytes.
-
-**`/pb:spec-harden [name]`** drives the whole loop: a review if the text has no
-verdict yet, repair lap → one claim check → one confirming review → one last lap
-over what that review finds → digest. It prints the plan first and one confirm
-starts it. Budget: `specFix.maxLaps` repair laps and `specFix.maxReviews` review
-passes (defaults 3 and 2). It repairs P0–P2; P3 polish is left to you (polish adds
-text the next review reads), and `/pb:spec-fix <numbers>` repairs one you want.
-The claim check runs once, after the first lap: each lap already re-checks what it
-wrote before it reports. Its claims get a lap only while one stays free for the
-confirming review's findings, which matter more; claims no lap took are listed
-for you. A lap that changes nothing ends the run. That is the stop rule, not "no findings" — a fresh full pass never runs
-out of subjects. Every claim left without evidence is listed for you, with what
-settling it would take, and so is every P0–P2 finding the last review left on the
-final text when no lap was left to take it, numbered for `/pb:spec-fix`.
-
-Each lap runs in a **fresh session of its own** (`spec-fix: <spec> · lap N`),
-seeded with the spec and its worklist rather than the whole planning discussion:
-the spec is written so a fresh session can start from it alone. pb brings you
-back after each lap, and the claim check, the review and the digest land in
-your session.
-
-Either way the run asks you only the calls it won't make: each question comes with
-its recommendation and with what it would do if you don't answer (that goes on
-the record as decided without you). The lap's pen is the ordinary one, so the
-format gates and your standards still bind it: it edits the spec section by
-section through `pb_update_spec` (a whole rewrite only when most of it changes,
-and either tool names anything the write removed), checks what it wrote against
-the same spec checks the writer runs, and `pb_try` writes nothing. Each lap is an undo point — `/pb:undo` restores the
-spec text and the phase it had before the lap, and drops the lap whole. Repair and
-build never overlap: `/pb:build` waits while a lap is open, and a build that
-starts anyway drops the open lap rather than build a plan that is mid-edit —
-harden before `/pb:build`, not during it.
-
-**If a spec keeps finding things**: read the P1s, and let the laps decide what
-only the business can decide — you keep the calls, the model does the clerking.
+A spec is reviewed once. After a pass, your edits go to the build unreviewed and
+the code review judges the result; after a P0, the next `/pb:build` reviews the
+edit that settles it.
 <!-- /pb -->
 
 <!-- pb:topic build -->
@@ -1167,9 +1103,8 @@ without touching your branch, commits or staging area). A row is stored in the
 undo list only when it adds information: one repeating the previous row's files,
 conversation point and task list would say nothing new. `/pb:undo` in the build
 session lists the tasks; pick one and the files and task list go back to how
-they were **before** it. In the spec's repair session it lists the repair laps,
-and picking one restores the spec text and phase from before that lap. Either
-way the **conversation** goes back too: the discarded attempt drops out of the
+they were **before** it. A `/pb:fix` lap's row also restores the spec text and
+phase from before that lap. Either way the **conversation** goes back too: the discarded attempt drops out of the
 context (a short note says what was undone, and repeats what
 you said meanwhile so your guidance isn't lost), so it doesn't anchor the next
 try. When the rewind point lies before a task-boundary reset, only the files and
@@ -1192,12 +1127,13 @@ no path and are read in every session; every other heading is an area heading
 with its path prefix, and sessions read only those covering the paths they
 touch.
 
-- **When a feature is done**, `/pb:archive` updates it from what the feature
-  established: its spec's Findings, the design the build settled on, the files
-  it changed, and the completed reviews' P0–P2 findings as leads the
-  cartographer must check against the code (a finding that no longer holds is
-  left out); `"mapOnArchive": false` turns that off, and `/pb:archive <name>
-  --force` skips it for that one archive. It reads only the
+- **When a feature is done**, with `"mapOnArchive": true`, `/pb:archive` updates
+  it from what the feature established: its spec's Findings, the design the build
+  settled on, the files it changed, and the completed reviews' P0–P2 findings as
+  leads the cartographer must check against the code (a finding that no longer
+  holds is left out). It is off by default — the cartographer is a long run — so
+  the archive says when the map was left as it was, and `/pb:archive <name>
+  --force` skips it even when it is on. It reads only the
   feature's change: the lines that cite a changed file are re-checked, the
   change is read against every rule on the map, and every other line is kept
   as it is.
@@ -1327,10 +1263,10 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
   later one the review fixes since, and a map-only commit after `/pb:archive`
   the map's changes. Your hooks run; whatever else you had staged stays staged
   and out of the commit. Nothing changed since the last commit: it says so and
-  stops. It refuses while a build or a repair lap is still writing files.
+  stops. It refuses while a build is still writing files.
 - **`/pb:archive`**: moves a finished spec to `.pi/pb-archive/` (which git
-  ignores), so `/pb:build` and `/pb:status` only show live work, and offers to
-  update the project map (`/pb:help map`). A spec with work left (a build not
+  ignores), so `/pb:build` and `/pb:status` only show live work; it updates the
+  project map only with `"mapOnArchive": true` (`/pb:help map`). A spec with work left (a build not
   finished, never reviewed, a last review that wasn't a pass, or open findings)
   is archived only after you confirm, with what it still owes named: once
   archived, its findings are out of `/pb:fix`'s reach. The approved spec moves with it; the
@@ -1381,16 +1317,15 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
 - Review it before building: `/pb:spec-review` — the same fresh reviewer, nothing built, and `/pb:build` then starts at T1 without re-reviewing.
-- The review found things? P2–P3, and anything about proofs, test names or docs: build with them. One or two P1s: `/pb:spec-fix <name> <numbers>`, one lap on just those. A P0, or a P1 that questions the design or a security guard: `/pb:spec-harden` — laps and fresh reviews until its budget is spent.
+- The review found things? Most need nothing: the build carries them and the code review judges the result. To settle one first, say so to the planner (`/pb:plan <spec>`); a P0 holds the build until then.
 - Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — every spec is reviewed first: a P0 stops it before the first task · more: `/pb:help spec`
 <!-- /pb -->
 
 ### A spec review with findings
-<!-- pb:tip spec.repair -->
-**What now** — which door for these findings (by the numbers above)
-- P2–P3, and anything about proofs, test names or docs: build with them — the build's own checks and the code review catch these for far less. `/pb:build {name}`
-- One or two P1s: one repair lap on just those — `/pb:spec-fix {name} <numbers>`.
-- A P0, or a P1 that questions the design or a security guard: `/pb:spec-harden {name}` — laps and fresh reviews until its budget is spent, the costly door.
+<!-- pb:tip spec.findings -->
+**What now** — these findings are information; only a P0 holds the build
+- Build with them: `/pb:build {name}` — the build carries them, and the code review judges the result.
+- Settle one first (a P1 about behaviour or a security guard, say): tell the planner — `/pb:plan {name}` picks the planning up again and edits the spec. The build does not review the edit again; the code review judges against it.
 <!-- /pb -->
 
 ### Build paused

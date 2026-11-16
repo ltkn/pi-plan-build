@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { briefOf, diligent, PLANNING, setup, SPEC, until, written, repairLap } from "./harness.mts";
+import { briefOf, diligent, PLANNING, setup, SPEC, until, written } from "./harness.mts";
 
 test("plan: investigation is free, project files are protected until /pb:plan off; spec asks for pb_write_spec", async () => {
   const t = setup({ verify: "true" });
@@ -1566,7 +1566,7 @@ test("pb_ask: when nobody answers in time, the rest of a batch is not asked — 
   assert.match(r.content![0].text, /1\. Mail or event\? — OPEN[\s\S]*2\. Retry how\? — OPEN/);
 });
 
-test("pb_ask in a lap: a fix lap and a hardening lap never ask; a manual repair lap asks, with the timeout", async () => {
+test("pb_ask in a fix lap: the lap never asks, it reports the finding as skipped", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
@@ -1581,31 +1581,6 @@ test("pb_ask in a lap: a fix lap and a hardening lap never ask; a manual repair 
   t.selects.push("Later");
   await t.run("fix");
   assert.match(said[0], /^A fix lap doesn't ask: a finding that needs a decision is reported as skipped/);
-
-  const h = setup({ verify: "true" });
-  await written(h);
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  const lapSaid: string[] = [];
-  const lap = repairLap(h, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled" });
-  h.agent.script = async (text, tool) => {
-    if (text.includes("[pb:spec-fix]")) lapSaid.push(String((await tool("pb_ask", { question: "Which way?", options: ["a", "b"] })).content?.[0]?.text ?? ""));
-    return lap(text, tool);
-  };
-  try {
-    await h.run("spec-review", "order-cancellation");
-    h.selects.push("Yes, go on");
-    await h.run("spec-harden", "order-cancellation");
-    assert.match(lapSaid[0], /^A hardening lap doesn't ask: park the question in your pb_spec_fix_done report/);
-    // A manual lap runs on your say-so, so it may ask — but never without the timeout, in a session of its own.
-    await h.run("spec-review", "order-cancellation");
-    const before = h.dialogTimeouts.length;
-    h.selects.push("a");
-    await h.run("spec-fix", "order-cancellation");
-    assert.ok(lapSaid.at(-1)!.startsWith("The human answered: a"));
-    assert.equal(h.dialogTimeouts.slice(before).find((x) => x !== undefined), 300_000, "askTimeoutSec applies");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-  }
 });
 
 test("planning changes nothing outside this machine either: a remote write is refused, a read is not; a sibling repository is protected like the project", async () => {

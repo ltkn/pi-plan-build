@@ -62,7 +62,7 @@ export interface ReportStats {
   cost: { build: number; review: number; explore: number; fix: number };
   context: { compactions: number; resets: number; nudges: number };
   ms: number;
-  /** the spec phase (reviews, claim checks, repair laps and the fresh runs' cost); null before any ran */
+  /** the spec phase (its reviews and their fresh runs' cost; claim checks and repair laps from older specs); null before any ran */
   spec: SpecPhase | null;
   /** the first code review's findings against the project map (broke a rule it states / found a line wrong); null before a review recorded them */
   map: { stated: number; wrong: number } | null;

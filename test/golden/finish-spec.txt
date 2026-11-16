@@ -1,4 +1,4 @@
-words: 1805
+words: 1803
 
 [pb:spec order-cancellation] Finish the spec .pi/pb/specs/order-cancellation/spec.md for building: ask me with pb_ask, all at once, about each open question; write answered ones into Decisions; add the Tasks and the Verification line, leave no Open questions, and set Status: ready. Anything still unanswered stays Open and the spec stays Status: planning — never decide for me. (pb_update_spec for sections, or pb_write_spec). After writing it, stop: the harness shows it to me and asks whether to build.
 
@@ -41,7 +41,7 @@ Add "## Out of scope" only when it helps. When you include a section that does n
 
 - Evidence: A claim is load-bearing when the build would act differently if it were false: a number or bound, what this repository, its build, runtime or configuration does, or how an external service behaves. Each one carries its evidence beside it: a path:line that says it, a probe (probe: <what you ran>; conclusion: <what it showed>), or, for a value this change defines (a new status, error, event or stored value), the Acceptance line that pins it, whose red test is the proof. A claim about existing code or a service needs the path:line or the probe: a test written from the same belief passes even when the belief is wrong. What nothing settles yet is tagged `assumed: <what would falsify it>` right after it. Anything else needs no evidence.
 - Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.
-- Write for the builder, not to win an argument: Findings hold only facts that change what gets built; Decisions only the choices a competent builder could plausibly get wrong, each in one or two sentences with its rejected alternative in one line. A claim nothing in the build depends on is left out, not cited. Keep the spec well under the size of the change it describes: every task, reviewer and repair lap reads all of it.
+- Write for the builder, not to win an argument: Findings hold only facts that change what gets built; Decisions only the choices a competent builder could plausibly get wrong, each in one or two sentences with its rejected alternative in one line. A claim nothing in the build depends on is left out, not cited. Keep the spec well under the size of the change it describes: every task and reviewer reads all of it.
 
 Before writing, run these checks (the spec reviewer runs the same ones) and fix what they find in the spec; tell me briefly what you changed:
   - Claims: each claim about existing code or a service says what the line it cites says; open the line, because a fact remembered from the discussion is not evidence.

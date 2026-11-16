@@ -24,20 +24,12 @@ never saw the build. Your engineering standards live in AGENTS.md, written once.
                       no spec? reviews the uncommitted change against its intent
 /pb:deps [which]      review dependencies (versions, deprecations, vulnerabilities, runtime) with the stack's own
                       read-only commands, and propose upgrades grouped into changes of their own
-/pb:map [focus|apply|undo]  refresh the project map in AGENTS.md (done at /pb:archive too); apply writes a proposal you dismissed; undo puts the previous back
+/pb:map [focus|apply|undo]  refresh the project map in AGENTS.md (at /pb:archive too, with "mapOnArchive": true); apply writes a proposal you dismissed; undo puts the previous back
 /pb:standards [stack] write the current standards into this project's AGENTS.md (created if missing; only pb's
                       section is replaced); java, vue, rust, plain or your own template, detected by default
 /pb:spec [which]      write or revise a spec without building (optional)
 /pb:spec-review [name] [--fresh] the pre-build review on its own: one fresh reviewer reads the ready spec, nothing
                       is built; the verdict is recorded, so /pb:build starts at T1 without re-reviewing; --fresh bypasses the recorded verdict
-/pb:spec-fix [name] [ids]
-                    one repair lap over the findings recorded against this exact text: it runs the probes,
-                    applies the fix it recommends, argues in Decisions when a finding is wrong, parks only
-                    what it won't decide; it re-checks what it wrote, and the next review reads the new text
-/pb:spec-harden [name]
-                    auto-pilot over a written spec: repair laps over the P0-P2 findings, one claim check,
-                    one confirming review, a lap kept for what it finds, then a digest naming what is left;
-                    budgets specFix.maxLaps / specFix.maxReviews
 /pb:commit [spec]     commit the work now (after build, fixes, review or archive): the change's files and a
                       message built from the spec, in an editor where you adjust both; pb never commits by itself
 /pb:undo · /pb:status [--json] · /pb:stats [all|compare [n]|--json] · /pb:archive [--force] · /pb:help
@@ -72,12 +64,9 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
      reads it before the first task (P0 findings stop the build until amended;
      the result header is ✅ PASS or ❌ FAIL with the review's time;
      /pb:spec-review runs that same pass on a spec you aren't building yet)
-   → findings? P2–P3 and anything about proofs, test names or docs: build with
-     them. One or two P1s: /pb:spec-fix <name> <numbers>, one lap on just those
-     (it measures what needs measuring, settles what it can defend, rebuts a
-     wrong finding in `## Decisions`). A P0, or a P1 that questions the design
-     or a security guard: /pb:spec-harden, laps and fresh reviews until its
-     budget is spent
+   → findings? Most need nothing: the build carries them and the code review
+     judges the result. To settle one first, tell the planner (/pb:plan <spec>);
+     a P0 holds the build until a review sees it settled
    → one run: T1 → T2 → … (each: its tests seen failing, then passing)
      → coherence (3+ tasks) → full suite → fix → full suite ✓
    → **✅ Build complete — order-cancellation** · 3/3 tasks · 25m (elapsed in parentheses when pauses count)
@@ -145,10 +134,10 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   times; those parts of the line simply don't appear.
 - **Fresh eyes on the plan.** Every spec gets one independent read before T1:
   its Decisions are attacked, every "Not doing X" re-tested, unmeasured numbers
-  flagged. Only a P0 (unsafe to build) stops the build; a P1 is shown and you
-  choose to build anyway, repair first or stop; P2-P3 are shown as advisory
-  findings and the build proceeds. There are no review rounds: editing
-  the spec makes the next build start review the new text. Every acceptance
+  flagged. Only a P0 (unsafe to build) stops the build; P1-P3 are shown and
+  the build carries them. A spec is reviewed once: there are no review rounds,
+  and an edit after a pass goes to the build as written (after a P0, the edit
+  that settles it is reviewed). Every acceptance
   line is proven by its task's `Test:`.
 - **Fresh eyes on the build.** A spec pass in a fresh read-only session you
   watch, then an adversarial pass in the background with the same frozen brief.
@@ -283,10 +272,9 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium", "idleSec": 600, "timeoutSec": 1800, "commandTimeoutSec": 120}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports). An explorer run stops after `idleSec` without progress or `timeoutSec` in all, each of its commands after `commandTimeoutSec`; 0 = no limit. Its shell runs read-only inspection commands only (ls, find, cat, head, tail, wc, rg, grep, git status/log/diff/show), enforced |
 | `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always` on every review; `off`) |
 | `specReviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the one fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. Only a P0 blocks; P1-P3 are advisory. Point it at `buildModel` to have the implementer model validate the plan |
-| `specFix` | `{}` | `{"model": "provider/id", "thinking": "low", "maxLaps": 3, "maxReviews": 2}` for the repair laps (`/pb:spec-fix`, `/pb:spec-harden`) and the claim check (once per hardening run); unset thinking runs the claim check at `low`; the budgets cap a hardening run, which stops when nothing is left un-evidenced, a lap changes nothing, or a budget is spent |
 | `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
-| `mapOnArchive` | true | `/pb:archive` updates the project map in AGENTS.md from the finished feature; `/pb:archive <name> --force` skips it for that one archive |
+| `mapOnArchive` | false | `true`: `/pb:archive` updates the project map in AGENTS.md from the finished feature (a long cartographer run; `/pb:archive <name> --force` skips it for that one archive). Off, the map is updated when you run `/pb:map` |
 | `notify` | true | a desktop notification when pb asks you something, when a build pauses or finishes, or when a spec review finishes while you're elsewhere |
 | `extra` | unset | your instructions added to a role's prompt: `{"plan", "spec", "build", "review", "adversarial", "map"}`; also read from `~/.pi/agent/pb/config.json`, applied first |
 | `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build uses it only when `buildReset` is `"threshold"`; 0 turns both off |
@@ -303,7 +291,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `.pi/pb/baseline.json`, `.pi/pb/planning/<session>.json` | the last test baseline; planning sessions and their snapshots |
 | `.pi/pb/reviews/`, `pending-build/`, `fixes/`, `review-runs/` | one file per session or run, so parallel work never clobbers the others |
 | `.pi/pb/explore.jsonl` | `pb_explore` usage per session |
-| `.pi/pb/specs/<name>/sessions/`, `.pi/pb/sessions/` | saved runs of the verifier, explorer, cartographer, spec reviewer and claim checker, to open with `pi --session <file>`; removed by `/pb:archive` |
+| `.pi/pb/specs/<name>/sessions/`, `.pi/pb/sessions/` | saved runs of the verifier, explorer, cartographer and spec reviewer, to open with `pi --session <file>`; removed by `/pb:archive` |
 | `.pi/pb-archive/` | archived specs (git-ignored by itself) |
 
 `.pi/pb/` holds only what a build needs while it runs, and

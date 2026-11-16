@@ -1,7 +1,7 @@
 /**
  * What a fresh run shows while it works: the step it is on, how long and how many tokens so far, its last few
  * actions in words, and the file its whole transcript is going to. One display for every fresh role (the map,
- * the spec review and claim check, the review's passes and verifier), so a long run reads as moving or stuck
+ * the spec review, the review's passes and verifier), so a long run reads as moving or stuck
  * at a glance, and nothing of it reaches the conversation: the transcript stays in its own session.
  */
 import * as path from "node:path";

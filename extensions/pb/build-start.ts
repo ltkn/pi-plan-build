@@ -16,7 +16,6 @@ import { offerStandards } from "./plan.ts";
 import { dryRunTests, editSpec, readySpecs, showSpec } from "./spec-tools.ts";
 import { COHERE_MARKER, beginCohereEntry, beginTask, confirmLiveBuild, needsCohere, staleness } from "./build-loop.ts";
 import { ensureSpecReviewed, recordedFindings, reviewDoor } from "./spec-review.ts";
-import { advanceSpecFix, fixLive } from "./repair.ts";
 import { enterStep, nextPhase, nextTodo, unfinishedPhase } from "./phase.ts";
 
 /**
@@ -81,20 +80,6 @@ export function registerBuildStart(pi: ExtensionAPI) {
     if (spec.status === "planning") {
       ctx.ui.notify(`${name} is still being planned: /${cmd("build")} ${name} finishes it first.`, "warning");
       return undefined;
-    }
-    const prog = store.progress(name);
-    if (prog?.fix && fixLive(name, prog.fix)) {
-      // A lap is the model holding the plan in its hands: a build approved now would be built from
-      // whichever half-written text the lap had reached when its turn happened to end.
-      ctx.ui.notify(`A repair lap for ${name} is still open (the model is rewriting its plan). Let it report, or /${cmd("undo")} to drop the lap — then /${cmd("build")} ${name}.`, "warning");
-      return undefined;
-    }
-    if (prog?.fix) {
-      // Nothing will report this lap again: the build reviews whatever text it left, like any other edit.
-      const edited = specHash(md) !== prog.fix.hash;
-      prog.fix = undefined;
-      store.saveProgress(prog);
-      ctx.ui.notify(`The repair lap left open for ${name} can no longer report (its session or the Pi running it is gone), so pb dropped it. ${edited ? `Its edits stay in the spec and are reviewed before T1; /${cmd("undo")} takes them back.` : "It had not changed the spec."}`, "info");
     }
     const { cfg, testCmd, buildCmd } = commands(ctx.cwd, store);
     // One build per working tree: a second one would share its undo points, review diff, checks and commit.
@@ -278,15 +263,14 @@ export function registerBuildStart(pi: ExtensionAPI) {
   const specReviewCount = (store: Store, name: string) => readEvents(path.join(store.specDir(name), "events.jsonl")).filter((e) => e.type === "spec-review").length;
 
   /**
-   * The P1s the spec review raised on the text about to be approved: known risks the build-start screen names,
-   * never a gate. A recorded pass is reused silently at this door, so its P1s are posted again here; a text
-   * already approved (a restart or resume) was decided before and counts none.
+   * The P1s the spec review raised on the text about to be approved: information the build carries, never a
+   * question — only a P0 holds a build. A pass the review just ran posted them already; a recorded pass is reused
+   * silently, so its P1s are posted here. A text already approved (a restart or resume) was seen before.
    */
-  const openP1s = (store: Store, name: string, md: string, reused: boolean): number[] => {
-    if (store.progress(name)?.approval?.hash === specHash(md)) return [];
+  const postCarriedP1s = (store: Store, name: string, md: string, reused: boolean) => {
+    if (!reused || store.progress(name)?.approval?.hash === specHash(md)) return;
     const p1 = recordedFindings(store, name, md).filter(({ f }) => f.priority === "P1");
-    if (p1.length && reused) post([`**The spec review of this text raised ${p1.length} P1 finding${p1.length === 1 ? "" : "s"}** — not blocking, but the build would carry ${p1.length === 1 ? "it" : "them"}:`, "", ...p1.map(({ id, f }) => `- ${findingLine(f, id)}`)].join("\n"));
-    return p1.map(({ id }) => id);
+    if (p1.length) post([`**The build carries ${p1.length} P1 finding${p1.length === 1 ? "" : "s"} from the spec review** — not blocking; the code review judges the result:`, "", ...p1.map(({ id, f }) => `- ${findingLine(f, id)}`)].join("\n"));
   };
 
   const startBuild = async (
@@ -307,36 +291,25 @@ export function registerBuildStart(pi: ExtensionAPI) {
 
     const reviewsBefore = specReviewCount(store, name);
     if ((await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "build"))) !== "pass") return;
-    const p1Ids = openP1s(store, name, md, specReviewCount(store, name) === reviewsBefore);
-    const p1s = p1Ids.length;
+    postCarriedP1s(store, name, md, specReviewCount(store, name) === reviewsBefore);
     const buildModel = cfg.buildModel ? findModel(ctx, cfg.buildModel) : undefined;
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
     const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";
-    // The build-start screen: everything that could make you hold the build (an unbuilt dependency, a red
-    // baseline, the spec review's P1s, a full session or a model switch), shown once, with one choice.
+    // The build-start screen: what could make you hold the build (an unbuilt dependency, a red baseline, another
+    // spec's uncommitted files, a full session or a model switch), shown once, with one choice.
     const usage = ctx.getContextUsage()?.percent;
     const placing = !fresh && !o.decided && ((usage != null && usage > cfg.freshAbove) || switching);
     const why = !placing ? "" : switching ? `building on ${cfg.buildModel} here sends this whole conversation to it again, uncached` : `this session is ${Math.round(usage!)}% full`;
-    const concerns = [
-      ...checked.concerns,
-      ...(p1s ? [`the spec review raised ${p1s} P1 finding${p1s === 1 ? "" : "s"} (number${p1s === 1 ? "" : "s"} ${p1Ids.join(", ")}, shown above): the build would carry ${p1s === 1 ? "it" : "them"} — build anyway when ${p1s === 1 ? "it is" : "they are"} about proofs, tests or docs; repair first when ${p1s === 1 ? "it changes" : "one changes"} behaviour or a guard`] : []),
-    ];
+    const concerns = checked.concerns;
     if ((placing || concerns.length) && ctx.hasUI) {
       const FRESH = "Build in a fresh session, from the spec (recommended)";
       const HERE = "Build here anyway";
       const GO = "Build anyway";
-      // One lap on exactly these P1s: a whole hardening run spends full fresh reviews that always find more.
-      const repairCommand = `/${cmd("spec-fix")} ${name} ${p1Ids.join(" ")}`;
-      const REPAIR = `Repair first: ${repairCommand} — one lap on the P1${p1s === 1 ? "" : "s"}`;
       const STOP = "Stop here";
       const build = placing ? (canOpenSession ? [FRESH, HERE] : [HERE, FRESH]) : [GO];
       const title = [`Build ${name}${why ? `: ${why}` : "?"}`, ...concerns.map((c) => `- ⚠ ${c}`)].join("\n");
-      const choice = await choose(ctx, store, title, [...build, ...(p1s ? [REPAIR] : []), STOP], build[0], notes);
+      const choice = await choose(ctx, store, title, [...build, STOP], build[0], notes);
       if (!choice || choice === STOP) return;
-      if (choice === REPAIR) {
-        ctx.ui.setEditorText(repairCommand);
-        return ctx.ui.notify(`Press Enter for one repair lap on P1 ${p1Ids.join(", ")}; then /${cmd("build")} ${name} reviews the repaired text before T1.`, "info");
-      }
       if (placing) fresh = choice === FRESH;
     } else if (!fresh && !o.decided && switching) fresh = true;
     // Without a UI the build-start screen is never shown: everything it would have listed goes on the record the
@@ -567,14 +540,6 @@ export function registerBuildStart(pi: ExtensionAPI) {
 
   pi.on("agent_settled", async (_e, ctx) => {
     if (await offerPendingBuild(ctx)) return;
-    // A repair lap's next step is driveRepair's, in the command that started the run — except when a build
-    // took the plan meanwhile: then the lap is dropped here and the build settles as a build does.
-    const fixStore = new Store(ctx.cwd);
-    const owned = fixStore.fixOfSession(ctx.sessionManager.getSessionFile());
-    if (owned?.p.fix) {
-      if (!unfinishedPhase(owned.p.phase)) return;
-      await advanceSpecFix(ctx, fixStore, owned.name, owned.p);
-    }
     const { store, progress: p } = specOfSession(ctx);
     if (p?.phase === "building") pauseBuild(ctx, store, p, "the agent stopped without finishing its task (you stopped it, or it stopped again after a reminder).", "build.paused", "stopped");
     // bash can write where edit and write are blocked: say what changed as soon as the turn ends,

@@ -72,7 +72,7 @@ export function registerMisc(pi: ExtensionAPI) {
         const s = loadSpec(store, n)?.spec;
         const where = p?.session && n !== here ? ` · session: pi --session ${sessionIdOf(p.session)}` : "";
         const next = whereNext(store, n);
-        const head = `${n === here ? "▸ " : ""}${n} — ${next.state}${where}${s ? ` · verification ${s.gate}${s.newTests ? "" : " · no new tests"}${s.dependsOn ? ` · depends on ${s.dependsOn}` : ""}` : " · ⚠ doesn't parse"}${p?.pause ? ` · paused: ${p.pause}` : ""}${p?.fix ? ` · repair lap ${p.fix.laps} open (${p.fix.driver ? "hardening" : "one lap"})` : ""}`;
+        const head = `${n === here ? "▸ " : ""}${n} — ${next.state}${where}${s ? ` · verification ${s.gate}${s.newTests ? "" : " · no new tests"}${s.dependsOn ? ` · depends on ${s.dependsOn}` : ""}` : " · ⚠ doesn't parse"}${p?.pause ? ` · paused: ${p.pause}` : ""}`;
         return [head, `    next: ${next.next}`, ...(p && p.phase !== "written" ? p.tasks.map((t) => `    ${taskLine(t)}`) : [])];
       });
       ctx.ui.notify([...lines, ...config, `help: /${cmd("help")}`].join("\n"), problems.length ? "warning" : "info");

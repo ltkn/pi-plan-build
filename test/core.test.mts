@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { briefOf, diligent, hardenToClaimCheck, setup, SPEC, specRel, taskOf, until, written } from "./harness.mts";
+import { briefOf, diligent, setup, SPEC, specRel, taskOf, until, written } from "./harness.mts";
 
 test("skippedLargeFiles: oversized untracked files are reported because snapshots can't see them", async () => {
   const t = setup();
@@ -38,25 +38,6 @@ test("a finding title capped mid-sentence renders on one line, with the cut disc
   assert.match(body!, /…\[truncated \d+ chars\]$/, "the cut is disclosed inline at the end of the title line");
   assert.doesNotMatch(body!, /rest that must be cut/);
   assert.equal(fixLine, "   Fix: re-run the decode and count");
-});
-
-test("the digest prints the check's findings in full: no 400-char cut, bulleted, with what pb left standing", async () => {
-  const t = setup({ verify: "true", specFix: { maxLaps: 1, maxReviews: 1 } });
-  await written(t);
-  await hardenToClaimCheck(t, "huge");
-  const digest = t.posts.at(-1)!;
-  assert.match(digest, /the whole claim in one breath and more words and more words and more words/);
-  assert.doesNotMatch(digest, /\[truncated \d+ chars\]/, "a realistic claim is printed in full");
-  assert.match(digest, /- \[P1\]/, "claims are bulleted");
-});
-
-test("a field pb had to clip names the run log that holds the uncut text", async () => {
-  const t = setup({ verify: "true", specFix: { maxLaps: 1, maxReviews: 1 } });
-  await written(t);
-  await hardenToClaimCheck(t, "clipped");
-  const digest = t.posts.at(-1)!;
-  assert.match(digest, /Some fields above are clipped by pb's length bound/);
-  assert.match(digest, /pi --session \.pi\/pb\/specs\/order-cancellation\/sessions\/spec-check\//, "the pointer names the run log");
 });
 
 test("stale sessions read as gone without throwing, live ones as present", async () => {
@@ -409,7 +390,7 @@ const patchProgress = (repo: string, name: string, patch: Record<string, unknown
 };
 
 test("archive: --force archives what the spec owes without asking, skips the map run, records why it left and says what is left uncommitted", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", mapOnArchive: true });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
@@ -520,7 +501,7 @@ test("archive: --force archives what the spec owes without asking, skips the map
   assert.ok(!w.posts.at(-1)!.includes("/pb:commit order-cancellation"), "a build that didn't finish is not offered a commit");
 
   // The plain path is unchanged: the cartographer still runs, and its own file counts as left behind.
-  const v = setup({ verify: "true" });
+  const v = setup({ verify: "true", mapOnArchive: true });
   fs.mkdirSync(path.join(v.repo, "src/auth"), { recursive: true });
   fs.mkdirSync(path.join(v.repo, "src/main/auth"), { recursive: true });
   fs.writeFileSync(path.join(v.repo, "src/order.ts"), "export {}\n");
@@ -656,7 +637,7 @@ test("archive: the leftover list reaches a sibling repository the way /pb:commit
 });
 
 test("map: /pb:archive updates it by itself: paths that don't resolve go back once to be fixed, then it's written, and undo swaps back", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", mapOnArchive: true });
   fs.mkdirSync(path.join(t.repo, "src/main/auth"), { recursive: true });
   fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
   fs.writeFileSync(path.join(t.repo, "src/main/auth/Login.java"), "class Login {}\n");
@@ -690,7 +671,7 @@ test("map: /pb:archive updates it by itself: paths that don't resolve go back on
 });
 
 test("map: /pb:archive reads only the feature's change against the map, marking the lines that cite a changed file; /pb:map audits the whole map", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", mapOnArchive: true });
   fs.mkdirSync(path.join(t.repo, "src/auth"), { recursive: true });
   fs.mkdirSync(path.join(t.repo, "src/orders"), { recursive: true });
   fs.writeFileSync(path.join(t.repo, "src/order.ts"), "export {}\n");
@@ -908,7 +889,7 @@ test("map: an unbalanced map section is refused", async () => {
   const doubleEnd = `# Shop\n\n<!-- pb:map -->\n## Project map\n\n- \`README\`: readme\n<!-- /pb:map -->\n<!-- /pb:map -->${tail}`;
   const noEnd = `# Shop\n\n<!-- pb:map -->\n## Project map\n\n- \`README\`: readme${tail}`;
 
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", mapOnArchive: true });
   process.chdir(t.repo);
   fs.writeFileSync(path.join(t.repo, "AGENTS.md"), doubleEnd);
   fs.writeFileSync(path.join(t.repo, ".pi/pb/map-previous.md"), "### Old\n- older\n");
@@ -943,7 +924,7 @@ test("map: an unbalanced map section is refused", async () => {
   assert.equal(t.read(".pi/pb/map-previous.md"), backup);
 
   // The archive step refuses a start without its end the same way, and still archives the spec.
-  const u = setup({ verify: "true" });
+  const u = setup({ verify: "true", mapOnArchive: true });
   await written(u);
   u.agent.script = diligent;
   await u.run("build");
@@ -1402,9 +1383,9 @@ test("what's next: one derivation names every state a spec can be in and the com
   const { specHash } = await import("../extensions/pb/spec.ts");
   store.event(name, { type: "spec-review", verdict: "pass", hash: specHash(md), reported: [{ priority: "P2", title: "b" }, { priority: "P1", title: "a" }] });
   assert.equal(at({ phase: "written" }), "spec reviewed: 1 P1 | /pb:build order-cancellation");
-  assert.match(whereNext(store, name).next, /^\/pb:spec-fix order-cancellation 2 repairs the P1 in one lap, or \/pb:build order-cancellation builds on it$/, "the P1's own number, one lap — not a whole hardening run");
+  assert.equal(whereNext(store, name).next, "/pb:build order-cancellation builds and carries it; to settle one first, say so to the planner (/pb:plan order-cancellation)", "a P1 is information: building is next");
   store.event(name, { type: "spec-review", verdict: "block", hash: specHash(md), reported: [{ priority: "P0", title: "c" }] });
-  assert.equal(at({ phase: "written" }), "spec review found a P0 | /pb:spec-fix order-cancellation");
+  assert.equal(at({ phase: "written" }), "spec review found a P0 | /pb:plan order-cancellation", "a P0 is settled with the planner");
   fs.writeFileSync(path.join(t.repo, ".pi/pb/specs", name, "spec.md"), md.replace("Status: ready", "Status: planning").replace(/^# Order cancellation\n/, "# Order cancellation\nStatus: planning\n"));
   assert.match(at({ phase: "written" }), /^planning \| \/pb:spec order-cancellation$/, "an edited text has no review: the planning status decides");
 });
@@ -1446,7 +1427,7 @@ test("what's next: always on screen — the footer, the title, situational help 
   assert.ok(undo.some((i: any) => i.value === "T1" && i.description), "checkpoints complete with what they undo");
 });
 
-test("build-start screen: an unbuilt dependency, the review's P1 and a full session are one screen with one choice", async () => {
+test("build-start screen: an unbuilt dependency and a full session are one screen with one choice, and the review's P1 is not a question", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   const { Store } = await import("../extensions/pb/store.ts");
@@ -1465,9 +1446,9 @@ test("build-start screen: an unbuilt dependency, the review's P1 and a full sess
   assert.equal(screens.length, 1, "one screen, not a dialog per concern");
   assert.equal(
     screens[0],
-    "Build order-cancellation: this session is 80% full\n- ⚠ order-cancellation depends on base-feature, which isn't built yet\n- ⚠ the spec review raised 1 P1 finding (number 1, shown above): the build would carry it — build anyway when it is about proofs, tests or docs; repair first when it changes behaviour or a guard",
+    "Build order-cancellation: this session is 80% full\n- ⚠ order-cancellation depends on base-feature, which isn't built yet",
   );
-  assert.deepEqual(t.selectOptions.at(-1), ["Build in a fresh session, from the spec (recommended)", "Build here anyway", "Repair first: /pb:spec-fix order-cancellation 1 — one lap on the P1", "Stop here"]);
+  assert.deepEqual(t.selectOptions.at(-1), ["Build in a fresh session, from the spec (recommended)", "Build here anyway", "Stop here"], "a P1 is information the build carries, never a choice");
   assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved");
 });
 
@@ -1489,7 +1470,7 @@ test("build-start screen: without a UI, every concern it would have listed is in
   }
   const done = t.posts.find((x) => /Build complete/.test(x))!;
   assert.match(done, /Decided without you[^\n]*:\n[\s\S]*- built although order-cancellation depends on base-feature, which isn't built yet \(no one to ask\)/);
-  assert.match(done, /- built although the spec review raised 1 P1 finding \(number 1, shown above\): the build would carry it — build anyway when it is about proofs, tests or docs; repair first when it changes behaviour or a guard \(no one to ask\)/);
+  assert.doesNotMatch(done, /built although the spec review raised/, "a P1 is not a decision, so nothing was decided without you");
   assert.match(done, /- built here although this session is 80% full \(no one to ask\)/);
 });
 
@@ -1724,7 +1705,7 @@ test("map: new lines are checked against the code before they're written; a cont
   }
 });
 
-test("stats: a lap's own session is counted — repair laps in the spec phase, /pb:fix laps as their own cost", async () => {
+test("stats: a /pb:fix lap's own session is counted as its own cost, never as the build's", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   const { Store } = await import("../extensions/pb/store.ts");
@@ -1739,19 +1720,14 @@ test("stats: a lap's own session is counted — repair laps in the spec phase, /
   store.saveFixSession(session, { spec: "order-cancellation", findings: [{ priority: "P1", title: "x" }] });
   await fire(0.5);
   store.clearFixSession(session);
-  // A repair lap's session: its turns are the spec phase's.
-  const p = store.progress("order-cancellation")!;
-  store.saveProgress({ ...p, fix: { session, driver: false, stage: "lap", startedAt: Date.now(), hash: "h", work: "findings" } as any });
-  await fire(0.25);
   const laps = t.events("order-cancellation").filter((e: any) => e.type === "lap-usage");
-  assert.deepEqual(laps.map((e: any) => [e.phase, e.cost]), [["fix", 0.5], ["spec-fix", 0.25]]);
+  assert.deepEqual(laps.map((e: any) => [e.phase, e.cost]), [["fix", 0.5]]);
   assert.ok(!t.events("order-cancellation").some((e: any) => e.type === "usage"), "never counted as the build's");
   await t.run("stats", "order-cancellation");
-  assert.match(t.posts.at(-1)!, /Spec .*\$0\.25/);
   assert.match(t.posts.at(-1)!, /Fix laps +in 1\.0k · out 200 · \$0\.50/);
   await t.run("stats", "compare");
   const row = t.posts.at(-1)!.split("\n").find((l) => l.startsWith("order-cancellation"))!;
-  assert.match(row, /\$0\.25 .*\$0\.50/);
+  assert.match(row, /\$0\.50/);
 });
 
 test("approach: it reads the map like every planning prompt, area notes included", async () => {

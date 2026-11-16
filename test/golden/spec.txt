@@ -1,4 +1,4 @@
-words: 2126
+words: 2108
 
 [pb:spec]
 
@@ -43,7 +43,7 @@ Add "## Out of scope" only when it helps. When you include a section that does n
 
 - Evidence: A claim is load-bearing when the build would act differently if it were false: a number or bound, what this repository, its build, runtime or configuration does, or how an external service behaves. Each one carries its evidence beside it: a path:line that says it, a probe (probe: <what you ran>; conclusion: <what it showed>), or, for a value this change defines (a new status, error, event or stored value), the Acceptance line that pins it, whose red test is the proof. A claim about existing code or a service needs the path:line or the probe: a test written from the same belief passes even when the belief is wrong. What nothing settles yet is tagged `assumed: <what would falsify it>` right after it. Anything else needs no evidence.
 - Point to code instead of copying it; state each fact once; leave out the discussion's history. A reader should start where we are, without re-analysing, and without being buried.
-- Write for the builder, not to win an argument: Findings hold only facts that change what gets built; Decisions only the choices a competent builder could plausibly get wrong, each in one or two sentences with its rejected alternative in one line. A claim nothing in the build depends on is left out, not cited. Keep the spec well under the size of the change it describes: every task, reviewer and repair lap reads all of it.
+- Write for the builder, not to win an argument: Findings hold only facts that change what gets built; Decisions only the choices a competent builder could plausibly get wrong, each in one or two sentences with its rejected alternative in one line. A claim nothing in the build depends on is left out, not cited. Keep the spec well under the size of the change it describes: every task and reviewer reads all of it.
 
 - One spec per change you would merge on its own; if the discussion covers several, say so and write one each.
 - Refactoring that the standards call for (outdated code in the way) comes first, as tasks titled "(refactor) …" that keep behaviour; a large one is a spec of its own that this one depends on.
@@ -67,5 +67,5 @@ Then tell me where it is. End your reply with this block, verbatim:
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
 - Review it before building: `/pb:spec-review` — the same fresh reviewer, nothing built, and `/pb:build` then starts at T1 without re-reviewing.
-- The review found things? P2–P3, and anything about proofs, test names or docs: build with them. One or two P1s: `/pb:spec-fix <name> <numbers>`, one lap on just those. A P0, or a P1 that questions the design or a security guard: `/pb:spec-harden` — laps and fresh reviews until its budget is spent.
+- The review found things? Most need nothing: the build carries them and the code review judges the result. To settle one first, say so to the planner (`/pb:plan <spec>`); a P0 holds the build until then.
 - Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — every spec is reviewed first: a P0 stops it before the first task · more: `/pb:help spec`
