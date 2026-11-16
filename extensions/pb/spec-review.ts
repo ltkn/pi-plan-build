@@ -71,7 +71,8 @@ export const toFindings = (raw: unknown[] | undefined): Finding[] =>
     }];
   });
 
-export const reviewDoor = (name: string, entry: "build" | "standalone" | "harden"): ReviewDoor => {
+/** `lapFollows` (harden only): whether the run has a repair lap left for what this review finds. */
+export const reviewDoor = (name: string, entry: "build" | "standalone" | "harden", lapFollows = true): ReviewDoor => {
   const fix = `fix the spec with \`/${cmd("spec")} ${name}\``;
   if (entry === "build") {
     return {
@@ -95,12 +96,14 @@ export const reviewDoor = (name: string, entry: "build" | "standalone" | "harden
       retryCmd: `/${cmd("spec-harden")} ${name}`,
       blockNext: `${fix}, then \`/${cmd("spec-harden")} ${name}\`.`,
       blockEvidence: "a P0 is repaired before this spec is built",
-      passNext: "pb works through these in the next repair lap; the confirming review is its last act, then it is yours.",
+      passNext: lapFollows
+        ? "pb works through these in the next repair lap; the confirming review is its last act, then it is yours."
+        : "no repair lap is left in this run: the findings below are yours, and the digest that follows lists the ones still open.",
       passEvidence: "the recorded verdict covers this text",
-      advisoryEvidence: "the recorded verdict covers this text; the repair lap takes what it can settle",
-      blockNotify: "❌ Spec review found a P0: pb works through it in the repair lap with the rest.",
+      advisoryEvidence: lapFollows ? "the recorded verdict covers this text; the repair lap takes what it can settle" : "the recorded verdict covers this text; no repair lap is left for these",
+      blockNotify: lapFollows ? "❌ Spec review found a P0: pb works through it in the repair lap with the rest." : "❌ Spec review found a P0 and no repair lap is left: it is yours to settle before a build.",
       noReportNotify: `❌ Spec review did not report; nothing was recorded. Run \`/${cmd("spec-harden")} ${name}\` again, or point specReviewer.model at a model that reports.`,
-      advisoryNotify: () => "✅ Spec review passed; pb takes the findings into the next repair lap.",
+      advisoryNotify: () => (lapFollows ? "✅ Spec review passed; pb takes the findings into the next repair lap." : "✅ Spec review passed; no repair lap is left, so its findings are yours (listed above)."),
       repostStoredPass: true,
     };
   }

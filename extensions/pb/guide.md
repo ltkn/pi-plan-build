@@ -713,7 +713,8 @@ wrote before it reports. Its claims get a lap only while one stays free for the
 confirming review's findings, which matter more; claims no lap took are listed
 for you. A lap that changes nothing ends the run. That is the stop rule, not "no findings" — a fresh full pass never runs
 out of subjects. Every claim left without evidence is listed for you, with what
-settling it would take.
+settling it would take, and so is every P0–P2 finding the last review left on the
+final text when no lap was left to take it, numbered for `/pb:spec-fix`.
 
 Each lap runs in a **fresh session of its own** (`spec-fix: <spec> · lap N`),
 seeded with the spec and its worklist rather than the whole planning discussion:

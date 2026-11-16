@@ -276,12 +276,18 @@ const fixDigest = (
   const clipped = claims.some((f) => /…\[truncated \d+ chars\]/.test(f.title ?? "") || (f.fix !== undefined && /…\[truncated \d+ chars\]/.test(f.fix)));
   const verdict = verdictOn(store, name, md);
   const blocked = verdict === "block";
+  // What the last verdict on this exact text still holds against it: the run's budget can end before a lap
+  // takes them, and a digest that left them out would read as a clean spec.
+  const open = driver ? repairable(recordedFindings(store, name, md)) : [];
+  const openNumbers = open.map((x) => x.id).join(" ");
   const next = stoppedWith
     ? stoppedWith
     : driver
       ? blocked
         ? `\`/${cmd("spec-fix")} ${name}\` — the confirming review still blocks on a P0${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
-        : verdict
+        : open.length
+          ? `\`/${cmd("spec-fix")} ${name} ${openNumbers}\` repairs the findings left open below, or \`/${cmd("build")} ${name}\` builds with them — the review's verdict covers this text${claims.length ? `; the un-evidenced claims are yours to settle or tag \`assumed\`` : ""}.`
+          : verdict
           ? `\`/${cmd("build")} ${name}\` — the review's verdict covers this text${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
           : `\`/${cmd("build")} ${name}\` — it reviews this text before T1${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
       : `\`/${cmd("spec-review")} ${name}\` — the text changed, so the verdict on the old text does not cover it.`;
@@ -289,9 +295,10 @@ const fixDigest = (
   const hardenStopped = driver && (blocked || stopped);
   return [
     phaseHeader(
-      driver ? (hardenStopped ? "\u26a0" : "\u2705") : "\ud83d\udd27",
+      driver ? (hardenStopped || open.length ? "\u26a0" : "\u2705") : "\ud83d\udd27",
       driver ? (hardenStopped ? "Spec harden stopped" : "Spec hardened") : "Spec fix",
       name,
+      open.length ? `${open.length} finding${open.length === 1 ? "" : "s"} left open` : "",
       `${fix.applied} applied`,
       `${fix.rebutted} rebutted`,
       fix.assumed ? `${fix.assumed} assumed` : "",
@@ -314,6 +321,13 @@ const fixDigest = (
             : "it decided everything it was shown",
     ),
     ...(clipped && session ? ["", `Some fields above are clipped by pb's length bound; the uncut text is in the run log: \`pi --session ${path.relative(path.join(store.root, "..", ".."), session)}\`.`] : []),
+    ...(open.length ? [
+      "",
+      "**Left open by the last review**",
+      `What the review of this exact text found and no lap was left to take (P3 polish aside): settle them with \`/${cmd("spec-fix")} ${name} <numbers>\`, or build with them as known risks.`,
+      "",
+      ...open.map(({ id, f }) => `- ${findingLine(f, id)}`),
+    ] : []),
     ...(claims.length ? [
       "",
       "**Claims with nothing behind them**",
@@ -435,7 +449,7 @@ export const advanceSpecFix = async (ctx: ExtensionContext, store: Store, name: 
   if (reviewsLeft) {
     fix.reviews += 1;
     store.saveProgress(p);
-    const reviewed = await ensureSpecReviewed(ctx, store, name, loaded.md, reviewDoor(name, "harden"));
+    const reviewed = await ensureSpecReviewed(ctx, store, name, loaded.md, reviewDoor(name, "harden", fix.laps < maxLaps));
     if (sessionGone(ctx) || reviewed === "gone") return true;
     if (reviewed !== "pass" && reviewed !== "block") {
       // No verdict on the text: never finish by claiming one covers it. The review door has already
@@ -463,7 +477,8 @@ export const advanceSpecFix = async (ctx: ExtensionContext, store: Store, name: 
   p.fix = undefined;
   store.saveProgress(p);
   post(fixDigest(store, name, fix, claims, md, true, undefined, checkSession));
-  if (cfg.notify) notifyDesktop(blocked ? "pb: spec harden stopped" : "pb: spec hardened", `${name}: ${fix.laps} repair laps, ${fix.applied} applied, ${claims.length} claims left for you`);
+  const open = repairable(recordedFindings(store, name, md)).length;
+  if (cfg.notify) notifyDesktop(blocked ? "pb: spec harden stopped" : "pb: spec hardened", `${name}: ${fix.laps} repair laps, ${fix.applied} applied, ${open ? `${open} finding${open === 1 ? "" : "s"} and ` : ""}${claims.length} claims left for you`);
   return true;
 };
 
@@ -722,7 +737,7 @@ export function registerRepair(pi: ExtensionAPI) {
           return ctx.ui.notify(`No review budget left to find the work: run /${cmd("spec-review")} ${name} first, then /${cmd("spec-harden")} ${name}.`, "info");
         }
         reviews += 1;
-        const reviewed = await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "harden"));
+        const reviewed = await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "harden", (cfg.specFix.maxLaps ?? 3) > 0));
         if (sessionGone(ctx) || reviewed === "gone" || reviewed === "changed" || reviewed === "error") return;
         const after = store.readSpec(name);
         if (after === undefined || after !== md) {

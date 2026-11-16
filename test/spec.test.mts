@@ -708,6 +708,29 @@ test("spec-harden: plan, review, lap, one claim check, confirming review, last l
   assert.equal(t.progress("order-cancellation").phase, "written", "hardening never starts a build");
 });
 
+test("spec-harden: findings the last review leaves after the lap budget is spent are listed in the digest, not hidden behind a pass", async () => {
+  const t = setup({ verify: "true", specFix: { maxLaps: 1, maxReviews: 2 } });
+  await written(t);
+  t.selects.push("Yes, go on");
+  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+  process.env.MOCK_SPEC_REVIEW = "advisory"; // every pass, the confirming one too, reports a P1 and a P2
+  try {
+    await t.run("spec-harden", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+  assert.equal(t.instructions.filter((i) => i.includes("[pb:spec-fix]")).length, 1, "the one lap the budget allows");
+  const reviews = t.posts.filter((p) => /^\*\*✅ Spec review — order-cancellation\*\*/.test(p));
+  assert.equal(reviews.length, 2);
+  assert.match(reviews[0], /pb works through these in the next repair lap/);
+  assert.match(reviews[1], /no repair lap is left in this run/, "the confirming review never promises a lap the run does not have");
+  assert.doesNotMatch(reviews[1], /next repair lap/);
+  const digest = t.posts.at(-1)!;
+  assert.match(digest, /\*\*⚠ Spec hardened — order-cancellation\*\* · 2 findings left open/);
+  assert.match(digest, /\*\*Next:\*\* `\/pb:spec-fix order-cancellation 1 2` repairs the findings left open below, or `\/pb:build order-cancellation` builds with them/);
+  assert.match(digest, /\*\*Left open by the last review\*\*[\s\S]*- 1\. \[P1\] src\/order\.ts:42 — Context — the transition has no guard[\s\S]*- 2\. \[P2\] spec\.md:12 — Contracts — unmeasured window/);
+});
+
 test("spec-harden: a clean pass on record is named as a pass, not 'no verdict'", async () => {
   const t = setup({ verify: "true" });
   await written(t);
