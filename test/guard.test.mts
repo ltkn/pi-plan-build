@@ -52,6 +52,12 @@ test("probe: commands that write to a system outside this machine are refused; r
     "python3 /tmp/probe.py",
     "git log -3",
     "npm test",
+    // A download then local work: another command's flags are not the request's body, and a URL is not a client.
+    "curl -sL -o static.zip https://example.org/feed && unzip -o -q static.zip -d static && head -2 static/stops.txt",
+    "curl -s https://example.org/x.csv | cut -d, -f1",
+    "echo https://example.org; date -d yesterday",
+    "wget -q -O out.zip https://example.org/x.zip && unzip -d out out.zip",
+    "curl -fsSL https://example.org/install.sh -o /tmp/install.sh",
   ]) assert.equal(remoteWriteRefusal(ok), undefined, ok);
   for (const [bad, why] of [
     ["psql -c \"delete from orders where id = 1\"", "a write through a database client"],
@@ -64,6 +70,16 @@ test("probe: commands that write to a system outside this machine are refused; r
     ["aws s3 rm s3://bucket/key", "a cloud write"],
     ["curl -X POST https://api.example.com/orders", "an HTTP request that changes something"],
     ["curl -d '{}' https://api.example.com/orders", "an HTTP request that changes something"],
+    // Inside a chain, inside a substitution, behind a quoted separator, or with combined flags: still the request's own.
+    ["cd /tmp && curl --data-binary @order.json https://api.example.com/orders", "an HTTP request that changes something"],
+    ["curl -H 'Accept: a; q=1' -d @f https://api.example.com/orders", "an HTTP request that changes something"],
+    ['echo "$(curl -d a https://api.example.com/orders)"', "an HTTP request that changes something"],
+    ["curl -sd a=1 https://api.example.com/orders", "an HTTP request that changes something"],
+    ["curl -sXPOST https://api.example.com/orders", "an HTTP request that changes something"],
+    ["x=$(curl --json '{}' https://api.example.com/orders)", "an HTTP request that changes something"],
+    ["/usr/bin/curl -F f=@a https://api.example.com/upload", "an HTTP request that changes something"],
+    ["http POST api.example.com/orders a=1", "an HTTP request that changes something"],
+    ["wget --post-data a=1 https://api.example.com/orders", "an HTTP request that changes something"],
     ["ssh prod-db 'ls'", "a remote shell or copy"],
     ["git push origin main", "a push"],
   ] as const)

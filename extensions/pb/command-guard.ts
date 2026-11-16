@@ -80,21 +80,58 @@ export function explorerRefusal(command: string): string | undefined {
 
 /* ------------------------------------------------ a probe's remote writes ------------------------------------------------ */
 
-const RULES: { name: string; test: RegExp }[] = [
+/**
+ * The simple commands a shell line runs, split at `&&`, `||`, `;`, `|`, `&`, new lines, parentheses and backticks
+ * outside quotes: so one command's flags are never read as another's (`curl … && unzip -d dir`).
+ */
+function simpleCommands(command: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  let quote: string | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote) {
+      if (c === "\\" && quote === '"' && i + 1 < command.length) {
+        current += c + command[++i];
+        continue;
+      }
+      if (c === quote) quote = undefined;
+      current += c;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      current += c;
+    } else if (c === "\\" && i + 1 < command.length) {
+      current += c + command[++i];
+    } else if (";|&\n()`".includes(c)) {
+      if (current.trim()) out.push(current.trim());
+      current = "";
+    } else current += c;
+  }
+  if (current.trim()) out.push(current.trim());
+  return out;
+}
+
+/**
+ * An HTTP client run with a method or a body that changes something. Judged per simple command, with the client as a
+ * word of its own: a URL's `https:` is not a client, and another command's `-d` (`unzip -d`, `cut -d,`) is not a body.
+ */
+const HTTP_WRITE = /(?:^|[\s(`"'=])(?:[^\s(`"'=]*\/)?(?:curl|wget|xh|http|https)(?=\s|$)[\s\S]*?(?:\s-[A-Za-z]*X\s*(?:POST|PUT|PATCH|DELETE)\b|\s--request[=\s]+(?:POST|PUT|PATCH|DELETE)\b|\s(?:-[A-Za-z]*[dFT]|--data\S*|--json|--form\S*|--upload-file|--post-data|--post-file)(?=[\s=,'"@]|$)|\s--method[=\s]+(?:POST|PUT|PATCH|DELETE)\b|\s(?:POST|PUT|PATCH|DELETE)(?=\s|$))/i;
+
+const RULES: { name: string; test: RegExp | ((command: string) => boolean) }[] = [
   { name: "a write through a database client", test: /\b(psql|mysql|mariadb|mongo|mongosh|redis-cli|cqlsh|clickhouse-client|sqlcmd)\b[\s\S]*\b(insert|update|delete|drop|truncate|alter|grant|revoke|create|merge|upsert|replace|copy|flushall|flushdb|del|set)\b/i },
   { name: "a script fed to a database client", test: /\b(psql|mysql|mariadb|mongosh|sqlcmd)\b[\s\S]*(\s-f\s|\s--file[=\s]|<)/i },
   { name: "a change to a Kubernetes cluster", test: /\bkubectl\s+(?:\S+\s+)*?(delete|apply|create|replace|patch|edit|scale|rollout|exec|cp|drain|cordon|uncordon|taint|label|annotate|set|run|expose|autoscale)\b/ },
   { name: "a Helm release change", test: /\bhelm\s+(install|upgrade|uninstall|delete|rollback)\b/ },
   { name: "an infrastructure change", test: /\b(terraform|tofu|pulumi)\s+(apply|destroy|import|taint|up|state\s+(rm|mv|push))\b/ },
   { name: "a cloud write", test: /\b(aws|gcloud|az)\b[\s\S]*\b(delete|remove|rm|put|create|update|modify|terminate|deploy|invoke|run-instances|cp|mv|sync|set)\b/ },
-  { name: "an HTTP request that changes something", test: /\b(curl|wget|http|https|xh)\b[\s\S]*(\s-X\s*(POST|PUT|PATCH|DELETE)\b|--request[=\s]+(POST|PUT|PATCH|DELETE)\b|\s(-d|--data\S*|-F|--form|-T|--upload-file|--post-data|--post-file|--method[=\s]+(POST|PUT|PATCH|DELETE))\b|\s(POST|PUT|PATCH|DELETE)\s)/i },
+  { name: "an HTTP request that changes something", test: (command) => simpleCommands(command).some((c) => HTTP_WRITE.test(c)) },
   { name: "a remote shell or copy", test: /(^|[\s;&|(])(ssh|scp|sftp|rsync)\s/ },
   { name: "a push", test: /\bgit\s+push\b|\bdocker\s+push\b|\bnpm\s+publish\b|\bgh\s+(pr\s+merge|release\s+create|repo\s+delete)\b/ },
 ];
 
 /** Why a probe may not run this command (it would write to a system outside this machine), or undefined. */
 export function remoteWriteRefusal(command: string): string | undefined {
-  return RULES.find((r) => r.test.test(command))?.name;
+  return RULES.find((r) => (typeof r.test === "function" ? r.test(command) : r.test.test(command)))?.name;
 }
 
 /* ------------------------------------------------ a probe's environment ------------------------------------------------ */
