@@ -1,4 +1,4 @@
-words: 1917
+words: 1942
 
 [pb:spec]
 
@@ -66,5 +66,5 @@ Then tell me where it is. End your reply with this block, verbatim:
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
 - Review it before building: `/pb:spec-review` — the same fresh reviewer, nothing built, and `/pb:build` then starts at T1 without re-reviewing.
-- The review found things? `/pb:spec-fix` — one lap over its findings on your say-so — or `/pb:spec-harden` — laps, one claim check and one confirming review, unattended.
+- The review found things? P2–P3, and anything about proofs, test names or docs: build with them. One or two P1s: `/pb:spec-fix <name> <numbers>`, one lap on just those. A P0, or a P1 that questions the design or a security guard: `/pb:spec-harden` — laps and fresh reviews until its budget is spent.
 - Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — every spec is reviewed first: a P0 stops it before the first task · more: `/pb:help spec`

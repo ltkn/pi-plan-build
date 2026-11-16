@@ -1139,8 +1139,9 @@ test("what's next: one derivation names every state a spec can be in and the com
   // A spec review on this exact text decides what "written" means.
   const md = store.readSpec(name)!;
   const { specHash } = await import("../extensions/pb/spec.ts");
-  store.event(name, { type: "spec-review", verdict: "pass", hash: specHash(md), reported: [{ priority: "P1", title: "a" }, { priority: "P2", title: "b" }] });
+  store.event(name, { type: "spec-review", verdict: "pass", hash: specHash(md), reported: [{ priority: "P2", title: "b" }, { priority: "P1", title: "a" }] });
   assert.equal(at({ phase: "written" }), "spec reviewed: 1 P1 | /pb:build order-cancellation");
+  assert.match(whereNext(store, name).next, /^\/pb:spec-fix order-cancellation 2 repairs the P1 in one lap, or \/pb:build order-cancellation builds on it$/, "the P1's own number, one lap — not a whole hardening run");
   store.event(name, { type: "spec-review", verdict: "block", hash: specHash(md), reported: [{ priority: "P0", title: "c" }] });
   assert.equal(at({ phase: "written" }), "spec review found a P0 | /pb:spec-fix order-cancellation");
   fs.writeFileSync(path.join(t.repo, ".pi/pb/specs", name, "spec.md"), md.replace("Status: ready", "Status: planning").replace(/^# Order cancellation\n/, "# Order cancellation\nStatus: planning\n"));
@@ -1203,9 +1204,9 @@ test("build-start screen: an unbuilt dependency, the review's P1 and a full sess
   assert.equal(screens.length, 1, "one screen, not a dialog per concern");
   assert.equal(
     screens[0],
-    "Build order-cancellation: this session is 80% full\n- ⚠ order-cancellation depends on base-feature, which isn't built yet\n- ⚠ the spec review raised 1 P1 finding (shown above): the build would carry it",
+    "Build order-cancellation: this session is 80% full\n- ⚠ order-cancellation depends on base-feature, which isn't built yet\n- ⚠ the spec review raised 1 P1 finding (number 1, shown above): the build would carry it — build anyway when it is about proofs, tests or docs; repair first when it changes behaviour or a guard",
   );
-  assert.deepEqual(t.selectOptions.at(-1), ["Build in a fresh session, from the spec (recommended)", "Build here anyway", "Repair first: /pb:spec-harden order-cancellation works through them", "Stop here"]);
+  assert.deepEqual(t.selectOptions.at(-1), ["Build in a fresh session, from the spec (recommended)", "Build here anyway", "Repair first: /pb:spec-fix order-cancellation 1 — one lap on the P1", "Stop here"]);
   assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved");
 });
 
@@ -1227,7 +1228,7 @@ test("build-start screen: without a UI, every concern it would have listed is in
   }
   const done = t.posts.find((x) => /Build complete/.test(x))!;
   assert.match(done, /Decided without you[^\n]*:\n[\s\S]*- built although order-cancellation depends on base-feature, which isn't built yet \(no one to ask\)/);
-  assert.match(done, /- built although the spec review raised 1 P1 finding \(shown above\): the build would carry it \(no one to ask\)/);
+  assert.match(done, /- built although the spec review raised 1 P1 finding \(number 1, shown above\): the build would carry it — build anyway when it is about proofs, tests or docs; repair first when it changes behaviour or a guard \(no one to ask\)/);
   assert.match(done, /- built here although this session is 80% full \(no one to ask\)/);
 });
 

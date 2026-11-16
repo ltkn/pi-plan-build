@@ -13,6 +13,7 @@ import { type Finding, Store, cap, gitHead, readEvents } from "./store.ts";
 import { safeLine } from "./markdown.ts";
 import { P_ORDER, cmd, evidenceLine, loadSpec, nextLine, phaseHeader, post, revertFreshRun, sessionGone, sessionModel, specCompletions, specOfSession, warnLater } from "./kit.ts";
 import { unfinishedPhase } from "./phase.ts";
+import { tip } from "./help.ts";
 
 /**
  * The two doors onto one pass. `/pb:build` runs it in front of T1; `/pb:spec-review` runs it on
@@ -119,7 +120,7 @@ export const reviewDoor = (name: string, entry: "build" | "standalone" | "harden
     noReportNotify: `❌ Spec review did not report; nothing was recorded. Run \`${again}\` again, or point specReviewer.model at a model that reports.`,
     advisoryNotify: () => `✅ Spec review passed (shown above); /${cmd("build")} ${name} starts from this verdict.`,
     repostStoredPass: true,
-    advisoryHint: `the advisory findings here are repairable: \`/${cmd("spec-harden")} ${name}\` — one command and it works through them, then hands you the rest.`,
+    advisoryHint: tip("spec.repair", { name }),
   };
 };
 
@@ -211,7 +212,7 @@ export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, na
       nextLine(door.blockNext),
       evidenceLine(door.blockEvidence, door.passEvidence, moved(last.head), note),
       "",
-      ...(findings.length ? findings.map((f) => `- ${findingLine(f)}`) : ["The reviewer's answer could not be read as findings."]),
+      ...(findings.length ? findings.map((f, i) => `- ${findingLine(f, i + 1)}`) : ["The reviewer's answer could not be read as findings."]),
     ].join("\n"));
     ctx.ui.notify(door.blockNotify, "warning");
     return "block";
@@ -226,7 +227,7 @@ export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, na
       "",
       nextLine(door.passNext),
       evidenceLine(...scope, door.passEvidence, moved(last.head), note),
-      ...(findings.length ? ["", "**Advisory**", "", ...findings.map((f) => `- ${findingLine(f)}`)] : []),
+      ...(findings.length ? ["", "**Advisory**", "", ...findings.map((f, i) => `- ${findingLine(f, i + 1)}`)] : []),
       ...(findings.length && door.advisoryHint ? ["", door.advisoryHint] : []),
       ...(typeof last.session === "string" ? ["", `The whole run: \`pi --session ${path.relative(ctx.cwd, last.session)}.\``] : []),
     ].join("\n"));
@@ -253,8 +254,10 @@ export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, na
     return "error";
   }
   if (review.findings.length) {
-    const p0 = review.findings.filter((f) => f.priority === "P0");
-    const rest = review.findings.filter((f) => f.priority !== "P0");
+    // Numbered as recorded: the numbers /pb:spec-fix takes.
+    const numbered = review.findings.map((f, i) => `- ${findingLine(f, i + 1)}`);
+    const p0 = numbered.filter((_, i) => review.findings[i].priority === "P0");
+    const rest = numbered.filter((_, i) => review.findings[i].priority !== "P0");
     const counts = P_ORDER.map((k) => review.findings.filter((f) => f.priority === k).length);
     const tally = counts.map((c, n) => `P${n} ${c}`).join(" · ");
     const sections = [
@@ -263,8 +266,8 @@ export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, na
       nextLine(review.block ? door.blockNext : door.passNext),
       evidenceLine(...scope, review.block ? door.blockEvidence : door.advisoryEvidence, note),
     ];
-    if (p0.length) sections.push("", "**P0**", "", ...p0.map((f) => `- ${findingLine(f)}`));
-    if (rest.length) sections.push("", "**Advisory**", "", ...rest.map((f) => `- ${findingLine(f)}`));
+    if (p0.length) sections.push("", "**P0**", "", ...p0);
+    if (rest.length) sections.push("", "**Advisory**", "", ...rest);
     if (rest.length && door.advisoryHint) sections.push("", door.advisoryHint);
     if (sessionNote) sections.push("", sessionNote);
     post(sections.join("\n"));

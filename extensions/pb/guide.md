@@ -47,12 +47,15 @@ complete with what each one is.
    last one; a failure goes back to Pi to fix. When the build pauses or finishes,
    pb sends a **desktop notification** — those are the moments you've reliably
    walked away from (`"notify": false` turns it off).
-3. **`/pb:spec-harden`** (only when the review's list is longer than you want to
-   type through): the model repairs the **plan** — it measures what needs
-   measuring, settles what it can defend, rebuts a finding it can prove wrong in
-   `## Decisions` — and asks you only where two defensible answers differ.
-   `/pb:spec-fix [name] [ids]` runs one such lap on your say-so. See
-   `/pb:help spec-harden`.
+3. **Repairing the plan** (optional): the model repairs the **plan** — it
+   measures what needs measuring, settles what it can defend, rebuts a finding
+   it can prove wrong in `## Decisions` — and asks you only where two defensible
+   answers differ. Pick the door by what the review found: P2–P3, and anything
+   about proofs, test names or docs, the build carries — its own checks and the
+   code review catch those for far less. One or two P1s: `/pb:spec-fix [name]
+   <numbers>`, one lap on just those. A P0, or a P1 that questions the design or
+   a security guard: `/pb:spec-harden`, laps and fresh reviews until its budget
+   is spent. See `/pb:help spec-harden`.
 4. **`/pb:review`**: a fresh reviewer compares the change with the spec and
    your standards; blocking findings get a second look before you see them.
    Fix them right there, `/pb:review` again (it looks only at what changed),
@@ -576,7 +579,9 @@ such as the implementer, to validate the plan.
 Only a **P0** blocks the build: a security or authorization hole, data loss or
 corruption, or a contract contradiction that cannot be built as written. P1-P3
 are advisory, but a **P1** is a known risk the build would carry, so before T1
-you choose: build anyway, repair first (`/pb:spec-harden`), or stop. This
+you choose: build anyway, repair first (one `/pb:spec-fix` lap on the P1s), or
+stop. Build anyway when the P1s are about proofs, tests or docs; repair first
+when one changes behaviour or a guard. This
 applies to a pass recorded earlier too: its P1s are shown again at the build,
 since you may not have seen them. You're asked once per text, never again on a
 restart or resume of an approved build; with nobody to ask, the build goes on
@@ -681,7 +686,12 @@ verdict no longer covers it. The review's own cost and the code state it read ar
 named under the findings — it is a reading of the code as it stands.
 
 When that review comes back with a list you don't want to type through, that's
-what the repair doors are for. Both doors make the model repair the **plan**, not
+what the repair doors are for. Most lists don't need one: P2–P3, and findings
+about proofs, test names or docs, are cheaper for the build and the code review
+to catch. One or two P1s take one `/pb:spec-fix` lap on their numbers;
+`/pb:spec-harden` is for a P0 or a P1 that questions the design or a security
+guard — each of its confirming reviews is a full fresh pass, and a fresh pass
+always finds something, so it runs until its budget is spent. Both doors make the model repair the **plan**, not
 the code, and both give it the same four ways to settle each item:
 
 - **point it at evidence** — it runs the probe itself (`pb_try`, read-only) and
@@ -1349,8 +1359,16 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
 - Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
 - Review it before building: `/pb:spec-review` — the same fresh reviewer, nothing built, and `/pb:build` then starts at T1 without re-reviewing.
-- The review found things? `/pb:spec-fix` — one lap over its findings on your say-so — or `/pb:spec-harden` — laps, one claim check and one confirming review, unattended.
+- The review found things? P2–P3, and anything about proofs, test names or docs: build with them. One or two P1s: `/pb:spec-fix <name> <numbers>`, one lap on just those. A P0, or a P1 that questions the design or a security guard: `/pb:spec-harden` — laps and fresh reviews until its budget is spent.
 - Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — every spec is reviewed first: a P0 stops it before the first task · more: `/pb:help spec`
+<!-- /pb -->
+
+### A spec review with findings
+<!-- pb:tip spec.repair -->
+**What now** — which door for these findings (by the numbers above)
+- P2–P3, and anything about proofs, test names or docs: build with them — the build's own checks and the code review catch these for far less. `/pb:build {name}`
+- One or two P1s: one repair lap on just those — `/pb:spec-fix {name} <numbers>`.
+- A P0, or a P1 that questions the design or a security guard: `/pb:spec-harden {name}` — laps and fresh reviews until its budget is spent, the costly door.
 <!-- /pb -->
 
 ### Build paused

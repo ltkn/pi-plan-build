@@ -40,10 +40,12 @@ export function whereNext(store: Store, name: string): Where {
     if (spec.status === "planning") return { spec: name, state: "planning", next: `answer the open questions, then /${cmd("spec")} ${name} finishes the spec`, command: `/${cmd("spec")} ${name}` };
     const review = specReviewOn(store, name, md);
     const reported = Array.isArray(review?.reported) ? (review.reported as { priority?: string }[]) : [];
-    const p1 = reported.filter((f) => f.priority === "P1").length;
+    // Numbered as the review recorded them: the numbers /pb:spec-fix takes.
+    const p1Ids = reported.flatMap((f, i) => (f.priority === "P1" ? [i + 1] : []));
+    const p1 = p1Ids.length;
     if (review?.verdict === "block") return { spec: name, state: "spec review found a P0", next: `/${cmd("spec-fix")} ${name} repairs it, or /${cmd("spec")} ${name}`, command: `/${cmd("spec-fix")} ${name}` };
     if (review?.verdict === "pass" && p1)
-      return { spec: name, state: `spec reviewed: ${p1} P1`, next: `/${cmd("spec-harden")} ${name} repairs the P1${p1 === 1 ? "" : "s"}, or /${cmd("build")} ${name} builds on ${p1 === 1 ? "it" : "them"}`, command: `/${cmd("build")} ${name}` };
+      return { spec: name, state: `spec reviewed: ${p1} P1`, next: `/${cmd("spec-fix")} ${name} ${p1Ids.join(" ")} repairs the P1${p1 === 1 ? "" : "s"} in one lap, or /${cmd("build")} ${name} builds on ${p1 === 1 ? "it" : "them"}`, command: `/${cmd("build")} ${name}` };
     if (review?.verdict === "pass") return { spec: name, state: "spec reviewed", next: `/${cmd("build")} ${name}`, command: `/${cmd("build")} ${name}` };
     return { spec: name, state: "spec ready", next: `/${cmd("build")} ${name} (it reviews the spec first), or /${cmd("spec-review")} ${name} on its own`, command: `/${cmd("build")} ${name}` };
   }

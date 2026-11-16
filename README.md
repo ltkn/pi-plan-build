@@ -72,10 +72,12 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
      reads it before the first task (P0 findings stop the build until amended;
      the result header is ✅ PASS or ❌ FAIL with the review's time;
      /pb:spec-review runs that same pass on a spec you aren't building yet)
-   → a long list of findings? /pb:spec-harden repairs the plan (measures what needs
-     measuring, settles what it can defend, rebuts a wrong finding in `## Decisions`)
-     and asks you only where two defensible answers differ;
-     /pb:spec-fix [ids] runs one such lap on your say-so
+   → findings? P2–P3 and anything about proofs, test names or docs: build with
+     them. One or two P1s: /pb:spec-fix <name> <numbers>, one lap on just those
+     (it measures what needs measuring, settles what it can defend, rebuts a
+     wrong finding in `## Decisions`). A P0, or a P1 that questions the design
+     or a security guard: /pb:spec-harden, laps and fresh reviews until its
+     budget is spent
    → one run: T1 → T2 → … (each: its tests seen failing, then passing)
      → coherence (3+ tasks) → full suite → fix → full suite ✓
    → **✅ Build complete — order-cancellation** · 3/3 tasks · 25m (elapsed in parentheses when pauses count)

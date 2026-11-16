@@ -313,14 +313,16 @@ const fixDigest = (
   // What the last verdict on this exact text still holds against it: the run's budget can end before a lap
   // takes them, and a digest that left them out would read as a clean spec.
   const open = driver ? repairable(recordedFindings(store, name, md)) : [];
-  const openNumbers = open.map((x) => x.id).join(" ");
+  const serious = open.filter((x) => x.f.priority === "P0" || x.f.priority === "P1");
   const next = stoppedWith
     ? stoppedWith
     : driver
       ? blocked
         ? `\`/${cmd("spec-fix")} ${name}\` — the confirming review still blocks on a P0${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
-        : open.length
-          ? `\`/${cmd("spec-fix")} ${name} ${openNumbers}\` repairs the findings left open below, or \`/${cmd("build")} ${name}\` builds with them — the review's verdict covers this text${claims.length ? `; the un-evidenced claims are yours to settle or tag \`assumed\`` : ""}.`
+        : serious.length
+          ? `\`/${cmd("spec-fix")} ${name} ${serious.map((x) => x.id).join(" ")}\` repairs the P1${serious.length === 1 ? "" : "s"} left open below in one lap, or \`/${cmd("build")} ${name}\` builds with them — the review's verdict covers this text${claims.length ? `; the un-evidenced claims are yours to settle or tag \`assumed\`` : ""}.`
+          : open.length
+          ? `\`/${cmd("build")} ${name}\` — the review's verdict covers this text, and the P2s left open below are the build's to carry${claims.length ? `; the un-evidenced claims are yours to settle or tag \`assumed\`` : ""}.`
           : verdict
           ? `\`/${cmd("build")} ${name}\` — the review's verdict covers this text${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`
           : `\`/${cmd("build")} ${name}\` — it reviews this text before T1${claims.length ? `; the un-evidenced claims above are yours to settle or tag \`assumed\`` : ""}.`

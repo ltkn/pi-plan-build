@@ -123,14 +123,14 @@ test("spec review: a P1 is weighed before T1 — build anyway, repair first or s
     await t.run("build", "order-cancellation");
     const shown = t.posts.slice(posted).join("\n");
     assert.match(shown, /\*\*The spec review of this text raised 1 P1 finding\*\* — not blocking, but the build would carry it:\n\n- 1\. \[P1\]/);
-    assert.ok(t.selectTitles.includes("Build order-cancellation?\n- ⚠ the spec review raised 1 P1 finding (shown above): the build would carry it"));
-    assert.deepEqual(t.selectOptions.at(-1), ["Build anyway", "Repair first: /pb:spec-harden order-cancellation works through them", "Stop here"]);
+    assert.ok(t.selectTitles.includes("Build order-cancellation?\n- ⚠ the spec review raised 1 P1 finding (number 1, shown above): the build would carry it — build anyway when it is about proofs, tests or docs; repair first when it changes behaviour or a guard"));
+    assert.deepEqual(t.selectOptions.at(-1), ["Build anyway", "Repair first: /pb:spec-fix order-cancellation 1 — one lap on the P1", "Stop here"]);
     assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved, nothing built");
     assert.equal(t.progress("order-cancellation").approval, undefined);
     // Repair first hands over the command instead of building.
-    t.selects.push("Repair first: /pb:spec-harden order-cancellation works through them");
+    t.selects.push("Repair first: /pb:spec-fix order-cancellation 1 — one lap on the P1");
     await t.run("build", "order-cancellation");
-    assert.equal(t.stat.editorText, "/pb:spec-harden order-cancellation");
+    assert.equal(t.stat.editorText, "/pb:spec-fix order-cancellation 1", "one lap on the P1, by its number");
     assert.equal(t.progress("order-cancellation").phase, "written");
     // Build anyway: the build goes on, and a restart of an approved text is not asked again.
     t.selects.push("Build anyway");
@@ -727,7 +727,7 @@ test("spec-harden: findings the last review leaves after the lap budget is spent
   assert.doesNotMatch(reviews[1], /next repair lap/);
   const digest = t.posts.at(-1)!;
   assert.match(digest, /\*\*⚠ Spec hardened — order-cancellation\*\* · 2 findings left open/);
-  assert.match(digest, /\*\*Next:\*\* `\/pb:spec-fix order-cancellation 1 2` repairs the findings left open below, or `\/pb:build order-cancellation` builds with them/);
+  assert.match(digest, /\*\*Next:\*\* `\/pb:spec-fix order-cancellation 1` repairs the P1 left open below in one lap, or `\/pb:build order-cancellation` builds with them/, "the P1 gets the lap; the P2 is the build's");
   assert.match(digest, /\*\*Left open by the last review\*\*[\s\S]*- 1\. \[P1\] src\/order\.ts:42 — Context — the transition has no guard[\s\S]*- 2\. \[P2\] spec\.md:12 — Contracts — unmeasured window/);
 });
 
@@ -2208,7 +2208,7 @@ test("spec review: each finding names the check it fails, and the stats count fi
   const review = t.events("order-cancellation").find((e: any) => e.type === "spec-review");
   // Spelled as the list spells it; a name outside the list is Other, never a new category; no tag stays none.
   assert.deepEqual(review.reported.map((f: any) => f.check), ["Values", "Claims", "Other", undefined]);
-  assert.match(t.posts.at(-1)!, /- \[P1 · Values\] src\/order\.ts:42 — Context — the transition has no guard/);
+  assert.match(t.posts.at(-1)!, /- 1\. \[P1 · Values\] src\/order\.ts:42 — Context — the transition has no guard/, "numbered as recorded: the numbers /pb:spec-fix takes");
   const stats = { name: "order-cancellation", phase: "written", events: t.events("order-cancellation"), explore: [], progress: t.progress("order-cancellation") } as any;
   assert.deepEqual(summarize(stats).spec!.byCheck, { Claims: 1, Other: 1, Values: 1 });
   assert.match(renderCard(stats), /findings P0 0 P1 1 P2 3 P3 0 · by check Claims 1 Other 1 Values 1 ·/);

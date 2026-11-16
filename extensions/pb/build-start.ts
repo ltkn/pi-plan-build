@@ -293,11 +293,11 @@ export function registerBuildStart(pi: ExtensionAPI) {
    * never a gate. A recorded pass is reused silently at this door, so its P1s are posted again here; a text
    * already approved (a restart or resume) was decided before and counts none.
    */
-  const openP1s = (store: Store, name: string, md: string, reused: boolean): number => {
-    if (store.progress(name)?.approval?.hash === specHash(md)) return 0;
+  const openP1s = (store: Store, name: string, md: string, reused: boolean): number[] => {
+    if (store.progress(name)?.approval?.hash === specHash(md)) return [];
     const p1 = recordedFindings(store, name, md).filter(({ f }) => f.priority === "P1");
     if (p1.length && reused) post([`**The spec review of this text raised ${p1.length} P1 finding${p1.length === 1 ? "" : "s"}** — not blocking, but the build would carry ${p1.length === 1 ? "it" : "them"}:`, "", ...p1.map(({ id, f }) => `- ${findingLine(f, id)}`)].join("\n"));
-    return p1.length;
+    return p1.map(({ id }) => id);
   };
 
   const startBuild = async (
@@ -318,7 +318,8 @@ export function registerBuildStart(pi: ExtensionAPI) {
 
     const reviewsBefore = specReviewCount(store, name);
     if ((await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "build"))) !== "pass") return;
-    const p1s = openP1s(store, name, md, specReviewCount(store, name) === reviewsBefore);
+    const p1Ids = openP1s(store, name, md, specReviewCount(store, name) === reviewsBefore);
+    const p1s = p1Ids.length;
     const buildModel = cfg.buildModel ? findModel(ctx, cfg.buildModel) : undefined;
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
     const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";
@@ -327,20 +328,25 @@ export function registerBuildStart(pi: ExtensionAPI) {
     const usage = ctx.getContextUsage()?.percent;
     const placing = !fresh && !o.decided && ((usage != null && usage > cfg.freshAbove) || switching);
     const why = !placing ? "" : switching ? `building on ${cfg.buildModel} here sends this whole conversation to it again, uncached` : `this session is ${Math.round(usage!)}% full`;
-    const concerns = [...checked.concerns, ...(p1s ? [`the spec review raised ${p1s} P1 finding${p1s === 1 ? "" : "s"} (shown above): the build would carry ${p1s === 1 ? "it" : "them"}`] : [])];
+    const concerns = [
+      ...checked.concerns,
+      ...(p1s ? [`the spec review raised ${p1s} P1 finding${p1s === 1 ? "" : "s"} (number${p1s === 1 ? "" : "s"} ${p1Ids.join(", ")}, shown above): the build would carry ${p1s === 1 ? "it" : "them"} — build anyway when ${p1s === 1 ? "it is" : "they are"} about proofs, tests or docs; repair first when ${p1s === 1 ? "it changes" : "one changes"} behaviour or a guard`] : []),
+    ];
     if ((placing || concerns.length) && ctx.hasUI) {
       const FRESH = "Build in a fresh session, from the spec (recommended)";
       const HERE = "Build here anyway";
       const GO = "Build anyway";
-      const REPAIR = `Repair first: /${cmd("spec-harden")} ${name} works through them`;
+      // One lap on exactly these P1s: a whole hardening run spends full fresh reviews that always find more.
+      const repairCommand = `/${cmd("spec-fix")} ${name} ${p1Ids.join(" ")}`;
+      const REPAIR = `Repair first: ${repairCommand} — one lap on the P1${p1s === 1 ? "" : "s"}`;
       const STOP = "Stop here";
       const build = placing ? (canOpenSession ? [FRESH, HERE] : [HERE, FRESH]) : [GO];
       const title = [`Build ${name}${why ? `: ${why}` : "?"}`, ...concerns.map((c) => `- ⚠ ${c}`)].join("\n");
       const choice = await choose(ctx, store, title, [...build, ...(p1s ? [REPAIR] : []), STOP], build[0], notes);
       if (!choice || choice === STOP) return;
       if (choice === REPAIR) {
-        ctx.ui.setEditorText(`/${cmd("spec-harden")} ${name}`);
-        return ctx.ui.notify(`Press Enter to repair ${name}; /${cmd("build")} ${name} afterwards reviews the repaired text.`, "info");
+        ctx.ui.setEditorText(repairCommand);
+        return ctx.ui.notify(`Press Enter for one repair lap on P1 ${p1Ids.join(", ")}; then /${cmd("build")} ${name} reviews the repaired text before T1.`, "info");
       }
       if (placing) fresh = choice === FRESH;
     } else if (!fresh && !o.decided && switching) fresh = true;
