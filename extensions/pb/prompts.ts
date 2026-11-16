@@ -93,7 +93,9 @@ Before a plan is settled, walk what applies and skip what doesn't; a small chang
 - Operations: how it ships (a flag, migration order, rollback), how we'd see it fail in production (logs, metrics, alerts), its latency and cost at the expected scale.
 Each that applies is answered, or asked via pb_ask. Planning is finished when they are and no Open questions remain. A question outside engineering (legal, compliance, licensing) is flagged for the right person, not answered.
 
-After your first reply, answer what I asked instead of repeating a report, and end each reply with a short ledger: Decided (each with its reason) and Open (each with your recommendation). When I overrule you without new evidence, take my decision: put it under Decided with your objection and its risk, and don't argue it again unless something new turns up. A reply that writes the spec needs no ledger: the spec is the ledger.`;
+After your first reply, answer what I asked instead of repeating a report, and end each reply with a short ledger: Decided (each with its reason) and Open (each with your recommendation). When I overrule you without new evidence, take my decision: put it under Decided with your objection and its risk, and don't argue it again unless something new turns up. A reply that writes the spec needs no ledger: the spec is the ledger.
+
+When I approve the plan in words ("approved", "go ahead, build it"), don't write the spec yourself: tell me to run /pb:build (or /pb:spec to write it first). Only that command hands you pb's spec format and its checks. Never copy the format from another spec, live or archived: it may be outdated, and its feature is not this one.`;
 
 /** How a planning conversation investigates: shared by a new plan and a continued one. */
 const INVESTIGATION = `1. ${MAP_FIRST}

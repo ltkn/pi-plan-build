@@ -636,6 +636,12 @@ test("/pb:plan <spec> continues planning in a fresh session seeded from the spec
   assert.match((await t.callTool("write", { path: "x.java", content: "x" })).error!, /Planning mode/); // planning mode in the new session
 });
 
+test("planner: an approval in words is answered with the command that writes the spec, never a spec copied from another", async () => {
+  const { PLANNER_ROLE } = await import("../extensions/pb/prompts.ts");
+  assert.match(PLANNER_ROLE, /When I approve the plan in words \("approved", "go ahead, build it"\), don't write the spec yourself: tell me to run \/pb:build \(or \/pb:spec to write it first\)\. Only that command hands you pb's spec format and its checks\./);
+  assert.match(PLANNER_ROLE, /Never copy the format from another spec, live or archived: it may be outdated, and its feature is not this one\./);
+});
+
 test("/pb:plan refuses to start while Pi is mid-turn", async () => {
   const t = setup();
   process.chdir(t.repo);
