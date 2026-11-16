@@ -250,7 +250,7 @@ export const SPEC_CHECK_NAMES: readonly string[] = [...[...SPEC_CHECKS.matchAll(
 /** The writer's pass over the checks, before the spec is written: shared by writing and finishing a spec. */
 const SPEC_SELF_CHECK = `Before writing, run these checks (the spec reviewer runs the same ones) and fix what they find in the spec; tell me briefly what you changed:
 ${SPEC_CHECKS.replace(/^- /gm, "  - ")}
-  Re-open the lines your claims rest on yourself; call pb_explore once, with the list, only for the claims you can't place.`;
+  For Claims, re-open only the lines a Contract or an Acceptance value rests on: the build acts on those directly. Every spec is reviewed from a fresh context, and the reviewer verifies the other citations, so a second pass over them here costs time and settles nothing. Call pb_explore once, with the list, only for those you can't place.`;
 
 /** The format, and what earns a place in a spec: shared by writing and finishing. */
 const SPEC_FORMAT = `# <title>
@@ -892,7 +892,7 @@ Priority:
 - P2 — a real weakness, edge case, ambiguity, missing measurement, documentation or rollback gap. P3 — polish or preference.
 No P0 means pass, however many P1-P3 findings you report.
 
-Check the spec against the code: every path:line resolves, and every load-bearing claim carries the evidence the rule below asks for, and that evidence says what the claim says. The writer ran these checks before writing; a spec that fails one is a finding:
+Check the spec against the code where the build depends on it: the claims a Contract, a Decision or an Acceptance line rests on carry the evidence the rule below asks for, and that evidence says what the claim says; a Finding's citation only when one of those depends on it. The writer ran these checks before writing; a spec that fails one is a finding:
 ${SPEC_CHECKS}
 
 Give each finding the check it fails in its check field: one of the names above, Evidence when it breaks the evidence rule below, or Other. Attack the Decisions and each rejected alternative; probe undefined empty paths. A point the spec marks decided is settled: check for new evidence, and comment only when you find it. Do not reward length or polish. No findings is a valid result.
@@ -900,6 +900,8 @@ Give each finding the check it fails in its check field: one of the names above,
 Report what would make the build wrong: behaviour that would come out wrong, a security or data hole, a contract the tasks cannot all meet. Report at most the five findings that matter most, highest priority first; a fresh pass always finds more, and each one you add costs a repair lap and another review. Wiring the build catches by itself is not a finding: a test name, a Test: command that cannot select its test, a doc or caller left out of a task, a fixture's shape — the build's red proof and the code review catch those for almost nothing; report one only when it would let wrong behaviour through. Overengineering covers the spec's own text too: a Goal that bundles a second outcome the change's own need does not require, or a section that argues instead of pinning, is a finding whose fix is the cut.
 
 The evidence rule the spec was written to: ${EVIDENCE_RULE} A claim that is not load-bearing and carries no evidence is not a finding.
+
+Read narrowly: grep for the symbol, then read the line range you need, never a whole file to find one line — everything you read stays in your context and slows every step after it. Stop after about 40 tool calls, or sooner once your findings are settled, and report.
 
 A fork a read-only inspection can settle, settle before you write, with one cheap targeted read or grep, and put the file:line and result in the finding. Never ask for a test, build or install: you cannot run one. What no read settles, report as a finding with the question the human must answer. Be concise: conclusion first.`;
 

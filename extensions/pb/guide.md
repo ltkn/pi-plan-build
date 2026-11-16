@@ -719,10 +719,10 @@ Out of scope entry — rather than asked about, and a lap leaves the spec no
 longer than it found it.
 
 **`/pb:spec-fix [name] [ids]`** runs one lap, now, on your say-so — every P0–P2
-finding by default, or the numbers you name. After the lap it runs a claim check
-(a separate, cheap pass: "which load-bearing claims still stand on nothing?") and
-reports. It does not re-review: the text changed, so the old verdict doesn't cover
-it and `/pb:spec-review` decides that on the new bytes.
+finding by default, or the numbers you name. The lap re-checks what it wrote
+before it reports, and that is the run: no separate claim check and no re-review.
+The text changed, so the old verdict doesn't cover it, and `/pb:spec-review` (or
+the next `/pb:build`) decides on the new bytes.
 
 **`/pb:spec-harden [name]`** drives the whole loop: a review if the text has no
 verdict yet, repair lap → one claim check → one confirming review → one last lap

@@ -589,6 +589,24 @@ export const quietLap =
     assert.equal(r.error, undefined, r.error ?? "");
   };
 
+/**
+ * One hardening run that ends at its claim check: the review it runs finds the work, one lap settles it, and
+ * with no lap or review left the check's claims land in the digest. The claim check runs only here: a manual
+ * /pb:spec-fix lap runs none.
+ */
+export const hardenToClaimCheck = async (t: ReturnType<typeof setup>, settle?: string) => {
+  t.selects.push("Yes, go on"); // the plan
+  t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  if (settle) process.env.MOCK_SETTLE = settle;
+  try {
+    await t.run("spec-harden", "order-cancellation");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+    delete process.env.MOCK_SETTLE;
+  }
+};
+
 export const specFixEvents = (t: ReturnType<typeof setup>, type: string) => t.events("order-cancellation").filter((e: any) => e.type === type);
 
 export const THREE_TASKS = `### T1: first file

@@ -339,7 +339,8 @@ const fixDigest = (
       `${fix.rebutted} rebutted`,
       fix.assumed ? `${fix.assumed} assumed` : "",
       // Claims a lap took are not re-checked by pb: say they went to a lap, never that none are left.
-      claims.length ? `${claims.length} un-evidenced` : driver && fix.claimsTaken ? `${fix.claimsTaken} claim${fix.claimsTaken === 1 ? "" : "s"} sent to a lap` : "no un-evidenced claims",
+      // A manual lap runs no claim check, so it says nothing about claims either way.
+      !driver ? "" : claims.length ? `${claims.length} un-evidenced` : fix.claimsTaken ? `${fix.claimsTaken} claim${fix.claimsTaken === 1 ? "" : "s"} sent to a lap` : "no un-evidenced claims",
     ),
     "",
     nextLine(next),
@@ -377,8 +378,9 @@ const fixDigest = (
 /**
  * The step owed after a repair lap's turn ends — one place, both doors. A lap that never reported is
  * stopped, not looped on; a lap that changed nothing is not checked or re-reviewed (same bytes, same
- * answers, minutes wasted); otherwise the text goes to the claim check, and the driver either hands the
- * next lap, spends its confirming review, or finishes with the digest. A manual lap stops at the check.
+ * answers, minutes wasted). A manual lap ends there with its digest: it already checked what it wrote, and the
+ * review decides the new text. The driver sends the text to the claim check, then either hands the next lap,
+ * spends its confirming review, or finishes with the digest.
  */
 
 export const advanceSpecFix = async (ctx: ExtensionContext, store: Store, name: string, p: Progress): Promise<boolean> => {
@@ -439,6 +441,14 @@ export const advanceSpecFix = async (ctx: ExtensionContext, store: Store, name: 
     post(fixDigest(store, name, fix, [], loaded.md, fix.driver, `the lap changed nothing (it parked or assumed everything it was shown): \`/${cmd("spec-review")} ${name}\` when you have decided, or \`/${cmd("spec-fix")} ${name}\` with the numbers you want argued.`, undefined));
     return true;
   }
+  // A manual lap is one lap, on the human's say-so. It re-checked what it wrote before reporting, and the next
+  // review reads the new text; a fresh claim check here would repeat that for another run's minutes.
+  if (!fix.driver) {
+    p.fix = undefined;
+    store.saveProgress(p);
+    post(fixDigest(store, name, fix, [], loaded.md, false));
+    return true;
+  }
   const claimCheck = async () => {
     const check = await runClaimCheck(ctx, store, name, loaded.md);
     if (sessionGone(ctx)) return undefined;
@@ -450,15 +460,6 @@ export const advanceSpecFix = async (ctx: ExtensionContext, store: Store, name: 
     }
     return check;
   };
-  // A manual lap is one lap, on the human's say-so: the claim check is its last step.
-  if (!fix.driver) {
-    const check = await claimCheck();
-    if (!check) return true;
-    p.fix = undefined;
-    store.saveProgress(p);
-    post(fixDigest(store, name, fix, check.claims, loaded.md, false, undefined, check.session));
-    return true;
-  }
   // The harden run checks claims once, on the first repaired text and before any confirming review: each lap
   // already checks what it wrote, and a check after every lap cost the most for the least. A claim lap runs
   // only while a lap stays free for what the confirming review brings back — those are the findings that
@@ -601,7 +602,7 @@ export function registerRepair(pi: ExtensionAPI) {
     name: "pb_spec_fix_done",
     label: "Spec repair done",
     description:
-      "At the end of a pb spec repair lap (started by /pb:spec-fix or /pb:spec-harden): report which numbered items you applied, which you rebutted (you wrote the argument in Decisions), which you park for the human (question + your recommendation), and which you marked assumed (the claim and what would falsify it), with one line on what the spec now says differently. Every number the brief showed you must appear in exactly one list. Then stop: pb checks the new text for un-evidenced claims and reviews it. " + reportRegister,
+      "At the end of a pb spec repair lap (started by /pb:spec-fix or /pb:spec-harden): report which numbered items you applied, which you rebutted (you wrote the argument in Decisions), which you park for the human (question + your recommendation), and which you marked assumed (the claim and what would falsify it), with one line on what the spec now says differently. Every number the brief showed you must appear in exactly one list. Then stop: pb takes the new text from there (a hardening run checks its claims and reviews it). " + reportRegister,
     parameters: Type.Object({
       applied: Type.Array(Type.Number(), { description: "the numbers this lap settled by evidence, decision or deletion, as shown in its brief" }),
       rebutted: Type.Array(Type.Number(), { description: "the numbers you argued against, having written the argument and its citation into Decisions" }),

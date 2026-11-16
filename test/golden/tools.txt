@@ -1,4 +1,4 @@
-words: 2183
+words: 2188
 
 ## pb_ask
 
@@ -233,7 +233,7 @@ In a pb build, for a task with a Test: line: after writing its tests and before 
 
 ## pb_spec_fix_done
 
-At the end of a pb spec repair lap (started by /pb:spec-fix or /pb:spec-harden): report which numbered items you applied, which you rebutted (you wrote the argument in Decisions), which you park for the human (question + your recommendation), and which you marked assumed (the claim and what would falsify it), with one line on what the spec now says differently. Every number the brief showed you must appear in exactly one list. Then stop: pb checks the new text for un-evidenced claims and reviews it. Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.
+At the end of a pb spec repair lap (started by /pb:spec-fix or /pb:spec-harden): report which numbered items you applied, which you rebutted (you wrote the argument in Decisions), which you park for the human (question + your recommendation), and which you marked assumed (the claim and what would falsify it), with one line on what the spec now says differently. Every number the brief showed you must appear in exactly one list. Then stop: pb takes the new text from there (a hardening run checks its claims and reviews it). Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.
 
 {
   "type": "object",

@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { briefOf, diligent, repairLap, setup, SPEC, specRel, taskOf, until, written } from "./harness.mts";
+import { briefOf, diligent, hardenToClaimCheck, setup, SPEC, specRel, taskOf, until, written } from "./harness.mts";
 
 test("skippedLargeFiles: oversized untracked files are reported because snapshots can't see them", async () => {
   const t = setup();
@@ -41,18 +41,9 @@ test("a finding title capped mid-sentence renders on one line, with the cut disc
 });
 
 test("the digest prints the check's findings in full: no 400-char cut, bulleted, with what pb left standing", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", specFix: { maxLaps: 1, maxReviews: 1 } });
   await written(t);
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  process.env.MOCK_SETTLE = "huge";
-  try {
-    await t.run("spec-review", "order-cancellation");
-    t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
-    await t.run("spec-fix", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SETTLE;
-  }
+  await hardenToClaimCheck(t, "huge");
   const digest = t.posts.at(-1)!;
   assert.match(digest, /the whole claim in one breath and more words and more words and more words/);
   assert.doesNotMatch(digest, /\[truncated \d+ chars\]/, "a realistic claim is printed in full");
@@ -60,18 +51,9 @@ test("the digest prints the check's findings in full: no 400-char cut, bulleted,
 });
 
 test("a field pb had to clip names the run log that holds the uncut text", async () => {
-  const t = setup({ verify: "true" });
+  const t = setup({ verify: "true", specFix: { maxLaps: 1, maxReviews: 1 } });
   await written(t);
-  process.env.MOCK_SPEC_REVIEW = "advisory";
-  process.env.MOCK_SETTLE = "clipped";
-  try {
-    await t.run("spec-review", "order-cancellation");
-    t.agent.script = repairLap(t, { applied: [1, 2], rebutted: [], parked: [], assumed: [], summary: "settled both" });
-    await t.run("spec-fix", "order-cancellation");
-  } finally {
-    delete process.env.MOCK_SPEC_REVIEW;
-    delete process.env.MOCK_SETTLE;
-  }
+  await hardenToClaimCheck(t, "clipped");
   const digest = t.posts.at(-1)!;
   assert.match(digest, /Some fields above are clipped by pb's length bound/);
   assert.match(digest, /pi --session \.pi\/pb\/specs\/order-cancellation\/sessions\/spec-check\//, "the pointer names the run log");
