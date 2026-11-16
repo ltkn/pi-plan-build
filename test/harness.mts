@@ -540,7 +540,10 @@ Speed up the page.
 export async function written(t: ReturnType<typeof setup>, spec = SPEC()) {
   process.chdir(t.repo);
   const { Store } = await import("../extensions/pb/store.ts");
-  new Store(t.repo).markAsked("standards");
+  const store = new Store(t.repo);
+  store.markAsked("standards");
+  // The spec is written in the step that hands the format over (/pb:spec or /pb:build), as it is in Pi.
+  for (const session of store.planningSessions()) store.markSpecFormatGiven(session);
   const r = await t.callTool("pb_write_spec", { name: "order-cancellation", content: spec });
   assert.equal(r.error, undefined, r.error ?? "");
 }

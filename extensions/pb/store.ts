@@ -513,6 +513,8 @@ export interface PlanningRecord {
   planner?: PlannerSettings;
   /** what the human answered through pb_ask while planning: the spec transcribes it, so a reset can't lose it */
   answers?: PlanningAnswer[];
+  /** pb has handed this session its spec format (/pb:spec, /pb:build, or a refused write): a ready spec may be written */
+  specFormatGiven?: boolean;
 }
 
 export interface PlanningAnswer {
@@ -990,7 +992,7 @@ export class Store {
     }
     for (const f of files) {
       if (!f.endsWith(".json")) continue;
-      const rec = readJson<{ session?: unknown; snapshot?: unknown; request?: unknown; planner?: unknown; answers?: unknown }>(path.join(this.planningDir(), f));
+      const rec = readJson<{ session?: unknown; snapshot?: unknown; request?: unknown; planner?: unknown; answers?: unknown; specFormatGiven?: unknown }>(path.join(this.planningDir(), f));
       if (typeof rec?.session !== "string" || !rec.session) continue;
       const planner = plannerSettingsOf(rec.planner);
       const answers = answersOf(rec.answers);
@@ -999,6 +1001,7 @@ export class Store {
         ...(typeof rec.snapshot === "string" ? { snapshot: rec.snapshot } : {}),
         ...(typeof rec.request === "string" ? { request: rec.request } : {}),
         ...(planner ? { planner } : {}),
+        ...(rec.specFormatGiven === true ? { specFormatGiven: true } : {}),
       };
     }
     return out;
@@ -1016,8 +1019,9 @@ export class Store {
       fs.rmSync(file, { force: true });
       return;
     }
-    const prev = readJson<{ snapshot?: unknown; request?: unknown; planner?: unknown; answers?: unknown }>(file) ?? {};
+    const prev = readJson<{ snapshot?: unknown; request?: unknown; planner?: unknown; answers?: unknown; specFormatGiven?: unknown }>(file) ?? {};
     const rec: Record<string, unknown> = { session: sessionFile };
+    if (prev.specFormatGiven === true) rec.specFormatGiven = true;
     const planner = plannerSettingsOf(prev.planner);
     if (planner) rec.planner = planner;
     const answers = answersOf(prev.answers);
@@ -1036,6 +1040,14 @@ export class Store {
     if (!prev) return;
     const answers = [...(answersOf(prev.answers) ?? []), { question: cap(a.question, 400), answer: cap(a.answer, 600) }].slice(-MAX_PLANNING_ANSWERS);
     writeFileAtomic(file, `${JSON.stringify({ ...prev, answers }, null, 2)}\n`);
+  }
+
+  /** Note that pb handed this planning session its spec format; nothing when planning is off. */
+  markSpecFormatGiven(sessionFile: string): void {
+    const file = this.planningFile(sessionFile);
+    const prev = readJson<Record<string, unknown>>(file);
+    if (!prev || prev.specFormatGiven === true) return;
+    writeFileAtomic(file, `${JSON.stringify({ ...prev, specFormatGiven: true }, null, 2)}\n`);
   }
 
   /** Record what planning changed in this session's model and thinking, so its end can put them back. */

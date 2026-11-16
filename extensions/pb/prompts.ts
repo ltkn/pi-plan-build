@@ -367,6 +367,15 @@ ${SPEC_FORMAT}
 ${SPEC_SELF_CHECK}${answersBlock(answers)}${extraBlock(extra)}`;
 }
 
+/** A planning session's first ready spec, written without pb's format: refused once, with the format it lacked. */
+export function specFormatHandout(): string {
+  return `Not written: this planning session hasn't been given pb's spec format. Here it is. Write the spec against it, never against another spec, live or archived (it may be outdated, and its feature is not this one), then call pb_write_spec again.
+
+${SPEC_FORMAT}
+
+${SPEC_SELF_CHECK}`;
+}
+
 /* ================================== build ================================== */
 
 function gateLine(spec: ParsedSpec, buildCmd: string | null, each: boolean): string {

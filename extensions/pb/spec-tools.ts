@@ -2,8 +2,8 @@
 import { StringEnum, Type } from "./schema.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
-import { specPrompt } from "./prompts.ts";
-import { specAssumptions, acceptanceCriteria, needsRed, parseSpec, setSection, setStatus, specLosses, tokensOf } from "./spec.ts";
+import { specFormatHandout, specPrompt } from "./prompts.ts";
+import { specAssumptions, acceptanceCriteria, isDraftSpec, needsRed, parseSpec, setSection, setStatus, specLosses, tokensOf } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { Store, now } from "./store.ts";
@@ -171,6 +171,15 @@ export function registerSpecTools(pi: ExtensionAPI) {
         throw new Error(
           `The build of ${building.spec} is running: its approved spec can't be rewritten. Only its Design and Decisions may change (pb_update_spec). If the contract itself must change, stop the task with pb_task_done status blocked and say why; the human then revises it and /${cmd("build")} re-approves the revision.`,
         );
+      // Planning has no spec format of its own: a spec meant for building is written against the one pb hands
+      // over, never against another spec's copy. A draft (a checkpoint's Status: planning) needs no format yet.
+      if (session && !isDraftSpec(params.content)) {
+        const planning = store.planning(session);
+        if (planning && !planning.specFormatGiven) {
+          store.markSpecFormatGiven(session);
+          throw new Error(specFormatHandout());
+        }
+      }
       const { spec, errors } = parseSpec(params.content);
       if (!spec) throw new Error(`The spec doesn't parse:\n- ${errors.join("\n- ")}\nFix it and call pb_write_spec again.`);
       const pathErrs = spec.status === "ready" ? [...specPathErrors(params.content, ctx.cwd), ...specRepoErrors(spec, ctx.cwd)] : [];
@@ -323,7 +332,10 @@ export function registerSpecTools(pi: ExtensionAPI) {
       const which = args.trim();
       const md = which && KEBAB_NAME.test(which) ? store.readSpec(which) : undefined;
       const session = ctx.sessionManager.getSessionFile();
-      if (session) specStarted.set(session, Date.now());
+      if (session) {
+        specStarted.set(session, Date.now());
+        store.markSpecFormatGiven(session);
+      }
       instruct(`▶ /${cmd("spec")}${which ? ` — ${which}` : ""}`, specPrompt(which, store.specNames(), md ? { name: which, markdown: md } : undefined, store.extra("spec"), session ? store.planning(session)?.answers : undefined));
     },
   });

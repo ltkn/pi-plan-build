@@ -60,6 +60,9 @@ const splitReason = (v: string) => {
 };
 
 /** Parse a spec; `errors` lists what's missing or malformed (empty = valid). */
+/** Whether the text declares itself a draft (`Status: planning`); anything else is meant to be built. */
+export const isDraftSpec = (md: string) => header(md, "Status")?.toLowerCase() === "planning";
+
 export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
   const errors: string[] = [];
   const blanked = blankFenced(md);

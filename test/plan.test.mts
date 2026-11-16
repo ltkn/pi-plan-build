@@ -642,6 +642,36 @@ test("planner: an approval in words is agreement, answered with the next command
   assert.match(PLANNER_ROLE, /Never copy the format from another spec, live or archived: it may be outdated, and its feature is not this one\./);
 });
 
+test("planning: a spec written before pb handed over its format is refused once, with the format, never copied from another", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.run("plan", "let admins cancel pending orders");
+  // A draft (a checkpoint's Status: planning) needs no format yet.
+  assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: PLANNING })).error, undefined);
+  // "Spec it" in the chat, with no /pb:spec: the first ready spec is refused, and the refusal is the format.
+  const refused = (await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error!;
+  assert.match(refused, /^Not written: this planning session hasn't been given pb's spec format\./);
+  assert.match(refused, /never against another spec, live or archived/);
+  assert.match(refused, /Depends on: <spec name> \| none/);
+  assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /Status: planning/);
+  // Handed the format, the next write goes through.
+  assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error, undefined);
+
+  // /pb:spec hands the format over itself, so its write is never refused.
+  const u = setup();
+  process.chdir(u.repo);
+  await u.run("plan", "let admins cancel pending orders");
+  await u.run("spec");
+  assert.equal((await u.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error, undefined);
+});
+
+test("citations: a file pb can't find gets the sibling form in the error, so a bare sibling filename can be fixed", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const error = (await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("Cancel orders.", "Cancel orders; the card renders at `NextTrainCard.vue:47`.") })).error!;
+  assert.match(error, /the spec cites `NextTrainCard\.vue:47`, but that path is not in the project; a file in a sibling repository is cited from the project root as `\.\.\/<repo>\/<path>:<line>`/);
+});
+
 test("/pb:plan refuses to start while Pi is mid-turn", async () => {
   const t = setup();
   process.chdir(t.repo);

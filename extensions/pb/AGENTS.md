@@ -91,4 +91,5 @@
 - `checkpointSummary` (the reset) carries the spec, not the stance; the first messages (`planPrompt`, `continuePlanPrompt`, `approachPrompt`) carry only the task, the investigation steps and the reply shape.
 - The planner's model and thinking floor (`config.planner`, default floor `"high"`) are applied by `applyPlanner` when planning starts (`/pb:plan`, `/pb:deps`) and handed to a continued plan's new session through the carry. What planning changed is stored on disk in the session's planning record (`PlannerSettings`, `store.setPlannerSettings`), so a restart keeps it.
 - `liftPlanning` puts back only what is still as planning set it (`restorePlanner`), so a level you chose mid-planning is kept; `plannerSettings` is the pure decision.
+- Planning has no spec format of its own: `pb_write_spec` in a planning session refuses its first ready spec with `specFormatHandout` (the format, and never copying another spec) until pb has handed the format over (`PlanningRecord.specFormatGiven`, set by `/pb:spec`, `/pb:build`'s spec-first step and that refusal). A `Status: planning` draft (the checkpoint's) goes through: it needs no format yet.
 <!-- /pb:map -->

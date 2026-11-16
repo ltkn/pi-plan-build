@@ -423,6 +423,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
     const options = preferFresh ? [FRESH, HERE, SHOW] : [HERE, FRESH, SHOW];
     const choice = await choose(ctx, store, "Pi writes the spec first. Then?", options, options[0], notes);
     if (!choice) return;
+    if (session) store.markSpecFormatGiven(session);
     if (choice === SHOW) {
       if (session) specStarted.set(session, Date.now());
       store.setPendingBuild(session);

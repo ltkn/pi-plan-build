@@ -145,7 +145,7 @@ export const specPathErrors = (md: string, cwd: string): string[] => {
   return refs.flatMap((ref) => {
     const found = visible.get(ref.path) ?? rescued.get(ref.path) ?? resolveSiblingFile(cwd, ref.path);
     if (!found)
-      return [`the spec cites \`${ref.path}:${ref.line}\`, but that path is not in the project${ref.path.startsWith("../") ? ", nor a file in a sibling repository (`../<repo>/<path>`, one folder up, no dot-named part)" : ""}`];
+      return [`the spec cites \`${ref.path}:${ref.line}\`, but that path is not in the project${ref.path.startsWith("../") ? ", nor a file in a sibling repository (`../<repo>/<path>`, one folder up, no dot-named part)" : "; a file in a sibling repository is cited from the project root as `../<repo>/<path>:<line>`"}`];
     let isFile = false;
     try {
       isFile = fs.statSync(found).isFile();
