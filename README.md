@@ -18,7 +18,10 @@ never saw the build. Your engineering standards live in AGENTS.md, written once.
 /pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default): each finding fixed
                       wherever the change repeats it, proven by a test seen failing first; pb runs the checks after
                       each lap and offers the follow-up review; each lap is an /pb:undo point. A changed contract is
-                      re-approved by /pb:build first, then /pb:review checks the delta
+                      re-approved by /pb:build first, then /pb:review checks the delta. Text after the ids directs
+                      the fixes (`/pb:fix spec 5 6 use one REPEATABLE READ read`): it binds where it differs
+                      from a finding's Fix, the others take their Fix as written, and the lap records each
+                      choice in the spec's Decisions so the next review judges against it
 /pb:review [focus]    independent review: a spec pass in a fresh session you watch, then an adversarial pass in the background, P0–P3, blocking findings
                       double-checked; follow-ups look only at what changed (--full: everything)
                       no spec? reviews the uncommitted change against its intent

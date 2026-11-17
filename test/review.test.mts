@@ -629,6 +629,83 @@ test("fix: skipped findings never start a lap and reach the escalation", async (
   assert.match(t.posts.at(-1)!, /spec revision/);
 });
 
+test("fix arguments: leading numbers pick findings, the rest is the human's direction", async () => {
+  const { parseFixRequest } = await import("../extensions/pb/fix.ts");
+  const open = [
+    { priority: "P2", title: "name the constant" },
+    { priority: "P2", title: "say why the guard exists" },
+    { priority: "P2", title: "read the catalogue as one snapshot" },
+  ] as Finding[];
+  const [first, second, third] = open;
+  assert.deepEqual(parseFixRequest(" 1 2 3", open), { picked: open });
+  assert.deepEqual(parseFixRequest(" 3 1 use REPEATABLE READ for 3", open), { picked: [third, first], direction: "use REPEATABLE READ for 3" });
+  assert.deepEqual(parseFixRequest(" 2, 3: keep the rule in Java\nand bound the read", open), { picked: [second, third], direction: "keep the rule in Java\nand bound the read" });
+  assert.deepEqual(parseFixRequest(" 2 -- 4 hops is the bound", open), { picked: [second], direction: "4 hops is the bound" }); // a separator lets a direction start with a number
+  assert.deepEqual(parseFixRequest(" 2 2", open), { picked: [second] });
+  assert.deepEqual(parseFixRequest(" 2 99 7 do it", open), { misses: ["99", "7"] }); // a wrong number is refused, never read as text
+  assert.deepEqual(parseFixRequest("", open), { picked: open });
+  assert.deepEqual(parseFixRequest(" constant guard", open), { picked: [first, second] }); // every word names one finding: a selection
+  assert.deepEqual(parseFixRequest(" keep the guard minimal", open), { picked: open, direction: "keep the guard minimal" }); // not every word does: a direction for all
+});
+
+test("fix: a direction after the ids reaches every lap's brief, binding, with the review's numbers mapped", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [
+    { priority: "P2", file: "src/a.ts", line: 1, title: "name the constant" },
+    { priority: "P2", file: "src/b.ts", line: 2, title: "say why the guard exists" },
+    { priority: "P2", file: "src/c.ts", line: 3, title: "read the catalogue as one snapshot" },
+  ]);
+  const seeds: string[] = [];
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix")) return;
+    seeds.push(text);
+    await provedFixed(tool, [1]).then(() => tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" })); // one finding per lap
+  };
+  await t.run("fix", "order-cancellation 2 3 for 3 use one REPEATABLE READ transaction\nkeyed by what the snapshot reported");
+  assert.equal(seeds.length, 2);
+  const [lap1, lap2] = seeds;
+  assert.doesNotMatch(lap1!, /name the constant/); // only the picked findings
+  assert.match(lap1!, /1\. \[P2\] src\/b\.ts:2 — say why the guard exists[\s\S]*2\. \[P2\] src\/c\.ts:3 — read the catalogue as one snapshot/);
+  assert.match(lap1!, /Direction from the human for these fixes\. It binds: where it differs from a finding's Fix, follow it; a finding it does not mention takes its Fix as written\./);
+  assert.match(lap1!, /never substitute an approach of your own/);
+  assert.match(lap1!, /Record each choice the direction makes in the spec's Decisions with pb_update_spec/);
+  assert.match(lap1!, /counts findings as the review numbered them: review #2 is 1 above, review #3 is 2 above\./);
+  assert.match(lap1!, /--- direction ---\nfor 3 use one REPEATABLE READ transaction\nkeyed by what the snapshot reported\n--- end of direction ---/);
+  // The second lap fixes what the first left open, under the same direction, renumbered for its own brief.
+  assert.match(lap2!, /1\. \[P2\] src\/c\.ts:3 — read the catalogue as one snapshot/);
+  assert.match(lap2!, /review #3 is 1 above\./);
+  assert.match(lap2!, /--- direction ---\nfor 3 use one REPEATABLE READ transaction/);
+  const starts = t.events("order-cancellation").filter((e: any) => e.type === "fix-start");
+  assert.equal(starts.length, 2);
+  for (const s of starts) assert.equal(s.direction, "for 3 use one REPEATABLE READ transaction\nkeyed by what the snapshot reported");
+});
+
+test("fix: without a direction the brief carries none", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" }]);
+  await t.run("fix", "1");
+  const seed = t.instructions.find((x) => x.startsWith("[pb:fix"))!;
+  assert.match(seed, /name the constant/);
+  assert.doesNotMatch(seed, /Direction from the human|--- direction ---/);
+  assert.equal(t.events("order-cancellation").find((e: any) => e.type === "fix-start")!.direction, undefined);
+});
+
+test("fix: an over-long direction is refused before any session opens", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" }]);
+  const { MAX_FIX_DIRECTION_CHARS } = await import("../extensions/pb/fix.ts");
+  const before = [...t.names.values()].length;
+  await t.run("fix", `1 ${"x".repeat(MAX_FIX_DIRECTION_CHARS + 1)}`);
+  assert.match(t.notes.at(-1)!, new RegExp(`a fix run takes at most ${MAX_FIX_DIRECTION_CHARS}`));
+  assert.equal([...t.names.values()].length, before); // no session opened
+});
+
 test("fix: unknown finding ids are refused, not guessed", async () => {
   const t = setup();
   process.chdir(t.repo);

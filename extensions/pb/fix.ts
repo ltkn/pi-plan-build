@@ -5,7 +5,8 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext
 } from "@earendil-works/pi-coding-agent";
-import { fixSeedPrompt, reportRegister } from "./prompts.ts";
+import { type FixDirection, fixSeedPrompt, reportRegister } from "./prompts.ts";
+import { safeBlock } from "./markdown.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { snapshot } from "./checkpoint.ts";
@@ -40,6 +41,38 @@ export function lapReport(events: readonly Record<string, unknown>[], from: numb
     reds: Array.isArray(last.reds) ? last.reds.filter((x): x is string => typeof x === "string") : [],
     tests: typeof last.tests === "string" ? last.tests : "",
   };
+}
+
+/** How long a human direction to a fix run may be: a few paragraphs of instructions, not a document. */
+export const MAX_FIX_DIRECTION_CHARS = 8_000;
+
+/** What `/pb:fix` was asked for once its spec name is taken off: the findings, and the human's direction if any. */
+export type FixRequest = { picked: Finding[]; direction?: string } | { misses: string[] };
+
+/**
+ * Reads `/pb:fix` arguments after the spec name: leading finding numbers, then free text that
+ * directs the run (an optional `:` or `--` may separate them). With no number, words that each
+ * name exactly one finding by its title select those findings, and anything else is a direction
+ * for every open finding. Numbers index `open`, the list the review numbered.
+ */
+export function parseFixRequest(rest: string, open: readonly Finding[]): FixRequest {
+  const lead = /^(?:[\s,]*\d+\b)+/.exec(rest.trimStart())?.[0] ?? "";
+  const numbers = lead.match(/\d+/g) ?? [];
+  const after = rest.trimStart().slice(lead.length).trim().replace(/^(?::|--)\s*/, "").trim();
+  if (numbers.length) {
+    const misses = numbers.filter((n) => !open[Number(n) - 1]);
+    if (misses.length) return { misses };
+    const picked = [...new Set(numbers.map((n) => open[Number(n) - 1]!))];
+    return after ? { picked, direction: after } : { picked };
+  }
+  if (!after) return { picked: [...open] };
+  const words = after.split(/\s+/);
+  const byTitle = words.map((w) => {
+    const hits = open.filter((f) => f.title.toLowerCase().includes(w.toLowerCase()));
+    return hits.length === 1 ? hits[0] : undefined;
+  });
+  if (byTitle.every((f) => f)) return { picked: [...new Set(byTitle as Finding[])] };
+  return { picked: [...open], direction: after };
 }
 
 export function registerFix(pi: ExtensionAPI) {
@@ -158,10 +191,11 @@ export function registerFix(pi: ExtensionAPI) {
     lap: number,
     home: string | undefined,
     failure?: string,
+    direction?: FixDirection,
   ): Promise<{ live: ExtensionCommandContext; report?: LapReport; ms: number } | undefined> => {
     const started = Date.now();
     const p = store.progress(spec);
-    const seed = fixSeedPrompt(spec, remaining, loadSpec(store, spec) ? specRef(store, spec) : "", { base: p?.baseCommit, failure });
+    const seed = fixSeedPrompt(spec, remaining, loadSpec(store, spec) ? specRef(store, spec) : "", { base: p?.baseCommit, failure, direction });
     checkpointLap(ctx.cwd, store, spec, lap);
     let live: ExtensionCommandContext | undefined;
     // The lap owns only events appended after its own fix-start marker; `from` is the log
@@ -178,7 +212,7 @@ export function registerFix(pi: ExtensionAPI) {
         live = cc;
         const lapFile = cc.sessionManager.getSessionFile() ?? undefined;
         if (lapFile) store.saveFixSession(lapFile, { spec, findings: remaining });
-        store.event(spec, { type: "fix-start", findings: remaining.map((f) => f.title) });
+        store.event(spec, { type: "fix-start", findings: remaining.map((f) => f.title), ...(direction ? { direction: safeBlock(direction.text) } : {}) });
         from = readEvents(path.join(store.specDir(spec), "events.jsonl")).length;
         await c.sendMessage({ customType: "pb-fix", content: seed, display: true }, { triggerTurn: true });
         for (let nudge = 0; nudge < FIX_NUDGES; nudge++) {
@@ -240,7 +274,7 @@ export function registerFix(pi: ExtensionAPI) {
    * gets the failure, and with no lap left the run stops on it.
    */
 
-  const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[], allOpen: Finding[]): Promise<void> => {
+  const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[], allOpen: Finding[], direction?: string): Promise<void> => {
     const home = ctx.sessionManager.getSessionFile() ?? undefined;
     // Taken now: each lap replaces the session, and a replaced context must not be read again.
     const cwd = ctx.cwd;
@@ -257,7 +291,8 @@ export function registerFix(pi: ExtensionAPI) {
     let checked: string[] = [];
     while (remaining.length && laps < FIX_LAPS) {
       laps++;
-      const out = await runFixLap(live, store, spec, remaining, laps, home, failure);
+      // Every lap carries the direction: a later lap fixes what the first left open, under the same instructions.
+      const out = await runFixLap(live, store, spec, remaining, laps, home, failure, direction === undefined ? undefined : { text: direction, reviewNumbers: remaining.map((f) => numberOf.get(f) ?? 0) });
       if (!out) return; // its session never opened (cancelled): user is present, nothing to say
       live = out.live;
       ms += out.ms;
@@ -345,15 +380,16 @@ export function registerFix(pi: ExtensionAPI) {
   };
 
   pi.registerCommand(cmd("fix"), {
-    description: "Fix P0-P2 review findings in a fresh fenced session: /pb:fix [finding ids]. No ids = all open findings (P3 nits are never open: fix those by hand). Run /pb:review afterwards: it checks only those findings and what changed",
+    description: "Fix P0-P2 review findings in a fresh fenced session: /pb:fix [spec] [finding ids] [direction]. No ids = all open findings (P3 nits are never open: fix those by hand). Text after the ids directs the fixes: it binds where it differs from a finding's Fix, and the rest take their Fix as written. Run /pb:review afterwards: it checks only those findings and what changed",
     getArgumentCompletions: fixCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
       const session = ctx.sessionManager.getSessionFile();
-      const words = args.trim().split(/\s+/).filter(Boolean);
-      // Spec: named, else this session's. Findings: all open, else the named ones.
-      let name = words[0] && KEBAB_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
-      const ids = name ? words.slice(1) : words;
+      const text = args.trim();
+      const first = text.split(/\s+/, 1)[0] ?? "";
+      // Spec: named, else this session's. Findings and direction: read off the rest (parseFixRequest).
+      let name = first && KEBAB_NAME.test(first) && store.readSpec(first) ? first : undefined;
+      const rest = name ? text.slice(first.length) : text;
       if (!name) name = specOfSession(ctx).name;
       if (!name && session) {
         // A planning session that wrote the spec but never built it: its writtenIn names it.
@@ -364,33 +400,23 @@ export function registerFix(pi: ExtensionAPI) {
       if (!name) return ctx.ui.notify(`No spec here: run /${cmd("fix")} from a build or review session, or name a spec.`, "warning");
       const open = store.progress(name)?.review?.findings ?? [];
       if (!open.length) return ctx.ui.notify(`\`${name}\` has no open review findings to fix.`, "info");
-      let picked = open;
-      if (ids.length) {
-        const misses: string[] = [];
-        picked = [];
-        for (const id of ids) {
-          const hit = /^\d+$/.test(id)
-            ? open[Number(id) - 1]
-            : open.filter((f) => f.title.toLowerCase().includes(id.toLowerCase())).length === 1
-              ? open.filter((f) => f.title.toLowerCase().includes(id.toLowerCase()))[0]
-              : undefined;
-          if (!hit || picked.includes(hit)) {
-            if (!hit) misses.push(id);
-            continue;
-          }
-          picked.push(hit);
-        }
-        if (misses.length || !picked.length) {
-          return ctx.ui.notify(
-            `No such finding${misses.length === 1 ? "" : "s"}: ${(misses.length ? misses : ids).join(", ")}. \`/pb:fix\` takes P0–P2 ids (P3 nits are never open: fix those by hand). Open findings for \`${name}\`:${open.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
-            "warning",
-          );
-        }
+      const request = parseFixRequest(rest, open);
+      if ("misses" in request) {
+        return ctx.ui.notify(
+          `No such finding${request.misses.length === 1 ? "" : "s"}: ${request.misses.join(", ")}. \`/pb:fix\` takes P0–P2 ids (P3 nits are never open: fix those by hand). Open findings for \`${name}\`:${open.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
+          "warning",
+        );
+      }
+      if (request.direction && request.direction.length > MAX_FIX_DIRECTION_CHARS) {
+        return ctx.ui.notify(
+          `The direction is ${request.direction.length} characters; a fix run takes at most ${MAX_FIX_DIRECTION_CHARS}. Shorten it to the instructions that differ from the findings' Fix lines.`,
+          "warning",
+        );
       }
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const cctx = ctx as ExtensionCommandContext;
       if (typeof cctx.newSession !== "function") return ctx.ui.notify("This Pi can't open sessions: fix the findings here instead.", "warning");
-      await driveFix(cctx, store, name!, picked, open);
+      await driveFix(cctx, store, name!, request.picked, open, request.direction);
     },
   });
 

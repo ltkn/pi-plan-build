@@ -7,6 +7,7 @@
  */
 import { tip } from "./help.ts";
 import { duration } from "./format.ts";
+import { safeBlock } from "./markdown.ts";
 import { BINDING_SECTIONS, type ParsedSpec, type SpecTask, sectionHeading, sectionOf } from "./spec.ts";
 import { type AcceptanceCheck, type AcceptanceCriterion, type Finding, PB_DIR, type Progress, type TaskProgress } from "./store.ts";
 
@@ -496,13 +497,36 @@ export function fixText(taskId: string, what: string, output: string, attempt: n
 
 /** A fix lap's first message: the findings it owns, numbered as pb_fix_done reports them, and its fence. */
 /**
- * A /pb:fix lap's brief. base: the commit the build started from, so "the change" is a diff the lap can take;
- * failure: what pb's own check said after the previous lap, which this lap must make pass.
+ * What the human typed after the finding ids of `/pb:fix`. reviewNumbers holds each brief finding's
+ * number in the review, in brief order: the human counts by those, the brief from 1.
  */
-export function fixSeedPrompt(spec: string, findings: Finding[], reference = "", o: { base?: string; failure?: string } = {}): string {
+export interface FixDirection {
+  text: string;
+  reviewNumbers: number[];
+}
+
+/** The human's direction in a fix brief: it binds, records itself in Decisions, and never licenses improvising. */
+function directionBlock(d: FixDirection): string {
+  const renumbered = d.reviewNumbers.flatMap((n, i) => (n && n !== i + 1 ? [`review #${n} is ${i + 1} above`] : []));
+  return (
+    `Direction from the human for these fixes. It binds: where it differs from a finding's Fix, follow it; a finding it does not mention takes its Fix as written. ` +
+    `If a direction cannot be done as written, or would need the spec's Goal, Contracts or Acceptance changed, skip that finding and say why; never substitute an approach of your own. ` +
+    `Record each choice the direction makes in the spec's Decisions with pb_update_spec, so the next review judges the code against it.` +
+    `${renumbered.length ? ` The direction counts findings as the review numbered them: ${renumbered.join(", ")}.` : ""}\n` +
+    `--- direction ---\n${safeBlock(d.text)}\n--- end of direction ---\n\n`
+  );
+}
+
+/**
+ * A /pb:fix lap's brief. base: the commit the build started from, so "the change" is a diff the lap can take;
+ * failure: what pb's own check said after the previous lap, which this lap must make pass;
+ * direction: the human's instructions for these fixes.
+ */
+export function fixSeedPrompt(spec: string, findings: Finding[], reference = "", o: { base?: string; failure?: string; direction?: FixDirection } = {}): string {
   const change = o.base ? `the change (\`git diff ${o.base.slice(0, 12)}\` plus untracked files)` : "the change (the files this build touched)";
   return (
     `[pb:fix ${spec}] Fix exactly the review findings below — nothing else.\n\nFindings:\n${findings.map((f, i) => findingLine(f, i + 1)).join("\n")}\n\n` +
+    `${o.direction ? directionBlock(o.direction) : ""}` +
     `${o.failure ? `The previous lap reported fixes, but pb's check after it failed, so none of them counts yet: make it pass without undoing them.\n${o.failure}\n\n` : ""}` +
     `${reference ? `${reference}\n\n` : ""}` +
     `A finding is a class, not a line: before fixing one, look for the same defect elsewhere in ${change} and fix every instance there too, naming each in your reply; an instance outside the change is reported, not fixed. ` +
