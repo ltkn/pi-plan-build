@@ -14,6 +14,7 @@ import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, now, r
 import { runVerify } from "./verify.ts";
 import { approvalDrift, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, specOfSession, specRef, withChecking } from "./kit.ts";
 import { tip } from "./help.ts";
+import { notifyDesktop } from "./notify.ts";
 
 /** One lap's report shape, normalized from its `fix` event: findings by the number its brief showed them as. */
 export interface LapReport {
@@ -348,11 +349,19 @@ export function registerFix(pi: ExtensionAPI) {
         ? `revise the spec with \`/${cmd("spec")}\` for the skipped findings (or fix them by hand), then ${reviewStep}`
         : reviewStep;
     const time = ms ? duration(ms) : "";
+    // The title says what became of each finding, by its review number: "fixed" only once pb's checks passed.
+    const numbers = (labels: string[]) => labels.map((l) => l.split(" ")[0]).join(", ");
+    const outcome = [
+      fixed.length ? `${numbers(fixed)} fixed${checked.length && !failure ? ", checks passed" : ""}` : "nothing fixed",
+      skipped.length ? `${numbers(skipped)} skipped` : "",
+      open.length ? `${numbers(open)} still open` : "",
+    ];
+    const lapCount = `${laps} lap${laps === 1 ? "" : "s"}`;
     const header = silent
-      ? phaseHeader("❌", "Fixes stopped", spec, "no report", time)
+      ? phaseHeader("❌", "Fixes stopped", spec, "no report", ...outcome, time)
       : failure
-        ? phaseHeader("❌", "Fixes stopped", spec, "check failed", `${laps} lap${laps === 1 ? "" : "s"}`, time)
-        : phaseHeader(open.length ? "❌" : "✅", open.length ? "Fixes stopped" : "Fixes complete", spec, `${laps} lap${laps === 1 ? "" : "s"}`, time);
+        ? phaseHeader("❌", "Fixes stopped", spec, "check failed", ...outcome, lapCount, time)
+        : phaseHeader(open.length ? "❌" : "✅", open.length ? "Fixes stopped" : "Fixes complete", spec, ...outcome, lapCount, time);
     const summary = [
       header,
       "",
@@ -372,6 +381,10 @@ export function registerFix(pi: ExtensionAPI) {
     ].join("\n");
     // The follow-up review is the next step whenever nothing is left open: offer it rather than leave it to memory.
     const offerReview = !silent && !failure && !open.length && !drift;
+    // The end of /pb:fix is the moment the human has walked away from: the summary alone goes unseen. A complete
+    // run asks whether to review, and that question notifies with the outcome; a stopped one notifies here.
+    const outcomeText = outcome.filter(Boolean).join(", ");
+    if (!offerReview && store.config().notify) notifyDesktop("pb: fixes stopped", `${spec}: ${outcomeText}`);
     try {
       if (!home) throw new Error("no home session");
       await live.switchSession(home, {
@@ -380,7 +393,7 @@ export function registerFix(pi: ExtensionAPI) {
           if (!offerReview) return;
           const NOW = "Review the fixes now";
           const LATER = "Later";
-          if ((await choose(c, store, `Fixes for ${spec} are in. Review them now?`, [NOW, LATER], LATER)) === NOW) {
+          if ((await choose(c, store, `Fixes for ${spec} are done: ${outcomeText}. Review them now?`, [NOW, LATER], LATER)) === NOW) {
             c.ui.setEditorText(`/${cmd("review")} ${spec}`);
             c.ui.notify(`Press Enter to review ${spec}: the follow-up looks at the previous findings and what changed since.`, "info");
           }

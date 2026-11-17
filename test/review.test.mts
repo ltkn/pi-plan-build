@@ -358,7 +358,7 @@ test("fix: a report names findings by the number in the brief; a number outside 
   assert.match(said[0]!, /2 is not one of the findings shown for this lap/);
   assert.match(said[1]!, /Report at least one finding by its number/);
   assert.match(said[2]!, /cannot be both fixed and skipped/);
-  assert.match(t.posts.at(-1)!, /\*\*✅ Fixes complete — order-cancellation\*\* · 1 lap · (?:<1s|\d+s)/);
+  assert.match(t.posts.at(-1)!, /\*\*✅ Fixes complete — order-cancellation\*\* · #1 fixed, checks passed · 1 lap · (?:<1s|\d+s)/);
   assert.match(t.posts.at(-1)!, /#1 name the constant the reviewer named/); // findings carry the number /pb:fix takes
   assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:review` checks the delta\./);
 });
@@ -420,7 +420,7 @@ test("fix: a lap that never reports stops the loop and escalates as silent", asy
   t.agent.script = async () => {}; // the lap never reports, nudges unanswered
   await t.run("fix");
   assert.equal([...t.names.values()].filter((n) => n.startsWith("fix: order-cancellation · lap ")).length, 1); // never retried into a second silent session
-  assert.match(t.posts.at(-1)!, /\*\*❌ Fixes stopped — order-cancellation\*\* · no report · (?:<1s|\d+s)/);
+  assert.match(t.posts.at(-1)!, /\*\*❌ Fixes stopped — order-cancellation\*\* · no report · nothing fixed · #\d+(?:, #\d+)* still open · (?:<1s|\d+s)/);
 });
 
 test("fix: pb runs the project's checks after a lap; a red check means the fixes don't count, and the next lap gets the failure", async () => {
@@ -440,12 +440,50 @@ test("fix: pb runs the project's checks after a lap; a red check means the fixes
   assert.doesNotMatch(seeds[0], /pb's check after it failed/);
   assert.match(seeds[1], /The previous lap reported fixes, but pb's check after it failed, so none of them counts yet: make it pass without undoing them\.\n`false` failed/);
   const summary = t.posts.at(-1)!;
-  assert.match(summary, /\*\*❌ Fixes stopped — order-cancellation\*\* · check failed · 3 laps/);
+  assert.match(summary, /\*\*❌ Fixes stopped — order-cancellation\*\* · check failed · nothing fixed · #1 still open · 3 laps/);
   assert.match(summary, /fixed none/, "the lap said fixed; pb's check said otherwise, and pb's word is the record");
   assert.match(summary, /\*\*pb's check after the last lap failed\*\*, so its fixes don't count yet:\n\n`false` failed/);
   const checks = t.events("order-cancellation").filter((e: any) => e.type === "check" && e.task === "fix");
   assert.ok(checks.some((e: any) => e.command === "false" && e.ok === false));
   assert.ok(!t.selectTitles.some((x) => x.includes("Review them now?")), "no review is offered over a red check");
+});
+
+test("fix: the end of a fix run names each finding's outcome in its title, and notifies", async () => {
+  const { setNotifySink } = await import("../extensions/pb/notify.ts");
+  const sent: string[][] = [];
+  setNotifySink((title, body) => sent.push([title, body]));
+  try {
+    const findings = [
+      { priority: "P1" as const, file: "src/order.ts", line: 12, title: "guard the cancel" },
+      { priority: "P2" as const, file: "src/order.ts", line: 30, title: "name the constant" },
+    ];
+    // Complete: the review question carries the outcome, and is the one notification.
+    const t = setup({ verify: "true", notify: true });
+    process.chdir(t.repo);
+    await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+    pausedWithFindings(t, "order-cancellation", findings);
+    t.agent.script = async (text, tool) => {
+      if (!text.startsWith("[pb:fix")) return;
+      await provedFixed(tool, [1]);
+      await tool("pb_fix_done", { fixed: [1], skipped: [2], tests: "ok" });
+    };
+    await t.run("fix", "1 2");
+    assert.ok(t.posts.some((x) => /^\*\*✅ Fixes complete — order-cancellation\*\* · #1 fixed, checks passed · #2 skipped · 1 lap/.test(x)));
+    assert.deepEqual(sent, [["pb: your choice", "Fixes for order-cancellation are done: #1 fixed, checks passed, #2 skipped. Review them now?"]]);
+
+    // Stopped: no lap left and nothing fixed, said in the title and in a notification of its own.
+    sent.length = 0;
+    const u = setup({ verify: "true", notify: true });
+    process.chdir(u.repo);
+    await u.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+    pausedWithFindings(u, "order-cancellation", findings);
+    u.agent.script = async () => {}; // the lap never reports
+    await u.run("fix", "1");
+    assert.ok(u.posts.some((x) => /^\*\*❌ Fixes stopped — order-cancellation\*\* · no report · nothing fixed · #1 still open/.test(x)));
+    assert.deepEqual(sent, [["pb: fixes stopped", "order-cancellation: nothing fixed, #1 still open"]]);
+  } finally {
+    setNotifySink(undefined);
+  }
 });
 
 test("fix: a green check is stated as a fact, and the follow-up review is offered", async () => {
@@ -465,10 +503,10 @@ test("fix: a green check is stated as a fact, and the follow-up review is offere
   assert.match(done, /1 reported fixed, 0 skipped\. They are not confirmed yet: pb runs the checks now, and a fix counts only if they pass\. Reply with exactly this one line, nothing else[^\n]*\nFix report sent\. pb is checking the fixes now; the result and the next step come in your session\.$/);
   assert.ok(t.posts.some((x) => /^\*\*Checking the fixes\*\* — the lap reports #1 fixed; none counts as fixed until these pass: `test -f [^`]+`, then `true`\. The outcome and the next step come in your session when they finish\.$/.test(x)));
   const summary = t.posts.at(-1)!;
-  assert.match(summary, /\*\*✅ Fixes complete — order-cancellation\*\* · 1 lap/);
+  assert.match(summary, /\*\*✅ Fixes complete — order-cancellation\*\* · #1 fixed, checks passed · 1 lap/);
   // The reproducing test the lap saw fail is re-run and must pass, then the project's checks.
   assert.match(summary, /pb's checks passed: `test -f [^`]+`, `true`/);
-  assert.ok(t.selectTitles.includes("Fixes for order-cancellation are in. Review them now?"));
+  assert.ok(t.selectTitles.includes("Fixes for order-cancellation are done: #1 fixed, checks passed. Review them now?"));
   assert.equal(t.stat.editorText, "/pb:review order-cancellation");
   // The ways on, as commands to type: a delta review or a full one; nothing is open, so no other lap.
   assert.match(summary, /- `\/pb:review` — checks only the fixes[\s\S]*- `\/pb:review --full` — reviews the whole change again/);
