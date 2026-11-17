@@ -1115,6 +1115,37 @@ test("review: the adversarial pass runs in the background and its findings are m
   assert.match(t.posts.at(-1)!, /with an adversarial pass[\s\S]*Adversarial: a forged owner cancels/);
 });
 
+test("review: a pass with open P2 findings offers /pb:fix as optional, after the commit", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [
+    { priority: "P2", file: "src/order.ts", line: 30, title: "name the constant" },
+    { priority: "P2", file: "src/order.ts", line: 12, title: "say why the guard exists" },
+    { priority: "P3", file: "src/order.ts", line: 40, title: "a nit" },
+  ];
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /PASS · P0 0 · P1 0 · P2 2 · P3 1/);
+  assert.match(
+    post,
+    /\*\*Next:\*\* `\/pb:commit order-cancellation` \(you see the files and the message first\), then `\/pb:archive order-cancellation`\. The verdict is PASS, so fixing the P2 findings is optional: `\/pb:fix order-cancellation 1 2` fixes them first if you want, then `\/pb:review` again\./,
+  );
+});
+
+test("review: a pass with no P0-P2 finding offers no /pb:fix", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [{ priority: "P3", file: "src/order.ts", line: 40, title: "a nit" }];
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /\*\*Next:\*\* `\/pb:commit order-cancellation` \(you see the files and the message first\), then `\/pb:archive order-cancellation`\.\n/);
+  assert.doesNotMatch(post, /\/pb:fix/);
+});
+
 test("review: an adversarial empty report with a long explanation is not a lost report", async () => {
   const t = setup({ verify: "true", reviewer: { security: "always" } });
   await written(t);

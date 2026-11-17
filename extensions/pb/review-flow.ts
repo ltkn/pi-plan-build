@@ -361,7 +361,12 @@ export function registerReviewFlow(pi: ExtensionAPI) {
                 : doubleCheckLines.fellShort
                   ? `\`/${cmd("review")} --full\` runs the second look again: its run failed, so the spec stays unreviewed.`
                   : run.name
-                    ? `\`/${cmd("commit")} ${run.name}\` (you see the files and the message first), then \`/${cmd("archive")} ${run.name}\`.`
+                    ? `\`/${cmd("commit")} ${run.name}\` (you see the files and the message first), then \`/${cmd("archive")} ${run.name}\`.${
+                        // P2s don't block a pass, but they stay open and /pb:fix takes them: offer it, as a choice.
+                        fixIds && complete
+                          ? ` The verdict is PASS, so fixing the P2 findings is optional: \`/${cmd("fix")} ${run.name} ${fixIds}\` fixes them first if you want, then \`/${cmd("review")}\` again.`
+                          : ""
+                      }`
                     : "commit when ready."
               : `\`/${cmd("review")}\` again, or read the sessions below.`;
     const tipKey = verdict === "pass" ? (midBuild.length ? "review.mid-build" : "review.pass") : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
