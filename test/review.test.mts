@@ -453,13 +453,17 @@ test("fix: a green check is stated as a fact, and the follow-up review is offere
   process.chdir(t.repo);
   await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
   pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 12, title: "name the constant" }]);
+  let done = "";
   t.agent.script = async (text, tool) => {
     if (!text.startsWith("[pb:fix")) return;
     await provedFixed(tool, [1]);
-    await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
+    done = (await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" })).content![0].text;
   };
   t.selects.push("Review the fixes now");
   await t.run("fix");
+  // The lap's report is a claim: its reply is one fixed line, and pb says the checks are running before they run.
+  assert.match(done, /1 reported fixed, 0 skipped\. They are not confirmed yet: pb runs the checks now, and a fix counts only if they pass\. Reply with exactly this one line, nothing else[^\n]*\nFix report sent\. pb is checking the fixes now; the result and the next step come in your session\.$/);
+  assert.ok(t.posts.some((x) => /^\*\*Checking the fixes\*\* — the lap reports #1 fixed; none counts as fixed until these pass: `test -f [^`]+`, then `true`\. The outcome and the next step come in your session when they finish\.$/.test(x)));
   const summary = t.posts.at(-1)!;
   assert.match(summary, /\*\*✅ Fixes complete — order-cancellation\*\* · 1 lap/);
   // The reproducing test the lap saw fail is re-run and must pass, then the project's checks.

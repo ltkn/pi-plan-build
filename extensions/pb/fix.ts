@@ -12,7 +12,7 @@ import { KEBAB_NAME } from "./names.ts";
 import { snapshot } from "./checkpoint.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, now, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { approvalDrift, choose, cmd, commands, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, specOfSession, specRef, withChecking } from "./kit.ts";
+import { approvalDrift, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, specOfSession, specRef, withChecking } from "./kit.ts";
 import { tip } from "./help.ts";
 
 /** One lap's report shape, normalized from its `fix` event: findings by the number its brief showed them as. */
@@ -162,10 +162,14 @@ export function registerFix(pi: ExtensionAPI) {
       store.clearFixSession(session);
       const cur = store.progress(rec.spec);
       const drift = cur ? approvalDrift(store, cur) : undefined;
-      const nextStep = drift
-        ? `the fix changed the approved contract, so run \`/${cmd("build")} ${rec.spec}\` to re-approve it, then \`/${cmd("review")}\`.`
-        : `pb now runs the project's checks; then \`/${cmd("review")}\` back home checks the delta.`;
-      return reply(`Recorded fix report for \`${rec.spec}\`: fixed ${fixed.length}, skipped ${skipped.length}. Reply briefly, then stop: ${nextStep}`);
+      // The lap's reply is not the outcome: pb's checks decide whether a reported fix counts, and the human reads
+      // the result in their own session. One fixed line keeps the lap from posting a report that reads as final.
+      const line = drift
+        ? `Fix report sent. The fix changed the approved contract: /${cmd("build")} ${rec.spec} re-approves it, then /${cmd("review")}.`
+        : "Fix report sent. pb is checking the fixes now; the result and the next step come in your session.";
+      return reply(
+        `Recorded as reported for \`${rec.spec}\`: ${fixed.length} reported fixed, ${skipped.length} skipped. They are not confirmed yet: ${drift ? "the contract needs re-approval first" : "pb runs the checks now, and a fix counts only if they pass"}. Reply with exactly this one line, nothing else (pb posts the outcome itself), then stop:\n${line}`,
+      );
     },
   });
 
@@ -253,11 +257,16 @@ export function registerFix(pi: ExtensionAPI) {
    * then the project's checks — the same ones the build's final step runs (suite or compile, lint, extra checks).
    * The first failure stops it. A lap's report is its own claim; this is the fact.
    */
-  const checkAfterLap = async (cwd: string, store: Store, spec: string, lap: number, reds: string[]): Promise<{ ok: boolean; ran: string[]; failure?: string }> => {
+  const checkAfterLap = async (cwd: string, store: Store, spec: string, lap: number, reds: string[], claimed: string): Promise<{ ok: boolean; ran: string[]; failure?: string }> => {
     const loaded = loadSpec(store, spec);
     const cmds = commands(cwd, store);
     const cfg = cmds.cfg;
     const list = [...new Set([...reds, ...(loaded ? finalCheckCommands(loaded.spec, cmds) : [])])];
+    // Said before the checks start, which can take minutes: the lap's own reply is not the end of /pb:fix.
+    if (list.length)
+      post(
+        `**Checking the fixes** — the lap reports ${claimed}; none counts as fixed until these pass: ${list.map((c) => `\`${c}\``).join(", then ")}. The outcome and the next step come in your session when they finish.`,
+      );
     const ran: string[] = [];
     for (const command of list) {
       const r = await withChecking(() => runVerify(command, cwd, cfg.verifyTimeoutSec, cfg.testOutputCap));
@@ -307,7 +316,8 @@ export function registerFix(pi: ExtensionAPI) {
       const skip = report.skipped.map(at).filter((f): f is Finding => !!f);
       const done = report.fixed.map(at).filter((f): f is Finding => !!f && !skip.includes(f));
       skipped.push(...skip.map(label));
-      const check = await checkAfterLap(cwd, store, spec, laps, report.reds);
+      const claimed = done.length ? `${done.map((f) => `#${numberOf.get(f) ?? "?"}`).join(", ")} fixed` : "nothing fixed";
+      const check = await checkAfterLap(cwd, store, spec, laps, report.reds, `${claimed}${skip.length ? `, ${skip.map((f) => `#${numberOf.get(f) ?? "?"}`).join(", ")} skipped` : ""}`);
       checked = check.ran;
       if (!check.ok) {
         // Fixes that leave a check red are not fixes yet: they stay open for the next lap, with the failure.
