@@ -607,6 +607,8 @@ export const approveSpec = (store: Store, p: Progress, md: string, spec: ParsedS
   p.tasks = syncTasks(spec, p.tasks);
   if (reapproved) p.edited = true;
   store.writeApprovedSpec(p.spec, md);
+  // What is approved is the spec; a draft refused earlier would otherwise wait to capture a later edit.
+  store.clearDraft(p.spec);
   store.event(p.spec, { type: "spec-approved", hash: p.approval.hash, contractHash: contract, reapproved: reapproved || undefined });
   return reapproved;
 };

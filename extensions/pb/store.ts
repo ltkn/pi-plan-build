@@ -616,6 +616,14 @@ function readJson<T>(file: string): T | undefined {
   }
 }
 
+/** A refused spec write: whose it is, the text, and what the checks said about it. */
+export interface SpecDraft {
+  session: string;
+  content: string;
+  errors: string[];
+  at: string;
+}
+
 export function writeFileAtomic(file: string, content: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
@@ -829,6 +837,29 @@ export class Store {
   }
   writeSpec(name: string, markdown: string): void {
     writeFileAtomic(path.join(this.specDir(name), "spec.md"), markdown.endsWith("\n") ? markdown : `${markdown}\n`);
+  }
+
+  /**
+   * A spec write the checks refused, kept so the session that wrote it can fix what was listed section by section
+   * instead of sending the whole spec again. Never read as the spec: only that session's pb_update_spec edits it,
+   * and it is gone once a write passes or the spec is approved for a build or a fix.
+   */
+  readDraft(name: string): SpecDraft | undefined {
+    try {
+      return readJson<SpecDraft>(path.join(this.specDir(name), "draft.json"));
+    } catch {
+      return undefined;
+    }
+  }
+  writeDraft(name: string, draft: SpecDraft): void {
+    writeFileAtomic(path.join(this.specDir(name), "draft.json"), `${JSON.stringify(draft, null, 2)}\n`);
+  }
+  clearDraft(name: string): void {
+    try {
+      fs.rmSync(path.join(this.specDir(name), "draft.json"), { force: true });
+    } catch {
+      // an invalid name has no draft to clear
+    }
   }
 
   /** The text a build was approved against: the build may add Design and Decisions, never rewrite this. */

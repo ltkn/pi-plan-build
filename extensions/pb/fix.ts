@@ -218,6 +218,7 @@ export function registerFix(pi: ExtensionAPI) {
         live = cc;
         const lapFile = cc.sessionManager.getSessionFile() ?? undefined;
         if (lapFile) store.saveFixSession(lapFile, { spec, findings: remaining });
+        store.clearDraft(spec); // a fix lap edits the reviewed spec, never a draft refused before it
         store.event(spec, { type: "fix-start", findings: remaining.map((f) => f.title), ...(direction ? { direction: safeBlock(direction.text) } : {}) });
         from = readEvents(path.join(store.specDir(spec), "events.jsonl")).length;
         await c.sendMessage({ customType: "pb-fix", content: seed, display: true }, { triggerTurn: true });

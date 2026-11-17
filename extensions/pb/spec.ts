@@ -21,12 +21,12 @@
  *   - Test: `<targeted test command>`        (optional)
  */
 import { createHash } from "node:crypto";
-import { blankFenced, escapeRegExp, headerBlock, sectionHeading, sectionOf, setSection, unfenced } from "./markdown.ts";
+import { blankFenced, escapeRegExp, headerBlock, removeSection, sectionHeading, sectionOf, setSection, unfenced } from "./markdown.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { SIBLING_REPO } from "./repos.ts";
 import type { AcceptanceCriterion, Gate } from "./store.ts";
 
-export { sectionHeading, sectionOf, setSection };
+export { removeSection, sectionHeading, sectionOf, setSection };
 
 export interface SpecTask {
   id: string;
@@ -116,7 +116,7 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
     else if (found.length > 1) errors.push(`duplicate "## ${s}" section: keep one`);
   }
   if (status === "ready" && sectionOf(md, "Open questions").trim())
-    errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions, tag the claim \`assumed: <what would falsify it>\`, or ask with pb_ask');
+    errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions, tag the claim \`assumed: <what would falsify it>\`, or ask with pb_ask; if nothing is open, remove the section (pb_update_spec, mode remove)');
 
   // Tasks: fence-aware, line-based. ## Tasks allows a trailing colon; ### T1 is case-insensitive
   // and normalized to T1; a ### line that looks like a task but doesn't parse is an error, not silence.

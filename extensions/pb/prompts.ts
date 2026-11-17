@@ -280,7 +280,7 @@ Only when the change persists or transforms data, a schema or a stored format, o
 ## Threats and abuse
 Only when the change adds or alters an entry point, touches a trust boundary (authentication, authorization, credentials, sensitive data, external input) or has rules someone gains from breaking (money, quantities, limits, quotas, state): who can reach it and with what, what they must prove or be allowed, how it could be abused (including by quantity, repetition, reordering or racing), and what prevents each abuse. A spec that is sensitive anywhere in Goal, Findings, Decisions, Contracts or Tasks should carry this section: say "none — <why>" if none of those triggers applies. The task acceptance lines then include the abuse cases.
 ## Open questions
-Only while Status is planning: what's undecided, the options still being weighed with what was found for and against each, and where the discussion stands.
+Only while Status is planning: what's undecided, the options still being weighed with what was found for and against each, and where the discussion stands. With Status: ready, leave this heading out: nothing open is not a section.
 ## Tasks
 ### T1: <the outcome, e.g. "a pending order can be cancelled">
 What must be true when it's done, and anything the build must know; not how to build it.

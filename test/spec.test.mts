@@ -1089,6 +1089,101 @@ test("pb_update_spec changes one section or the status, and writes nothing that 
   assert.match((await t.callTool("pb_update_spec", { name: "nope", section: "Goal", content: "x" })).error!, /No spec "nope"/);
 });
 
+/** SPEC() as a model often writes it ready: an Open questions heading kept over "none". */
+const READY_WITH_NO_OPEN_QUESTIONS = SPEC().replace("## Tasks", "## Open questions\nNone — every unknown is settled in Decisions.\n## Tasks");
+const draftOf = (t: ReturnType<typeof setup>, name: string) => path.join(t.repo, ".pi/pb/specs", name, "draft.json");
+
+test("pb_write_spec: a rejected spec is kept as a draft, and one section edit saves it — nothing is rewritten whole", async () => {
+  const t = setup();
+  await written(t, SPEC()); // the session has the format; then the next write of a new spec is refused
+  const refused = await t.callTool("pb_write_spec", { name: "refund-flow", content: READY_WITH_NO_OPEN_QUESTIONS });
+  assert.match(refused.error!, /doesn't parse[\s\S]*Open questions[\s\S]*The draft is kept[\s\S]*pb_update_spec[\s\S]*not the whole spec/);
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/specs/refund-flow/spec.md")), "nothing that fails the checks becomes the spec");
+  assert.ok(fs.existsSync(draftOf(t, "refund-flow")));
+
+  const saved = await t.callTool("pb_update_spec", { name: "refund-flow", section: "Open questions", mode: "remove" });
+  assert.equal(saved.error, undefined, saved.error ?? "");
+  assert.match(saved.content![0].text, /^✅ Wrote .*refund-flow\/spec\.md from the draft \(Open questions removed\): status ready/);
+  const md = t.read(".pi/pb/specs/refund-flow/spec.md");
+  assert.doesNotMatch(md, /Open questions/);
+  assert.match(md, /## Decisions[\s\S]*## Tasks\n### T1: first file/);
+  assert.ok(!fs.existsSync(draftOf(t, "refund-flow")), "a saved draft is gone");
+  assert.deepEqual(t.progress("refund-flow").tasks.map((x: any) => [x.id, x.status]), [["T1", "todo"], ["T2", "todo"]]);
+  assert.equal(t.progress("refund-flow").writtenIn, t.runtime().ctx.sessionManager.getSessionFile());
+});
+
+test("pb_write_spec: a citation the code doesn't have is fixed in its section, and an edit that leaves errors keeps the draft", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  citedPage(t);
+  const cites = citingSpec("`src/missing.ts:1` holds the model.");
+  assert.match((await t.callTool("pb_write_spec", { name: "slow-page", content: cites })).error!, /points at code that isn't there[\s\S]*The draft is kept/);
+  assert.equal((await t.callTool("pb_update_spec", { name: "slow-page", section: "Findings", content: "- `src/page.ts:12` holds the model." })).error, undefined);
+  assert.match(t.read(".pi/pb/specs/slow-page/spec.md"), /src\/page\.ts:12/);
+
+  // Two problems: one edit fixes one, and only the other comes back.
+  const twice = READY_WITH_NO_OPEN_QUESTIONS.replace("## Goal\nCancel orders.\n", "");
+  const both = (await t.callTool("pb_write_spec", { name: "two-faults", content: twice })).error!;
+  assert.match(both, /Goal[\s\S]*Open questions|Open questions[\s\S]*Goal/);
+  const left = (await t.callTool("pb_update_spec", { name: "two-faults", section: "Open questions", mode: "remove" })).error!;
+  assert.match(left, /missing the "## Goal" section[\s\S]*The draft is kept/);
+  assert.doesNotMatch(left, /Open questions/);
+  assert.ok(fs.existsSync(draftOf(t, "two-faults")));
+  assert.equal((await t.callTool("pb_update_spec", { name: "two-faults", section: "Goal", content: "Cancel orders." })).error, undefined);
+  assert.match(t.read(".pi/pb/specs/two-faults/spec.md"), /## Goal\nCancel orders\./);
+});
+
+test("a draft belongs to the session that wrote it: elsewhere, and once the spec is written whole, edits reach the spec", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  const before = t.read(specRel);
+  assert.ok((await t.callTool("pb_write_spec", { name: "order-cancellation", content: READY_WITH_NO_OPEN_QUESTIONS })).error);
+  assert.equal(t.read(specRel), before, "the refused rewrite leaves the spec as it was");
+
+  // Another session's edit goes to the spec, never into this session's draft.
+  const rt = t.runtime();
+  const elsewhere = { ...rt.ctx, sessionManager: { ...rt.ctx.sessionManager, getSessionFile: () => path.join(t.repo, "other-session.jsonl") } };
+  const other = await rt.tools.pb_update_spec.execute("x", { name: "order-cancellation", section: "Decisions", content: "- Notify by event, because mail belongs to the notification service.", mode: "append" }, undefined, undefined, elsewhere);
+  assert.match(other.content[0].text, /^✅ Updated .*spec\.md \(Decisions\)/);
+  assert.match(t.read(specRel), /Notify by event/);
+  assert.doesNotMatch(fs.readFileSync(draftOf(t, "order-cancellation"), "utf8"), /Notify by event/);
+
+  // A whole write that passes replaces the draft.
+  assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error, undefined);
+  assert.ok(!fs.existsSync(draftOf(t, "order-cancellation")));
+});
+
+test("a build approves the spec, never a draft, and its approval discards one", async () => {
+  const t = setup({ verify: "true" });
+  await written(t, SPEC());
+  assert.ok((await t.callTool("pb_write_spec", { name: "order-cancellation", content: READY_WITH_NO_OPEN_QUESTIONS })).error);
+  assert.ok(fs.existsSync(draftOf(t, "order-cancellation")));
+  t.agent.script = diligent;
+  await t.run("build", "order-cancellation");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.doesNotMatch(t.read(".pi/pb/specs/order-cancellation/approved.md"), /Open questions/);
+  assert.ok(!fs.existsSync(draftOf(t, "order-cancellation")));
+});
+
+test("pb_update_spec remove: a section goes, a required one or one that isn't there is refused", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  assert.equal((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Out of scope", mode: "remove" })).error, undefined);
+  assert.doesNotMatch(t.read(specRel), /## Out of scope/);
+  const before = t.read(specRel);
+  assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Goal", mode: "remove" })).error!, /missing the "## Goal" section/);
+  assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Glossary", mode: "remove" })).error!, /no "## Glossary" section to remove/);
+  assert.equal(t.read(specRel), before);
+});
+
+test("/pb:status names an unsaved draft", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  await t.callTool("pb_write_spec", { name: "refund-flow", content: READY_WITH_NO_OPEN_QUESTIONS });
+  await t.run("status");
+  assert.match(t.notes.at(-1)!, /refund-flow — .*unsaved draft \(1 error\)/);
+});
+
 test("pb_update_spec: replacing a section with nothing is refused and the file keeps what it had", async () => {
   const t = setup();
   process.chdir(t.repo);

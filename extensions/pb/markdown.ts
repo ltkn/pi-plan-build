@@ -114,6 +114,20 @@ export function setSection(md: string, section: string, body: string, mode: "rep
   return `${md.slice(0, start).replace(/\s*$/, "")}\n${merged}\n${end < md.length ? `\n${md.slice(end).replace(/^\s*/, "")}` : ""}`;
 }
 
+/** The markdown without its "## <section>" (heading and body), or undefined when it has no such section. */
+export function removeSection(md: string, section: string): string | undefined {
+  const name = section.replace(/^#+\s*/, "").trim();
+  const lines = md.split("\n");
+  const blanked = blankFenced(md);
+  const idx = blanked.findIndex((l) => sectionHeading(name).test(l));
+  if (idx < 0) return undefined;
+  const rel = blanked.slice(idx + 1).findIndex((l) => /^##\s+(?!#)/.test(l));
+  const end = rel < 0 ? lines.length : idx + 1 + rel;
+  const head = lines.slice(0, idx).join("\n").replace(/\s*$/, "");
+  const tail = lines.slice(end).join("\n").replace(/^\s*/, "");
+  return tail ? `${head}\n\n${tail}` : `${head}\n`;
+}
+
 /** Lines outside fenced code blocks, where example bullets are not real content. */
 export function unfenced(text: string): string[] {
   const lines = text.split("\n");

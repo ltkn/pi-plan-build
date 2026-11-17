@@ -3,7 +3,7 @@ import { StringEnum, Type } from "./schema.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
 import { specFormatHandout, specPrompt } from "./prompts.ts";
-import { specAssumptions, acceptanceCriteria, isDraftSpec, needsRed, parseSpec, setSection, setStatus, specLosses, tokensOf } from "./spec.ts";
+import { specAssumptions, acceptanceCriteria, isDraftSpec, needsRed, parseSpec, removeSection, setSection, setStatus, specLosses, tokensOf } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { Store, now } from "./store.ts";
@@ -113,6 +113,19 @@ export const showSpec = (store: Store, name: string, o: { names?: string[]; next
   appendEntry("pb-spec", { name, markdown: loaded.md });
 };
 
+/** What a refused write tells the model when its text was kept: fix what's listed, by section. */
+const DRAFT_KEPT =
+  "The draft is kept: fix only what's listed with pb_update_spec (a section's new content, or mode remove for a section that shouldn't be there), which edits this draft while it's pending — not the whole spec again.";
+
+/**
+ * A write the checks refused: kept as the session's draft when there is a session to own it, so the fix is a
+ * section edit; the thrown error lists what to fix either way.
+ */
+const refuse = (store: Store, name: string, session: string | undefined, content: string, head: string, errors: string[], tail: string): never => {
+  if (session) store.writeDraft(name, { session, content, errors, at: now() });
+  throw new Error(`${head}\n- ${errors.join("\n- ")}\n${tail}${session ? `\n${DRAFT_KEPT}` : ""}`);
+};
+
 /** A write's note on what it removed from the previous text, when it removed anything. */
 const lossNote = (before: string | undefined, after: string): string | undefined => {
   const lost = before ? specLosses(before, after) : [];
@@ -151,7 +164,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
     name: "pb_write_spec",
     label: "Write spec",
     description:
-      "Write or rewrite a pb feature spec (.pi/pb/specs/<name>/spec.md). Use it when the user runs /pb:spec or /pb:build asks for the spec. The content must follow the spec format the user's instructions give; the tool rejects a spec that doesn't parse and says why.",
+      "Write or rewrite a pb feature spec (.pi/pb/specs/<name>/spec.md). Use it when the user runs /pb:spec or /pb:build asks for the spec. The content must follow the spec format the user's instructions give; the tool rejects a spec that doesn't parse or cites code that isn't there, says why, and keeps the rejected text as a draft: fix it with pb_update_spec, section by section, rather than sending it whole again.",
     parameters: Type.Object({
       name: Type.String({ description: "short kebab-case spec name (the folder under .pi/pb/specs/, not a path), e.g. order-cancellation" }),
       content: Type.String({ description: "the complete spec in markdown" }),
@@ -181,9 +194,9 @@ export function registerSpecTools(pi: ExtensionAPI) {
         }
       }
       const { spec, errors } = parseSpec(params.content);
-      if (!spec) throw new Error(`The spec doesn't parse:\n- ${errors.join("\n- ")}\nFix it and call pb_write_spec again.`);
+      if (!spec) return refuse(store, params.name, session, params.content, "The spec doesn't parse:", errors, "Fix it.");
       const pathErrs = spec.status === "ready" ? [...specPathErrors(params.content, ctx.cwd), ...specRepoErrors(spec, ctx.cwd)] : [];
-      if (pathErrs.length) throw new Error(`The spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\nFix the path, line or citation; new files need no line number.`);
+      if (pathErrs.length) return refuse(store, params.name, session, params.content, "The spec points at code that isn't there:", pathErrs, "Fix the path, line or citation; new files need no line number.");
       const prev = store.progress(params.name);
       // Everything the answer needs is settled first: from the write down, the only work left is the
       // spec file and its two ledger records, so a failing note can't report an error over a spec
@@ -198,6 +211,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
       const started = session ? specStarted.get(session) : undefined;
       const specMs = spec.status === "ready" && started !== undefined ? Math.max(0, Date.now() - started) : undefined;
       store.writeSpec(params.name, params.content);
+      store.clearDraft(params.name);
       if (specMs !== undefined && session) specStarted.delete(session);
       store.saveProgress({
         ...(prev ?? { spec: params.name, phase: "written" }),
@@ -216,12 +230,12 @@ export function registerSpecTools(pi: ExtensionAPI) {
     name: "pb_update_spec",
     label: "Update spec",
     description:
-      "Change part of an existing pb spec instead of rewriting it: replace or append to one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, \"none — <why>\".",
+      "Change part of an existing pb spec instead of rewriting it: replace, append to or remove one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, \"none — <why>\". When this session's pb_write_spec was refused, this edits that kept draft, and the spec is written once the draft passes.",
     parameters: Type.Object({
       name: Type.Optional(Type.String({ description: "the spec's name; the one this session is building or writing, if omitted" })),
       section: Type.Optional(Type.String({ description: 'the "## " section to change, e.g. Decisions; created if missing' })),
-      content: Type.Optional(Type.String({ description: "the section's new body (without its heading), or the lines to append" })),
-      mode: Type.Optional(StringEnum(["replace", "append"])),
+      content: Type.Optional(Type.String({ description: "the section's new body (without its heading), or the lines to append; none for remove" })),
+      mode: Type.Optional(StringEnum(["replace", "append", "remove"])),
       status: Type.Optional(StringEnum(["planning", "ready"])),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -252,10 +266,20 @@ export function registerSpecTools(pi: ExtensionAPI) {
             `This fix lap may change only ${fixLap.spec}'s Design and Decisions, to say what the fix changed. A finding that needs its Goal, Contracts, Acceptance or Status changed is reported as skipped, for a spec revision.`,
           );
       }
-      let md = store.readSpec(name);
+      // This session's refused write, if there is one: the edit fixes it. A build or a fix lap edits the spec
+      // it was approved against, and another session's draft is never this session's to finish.
+      const kept = building || fixLap || !session ? undefined : store.readDraft(name);
+      const draft = kept?.session === session ? kept : undefined;
+      let md = draft?.content ?? store.readSpec(name);
       if (!md) throw new Error(`No spec "${name}": write it with pb_write_spec.`);
-      const before = md;
-      if (params.section) {
+      const before = store.readSpec(name);
+      const sectionLabel = params.section?.replace(/^#+\s*/, "").trim();
+      if (params.mode === "remove") {
+        if (!sectionLabel) throw new Error("mode remove needs the section to remove.");
+        const removed = removeSection(md, sectionLabel);
+        if (removed === undefined) throw new Error(`Not written: there is no "## ${sectionLabel}" section to remove.`);
+        md = removed;
+      } else if (params.section) {
         if (params.content === undefined) throw new Error("content is required with section.");
         // An empty body under replace would leave the heading standing over nothing, and an empty
         // section answers every evidence gate by deleting what the gate inspects.
@@ -265,16 +289,22 @@ export function registerSpecTools(pi: ExtensionAPI) {
       }
       if (params.status) md = setStatus(md, params.status as "planning" | "ready");
       const { spec, errors } = parseSpec(md);
-      if (!spec) throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.join("\n- ")}`);
-      const sectionName = params.section?.replace(/^#+\s*/, "").trim().toLowerCase() ?? "";
+      if (!spec) {
+        if (draft) return refuse(store, name, session, md, "Not written: the draft still doesn't parse:", errors, "Fix it.");
+        throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.join("\n- ")}`);
+      }
+      const sectionName = sectionLabel?.toLowerCase() ?? "";
       // A path:line is a claim about the code the spec was written against. Check it on every
       // ready write except Design, which the build writes and may legitimately describe new code.
-      if (spec.status === "ready" && sectionName !== "design") {
+      if (spec.status === "ready" && (sectionName !== "design" || draft)) {
         const pathErrs = [...specPathErrors(md, ctx.cwd), ...specRepoErrors(spec, ctx.cwd)];
-        if (pathErrs.length) throw new Error(`Not written: the spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\nFix the path, line or citation; new files need no line number.`);
+        const fix = "Fix the path, line or citation; new files need no line number.";
+        if (pathErrs.length && draft) return refuse(store, name, session, md, "Not written: the draft points at code that isn't there:", pathErrs, fix);
+        if (pathErrs.length) throw new Error(`Not written: the spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\n${fix}`);
       }
       const prev = store.progress(name);
-      const isTasks = sectionName === "tasks";
+      // A draft becomes the spec whole, so it gets a whole write's notes.
+      const isTasks = sectionName === "tasks" || !!draft;
       const rw = isTasks ? rewriteWarning(name, prev, spec) : undefined;
       const lost = lossNote(before, md);
       const notes = [...(isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])] : []), ...(lost ? [lost] : [])].map((w) => `\nNote: ${w}.`);
@@ -282,6 +312,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
       const specMs = !building && spec.status === "ready" && started !== undefined ? Math.max(0, Date.now() - started) : undefined;
       // Answer built from pre-write values above; what follows is the file and its two ledger records.
       store.writeSpec(name, md);
+      if (draft) store.clearDraft(name);
       if (specMs !== undefined && session) specStarted.delete(session);
       // A live build's task list is its approved one: a Design or Decisions edit never resyncs it
       // from the live file, and the build that owns the spec keeps its writtenIn.
@@ -295,8 +326,10 @@ export function registerSpecTools(pi: ExtensionAPI) {
         writtenIn: ownerStays && prev ? prev.writtenIn : session,
         updatedAt: now(),
       });
-      store.event(name, { type: "spec", update: params.section ?? "status", status: spec.status, tokens: tokensOf(md), ...(specMs !== undefined ? { ms: specMs } : {}) });
-      return reply(`✅ Updated ${store.rel("specs", name, "spec.md")}${params.section ? ` (${params.section})` : ""}: status ${spec.status}; ${sizeNote(tokensOf(md))}${timeSuffix(specMs)}.${notes.join("")}`);
+      store.event(name, { type: "spec", update: params.section ?? "status", ...(draft ? { fromDraft: true } : {}), status: spec.status, tokens: tokensOf(md), ...(specMs !== undefined ? { ms: specMs } : {}) });
+      const change = sectionLabel ? ` (${sectionLabel}${params.mode === "remove" ? " removed" : ""})` : "";
+      const what = draft ? `✅ Wrote ${store.rel("specs", name, "spec.md")} from the draft${change}` : `✅ Updated ${store.rel("specs", name, "spec.md")}${change}`;
+      return reply(`${what}: status ${spec.status}; ${sizeNote(tokensOf(md))}${timeSuffix(specMs)}.${notes.join("")}`);
     },
   });
 
