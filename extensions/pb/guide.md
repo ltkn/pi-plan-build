@@ -508,7 +508,16 @@ performance), planning tries it in a scratch copy first.
 **Out of scope** is optional. The aim: a fresh or reset session starts where
 the discussion ended, without re-analysing and without being buried. Pi points to code instead of copying it and states each
 fact once; `pb_write_spec` reports the size and only suggests tightening a long
-spec. `pb_update_spec` changes one section at a time.
+spec. `pb_update_spec` changes one section at a time, or a line or two inside one
+(`mode edit`, quoting the exact text it changes).
+
+**A spec is never overwritten from an older copy.** pb remembers what each session
+has seen of a spec: what it wrote, read whole, or was seeded with. A section
+replace, or a whole `pb_write_spec` rewrite, is refused when the text on disk
+changed since that session saw it (your hand edit, another session's), and the
+refusal returns the text as it stands; the model then edits it by quoting it, or
+reads the file and writes again. While a spec this session worked on differs on
+disk, each turn says so, naming the sections.
 
 A spec with `Status: planning` is a checkpoint of an unfinished discussion (no
 tasks or verification needed yet). `/pb:build` finishes it first: open
@@ -603,9 +612,11 @@ full transcript are recorded beside the spec.
 text, re-posting a standing P0 instead of running again. After a pass, an edit
 is not reviewed again: a fresh pass always finds new subjects, and the code
 review judges the build against the final text (`/pb:spec-review` reviews it
-again when you want). After a P0, the edit that settles it is reviewed, since
-the P0 holds the build until a review sees it gone. Once the first task has
-started, spec edits are the code reviewer's to judge.
+again when you want). The build-start screen still shows what changed since the
+review read it: the sections, and every line it read that the text no longer has,
+since a removal is rarely what settling a finding meant to do. After a P0, the edit
+that settles it is reviewed, since the P0 holds the build until a review sees it
+gone. Once the first task has started, spec edits are the code reviewer's to judge.
 
 **`/pb:spec-review [name]` runs that pass without the build**, for a spec that
 is written but must not be built yet — a plan you want judged before you commit
@@ -739,9 +750,12 @@ revised spec and a new approval.
 
    Once the first task starts, the spec's contract is frozen: the build may add
    to `## Design` and `## Decisions`, and change nothing else — not through
-   `pb_update_spec`, not by editing the file. If the spec itself must change,
-   the build stops and asks; editing it by hand pauses the build at its next
-   step, and `/pb:build` re-approves the revision (finished tasks stay done).
+   `pb_update_spec`, not by editing the file. The decisions you approved hold
+   too: the build (running, or paused in its own session) and its fix laps may
+   add decisions but never change or drop an approved one. If the spec itself
+   must change, the build stops and asks; editing it by hand pauses the build at
+   its next step, and `/pb:build` re-approves the revision (finished tasks stay
+   done), showing any approved decision that was removed.
 2. **Structured files are edited literally.** `pom.xml`, JSON, YAML and other
    structured files are changed by exact literal replacement or line-based
    edits, never by a regex that can backtrack — a nested-quantifier pattern such

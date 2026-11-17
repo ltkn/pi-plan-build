@@ -8,7 +8,7 @@ import type {
 import { snapshot } from "./checkpoint.ts";
 import { tip } from "./help.ts";
 import { buildIntro, coherePrompt, continuePrompt, findingLine, finishSpecPrompt, fixText, specPrompt } from "./prompts.ts";
-import { type ParsedSpec, contractHash, specHash, specTextBlocks } from "./spec.ts";
+import { type ParsedSpec, blockFingerprints, contractHash, removedLines, sectionOf, specHash, specTextBlocks } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type Progress, COHERE_TASK_ID, Store, cap, changedSince, gitHead, now, readEvents } from "./store.ts";
 import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, planningEdits, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
@@ -16,7 +16,7 @@ import { whereNext } from "./next.ts";
 import { offerStandards } from "./plan.ts";
 import { dryRunTests, editSpec, readySpecs, showSpec } from "./spec-tools.ts";
 import { COHERE_MARKER, beginCohereEntry, beginTask, confirmLiveBuild, needsCohere, staleness } from "./build-loop.ts";
-import { ensureSpecReviewed, recordedFindings, reviewDoor } from "./spec-review.ts";
+import { ensureSpecReviewed, recordedFindings, reviewDoor, sinceReview } from "./spec-review.ts";
 import { enterStep, nextPhase, nextTodo, unfinishedPhase } from "./phase.ts";
 
 /**
@@ -245,6 +245,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
         // Only `c` from here on: the captured pi and ctx belong to the replaced session.
         // The new session gets a fresh runtime with the default tools, so editing is on.
         p.session = c.sessionManager.getSessionFile();
+        if (p.session) store.markSeen(name, p.session, blockFingerprints(md)); // seeded with the spec: it has seen it
         const reapproved = approveSpec(store, p, md, spec);
         store.saveProgress(p);
         saveStartCheckpoint(c, store, name, p, cfg.checkpoints, restart);
@@ -319,6 +320,9 @@ export function registerBuildStart(pi: ExtensionAPI) {
 
     const reviewsBefore = specReviewCount(store, name);
     if ((await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "build"))) !== "pass") return;
+    // Lines the review read and this text no longer has: listed with the review's answer, and asked about here.
+    const gone = sinceReview(store, name, md).removed.length;
+    if (gone) checked.concerns.push(`${gone} line${gone === 1 ? "" : "s"} the spec review read ${gone === 1 ? "is" : "are"} gone from this text (listed above)`);
     postCarriedP1s(store, name, md, specReviewCount(store, name) === reviewsBefore);
     const buildModel = cfg.buildModel ? findModel(ctx, cfg.buildModel) : undefined;
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
@@ -637,8 +641,20 @@ export function registerBuildStart(pi: ExtensionAPI) {
         // revision" was an assumption: show what changed and ask, instead of inheriting it.
         const live = loadSpec(store, p.spec);
         if (!live) return ctx.ui.notify(`${store.rel("specs", p.spec, "spec.md")} doesn't parse. Fix it (or /${cmd("spec")} ${p.spec}), then /${cmd("build")}.`, "error");
-        if (p.approval && contractHash(live.md) !== p.approval.contractHash && ctx.hasUI) {
-          if (!(await ctx.ui.confirm(`${p.spec}'s contract changed while the build was paused`, contractDiff(store, p.spec, live.md)))) {
+        // Decisions are outside the contract's fingerprint (the build adds to them), but an approved line is still
+        // what was approved: one removed while paused is shown and asked about like a contract change.
+        const approvedMd = store.readApprovedSpec(p.spec);
+        const droppedDecisions = approvedMd ? removedLines(sectionOf(approvedMd, "Decisions"), sectionOf(live.md, "Decisions")) : [];
+        const contractChanged = !!p.approval && contractHash(live.md) !== p.approval.contractHash;
+        if (p.approval && (contractChanged || droppedDecisions.length) && ctx.hasUI) {
+          const title = `${p.spec}'s ${contractChanged ? "contract" : "approved decisions"} changed while the build was paused`;
+          const body = [
+            contractChanged ? contractDiff(store, p.spec, live.md) : "",
+            droppedDecisions.length ? `## Decisions — approved lines removed\n${droppedDecisions.map((l) => (l.startsWith("- ") ? l : `- ${l}`)).join("\n")}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+          if (!(await ctx.ui.confirm(title, body))) {
             return ctx.ui.notify("Not re-approved: the build stays paused. Edit the spec (or /" + cmd("spec") + ` ${p.spec}), then /${cmd("build")} again.`, "warning");
           }
         }

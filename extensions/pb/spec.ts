@@ -396,6 +396,37 @@ export const specTextBlocks = (md: string): SpecTextBlock[] => {
   return blocks;
 };
 
+/** The key a "## <section>" block is filed under in specTextBlocks. */
+export const sectionKey = (section: string) => `section:${blockName(section.replace(/^#+\s*/, "").replace(/\s*:?\s*$/, ""))}`;
+
+/** How a block is named to a reader: its own heading line as written, or "the header". */
+export const blockLabel = (block: SpecTextBlock) => (block.key === "header" ? "the header" : block.text.split("\n")[0].trim());
+
+/** Each block of a spec and its fingerprint: what a session has seen of it, block by block. */
+export const blockFingerprints = (md: string): Record<string, string> =>
+  Object.fromEntries(specTextBlocks(md).map((b) => [b.key, createHash("sha256").update(b.text).digest("hex")]));
+
+/** The blocks of `md` that differ from `seen` (changed, added, or gone from `md` are all "changed"), in spec order. */
+export const unseenBlocks = (md: string, seen: Record<string, string>): SpecTextBlock[] => {
+  const now = blockFingerprints(md);
+  const blocks = specTextBlocks(md).filter((b) => seen[b.key] !== now[b.key]);
+  const gone = Object.keys(seen).filter((k) => !(k in now)).map((k) => ({ key: k, text: `## ${k.replace(/^section:/, "")}\n(removed)` }));
+  return [...blocks, ...gone];
+};
+
+/** The non-blank lines of `before` that `after` no longer has, each occurrence counted once, in `before`'s order. */
+export function removedLines(before: string, after: string): string[] {
+  const left = new Map<string, number>();
+  for (const l of after.split("\n").map((x) => x.trim()).filter(Boolean)) left.set(l, (left.get(l) ?? 0) + 1);
+  const out: string[] = [];
+  for (const l of before.split("\n").map((x) => x.trim()).filter(Boolean)) {
+    const n = left.get(l) ?? 0;
+    if (n > 0) left.set(l, n - 1);
+    else out.push(l);
+  }
+  return out;
+}
+
 /** A review answers for the exact markdown it saw: a pass stops covering the spec the moment the text changes. */
 export const specHash = (markdown: string) => createHash("sha256").update(markdown).digest("hex");
 

@@ -867,6 +867,41 @@ export class Store {
     }
   }
 
+  /**
+   * What each session has seen of a spec, block by block (fingerprints from blockFingerprints): set when the session
+   * writes the spec, reads it whole, or is seeded with it. A section replace may overwrite only a block its session
+   * saw as it stands, so a model writing from memory can't erase what changed on disk meanwhile.
+   */
+  seenBlocks(name: string, session: string): Record<string, string> | undefined {
+    try {
+      return readJson<Record<string, Record<string, string>>>(path.join(this.specDir(name), "seen.json"))?.[session];
+    } catch {
+      return undefined;
+    }
+  }
+  /** Record blocks as seen by `session`: all of `fingerprints`, or only the keys in `only`. */
+  markSeen(name: string, session: string, fingerprints: Record<string, string>, only?: readonly string[]): void {
+    const file = path.join(this.specDir(name), "seen.json");
+    const all = readJson<Record<string, Record<string, string>>>(file) ?? {};
+    const mine = only ? { ...(all[session] ?? {}) } : {};
+    for (const [k, v] of Object.entries(fingerprints)) if (!only || only.includes(k)) mine[k] = v;
+    if (only) for (const k of only) if (!(k in fingerprints)) delete mine[k];
+    all[session] = mine;
+    writeFileAtomic(file, `${JSON.stringify(all, null, 2)}\n`);
+  }
+
+  /** The text the spec review last judged (reviewed.md), so an approval can show what changed since. */
+  readReviewedSpec(name: string): string | undefined {
+    try {
+      return fs.readFileSync(path.join(this.specDir(name), "reviewed.md"), "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+  writeReviewedSpec(name: string, markdown: string): void {
+    writeFileAtomic(path.join(this.specDir(name), "reviewed.md"), markdown);
+  }
+
   /** The text a build was approved against: the build may add Design and Decisions, never rewrite this. */
   readApprovedSpec(name: string): string | undefined {
     try {

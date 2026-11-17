@@ -3,7 +3,7 @@ import { StringEnum, Type } from "./schema.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
 import { specFormatHandout, specPrompt } from "./prompts.ts";
-import { specAssumptions, acceptanceCriteria, isDraftSpec, needsRed, parseSpec, removeSection, setSection, setStatus, specLosses, tokensOf } from "./spec.ts";
+import { specAssumptions, acceptanceCriteria, blockFingerprints, blockLabel, isDraftSpec, needsRed, parseSpec, removedLines, removeSection, sectionKey, sectionOf, setSection, setStatus, specLosses, specTextBlocks, tokensOf, unseenBlocks } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { Store, now } from "./store.ts";
@@ -126,6 +126,26 @@ const refuse = (store: Store, name: string, session: string | undefined, content
   throw new Error(`${head}\n- ${errors.join("\n- ")}\n${tail}${session ? `\n${DRAFT_KEPT}` : ""}`);
 };
 
+/**
+ * The answer to a write built from a copy of the spec older than the file: the blocks as they stand now, so the
+ * model edits those instead of retrying what it remembers. Being shown a block is not reading it: a blind retry of
+ * the same text is refused again, until the session edits by quoting (mode edit) or reads the file.
+ */
+const staleRefusal = (head: string, blocks: { text: string }[]) =>
+  new Error(
+    `${head}\n\n${blocks.map((b) => `--- as it stands ---\n${b.text}`).join("\n\n")}\n--- end ---\n\nChange it with pb_update_spec mode edit (old: the exact text to change, new: its replacement), or read the spec file and then write: a write from an older copy would erase what changed.`,
+  );
+
+/**
+ * Decisions approved for a build hold while that build is running or paused in its own session, and in its fix
+ * laps: those writers are autonomous, and approval does not fingerprint Decisions (the build adds to them). Adding is
+ * theirs; changing or dropping an approved line is a spec revision, re-approved by the human.
+ */
+const droppedApprovedDecisions = (store: Store, name: string, md: string): string[] => {
+  const approved = store.readApprovedSpec(name);
+  return approved ? removedLines(sectionOf(approved, "Decisions"), sectionOf(md, "Decisions")) : [];
+};
+
 /** A write's note on what it removed from the previous text, when it removed anything. */
 const lossNote = (before: string | undefined, after: string): string | undefined => {
   const lost = before ? specLosses(before, after) : [];
@@ -193,6 +213,20 @@ export function registerSpecTools(pi: ExtensionAPI) {
           throw new Error(specFormatHandout());
         }
       }
+      // A whole rewrite from an older copy erases whatever changed on disk since: the blocks this session has not
+      // seen as they stand come back to it, and nothing is written (or kept as a draft: the text is stale).
+      const existing = store.readSpec(params.name);
+      if (existing && session) {
+        const seen = store.seenBlocks(params.name, session);
+        const unseen = unseenBlocks(existing, seen ?? {});
+        if (unseen.length)
+          throw staleRefusal(
+            seen
+              ? `Not written: spec.md changed since this session last read it: ${unseen.map(blockLabel).join(", ")}.`
+              : `Not written: this session has not read the spec it would replace (${store.rel("specs", params.name, "spec.md")}).`,
+            unseen,
+          );
+      }
       const { spec, errors } = parseSpec(params.content);
       if (!spec) return refuse(store, params.name, session, params.content, "The spec doesn't parse:", errors, "Fix it.");
       const pathErrs = spec.status === "ready" ? [...specPathErrors(params.content, ctx.cwd), ...specRepoErrors(spec, ctx.cwd)] : [];
@@ -212,6 +246,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
       const specMs = spec.status === "ready" && started !== undefined ? Math.max(0, Date.now() - started) : undefined;
       store.writeSpec(params.name, params.content);
       store.clearDraft(params.name);
+      if (session) store.markSeen(params.name, session, blockFingerprints(params.content));
       if (specMs !== undefined && session) specStarted.delete(session);
       store.saveProgress({
         ...(prev ?? { spec: params.name, phase: "written" }),
@@ -230,12 +265,14 @@ export function registerSpecTools(pi: ExtensionAPI) {
     name: "pb_update_spec",
     label: "Update spec",
     description:
-      "Change part of an existing pb spec instead of rewriting it: replace, append to or remove one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, \"none — <why>\". When this session's pb_write_spec was refused, this edits that kept draft, and the spec is written once the draft passes.",
+      "Change part of an existing pb spec instead of rewriting it: edit text inside one section (mode edit: old, the exact text as it stands, and new — the way to change a line or two), replace, append to or remove one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). A replace or remove is refused when the section changed since this session last read the spec, with the section as it stands; edit then, or read the file first. The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, \"none — <why>\". When this session's pb_write_spec was refused, this edits that kept draft, and the spec is written once the draft passes.",
     parameters: Type.Object({
       name: Type.Optional(Type.String({ description: "the spec's name; the one this session is building or writing, if omitted" })),
       section: Type.Optional(Type.String({ description: 'the "## " section to change, e.g. Decisions; created if missing' })),
-      content: Type.Optional(Type.String({ description: "the section's new body (without its heading), or the lines to append; none for remove" })),
-      mode: Type.Optional(StringEnum(["replace", "append", "remove"])),
+      content: Type.Optional(Type.String({ description: "the section's new body (without its heading), or the lines to append; none for remove or edit" })),
+      mode: Type.Optional(StringEnum(["replace", "append", "remove", "edit"])),
+      old: Type.Optional(Type.String({ description: "mode edit: the exact text to change, as it stands in the section, enough of it to name one place" })),
+      new: Type.Optional(Type.String({ description: "mode edit: what replaces it (empty deletes it)" })),
       status: Type.Optional(StringEnum(["planning", "ready"])),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -274,7 +311,28 @@ export function registerSpecTools(pi: ExtensionAPI) {
       if (!md) throw new Error(`No spec "${name}": write it with pb_write_spec.`);
       const before = store.readSpec(name);
       const sectionLabel = params.section?.replace(/^#+\s*/, "").trim();
-      if (params.mode === "remove") {
+      const key = sectionLabel ? sectionKey(sectionLabel) : undefined;
+      const mode = params.mode ?? (params.section ? "replace" : undefined);
+      const asItStands = () => specTextBlocks(md!).filter((b) => b.key === key);
+      // A replace or remove overwrites the whole section: only from what this session saw of it. The spec on disk is
+      // what's guarded; a kept draft is this session's own text.
+      if (!draft && session && before && key && (mode === "replace" || mode === "remove") && asItStands().length) {
+        const seen = store.seenBlocks(name, session);
+        if (!seen) throw staleRefusal(`Not written: this session has not read the spec, so it can't replace ## ${sectionLabel} from what it holds.`, asItStands());
+        if (seen[key] !== blockFingerprints(md)[key]) throw staleRefusal(`Not written: ## ${sectionLabel} changed since this session last read it.`, asItStands());
+      }
+      if (mode === "edit") {
+        if (!sectionLabel) throw new Error("mode edit needs the section whose text it changes.");
+        if (params.old === undefined || params.old === "") throw new Error("mode edit needs old: the exact text to change, as it stands in the section.");
+        const body = sectionOf(md, sectionLabel);
+        if (!asItStands().length) throw new Error(`Not written: there is no "## ${sectionLabel}" section to edit.`);
+        const count = body.split(params.old).length - 1;
+        if (count === 0) throw staleRefusal(`Not written: the text to change is not in ## ${sectionLabel} as it stands.`, asItStands());
+        if (count > 1) throw new Error(`Not written: the text to change occurs ${count} times in ## ${sectionLabel}: quote enough to name one place.`);
+        const edited = body.replace(params.old, () => params.new ?? "");
+        if (!edited.trim()) throw new Error(`Not written: this edit leaves ${sectionLabel} empty — a section with nothing to say is one line, "none — <why>".`);
+        md = setSection(md, sectionLabel, edited, "replace");
+      } else if (params.mode === "remove") {
         if (!sectionLabel) throw new Error("mode remove needs the section to remove.");
         const removed = removeSection(md, sectionLabel);
         if (removed === undefined) throw new Error(`Not written: there is no "## ${sectionLabel}" section to remove.`);
@@ -288,6 +346,17 @@ export function registerSpecTools(pi: ExtensionAPI) {
         md = setSection(md, params.section, params.content, (params.mode as "replace" | "append" | undefined) ?? "replace");
       }
       if (params.status) md = setStatus(md, params.status as "planning" | "ready");
+      // Approved decisions hold for the autonomous writers of a live build: the build, running or paused in its own
+      // session, and its fix laps. (A paused build's own session is where they were rewritten from memory before.)
+      const spoken = store.progress(name);
+      const buildsIt = !!building || !!fixLap || (spoken?.phase === "paused" && !!session && spoken.session === session);
+      if (buildsIt && key === "section:decisions" && mode !== "append") {
+        const dropped = droppedApprovedDecisions(store, name, md);
+        if (dropped.length)
+          throw new Error(
+            `Not written: approved decisions hold during the build of ${name}; this write would change or drop:\n${dropped.map((l) => (l.startsWith("- ") ? l : `- ${l}`)).join("\n")}\nAdd a decision with pb_record_decision or mode append. If an approved decision is wrong, stop the task with pb_task_done status blocked and say why: the human revises the spec and /${cmd("build")} re-approves it.`,
+          );
+      }
       const { spec, errors } = parseSpec(md);
       if (!spec) {
         if (draft) return refuse(store, name, session, md, "Not written: the draft still doesn't parse:", errors, "Fix it.");
@@ -313,6 +382,20 @@ export function registerSpecTools(pi: ExtensionAPI) {
       // Answer built from pre-write values above; what follows is the file and its two ledger records.
       store.writeSpec(name, md);
       if (draft) store.clearDraft(name);
+      if (session) {
+        // What this write showed the session: all of a draft (its own text), the blocks it replaced, edited or removed;
+        // an append or a status change leaves a block seen only if it was seen as it stood before.
+        const after = blockFingerprints(md);
+        const touched = [...(key ? [key] : []), ...(params.status ? ["header"] : [])];
+        if (draft) store.markSeen(name, session, after);
+        else {
+          const seen = store.seenBlocks(name, session) ?? {};
+          const was = before ? blockFingerprints(before) : {};
+          const follows = (k: string) => mode === "replace" || mode === "remove" || mode === "edit" || seen[k] === was[k];
+          const keys = touched.filter((k) => (k === "header" ? seen.header === was.header : follows(k)));
+          if (keys.length) store.markSeen(name, session, after, keys);
+        }
+      }
       if (specMs !== undefined && session) specStarted.delete(session);
       // A live build's task list is its approved one: a Design or Decisions edit never resyncs it
       // from the live file, and the build that owns the spec keeps its writtenIn.
@@ -327,7 +410,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
         updatedAt: now(),
       });
       store.event(name, { type: "spec", update: params.section ?? "status", ...(draft ? { fromDraft: true } : {}), status: spec.status, tokens: tokensOf(md), ...(specMs !== undefined ? { ms: specMs } : {}) });
-      const change = sectionLabel ? ` (${sectionLabel}${params.mode === "remove" ? " removed" : ""})` : "";
+      const change = sectionLabel ? ` (${sectionLabel}${mode === "remove" ? " removed" : mode === "edit" ? " edited" : ""})` : "";
       const what = draft ? `✅ Wrote ${store.rel("specs", name, "spec.md")} from the draft${change}` : `✅ Updated ${store.rel("specs", name, "spec.md")}${change}`;
       return reply(`${what}: status ${spec.status}; ${sizeNote(tokensOf(md))}${timeSuffix(specMs)}.${notes.join("")}`);
     },
@@ -349,6 +432,11 @@ export function registerSpecTools(pi: ExtensionAPI) {
       const entry = params.assumption ? `Assumption (build${progress.current ? `, ${progress.current}` : ""}): ${params.decision}` : params.decision;
       const refused = appendDecision(store, name, entry);
       if (refused) throw new Error(`Not recorded: ${refused}. Fix the spec (pb_update_spec) and record the decision again.`);
+      const session = ctx.sessionManager.getSessionFile();
+      const after = store.readSpec(name);
+      // The session's own append: Decisions stays seen if it was seen as it stood before.
+      if (session && after && store.seenBlocks(name, session)?.["section:decisions"] === blockFingerprints(md)["section:decisions"])
+        store.markSeen(name, session, blockFingerprints(after), ["section:decisions"]);
       if (params.assumption) {
         progress.assumptions = [...(progress.assumptions ?? []), entry];
         store.saveProgress(progress);

@@ -7,7 +7,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { changedPaths, cleanupIndexes, snapshot } from "./checkpoint.ts";
 import { PLANNER_ROLE, PLANNER_SECTION, checkpointPrompt, checkpointSummary, extraBlock, reviewStateSummary, nudgePrompt } from "./prompts.ts";
-import { tokensOf } from "./spec.ts";
+import { blockFingerprints, blockLabel, tokensOf, unseenBlocks } from "./spec.ts";
 import { Store, now } from "./store.ts";
 import { COMPACT_STALL_LIMIT, REVIEW_SESSION_TOOLS, checkpointQuiet, checkpointing, cmd, compactStalls, contentText, findModel, instruct, liveBuildOfSession, longCommandSec, longCommands, pauseBuild, pruneSession, refreshWhere, rememberStall, resetLimit, runtime, specOfSession, tree } from "./kit.ts";
 import { whereHere } from "./next.ts";
@@ -44,7 +44,39 @@ export function registerHooks(pi: ExtensionAPI) {
     const store = new Store(ctx.cwd);
     if (session && store.planningSessions().includes(session)) sections[PLANNER_SECTION] = PLANNER_ROLE + extraBlock(store.extra("plan"));
     else delete sections[PLANNER_SECTION];
+    // A spec this session has seen and that changed on disk since (a hand edit, another session): said on the turn,
+    // so the model reads it before editing from what it holds. Present only while something changed, so the cached
+    // prompt is untouched otherwise.
+    const changed = session ? specsChangedOnDisk(store, session) : [];
+    if (changed.length) sections[SPEC_CHANGED_SECTION] = `pb: ${changed.length === 1 ? "a spec" : "specs"} this session worked on changed outside it:\n${changed.join("\n")}\npb_update_spec refuses a replace written from an older copy.`;
+    else delete sections[SPEC_CHANGED_SECTION];
   });
+
+  // Reading a spec whole is seeing it as it stands: a replace from this session is safe again.
+  pi.on("tool_call", (e, ctx) => {
+    const ev = e as { toolName: string; input: { path?: string; offset?: unknown; limit?: unknown } };
+    if (ev.toolName !== "read" || ev.input.offset !== undefined || ev.input.limit !== undefined) return;
+    const session = ctx.sessionManager.getSessionFile();
+    if (!session) return;
+    const store = new Store(ctx.cwd);
+    const rel = path.relative(path.join(ctx.cwd, ".pi", "pb", "specs"), path.resolve(ctx.cwd, ev.input.path ?? ""));
+    const [name, file, ...rest] = rel.split(path.sep);
+    if (!name || file !== "spec.md" || rest.length || name.startsWith("..")) return;
+    const md = store.readSpec(name);
+    if (md) store.markSeen(name, session, blockFingerprints(md));
+  });
+
+  /** The system-prompt section that names specs changed on disk since this session last saw them. */
+  const SPEC_CHANGED_SECTION = "pb-spec-changed";
+
+  /** One line per spec this session has seen and whose file differs since, naming the blocks that changed. */
+  const specsChangedOnDisk = (store: Store, session: string): string[] =>
+    store.specNames().flatMap((name) => {
+      const seen = store.seenBlocks(name, session);
+      const md = seen ? store.readSpec(name) : undefined;
+      const unseen = md && seen ? unseenBlocks(md, seen) : [];
+      return unseen.length ? [`- ${name} (${store.rel("specs", name, "spec.md")}) changed on disk since this session last read it: ${unseen.map(blockLabel).join(", ")}; read it before editing it.`] : [];
+    });
 
   /** which limit governs each shell call in flight, so a timeout names the one that fired */
   const shellLimitKeys = new Map<string, string>();

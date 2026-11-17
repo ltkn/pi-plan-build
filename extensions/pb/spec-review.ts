@@ -6,7 +6,7 @@ import { findingLine, specReviewBrief, SPEC_REVIEWER_SYSTEM, SPEC_CHECK_NAMES } 
 import { REVIEW_TOOLS } from "./review.ts";
 import { freshProgress } from "./progress.ts";
 import { runFresh, runUsage } from "./runner.ts";
-import { specAssumptions, acceptanceCriteria, parseSpec, specHash } from "./spec.ts";
+import { specAssumptions, acceptanceCriteria, blockLabel, parseSpec, removedLines, specHash, specTextBlocks } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type Finding, Store, cap, gitHead, readEvents } from "./store.ts";
@@ -160,6 +160,8 @@ const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, 
     return { findings: [], block: true, session, ms: res.ms, ...(prose.trim() ? { prose: cap(prose.trim(), 2000) } : {}) };
   }
   const block = findings.some((f) => f.priority === "P0");
+  // The text itself, beside its verdict: an approval of a later text can then show what changed since the review.
+  store.writeReviewedSpec(name, md);
   store.event(name, { type: "spec-review", verdict: block ? "block" : "pass", hash: specHash(md), head: gitHead(cwd), findings: findings.length, reported: findings, model: reviewModel, thinking: cfg.specReviewer.thinking, session, ms: res.ms, ...runUsage(res) });
   return { findings, block, session, ms: res.ms };
 };
@@ -172,6 +174,32 @@ const runSpecReview = async (ctx: ExtensionContext, store: Store, name: string, 
  * `note` is what else belongs on the evidence line where the human stands: the standalone door names
  * a build already underway, because a plan-level pass does not re-gate a running one.
  */
+
+/**
+ * What changed between the text a passed review read and the text about to be built: the sections, and the lines
+ * removed (first: a removal is what settling a finding rarely means to do). Empty when the review read this text.
+ */
+export const sinceReview = (store: Store, name: string, md: string, reviewedHash?: unknown): { kept: boolean; sections: string[]; removed: string[] } => {
+  const reviewed = store.readReviewedSpec(name);
+  if (reviewed === undefined || (typeof reviewedHash === "string" && specHash(reviewed) !== reviewedHash)) return { kept: false, sections: [], removed: [] };
+  if (reviewed === md) return { kept: true, sections: [], removed: [] };
+  const now = new Map(specTextBlocks(md).map((b) => [b.key, b.text]));
+  const was = specTextBlocks(reviewed);
+  const sections = [...was.filter((b) => now.get(b.key) !== b.text), ...specTextBlocks(md).filter((b) => !was.some((w) => w.key === b.key))].map(blockLabel);
+  return { kept: true, sections: [...new Set(sections)], removed: removedLines(reviewed, md) };
+};
+
+const sinceReviewLines = (store: Store, name: string, md: string, reviewedHash: unknown): string[] => {
+  const s = sinceReview(store, name, md, reviewedHash);
+  if (!s.kept) return ["", "(The reviewed text was not kept, so what changed since can't be shown.)"];
+  const shown = s.removed.slice(0, 20);
+  return [
+    ...(s.sections.length ? ["", `Changed since the review: ${s.sections.join(", ")}.`] : []),
+    ...(shown.length
+      ? ["", `Removed since the review (${s.removed.length} line${s.removed.length === 1 ? "" : "s"}):`, ...shown.map((l) => (l.startsWith("- ") ? l : `- ${l}`)), ...(s.removed.length > shown.length ? [`… (+${s.removed.length - shown.length} more)`] : [])]
+      : []),
+  ];
+};
 
 export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, name: string, md: string, door: ReviewDoor, note?: string, opts?: { fresh?: boolean }): Promise<SpecReviewOutcome> => {
   const hash = specHash(md);
@@ -229,7 +257,12 @@ export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, na
       .filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block"))
       .at(-1);
     if (earlier?.verdict === "pass") {
-      post(`**Spec review** — ${name} changed since its review passed; pb reviews a spec once, so this text goes to the build as it is, and the code review judges the result against it. \`/${cmd("spec-review")} ${name}\` reviews it again if you want.`);
+      post(
+        [
+          `**Spec review** — ${name} changed since its review passed; pb reviews a spec once, so this text goes to the build as it is, and the code review judges the result against it. \`/${cmd("spec-review")} ${name}\` reviews it again if you want.`,
+          ...sinceReviewLines(store, name, md, earlier.hash),
+        ].join("\n"),
+      );
       return "pass";
     }
   }

@@ -8,7 +8,7 @@ import type {
 import { inWorktree, snapshot } from "./checkpoint.ts";
 import { approachPrompt, continuePlanPrompt, depsPrompt, planPrompt } from "./prompts.ts";
 import { missingPaths, readMap } from "./map.ts";
-import { parseSpec, setStatus } from "./spec.ts";
+import { blockFingerprints, parseSpec, setStatus } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { agentDir, findStandards, isUserTemplate, presetNote, projectStack, sectionFor, usesDatabase, writeStandards } from "./standards.ts";
 import { type VerifyResult, Store, cap, gitHead, now } from "./store.ts";
@@ -188,6 +188,7 @@ export function registerPlan(pi: ExtensionAPI) {
         if (!snap?.commit) c.ui.notify(noSnapshotWarning(checkpoints), "warning");
         // Same staleness check as /pb:plan: the map may have rotted since the old session.
         warnStaleMap(c);
+        if (session) ns.markSeen(name, session, blockFingerprints(md)); // seeded with the spec: it has seen it
         const p = ns.progress(name);
         if (p) ns.saveProgress({ ...p, writtenIn: session });
         else {

@@ -1150,7 +1150,10 @@ test("a draft belongs to the session that wrote it: elsewhere, and once the spec
   assert.match(t.read(specRel), /Notify by event/);
   assert.doesNotMatch(fs.readFileSync(draftOf(t, "order-cancellation"), "utf8"), /Notify by event/);
 
-  // A whole write that passes replaces the draft.
+  // A whole write that passes replaces the draft — once this session has read what the other one added,
+  // since a rewrite from its older copy would erase it.
+  assert.match((await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error!, /changed since this session last read it: ## Decisions/);
+  await t.callTool("read", { path: specRel });
   assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error, undefined);
   assert.ok(!fs.existsSync(draftOf(t, "order-cancellation")));
 });
@@ -1165,6 +1168,163 @@ test("a build approves the spec, never a draft, and its approval discards one", 
   assert.equal(t.progress("order-cancellation").phase, "built");
   assert.doesNotMatch(t.read(".pi/pb/specs/order-cancellation/approved.md"), /Open questions/);
   assert.ok(!fs.existsSync(draftOf(t, "order-cancellation")));
+});
+
+/* ------------- spec writes against a stale copy: what this session last saw is what it may overwrite ------------- */
+
+/** Edit spec.md on disk the way a human or another tool does: the session is not told. */
+const handEdit = (t: ReturnType<typeof setup>, from: string, to: string) => {
+  const file = path.join(t.repo, specRel);
+  const md = fs.readFileSync(file, "utf8");
+  assert.ok(md.includes(from), `fixture: ${from}`);
+  fs.writeFileSync(file, md.replace(from, to));
+};
+const SOFT_DELETE = "- Not doing soft delete, because audit lives elsewhere.";
+const HAND_FIX = "- Only PENDING orders can be cancelled, because the state machine only allows that transition; a cancelled order is never re-opened.";
+
+test("stale copy: a section replace written from memory is refused with the current text, and a read lets it through", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  handEdit(t, "- Only PENDING orders can be cancelled, because the state machine only allows that transition.", HAND_FIX);
+  const onDisk = t.read(specRel);
+
+  // The model rewrites Decisions as it remembers them, to add one bullet: the hand fix would be lost.
+  const fromMemory = `- Only PENDING orders can be cancelled, because the state machine only allows that transition.\n${SOFT_DELETE}\n- Notify by event, because mail belongs elsewhere.`;
+  const refused = (await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: fromMemory })).error!;
+  assert.match(refused, /Not written: ## Decisions changed since this session last read it/);
+  assert.ok(refused.includes(HAND_FIX), "the current text comes back, so the model can edit that");
+  assert.match(refused, /mode edit/);
+  assert.equal(t.read(specRel), onDisk, "nothing was overwritten");
+  // Being shown the text is not reading it: the same blind retry is refused again.
+  assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: fromMemory })).error!, /changed since this session last read it/);
+
+  // Reading the spec is what makes a replace safe again.
+  await t.callTool("read", { path: specRel });
+  assert.equal((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", content: `${HAND_FIX}\n${SOFT_DELETE}\n- Notify by event, because mail belongs elsewhere.` })).error, undefined);
+  assert.ok(t.read(specRel).includes(HAND_FIX));
+});
+
+test("stale copy: mode edit quotes the text it changes, so it can't overwrite what it never saw", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  handEdit(t, "- Only PENDING orders can be cancelled, because the state machine only allows that transition.", HAND_FIX);
+  const ok = await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", mode: "edit", old: SOFT_DELETE, new: `${SOFT_DELETE.slice(0, -1)}, in the audit service.` });
+  assert.equal(ok.error, undefined, ok.error ?? "");
+  assert.match(ok.content![0].text, /Updated .*\(Decisions edited\)/);
+  assert.ok(t.read(specRel).includes(HAND_FIX), "the edit leaves the rest of the section as it is on disk");
+  assert.ok(t.read(specRel).includes("audit lives elsewhere, in the audit service."));
+
+  // Quoting text the section doesn't have (a stale memory) is refused, with the section as it is.
+  const stale = (await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", mode: "edit", old: "- Only PENDING orders can be cancelled, because the state machine only allows that transition.\n", new: "x" })).error!;
+  assert.match(stale, /Not written: the text to change is not in ## Decisions as it stands/);
+  assert.ok(stale.includes(HAND_FIX));
+  // Text that occurs twice names no one place.
+  assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", mode: "edit", old: "because", new: "since" })).error!, /occurs 2 times in ## Decisions: quote enough to name one place/);
+  assert.match((await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", mode: "edit", new: "x" })).error!, /mode edit needs old: the exact text to change/);
+});
+
+test("stale copy: a session that never read the spec can append and set the status, never replace; a whole rewrite is held to the same rule", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  const rt = t.runtime();
+  const elsewhere = { ...rt.ctx, sessionManager: { ...rt.ctx.sessionManager, getSessionFile: () => path.join(t.repo, "other-session.jsonl") } };
+  const call = (params: object) => rt.tools.pb_update_spec.execute("x", params, undefined, undefined, elsewhere).then((r: Result) => r, (e: Error) => ({ error: e.message }) as Result);
+  assert.match((await call({ name: "order-cancellation", section: "Decisions", content: SOFT_DELETE })).error!, /this session has not read the spec/);
+  assert.equal((await call({ name: "order-cancellation", section: "Decisions", content: "- Notify by event, because mail belongs elsewhere.", mode: "append" })).error, undefined);
+  assert.equal((await call({ name: "order-cancellation", status: "planning" })).error, undefined);
+
+  // The writing session's own whole rewrite, after a hand edit it never saw: refused, naming what changed.
+  await t.callTool("pb_update_spec", { name: "order-cancellation", status: "ready" }).catch(() => undefined);
+  handEdit(t, "Refunds.", "Refunds, and partial cancellations.");
+  const rewrite = (await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error!;
+  // The header too: the other session set the status, and this one only ever set it back.
+  assert.match(rewrite, /Not written: spec\.md changed since this session last read it: the header, ## Out of scope, ## Decisions\./);
+  assert.ok(rewrite.includes("Refunds, and partial cancellations."), "each changed section comes back as it stands");
+  assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/draft.json")), "a stale write is not kept as a draft");
+  await t.callTool("read", { path: specRel });
+  assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() })).error, undefined);
+});
+
+test("stale copy: the next turn says which spec changed on disk, until the session reads it", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  handEdit(t, "Refunds.", "Refunds, and partial cancellations.");
+  await t.run("status"); // any command; what matters is the next turn
+  t.say("go on");
+  await t.runtime().pi.sendUserMessage("go on");
+  await t.settle();
+  const note = t.systemSections.at(-1)!["pb-spec-changed"];
+  assert.match(note, /order-cancellation[\s\S]*changed on disk since this session last read it: ## Out of scope[\s\S]*read it before editing/);
+  await t.callTool("read", { path: specRel });
+  await t.runtime().pi.sendUserMessage("and now");
+  await t.settle();
+  assert.equal(t.systemSections.at(-1)!["pb-spec-changed"], undefined);
+});
+
+test("approved decisions hold during a build: the build session, running or paused, may add decisions, never drop one", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  let refusedRunning: Result | undefined;
+  let stopped = false;
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T1") && !refusedRunning) {
+      await tool("read", { path: specRel });
+      refusedRunning = await tool("pb_update_spec", { section: "Decisions", content: "- Only PENDING orders can be cancelled, because the state machine only allows that transition.\n- Hub grouping is a union." });
+    }
+    if (text.includes("Task T2") && !text.includes("You stopped") && !stopped) {
+      stopped = true;
+      return undefined;
+    }
+    if (text.includes("You stopped without finishing T2")) return undefined;
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.match(refusedRunning!.error!, /Not written: approved decisions hold during the build[\s\S]*- Not doing soft delete, because audit lives elsewhere\./);
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+  // Paused, in the build's own session: the same rule (this is where the commute spec lost its departure rule).
+  await t.callTool("read", { path: specRel });
+  assert.match((await t.callTool("pb_update_spec", { section: "Decisions", content: "- Hub grouping is a union." })).error!, /approved decisions hold during the build/);
+  assert.match((await t.callTool("pb_update_spec", { section: "Decisions", mode: "edit", old: SOFT_DELETE, new: "- Soft delete after all." })).error!, /approved decisions hold during the build/);
+  // Adding is the build's to do.
+  assert.equal((await t.callTool("pb_update_spec", { section: "Decisions", content: "- Hub grouping is a union, because each source alone misses members.", mode: "append" })).error, undefined);
+  assert.ok(t.read(specRel).includes(SOFT_DELETE));
+});
+
+test("a resume asks before approving a Decisions line removed while paused, as it does for the contract", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  let stopped = false;
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T2") && !text.includes("You stopped") && !stopped) {
+      stopped = true;
+      return undefined;
+    }
+    if (text.includes("You stopped without finishing T2")) return undefined;
+    if (text.includes("Continue task T2")) return diligent("Task T2", tool);
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+  handEdit(t, `${SOFT_DELETE}\n`, ""); // removed outside the build, by whoever
+  t.confirmAnswers.push(false);
+  await t.run("build");
+  assert.match(t.confirms.at(-1)!, /changed while the build was paused/);
+  assert.match(t.confirmBodies.at(-1)!, /## Decisions — approved lines removed[\s\S]*- Not doing soft delete, because audit lives elsewhere\./);
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+});
+
+test("approval after a review: the lines the review read and the spec no longer has are listed, and the build-start screen asks", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  await t.run("spec-review", "order-cancellation"); // a pass, recorded with the text it read
+  assert.ok(fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/reviewed.md")));
+  const removed = await t.callTool("pb_update_spec", { name: "order-cancellation", section: "Decisions", mode: "edit", old: `\n${SOFT_DELETE}`, new: "" });
+  assert.equal(removed.error, undefined, removed.error ?? "");
+  t.selects.push("Stop here");
+  await t.run("build", "order-cancellation");
+  assert.ok(t.posts.some((p) => /changed since its review passed[\s\S]*Removed since the review \(1 line\):\n- Not doing soft delete, because audit lives elsewhere\./.test(p)));
+  assert.match(t.selectTitles.at(-1)!, /Build order-cancellation\?\n- ⚠ 1 line the spec review read is gone from this text \(listed above\)/);
+  assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved");
 });
 
 test("pb_update_spec remove: a section goes, a required one or one that isn't there is refused", async () => {

@@ -1,4 +1,4 @@
-words: 1882
+words: 1980
 
 ## pb_ask
 
@@ -114,7 +114,7 @@ Write or rewrite a pb feature spec (.pi/pb/specs/<name>/spec.md). Use it when th
 
 ## pb_update_spec
 
-Change part of an existing pb spec instead of rewriting it: replace, append to or remove one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, "none — <why>". When this session's pb_write_spec was refused, this edits that kept draft, and the spec is written once the draft passes.
+Change part of an existing pb spec instead of rewriting it: edit text inside one section (mode edit: old, the exact text as it stands, and new — the way to change a line or two), replace, append to or remove one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). A replace or remove is refused when the section changed since this session last read the spec, with the section as it stands; edit then, or read the file first. The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, "none — <why>". When this session's pb_write_spec was refused, this edits that kept draft, and the spec is written once the draft passes.
 
 {
   "type": "object",
@@ -129,15 +129,24 @@ Change part of an existing pb spec instead of rewriting it: replace, append to o
     },
     "content": {
       "type": "string",
-      "description": "the section's new body (without its heading), or the lines to append; none for remove"
+      "description": "the section's new body (without its heading), or the lines to append; none for remove or edit"
     },
     "mode": {
       "type": "string",
       "enum": [
         "replace",
         "append",
-        "remove"
+        "remove",
+        "edit"
       ]
+    },
+    "old": {
+      "type": "string",
+      "description": "mode edit: the exact text to change, as it stands in the section, enough of it to name one place"
+    },
+    "new": {
+      "type": "string",
+      "description": "mode edit: what replaces it (empty deletes it)"
     },
     "status": {
       "type": "string",
