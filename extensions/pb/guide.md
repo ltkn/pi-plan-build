@@ -34,8 +34,8 @@ complete with what each one is.
    you discuss: the approach, the trade-offs, the questions only you can answer.
    This is the cheapest place to change your mind.
 2. **`/pb:build`**: first it asks, while you're here, how to go on once the
-   spec is written: build here, build in a fresh session, or show you the spec
-   first. Then Pi writes a short **spec** from the discussion (goal, findings,
+   spec is written: build it (in a fresh session, from the spec) or show you the
+   spec first. Then Pi writes a short **spec** from the discussion (goal, findings,
    decisions, tasks); every spec gets one independent review before the first
    task — fresh eyes, read-only — and a P0 stops it for you to amend or rebut;
    P1-P3 are shown and the build carries them (see `/pb:help spec`). `/pb:spec-review
@@ -291,8 +291,8 @@ the build and tests, curl an API, and write and run one-off scripts or programs
 capped at `commandTimeoutSec` (30 minutes by default), so a runaway loop stops
 instead of holding the session for hours; raise it if the project's builds
 legitimately take longer. Editing or writing any file inside
-the project is blocked in this session until you build here (`/pb:build` lifts
-it). Commands can still write files, so pb snapshots the project when planning
+the project is blocked in this session until a build starts here
+(`/pb:build --here` lifts it; a fresh build has its own session). Commands can still write files, so pb snapshots the project when planning
 starts. A turn that changes a project file is named in the chat right away, and
 when you build (or run `/pb:plan off`) pb lists everything that changed and asks
 whether to keep or restore it.
@@ -546,11 +546,13 @@ tagged `assumed:` and listed for you before the build; the build records its own
 small readings as it goes — the reviewer checks both.) A checkpoint asks nothing at
 all: what's undecided goes under Open questions.
 
-When `/pb:build` writes it, it asks first: **build here**, **build in a fresh
-session**, or **show me the spec first**. Built straight away, the spec is still
-shown in the session for later. Shown first, you choose: build here, build in a
-fresh session, **edit the spec first** (in an editor; it's saved only when it
-still parses, and the build then gets your version), or not now.
+When `/pb:build` writes it, it asks first: **build it** (in a fresh session, from
+the spec) or **show me the spec first**. Built straight away, the spec is still
+shown in the session for later. Shown first, you choose: build it in a fresh
+session, **edit the spec first** (in an editor; it's saved only when it still
+parses, and the build then gets your version), or not now. That offer comes
+after a turn, where pb can't open a session itself, so choosing to build leaves
+`/pb:build <spec>` in the editor: press Enter.
 
 The header is `**✅ Spec written — <name>**` with the task and acceptance-criterion counts
 and, when the step recorded it, the time it took from `/pb:build` or `/pb:spec` to the
@@ -702,13 +704,16 @@ edit that settles it.
 <!-- pb:topic build -->
 ## Building
 
-`/pb:build` builds **in the session you run it from**. If this conversation
-hasn't produced a spec yet, Pi writes one first and shows it. With several
-specs, pick one. pb recommends a **fresh session** instead when this one is
-more than half full (`freshAbove`) or when `buildModel` names another model
-(switching models mid-conversation re-sends the whole conversation to the new
-model, uncached); `/pb:build --fresh` asks for one directly: a new session
-named "build: <spec>", seeded with the spec, on your model and thinking level.
+`/pb:build` builds **from the spec, in a fresh session**: a new session named
+"build: <spec>", seeded with the spec, on your model and thinking level (or
+`buildModel`). The planning discussion does not come along, on purpose: the
+spec is what was approved and what both reviews judge against, so a build that
+also read the chat could follow something the spec never said. If the build
+can't succeed from the spec alone, the spec is missing something, and the
+first task shows it. If this conversation hasn't produced a spec yet, Pi writes
+one first and shows it. With several specs, pick one. `/pb:build <spec> --here`
+builds in the session you run it from instead (a tiny change, or when you want
+the discussion along); a paused build always resumes in its own session.
 
 Before the first task, every spec gets one independent fresh-eyes review (see
 `/pb:help spec`): only a P0 stops the build there for you to read; a P1 asks
@@ -1313,8 +1318,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 <!-- pb:tip plan.next -->
 **What now** — the plan is ready to discuss, nothing is built yet
 - Steer it in words: agree, disagree, or answer its questions. Example: *"go with option B, but keep the old endpoint"*
-- `/pb:build` — writes the spec, has it reviewed, and builds here
-- `/pb:build --fresh` — the same, building in a new session with a lean context
+- `/pb:build` — writes the spec, has it reviewed, and builds it in a fresh session
 - `/pb:spec` — only writes the spec, to read it before anything is built · more: `/pb:help plan`
 <!-- /pb -->
 
@@ -1322,16 +1326,14 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 <!-- pb:tip spec.next -->
 **What now** — the spec is written, nothing is built yet
 - Read it in `.pi/pb/specs/`: the build follows it, the reviewer checks against it. To change it, say what, then `/pb:spec` again. Example: *"split T2 into two tasks"*
-- `/pb:build` — reviews it, then builds here (only a P0 stops it before the first task)
-- `/pb:build --fresh` — the same, building in a new session
+- `/pb:build` — reviews it, then builds it in a fresh session (only a P0 stops it before the first task)
 - `/pb:spec-review` — only the review, nothing built; `/pb:build` then starts without reviewing again · more: `/pb:help spec`
 <!-- /pb -->
 
 ### A spec review with findings
 <!-- pb:tip spec.findings -->
 **What now** — these findings are information; only a P0 holds the build
-- `/pb:build {name}` — builds and carries them; the code review judges the result
-- `/pb:build {name} --fresh` — the same, building in a new session
+- `/pb:build {name}` — builds and carries them, in a fresh session; the code review judges the result
 - `/pb:plan {name}` — settle one first: tell the planner which and how, e.g. *"settle finding 2: keep the old endpoint"*. The edit is not reviewed again; the code review judges against it.
 <!-- /pb -->
 

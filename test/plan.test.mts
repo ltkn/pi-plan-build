@@ -615,7 +615,7 @@ test("standards: offered once into AGENTS.md; repeated in a message only when th
   t.runtime().contextFiles = [];
   await written(t);
   t.agent.script = diligent;
-  await t.run("build");
+  await t.run("build", "--here"); // in this session, which hasn't loaded them; a fresh one loads AGENTS.md itself
   assert.match(t.instructions.find((i) => /\[pb:build order-cancellation\]/.test(i))!, /Java 21: records, no Lombok/);
 });
 

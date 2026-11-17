@@ -11,8 +11,8 @@ never saw the build. Your engineering standards live in AGENTS.md, written once.
 /pb:approach [idea]   in planning: hear how Pi would approach it (chat only: no writes, no dialogs)
 /pb:compact           pb's compaction: planning, write the spec and reset to it (automatic at checkpointAt);
                       build, compact to the build's state
-/pb:build [name]      write the spec if needed, show it, then build it here, task by task; the full suite decides
-                      (--fresh: in a new session from the spec). Before T1, one fresh reviewer
+/pb:build [name]      write the spec if needed, show it, then build it from the spec in a fresh session, task by
+                      task; the full suite decides (--here: in this session). Before T1, one fresh reviewer
                       reads the frozen draft: P0 findings stop the build until amended; P1s are shown on
                       the build-start screen with a repair-first choice; P2-P3 are advisory
 /pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default): each finding fixed
@@ -62,7 +62,7 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
    … a long discussion? at 75% of the window Pi writes the plan to its spec
      and the session is reset to it (/pb:compact does it on demand)
 /pb:build
-   → asks now, while you're here: build here / in a fresh session / show the spec
+   → asks now, while you're here: build it (in a fresh session, from the spec) / show the spec first
    → Pi writes .pi/pb/specs/order-cancellation/spec.md and one fresh reviewer
      reads it before the first task (P0 findings stop the build until amended;
      the result header is ✅ PASS or ❌ FAIL with the review's time;
@@ -87,13 +87,15 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 
 ## Why it's built this way
 
-- **The build stays in one session, but not one context.** Nothing you
-  discussed is lost — the session keeps it — while each task after the first
-  starts from a reset to the spec, the done tasks and their changed files; the
-  agent reads the code instead of inheriting the previous task's conversation. The spec on
-  disk carries decisions and rejected ideas through every reset to the
-  reviewer. pb still recommends a fresh session above `freshAbove`, or when
-  building on another model.
+- **The build starts from the spec, not from the discussion.** `/pb:build`
+  opens a fresh session seeded with the spec: the spec is what was approved and
+  what both reviews judge against, so a build that read the chat could follow
+  something the spec never said, and a gap in the spec would stay hidden. Within
+  the build session, each task after the first starts from a reset to the spec,
+  the done tasks and their changed files; the agent reads the code instead of
+  inheriting the previous task's conversation. The spec on disk carries
+  decisions and rejected ideas through every reset to the reviewer.
+  `/pb:build <spec> --here` builds in the planning session when you want that.
 - **The harness decides when it's done.** `pb_task_done` hands out tasks in one
   uninterrupted run; after the last one the harness runs the full suite, sends
   a failure back to fix, and pauses after `maxAttempts`. The agent's word never
@@ -275,8 +277,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `explorer` | `{}` | `{"model": "provider/id", "thinking": "medium", "idleSec": 600, "timeoutSec": 1800, "commandTimeoutSec": 120}` for `pb_explore` and the project map; unset model = your session's, thinking defaults to max (clamped to what the model supports). An explorer run stops after `idleSec` without progress or `timeoutSec` in all, each of its commands after `commandTimeoutSec`; 0 = no limit. Its shell runs read-only inspection commands only (ls, find, cat, head, tail, wc, rg, grep, git status/log/diff/show), enforced |
 | `reviewer` | `{"verify": true, "security": "auto"}` | `{"model": "provider/id", "thinking": "high", "verify": true, "security": "auto"}`: the fresh reviewer, whether P0/P1 findings get a second look, and when the adversarial pass joins (`auto`: when the change looks sensitive; `always` on every review; `off`) |
 | `specReviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the one fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. Only a P0 blocks; P1-P3 are advisory. Point it at `buildModel` to have the implementer model validate the plan |
-| `freshAbove` | 50 | above this % of the context window, `/pb:build` recommends a fresh session |
-| `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with (in a fresh session, by default) |
+| `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with |
 | `mapOnArchive` | false | `true`: `/pb:archive` updates the project map in AGENTS.md from the finished feature (a long cartographer run; `/pb:archive <name> --force` skips it for that one archive). Off, the map is updated when you run `/pb:map` |
 | `notify` | true | a desktop notification when pb asks you something, when a build pauses or finishes, or when a spec review finishes while you're elsewhere |
 | `extra` | unset | your instructions added to a role's prompt: `{"plan", "spec", "build", "review", "adversarial", "map"}`; also read from `~/.pi/agent/pb/config.json`, applied first |

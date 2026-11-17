@@ -1,4 +1,4 @@
-words: 2130
+words: 2123
 
 [pb:spec]
 
@@ -65,6 +65,5 @@ Then tell me where it is. End your reply with this block, verbatim:
 
 **What now** — the spec is written, nothing is built yet
 - Read it in `.pi/pb/specs/`: the build follows it, the reviewer checks against it. To change it, say what, then `/pb:spec` again. Example: *"split T2 into two tasks"*
-- `/pb:build` — reviews it, then builds here (only a P0 stops it before the first task)
-- `/pb:build --fresh` — the same, building in a new session
+- `/pb:build` — reviews it, then builds it in a fresh session (only a P0 stops it before the first task)
 - `/pb:spec-review` — only the review, nothing built; `/pb:build` then starts without reviewing again · more: `/pb:help spec`

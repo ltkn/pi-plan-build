@@ -305,7 +305,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
     store: Store,
     name: string,
     fresh: boolean,
-    o: { decided?: boolean; checked?: boolean; notes?: string[] } = {},
+    o: { checked?: boolean; notes?: string[] } = {},
   ): Promise<void> => {
     // An explicit build consumes the pending offer either way: a record that survived it would
     // keep agent_settled's stop-pause from firing for this session until the record expired.
@@ -324,30 +324,22 @@ export function registerBuildStart(pi: ExtensionAPI) {
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
     const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";
     // The build-start screen: what could make you hold the build (an unbuilt dependency, a red baseline, another
-    // spec's uncommitted files, a full session or a model switch), shown once, with one choice.
-    const usage = ctx.getContextUsage()?.percent;
-    const placing = !fresh && !o.decided && ((usage != null && usage > cfg.freshAbove) || switching);
-    const why = !placing ? "" : switching ? `building on ${cfg.buildModel} here sends this whole conversation to it again, uncached` : `this session is ${Math.round(usage!)}% full`;
+    // spec's uncommitted files), shown once, with one choice. Where to build is not one of them: a build runs from
+    // the spec, so it gets a session of its own unless --here asked for this one.
     const concerns = checked.concerns;
-    if ((placing || concerns.length) && ctx.hasUI) {
-      const FRESH = "Build in a fresh session, from the spec (recommended)";
-      const HERE = "Build here anyway";
+    if (concerns.length && ctx.hasUI) {
       const GO = "Build anyway";
       const STOP = "Stop here";
-      const build = placing ? (canOpenSession ? [FRESH, HERE] : [HERE, FRESH]) : [GO];
-      const title = [`Build ${name}${why ? `: ${why}` : "?"}`, ...concerns.map((c) => `- ⚠ ${c}`)].join("\n");
-      const choice = await choose(ctx, store, title, [...build, STOP], build[0], notes);
+      const title = [`Build ${name}?`, ...concerns.map((c) => `- ⚠ ${c}`)].join("\n");
+      const choice = await choose(ctx, store, title, [GO, STOP], GO, notes);
       if (!choice || choice === STOP) return;
-      if (placing) fresh = choice === FRESH;
-    } else if (!fresh && !o.decided && switching) fresh = true;
+    }
     // Without a UI the build-start screen is never shown: everything it would have listed goes on the record the
     // build's closing summary reads, so a headless build says what it went ahead over.
-    if (!ctx.hasUI) {
-      for (const c of concerns) notes.push(`built although ${c} (no one to ask)`);
-      if (placing && !fresh) notes.push(`built here although ${why} (no one to ask)`);
-    }
+    if (!ctx.hasUI) for (const c of concerns) notes.push(`built although ${c} (no one to ask)`);
     if (fresh && !canOpenSession) {
-      ctx.ui.setEditorText(`/${cmd("build")} ${name} --fresh`);
+      // Only a command can open a session: the build waits one Enter away instead of starting in this one.
+      ctx.ui.setEditorText(`/${cmd("build")} ${name}`);
       return ctx.ui.notify(`Press Enter to build ${name} in a fresh session.`, "info");
     }
 
@@ -434,7 +426,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
     return at > 0 ? `${prompt.slice(0, at)}${stop}\n\n${prompt.slice(at)}` : `${prompt}\n\n${stop}`;
   };
 
-  const specThenBuild = async (ctx: ExtensionCommandContext, store: Store, marker: string, prompt: string) => {
+  const specThenBuild = async (ctx: ExtensionCommandContext, store: Store, marker: string, prompt: string, here = false) => {
     const session = ctx.sessionManager.getSessionFile();
     const { cfg, testCmd } = commands(ctx.cwd, store);
     const notes: string[] = [];
@@ -442,14 +434,10 @@ export function registerBuildStart(pi: ExtensionAPI) {
     const baseline = store.baseline(session ?? undefined);
     if (baselineApplies(ctx, store, testCmd) && !(await agree(ctx, store, baselineQuestion(baseline!), notes))) return;
 
-    const usage = ctx.getContextUsage()?.percent;
     const switching = !!cfg.buildModel && cfg.buildModel !== sessionModel(ctx) && !!findModel(ctx, cfg.buildModel);
-    const preferFresh = switching || (usage != null && usage > cfg.freshAbove);
-    const HERE = "Build here as soon as the spec is written (keeps our discussion; the cache stays warm)";
-    const FRESH = `Build in a fresh session as soon as the spec is written (${switching ? `on ${cfg.buildModel}, ` : ""}lean context)`;
+    const BUILD = here ? "Build here as soon as the spec is written" : `Build as soon as the spec is written (in a fresh session, from the spec${switching ? `, on ${cfg.buildModel}` : ""})`;
     const SHOW = "Show me the spec first";
-    const options = preferFresh ? [FRESH, HERE, SHOW] : [HERE, FRESH, SHOW];
-    const choice = await choose(ctx, store, "Pi writes the spec first. Then?", options, options[0], notes);
+    const choice = await choose(ctx, store, "Pi writes the spec first. Then?", [BUILD, SHOW], BUILD, notes);
     if (!choice) return;
     if (session) store.markSpecFormatGiven(session);
     if (choice === SHOW) {
@@ -493,10 +481,10 @@ export function registerBuildStart(pi: ExtensionAPI) {
     if (sessionGone(ctx)) return; // replaced during the dry run: a later /pb:build still offers the spec
     showSpec(store, ready[0], {
       names: ready,
-      next: choice === FRESH ? "the build starts in a fresh session; one fresh reviewer checks the spec before T1." : "the build starts here; one fresh reviewer checks the spec before T1.",
+      next: here ? "the build starts here; one fresh reviewer checks the spec before T1." : "the build starts in a fresh session; one fresh reviewer checks the spec before T1.",
       extra: dry,
     });
-    await startBuild(ctx, store, ready[0], choice === FRESH, { decided: true, checked: true, notes });
+    await startBuild(ctx, store, ready[0], !here, { checked: true, notes });
   };
 
   /** After /pb:build asked for the spec: once it's written, show it and ask how to go on. */
@@ -527,25 +515,20 @@ export function registerBuildStart(pi: ExtensionAPI) {
     }
     showSpec(store, name, {
       names,
-      next: ctx.hasUI ? "choose how to build: here or in a fresh session — or edit the spec first." : `\`/${cmd("build")} ${name}\` builds it here.`,
+      next: ctx.hasUI ? "build it in a fresh session, or edit the spec first." : `\`/${cmd("build")} ${name}\` builds it in a fresh session.`,
       extra: dry,
     });
     if (!ctx.hasUI) {
       post(tip("spec.next"));
       return true;
     }
-    const cfg = store.config();
-    const usage = ctx.getContextUsage()?.percent;
-    const switching = !!cfg.buildModel && cfg.buildModel !== sessionModel(ctx) && !!findModel(ctx, cfg.buildModel);
-    const preferFresh = switching || (usage != null && usage > cfg.freshAbove);
-    const HERE = "Build here (keeps our discussion; the cache stays warm)";
-    const FRESH = `Build in a fresh session, from the spec (${switching ? `on ${cfg.buildModel}, ` : ""}lean context)`;
+    const BUILD = "Build in a fresh session, from the spec";
     const EDIT = "Edit the spec first";
     const LATER = "Not now";
     const notes: string[] = [];
     for (;;) {
-      // Unanswered, it builds here: a fresh session can't be opened from here, only from a command.
-      const choice = await choose(ctx, store, `Build ${name} now? ${spec.tasks.length} tasks`, preferFresh ? [FRESH, HERE, EDIT, LATER] : [HERE, FRESH, EDIT, LATER], HERE, notes);
+      // Only a command can open a session, so from here the build is left one Enter away — answered or not.
+      const choice = await choose(ctx, store, `Build ${name} now? ${spec.tasks.length} tasks`, [BUILD, EDIT, LATER], BUILD, notes);
       if (sessionGone(ctx)) {
         // Replaced while deciding: offer again on a later turn instead of dying mid-offer.
         if (session) store.setPendingBuild(session);
@@ -555,8 +538,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
         await editSpec(ctx, store, name);
         continue;
       }
-      if (choice === HERE) await startBuild(ctx, store, name, false, { decided: true, notes });
-      else if (choice === FRESH) await startBuild(ctx, store, name, true, { decided: true, notes });
+      if (choice === BUILD) await startBuild(ctx, store, name, true, { notes });
       else post(tip("spec.next"));
       return true;
     }
@@ -605,13 +587,17 @@ export function registerBuildStart(pi: ExtensionAPI) {
   };
 
   pi.registerCommand(cmd("build"), {
-    description: "Build the planned feature here, task by task (the full check runs after the last task; writes the spec first if there isn't one). --fresh builds in a new session. In a paused build: continue, optionally with guidance",
-    getArgumentCompletions: (prefix: string) => [{ value: "--fresh", label: "--fresh" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
+    description: "Build the planned feature from its spec in a fresh session, task by task (the full check runs after the last task; writes the spec first if there isn't one). --here builds in this session. In a paused build: continue, optionally with guidance",
+    getArgumentCompletions: (prefix: string) => [{ value: "--here", label: "--here" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
     handler: async (args, ctx) => {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const store = new Store(ctx.cwd);
-      const fresh = /(^|\s)--fresh(\s|$)/.test(args);
-      const words = args.replace(/(^|\s)--fresh(?=\s|$)/g, " ").trim().split(/\s+/).filter(Boolean);
+      // Fresh is the default; --fresh is still read, so a habit or an old tip keeps working.
+      const flag = (f: string) => new RegExp(`(^|\\s)${f}(\\s|$)`).test(args);
+      const stayHere = flag("--here");
+      const askedFresh = flag("--fresh");
+      if (stayHere && askedFresh) return ctx.ui.notify("`--here` and `--fresh` contradict each other: give one (a build is fresh unless you say `--here`).", "warning");
+      const words = args.replace(/(^|\s)--(?:fresh|here)(?=\s|$)/g, " ").trim().split(/\s+/).filter(Boolean);
       const session = ctx.sessionManager.getSessionFile();
       const { cfg, buildCmd } = commands(ctx.cwd, store);
 
@@ -637,7 +623,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
       const named = words[0] && KEBAB_NAME.test(words[0]) && store.readSpec(words[0]) ? words[0] : undefined;
       if (here.name && here.progress && unfinishedPhase(here.progress.phase) && (!named || named === here.name)) {
         const p = here.progress;
-        if (fresh) ctx.ui.notify("`--fresh` only applies when starting a build: continuing here instead.", "warning");
+        if (stayHere || askedFresh) ctx.ui.notify(`\`${stayHere ? "--here" : "--fresh"}\` only applies when starting a build: continuing here instead.`, "warning");
         // Resuming lifts planning protection: a /pb:plan or /pb:deps after the pause turned it back on.
         if (!(await liftPlanning(ctx, store))) return;
         // The spec name itself isn't guidance: only what follows it is.
@@ -724,7 +710,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
         const planning = !!session && store.planningSessions().includes(session);
         if (!mine.length && (planning || !offered.length)) {
           // No spec from this discussion yet: write it first, then build it.
-          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec"), session ? store.planning(session)?.answers : undefined));
+          return specThenBuild(ctx, store, `▶ /${cmd("build")} — writing the spec first`, specPrompt(words.join(" "), store.specNames(), undefined, store.extra("spec"), session ? store.planning(session)?.answers : undefined), stayHere);
         }
         const pool = mine.length ? mine : offered;
         const labelOf = (n: string) => {
@@ -745,7 +731,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
       if (!(await confirmLiveBuild(ctx, store, name, ["building"], "Restart it here — finished tasks stay done?"))) return;
       if (loadSpec(store, name)?.spec.status === "planning") {
         // A checkpoint of an unfinished discussion: finish it (tasks, verification), then build it.
-        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec"), session ? store.planning(session)?.answers : undefined).replace(/\s*After writing it, stop:[^\n]*/, ""));
+        return specThenBuild(ctx, store, `▶ /${cmd("build")} — finishing the spec ${name} first`, finishSpecPrompt(name, store.extra("spec"), session ? store.planning(session)?.answers : undefined).replace(/\s*After writing it, stop:[^\n]*/, ""), stayHere);
       }
       if (words[0] === name && words.length > 1) {
         // Trailing words with a named spec are guidance (as on resume); without a name
@@ -754,7 +740,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
           ctx.ui.notify("Guidance not recorded: it would leave the spec unparseable.", "warning");
         }
       }
-      await startBuild(ctx, store, name, fresh);
+      await startBuild(ctx, store, name, !stayHere);
     },
   });
 

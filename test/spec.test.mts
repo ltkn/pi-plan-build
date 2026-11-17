@@ -457,7 +457,7 @@ test("spec-review: a PASS with advisory findings says they are information, and 
   process.env.MOCK_SPEC_REVIEW = "advisory";
   try {
     await t.run("spec-review", "order-cancellation");
-    const hint = /these findings are information; only a P0 holds the build\n- `\/pb:build order-cancellation` — builds and carries them[\s\S]*- `\/pb:build order-cancellation --fresh`[\s\S]*- `\/pb:plan order-cancellation` — settle one first: tell the planner which and how/;
+    const hint = /these findings are information; only a P0 holds the build\n- `\/pb:build order-cancellation` — builds and carries them, in a fresh session[\s\S]*- `\/pb:plan order-cancellation` — settle one first: tell the planner which and how/;
     assert.match(t.posts.at(-1)!, hint);
     await t.run("spec-review", "order-cancellation"); // the stored pass says so too
     assert.match(t.posts.at(-1)!, /PASS \(already on record\)/);
@@ -884,9 +884,10 @@ test("spec: a human edit saves on parse alone and the build adds no shape adviso
     if (/pb_write_spec tool/.test(text)) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
     return diligent(text, tool);
   };
-  t.selects.push("Show me the spec first", "Edit the spec first", "Build here (keeps our discussion; the cache stays warm)");
+  t.selects.push("Show me the spec first", "Edit the spec first", "Build in a fresh session, from the spec");
   t.editors.push(SPEC().replace("- Only PENDING orders can be cancelled, because the state machine only allows that transition.", "- Only PENDING orders can be cancelled."));
   await t.run("build");
+  await t.run("build", "order-cancellation"); // the offer leaves the command in the editor: Enter
   assert.equal(t.progress("order-cancellation").phase, "built");
   assert.ok(!t.notes.some((n) => /human override|Spec-shape advisory/.test(n)));
   assert.ok(!t.events("order-cancellation").some((e: any) => e.override === true));
@@ -1060,9 +1061,10 @@ test("spec approval: edit the spec first; the build then gets your version", asy
     if (/pb_write_spec tool/.test(text)) return void (await tool("pb_write_spec", { name: "order-cancellation", content: SPEC() }));
     return diligent(text, tool);
   };
-  t.selects.push("Show me the spec first", "Edit the spec first", "Build here (keeps our discussion; the cache stays warm)");
+  t.selects.push("Show me the spec first", "Edit the spec first", "Build in a fresh session, from the spec");
   t.editors.push("# broken", SPEC().replace("### T2: second file", "### T2: the second file"));
   await t.run("build");
+  await t.run("build", "order-cancellation"); // the offer leaves the command in the editor: Enter
   assert.ok(t.notes.some((n) => /Not saved, the spec doesn't parse/.test(n)));
   assert.match(t.read(".pi/pb/specs/order-cancellation/spec.md"), /### T2: the second file/);
   assert.match(t.instructions.find((i) => /\[pb:build order-cancellation\]/.test(i))!, /Build \.pi\/pb\/specs\/order-cancellation\/spec\.md\./);
@@ -1355,7 +1357,7 @@ test("spec writing leaves undecided questions open; the checkpoint asks nothing;
     }
     return diligent(text, tool);
   };
-  t.selects.push("Build here as soon as the spec is written (keeps our discussion; the cache stays warm)", "<timeout>");
+  t.selects.push("Build as soon as the spec is written (in a fresh session, from the spec)", "<timeout>");
   await t.run("build");
   assert.equal(t.dialogTimeouts.at(-1), 1); // the question counted down, though no build was running yet
   assert.match(answer!.content![0].text, /No answer in time: it stays open — do not take a reading or tag it assumed\. Record it under Open questions; planning stays incomplete until it is answered\./);

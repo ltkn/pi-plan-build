@@ -6,7 +6,7 @@
  *   /pb:approach [idea]    in planning: hear how Pi would approach it (chat only: no writes, no dialogs)
  *   /pb:compact            planning: write the plan to its spec and reset to it; build: compact to the build's state
  *   /pb:spec [which]       write or revise the spec(s) from the discussion
- *   /pb:build [name]       build a spec here (--fresh: in a new session); resumes after a pause
+ *   /pb:build [name]       build a spec in a fresh session (--here: in this one); resumes after a pause
  *   /pb:spec-review [name] the pre-build review on its own: fresh eyes on a ready spec, nothing built
  *   /pb:review [focus]     fresh, independent review against the spec, or of any uncommitted change
  *   /pb:deps [scope]       check dependencies and propose upgrades, as a change of their own

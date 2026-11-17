@@ -1,4 +1,4 @@
-words: 609
+words: 598
 
 [pb:plan] Let customers cancel pending orders
 
@@ -30,6 +30,5 @@ When I'm ready I'll run /pb:build (or /pb:spec to write the spec first). End you
 
 **What now** — the plan is ready to discuss, nothing is built yet
 - Steer it in words: agree, disagree, or answer its questions. Example: *"go with option B, but keep the old endpoint"*
-- `/pb:build` — writes the spec, has it reviewed, and builds here
-- `/pb:build --fresh` — the same, building in a new session with a lean context
+- `/pb:build` — writes the spec, has it reviewed, and builds it in a fresh session
 - `/pb:spec` — only writes the spec, to read it before anything is built · more: `/pb:help plan`

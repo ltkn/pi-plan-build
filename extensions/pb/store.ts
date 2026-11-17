@@ -68,8 +68,6 @@ export interface Config {
    * plan checked by the model that will implement it. Every ready spec gets one pass.
    */
   specReviewer: { model?: string; thinking?: string };
-  /** Above this share of the context window (%), /pb:build offers a fresh session instead of this one. */
-  freshAbove: number;
   /** /pb:plan runs the test suite in the background, so planning knows whether it passes today. */
   baseline: boolean;
   /**
@@ -131,7 +129,6 @@ export const DEFAULT_CONFIG: Config = {
   checkpoints: true,
   reviewer: { verify: true, security: "auto" },
   specReviewer: {},
-  freshAbove: 50,
   baseline: true,
   explorer: { idleSec: 600, timeoutSec: 1800, commandTimeoutSec: 120 },
   planner: {},
@@ -180,7 +177,6 @@ function sanitizeConfig(raw: Partial<Config>): Config {
       model: typeof (specReviewerRaw as { model?: unknown }).model === "string" ? (specReviewerRaw as { model: string }).model : undefined,
       thinking: typeof (specReviewerRaw as { thinking?: unknown }).thinking === "string" ? (specReviewerRaw as { thinking: string }).thinking : undefined,
     },
-    freshAbove: num((raw as { freshAbove?: unknown }).freshAbove, DEFAULT_CONFIG.freshAbove),
     baseline: bool((raw as { baseline?: unknown }).baseline, true),
     planner: {
       model: typeof (plannerRaw as { model?: unknown }).model === "string" ? (plannerRaw as { model: string }).model : undefined,
@@ -232,6 +228,11 @@ const shown = (v: unknown) => {
   return s.length > 40 ? `${s.slice(0, 39)}…` : s;
 };
 
+/** Settings pb once read and no longer does, with what replaced each: a config that still sets one is told why. */
+const RETIRED_CONFIG_KEYS: Record<string, string> = {
+  freshAbove: "/pb:build always builds in a fresh session, from the spec; `/pb:build <spec> --here` builds in this one",
+};
+
 /**
  * What in a config file pb ignores or replaces, in words: unknown keys (with the nearest real one), values the
  * sanitizer replaces, and settings the user-level file is not read for. Pure: the sanitizer stays the one
@@ -245,6 +246,10 @@ export function configProblems(raw: unknown, scope: "project" | "global"): strin
     return `\`${key}\` is not a pb setting${near ? ` — did you mean \`${key.replace(/[^.]+$/, near)}\`?` : ": pb ignores it"}`;
   };
   for (const [key, value] of Object.entries(raw)) {
+    if (key in RETIRED_CONFIG_KEYS) {
+      out.push(`\`${key}\` is no longer used: ${RETIRED_CONFIG_KEYS[key]}`);
+      continue;
+    }
     if (!(key in CONFIG_KEYS)) {
       out.push(unknown(key, Object.keys(CONFIG_KEYS)));
       continue;

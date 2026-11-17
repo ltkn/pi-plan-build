@@ -577,13 +577,13 @@ test("archive: a build live in another session refuses both archives, the build'
     await standBuilding(other, 45);
     await t.run("archive", "refund-flow --force");
     assert.match(t.notes.at(-1)!, /refund-flow is building right now/);
-    await t.run("build", "order-cancellation");
+    await t.run("build", "order-cancellation --here");
     assert.match(t.notes.at(-1)!, /^refund-flow is building in another session right now/);
     assert.equal(t.progress("order-cancellation").phase, "written");
     // 90 minutes quiet is outside it: the build starts, and the archive goes.
     await standBuilding(other, 90);
     t.agent.script = diligent;
-    await t.run("build", "order-cancellation");
+    await t.run("build", "order-cancellation --here");
     assert.notEqual(t.progress("order-cancellation").phase, "written", "the build started");
     await t.run("archive", "refund-flow --force");
     assert.ok(!fs.existsSync(progressFile), "an abandoned build can be forced away");
@@ -1046,11 +1046,12 @@ test("notify: a desktop notification when pb asks, and none when it's turned off
     assert.deepEqual(sent.at(-1), ["pb: a question for you", "Mail or event now?"]); // one line, nothing that ends the escape sequence
     const v = setup({ verify: "true", notify: true }); // a dialog that goes on without you
     await written(v);
-    v.runtime().usage = 72;
+    await v.callTool("pb_write_spec", { name: "base-feature", content: SPEC() });
+    await v.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("Depends on: none", "Depends on: base-feature") });
     v.agent.script = diligent;
-    v.selects.push("Build here anyway");
-    await v.run("build");
-    assert.ok(sent.some(([title, body]) => title === "pb: your choice" && body === "Build order-cancellation: this session is 72% full")); // the build ending adds its own ping after this one
+    v.selects.push("Build anyway");
+    await v.run("build", "order-cancellation");
+    assert.ok(sent.some(([title, body]) => title === "pb: your choice" && body.startsWith("Build order-cancellation?"))); // the build ending adds its own ping after this one
 
     const u = setup();
     process.chdir(u.repo);
@@ -1458,7 +1459,6 @@ test("build-start screen: an unbuilt dependency and a full session are one scree
   new Store(t.repo).markAsked("standards");
   await t.callTool("pb_write_spec", { name: "base-feature", content: SPEC() });
   assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("Depends on: none", "Depends on: base-feature") })).error, undefined);
-  t.runtime().usage = 80; // past freshAbove (50): where to build is part of the same screen
   process.env.MOCK_SPEC_REVIEW = "advisory"; // a pass with a P1
   t.selects.push("Stop here");
   try {
@@ -1470,9 +1470,9 @@ test("build-start screen: an unbuilt dependency and a full session are one scree
   assert.equal(screens.length, 1, "one screen, not a dialog per concern");
   assert.equal(
     screens[0],
-    "Build order-cancellation: this session is 80% full\n- ⚠ order-cancellation depends on base-feature, which isn't built yet",
+    "Build order-cancellation?\n- ⚠ order-cancellation depends on base-feature, which isn't built yet",
   );
-  assert.deepEqual(t.selectOptions.at(-1), ["Build in a fresh session, from the spec (recommended)", "Build here anyway", "Stop here"], "a P1 is information the build carries, never a choice");
+  assert.deepEqual(t.selectOptions.at(-1), ["Build anyway", "Stop here"], "a P1 is information the build carries, never a choice; where to build is not asked");
   assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved");
 });
 
@@ -1483,7 +1483,6 @@ test("build-start screen: without a UI, every concern it would have listed is in
   new Store(t.repo).markAsked("standards");
   await t.callTool("pb_write_spec", { name: "base-feature", content: SPEC() });
   assert.equal((await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC().replace("Depends on: none", "Depends on: base-feature") })).error, undefined);
-  t.runtime().usage = 80;
   t.runtime().hasUI = false;
   t.agent.script = diligent;
   process.env.MOCK_SPEC_REVIEW = "advisory";
@@ -1495,7 +1494,7 @@ test("build-start screen: without a UI, every concern it would have listed is in
   const done = t.posts.find((x) => /Build complete/.test(x))!;
   assert.match(done, /Decided without you[^\n]*:\n[\s\S]*- built although order-cancellation depends on base-feature, which isn't built yet \(no one to ask\)/);
   assert.doesNotMatch(done, /built although the spec review raised/, "a P1 is not a decision, so nothing was decided without you");
-  assert.match(done, /- built here although this session is 80% full \(no one to ask\)/);
+  assert.doesNotMatch(done, /built here although/); // where to build is no longer a concern: it is fresh
 });
 
 test("a build in the planning session renames it, so /resume shows what it became", async () => {
@@ -1503,7 +1502,7 @@ test("a build in the planning session renames it, so /resume shows what it becam
   await written(t);
   t.agent.script = diligent;
   const session = t.runtime().ctx.sessionManager.getSessionFile();
-  await t.run("build");
+  await t.run("build", "--here");
   assert.equal(t.names.get(session), "build: order-cancellation");
 });
 
@@ -1527,7 +1526,7 @@ test("dialogs: the footer says pb is waiting for you, and a timed-out choice say
 });
 
 test("config: a mistyped or replaced setting is named at startup and in /pb:status, with the nearest real key; null turns a command off", async () => {
-  const t = setup({ comandTimeoutSec: 5, maxAttempts: 0, reviewer: { idelSec: 1 }, planner: { thinking: "ultra" }, verify: null, lint: null });
+  const t = setup({ comandTimeoutSec: 5, maxAttempts: 0, reviewer: { idelSec: 1 }, planner: { thinking: "ultra" }, verify: null, lint: null, freshAbove: 50 });
   const globalFile = path.join(process.env.PI_CODING_AGENT_DIR!, "pb", "config.json");
   fs.mkdirSync(path.dirname(globalFile), { recursive: true });
   fs.writeFileSync(globalFile, JSON.stringify({ verifyTimeoutSec: 60 }));
@@ -1539,6 +1538,8 @@ test("config: a mistyped or replaced setting is named at startup and in /pb:stat
     assert.match(warning, /`maxAttempts`: 0 is not valid — pb uses 1/);
     assert.match(warning, /`reviewer\.idelSec` is not a pb setting — did you mean `reviewer\.idleSec`\?/);
     assert.match(warning, /`planner\.thinking`: "ultra" is not valid/);
+    // A retired setting says what replaced it, not "did you mean".
+    assert.match(warning, /`freshAbove` is no longer used: \/pb:build always builds in a fresh session, from the spec; `\/pb:build <spec> --here` builds in this one/);
     assert.match(warning, /the user-level pb config\.json: `verifyTimeoutSec` is read only from a project's \.pi\/pb\/config\.json/);
     // null is the documented way to turn a command off: it is honoured, and not reported.
     assert.doesNotMatch(warning, /`verify`|`lint`|`build`/);
