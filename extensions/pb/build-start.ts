@@ -12,6 +12,7 @@ import { type ParsedSpec, contractHash, specHash, specTextBlocks } from "./spec.
 import { KEBAB_NAME } from "./names.ts";
 import { type Progress, COHERE_TASK_ID, Store, cap, changedSince, gitHead, now, readEvents } from "./store.ts";
 import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, planningEdits, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
+import { whereNext } from "./next.ts";
 import { offerStandards } from "./plan.ts";
 import { dryRunTests, editSpec, readySpecs, showSpec } from "./spec-tools.ts";
 import { COHERE_MARKER, beginCohereEntry, beginTask, confirmLiveBuild, needsCohere, staleness } from "./build-loop.ts";
@@ -110,6 +111,32 @@ export function registerBuildStart(pi: ExtensionAPI) {
     return { spec, md, cfg, buildCmd, concerns };
   };
 
+  /** The first step a build of `spec` still has to run after what `prev` finished; undefined when none is left. */
+  const firstUnbuilt = (spec: ParsedSpec, prev: Progress | undefined) =>
+    syncTasks(spec, prev?.tasks).find((t) => t.status !== "done")?.id ??
+    (needsCohere(spec) && !prev?.tasks.some((t) => t.id === COHERE_TASK_ID && t.status === "done") ? COHERE_TASK_ID : undefined);
+
+  /**
+   * A finished build with nothing left to build: no spec review (the build is past it) and no build-start screen.
+   * /pb:build still re-approves a revised contract, so the review that follows judges the code against the spec
+   * as it stands. True when it handled the call.
+   */
+  const alreadyBuilt = (store: Store, name: string): boolean => {
+    const prev = store.progress(name);
+    const loaded = loadSpec(store, name);
+    if (!prev || !loaded || (prev.phase !== "built" && prev.phase !== "reviewed") || firstUnbuilt(loaded.spec, prev)) return false;
+    const reapproved = approveSpec(store, prev, loaded.md, loaded.spec);
+    store.saveProgress({ ...prev, updatedAt: now() });
+    const builtAt = String(readEvents(path.join(store.specDir(name), "events.jsonl")).filter((e) => e.type === "built").at(-1)?.at ?? "").slice(0, 10);
+    const tasks = loaded.spec.tasks.length;
+    const where = whereNext(store, name);
+    post(
+      `**Already built** — ${name}'s build finished${builtAt ? ` on ${builtAt}` : ""} (${tasks}/${tasks} task${tasks === 1 ? "" : "s"}): nothing to build, so no spec review. It stands at: ${where.state}. Next: ${where.next}.` +
+        (reapproved ? `\n\n**Spec re-approved** — its contract changed since the build was approved, so the review now judges the code against the spec as it stands.` : ""),
+    );
+    return true;
+  };
+
   /**
    * Fresh progress for (re)starting a build: finished tasks stay done with their proofs,
    * everything else goes back to todo — attempts included, so a crash grants no fresh budget.
@@ -137,7 +164,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
       unattended: notes.length ? notes : undefined,
       updatedAt: now(),
     };
-    const first = p.tasks.find((t) => t.status !== "done")?.id ?? (needsCohere(spec) && !prev?.tasks.some((t) => t.id === COHERE_TASK_ID && t.status === "done") ? COHERE_TASK_ID : undefined);
+    const first = firstUnbuilt(spec, prev);
     if (!first) {
       ctx.ui.notify(`Every task of ${name} is done. Next: /${cmd("review")} ${name}.`, "info");
       return undefined;
@@ -284,6 +311,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
     // keep agent_settled's stop-pause from firing for this session until the record expired.
     const here = ctx.sessionManager.getSessionFile();
     if (here) store.clearPendingBuild(here);
+    if (alreadyBuilt(store, name)) return;
     const notes = o.notes ?? [];
     const checked = await preBuildChecks(ctx, store, name, o);
     if (!checked) return;

@@ -2689,3 +2689,23 @@ test("sibling repositories: a follow-up review isn't skipped when only the sibli
     fs.rmSync(sibling, { recursive: true, force: true });
   }
 });
+
+test("build: /pb:build on a finished build says it's built, with no spec review", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  // The spec is touched after its review passed (outside the contract), as a planning or fix edit would.
+  const specFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  fs.writeFileSync(specFile, `${fs.readFileSync(specFile, "utf8")}\n<!-- touched -->\n`);
+  const events = () => t.read(".pi/pb/specs/order-cancellation/events.jsonl").trim().split("\n").map((l) => JSON.parse(l).type as string);
+  const before = events();
+  const posts = t.posts.length;
+  await t.run("build", "order-cancellation");
+  assert.equal(events().filter((e) => e === "spec-review").length, before.filter((e) => e === "spec-review").length);
+  const said = t.posts.slice(posts).join("\n");
+  assert.doesNotMatch(said, /changed since its review passed/);
+  assert.match(said, /Already built.*order-cancellation's build finished on \d{4}-\d{2}-\d{2} \(2\/2 tasks\): nothing to build.*Next: \/pb:review order-cancellation/);
+  assert.equal(t.progress("order-cancellation").phase, "built");
+});
