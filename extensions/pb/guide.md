@@ -318,8 +318,9 @@ is enough) and Pi follows it. If Pi is working, a message sent with Enter is rea
 after its current step, without interrupting it. When pb asks you something, a question or a dialog
 that goes on without you, it also sends a **desktop notification**, in case
 you're in another window (`"notify": false` turns it off). Ghostty, iTerm2,
-WezTerm, Kitty, macOS Terminal and Windows Terminal show it; in tmux it may
-not get through.
+WezTerm, Kitty and Windows Terminal show it; macOS Terminal and other terminals
+on a Mac get the bell instead (the Dock icon bounces); in tmux it may not get
+through.
 
 Discuss as long as you like. When a discussion turns out to cover two things you
 would merge separately, Pi should say so; they become two specs.

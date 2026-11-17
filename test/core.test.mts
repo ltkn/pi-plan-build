@@ -1019,6 +1019,19 @@ test("map: a stray fence does not hide the map", async () => {
   assert.equal(t.read("AGENTS.md"), `# Shop\n\n${example}\n<!-- pb:map -->\n## Project map\n\n### Layout\n- \`README\`: the readme\n<!-- /pb:map -->\n`);
 });
 
+test("notify: a macOS terminal without notifications gets the bell, never an osascript notification", async () => {
+  const { channelFor } = await import("../extensions/pb/notify.ts");
+  assert.equal(channelFor({ TERM_PROGRAM: "Apple_Terminal" }, "darwin"), "bell"); // clicking an osascript one opened Script Editor
+  assert.equal(channelFor({}, "darwin"), "bell");
+  assert.equal(channelFor({ TERM_PROGRAM: "Ghostty" }, "darwin"), "osc777");
+  assert.equal(channelFor({ TERM_PROGRAM: "iTerm.app" }, "darwin"), "osc777");
+  assert.equal(channelFor({ KITTY_WINDOW_ID: "1" }, "darwin"), "kitty");
+  assert.equal(channelFor({}, "linux"), "osc777");
+  assert.equal(channelFor({ WT_SESSION: "x" }, "linux"), "windows");
+  const source = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "../extensions/pb/notify.ts"), "utf8");
+  assert.doesNotMatch(source, /execFile\("osascript"/);
+});
+
 test("notify: a desktop notification when pb asks, and none when it's turned off", async () => {
   const { setNotifySink } = await import("../extensions/pb/notify.ts");
   const sent: string[][] = [];
