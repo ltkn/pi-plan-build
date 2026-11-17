@@ -575,6 +575,8 @@ export interface ReviewRun {
   /** why an abuse pass runs, if it does */
   security?: string;
   followUp: boolean;
+  /** a follow-up's previous findings, by title: the reviewer reports one still open under the same title */
+  previousTitles?: string[];
   /** the session to come back to */
   home?: string;
   /** the tree the review saw: the delta base for the next review, and what changed during this one is reported against it */

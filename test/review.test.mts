@@ -1371,6 +1371,29 @@ test("review: a follow-up looks at the previous findings and what changed since"
   assert.match(t.posts.at(-1)!, /Review — order-cancellation \(follow-up\)\*\* · PASS/);
 });
 
+test("review: a follow-up says which findings are still open from the last review and which are new", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = CHANGES;
+  await t.run("review");
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
+  // The P1 is reported again under its title (still open); the P2 is gone; one finding is new.
+  t.reviewer.review = [{ ...CHANGES[0], title: "Consider  a guard clause " }, { priority: "P2", file: "src/order.ts", line: 40, title: "the fix left a stale comment" }];
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /\*\*Since the last review\*\* \(2 findings\): 1 no longer reported, 1 still open \(1\); 1 below is new\./);
+
+  // A first review has nothing to account for.
+  const u = setup({ verify: "true" });
+  await written(u);
+  u.agent.script = diligent;
+  await u.run("build");
+  u.reviewer.review = CHANGES;
+  await u.run("review");
+  assert.doesNotMatch(u.posts.at(-1)!, /Since the last review/);
+});
+
 test("review: the follow-up brief carries only fix reports from after the review it follows up", async () => {
   const t = setup({ verify: "true" });
   await written(t);

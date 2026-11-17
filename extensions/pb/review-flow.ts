@@ -29,6 +29,22 @@ import { areaNotesFor } from "./map.ts";
 import { freshProgress } from "./progress.ts";
 import { addedDependencies } from "./manifest.ts";
 import type { ReplacedSessionContext } from "./kit.ts";
+const titleKey = (title: string) => title.trim().replace(/\s+/g, " ").toLowerCase();
+
+/**
+ * A follow-up's account of the review it follows. The reviewer reports a finding still open under its old
+ * title, so a title seen before is still open and any other is new; the earlier ones not reported again are gone.
+ */
+export function sinceLastReview(previousTitles: string[], findings: Finding[], number: Map<Finding, number>): string {
+  const before = new Set(previousTitles.map(titleKey));
+  const open = findings.filter((f) => before.has(titleKey(f.title)));
+  const fresh = findings.length - open.length;
+  const gone = previousTitles.length - open.length;
+  const named = open.map((f) => (number.has(f) ? `${number.get(f)}` : `${f.priority} "${safeLine(cap(f.title, 60))}"`)).join(", ");
+  const s = (n: number) => (n === 1 ? "" : "s");
+  return `**Since the last review** (${previousTitles.length} finding${s(previousTitles.length)}): ${gone} no longer reported, ${open.length ? `${open.length} still open (${named})` : "none still open"}; ${fresh ? `${fresh} below ${fresh === 1 ? "is" : "are"} new` : "nothing new"}.`;
+}
+
 export function registerReviewFlow(pi: ExtensionAPI) {
   pi.registerTool({
     name: "pb_report_findings",
@@ -410,6 +426,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
               : []),
           ]
         : []),
+      ...(run.previousTitles ? ["", sinceLastReview(run.previousTitles, findings, number)] : []),
       ...(inChange.length ? ["", "**Findings**", "", ...inChange.map((f) => findingLine(f, number.get(f)))] : []),
       ...(outside.length ? ["", "**Outside the change** — pre-existing, not caused by this revision", "", ...outside.map((f) => findingLine(f, number.get(f)))] : []),
       ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}${d.finding.outside ? " · Outside the change" : ""}] ${d.finding.title} — ${d.evidence}`)] : []),
@@ -846,6 +863,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         security,
         acceptance,
         followUp: !!previous,
+        ...(previous ? { previousTitles: previous.findings.map((f) => f.title) } : {}),
         home: ctx.sessionManager.getSessionFile(),
         before: before ? { commit: before.commit, tree: before.tree } : undefined,
         ...(Object.keys(repoBefore).length ? { repoBefore } : {}),
