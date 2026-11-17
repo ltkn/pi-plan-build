@@ -10,6 +10,7 @@ import { inRepo, resolveRepos } from "./repos.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { buildLivenessMs, cmd, nextLine, post, sessionLive, specCompletions } from "./kit.ts";
 import { updateMap } from "./map-flow.ts";
+import { tip } from "./help.ts";
 
 /**
  * What a spec still owes before it is put away: a build that never finished, a review still running or
@@ -143,7 +144,7 @@ export function registerArchive(pi: ExtensionAPI) {
       const uncommitted = leftoverFiles(ctx.cwd, parseSpec(markdown).spec?.repos ?? []);
       fs.appendFileSync(path.join(dest, "events.jsonl"), `${JSON.stringify({ at: now(), type: "archive", force, owed, base: base ?? "HEAD", uncommitted })}\n`);
       // Archiving ends a feature: what's left is the decision about those files, and the next feature.
-      post(nextLine(leftoverAdvice(name, uncommitted, progress?.phase)));
+      post([nextLine(leftoverAdvice(name, uncommitted, progress?.phase)), "", tip("archive.done")].join("\n"));
     },
   });
 

@@ -1,4 +1,4 @@
-words: 2108
+words: 2057
 
 [pb:spec]
 
@@ -64,8 +64,7 @@ Add "## Out of scope" only when it helps. When you include a section that does n
 Then tell me where it is. End your reply with this block, verbatim:
 
 **What now** — the spec is written, nothing is built yet
-- Check it: read the spec in `.pi/pb/specs/` — the build follows it word for word, and the reviewer checks against it.
-- Change something: say what and run `/pb:spec` again. Example: *"split T2 into two tasks"*
-- Review it before building: `/pb:spec-review` — the same fresh reviewer, nothing built, and `/pb:build` then starts at T1 without re-reviewing.
-- The review found things? Most need nothing: the build carries them and the code review judges the result. To settle one first, say so to the planner (`/pb:plan <spec>`); a P0 holds the build until then.
-- Build it: `/pb:build` here, or `/pb:build --fresh` for a new session — every spec is reviewed first: a P0 stops it before the first task · more: `/pb:help spec`
+- Read it in `.pi/pb/specs/`: the build follows it, the reviewer checks against it. To change it, say what, then `/pb:spec` again. Example: *"split T2 into two tasks"*
+- `/pb:build` — reviews it, then builds here (only a P0 stops it before the first task)
+- `/pb:build --fresh` — the same, building in a new session
+- `/pb:spec-review` — only the review, nothing built; `/pb:build` then starts without reviewing again · more: `/pb:help spec`

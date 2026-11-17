@@ -439,7 +439,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       ...(doubleCheckLines.note ? ["", doubleCheckLines.note] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
       "",
-      tip(tipKey, { spec: run.label }),
+      tip(tipKey, { spec: run.name ?? "", ...(run.name && fixIds && complete ? { ids: fixIds } : {}) }),
     ].join("\n");
     return { text, verdict, counts, findings: fixable, acceptance, complete, abuse: finished("abuse") };
   };

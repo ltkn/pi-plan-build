@@ -34,9 +34,17 @@ function regions(): Regions {
   }
 }
 
-/** Short "What now" block for a phase result; `{name}` placeholders are filled from vars. */
+/**
+ * Short "What now" block for a phase result; `{name}` placeholders are filled from vars. A command line naming a
+ * placeholder the caller has no value for (no finding ids, say) is left out rather than shown half-filled, and an
+ * empty value drops with the space before it (`/pb:commit {spec}` without a spec reads `/pb:commit`).
+ */
 export function tip(key: string, vars: Record<string, string | number> = {}): string {
-  return (regions().tip.get(key) ?? "").replace(/\{(\w+)\}/g, (all, k) => (k in vars ? String(vars[k]) : all));
+  return (regions().tip.get(key) ?? "")
+    .split("\n")
+    .filter((line) => !line.startsWith("- ") || [...line.matchAll(/\{(\w+)\}/g)].every(([, k]) => k in vars))
+    .join("\n")
+    .replace(/( ?)\{(\w+)\}/g, (all, space: string, k: string) => (k in vars ? (String(vars[k]) === "" ? "" : `${space}${vars[k]}`) : all));
 }
 
 /** A full help section, or undefined if there is no such topic. */

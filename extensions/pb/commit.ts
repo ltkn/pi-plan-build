@@ -16,6 +16,7 @@ import { cmd, nextLine, post, specCompletions, specOfSession } from "./kit.ts";
 import { whereNext } from "./next.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
 import { mapFiles } from "./map.ts";
+import { tip } from "./help.ts";
 
 /** The spec whose work is committed: live, or archived (a commit right after /pb:archive). */
 interface Target {
@@ -159,7 +160,7 @@ export function registerCommit(pi: ExtensionAPI) {
         );
       const next = spec && !spec.archived ? whereNext(store, spec.name).next : `\`/${cmd("plan")} <feature>\` for the next one`;
       const shas = committed.map((c) => `${c.name ? `${c.name} ` : ""}\`${c.sha.slice(0, 7)}\``).join(" · ");
-      post([`**✅ Committed** ${shas} — ${subject} · ${total} file${total === 1 ? "" : "s"}${left.length ? ` · left out, still uncommitted: ${left.join(", ")}` : ""}`, "", nextLine(`${next}.`)].join("\n"));
+      post([`**✅ Committed** ${shas} — ${subject} · ${total} file${total === 1 ? "" : "s"}${left.length ? ` · left out, still uncommitted: ${left.join(", ")}` : ""}`, "", nextLine(`${next}.`), "", tip("commit.done", spec && !spec.archived ? { spec: spec.name } : {})].join("\n"));
     },
   });
 }

@@ -13,6 +13,7 @@ import { snapshot } from "./checkpoint.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, now, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
 import { approvalDrift, choose, cmd, commands, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, specOfSession, specRef, withChecking } from "./kit.ts";
+import { tip } from "./help.ts";
 
 /** One lap's report shape, normalized from its `fix` event: findings by the number its brief showed them as. */
 export interface LapReport {
@@ -356,6 +357,8 @@ export function registerFix(pi: ExtensionAPI) {
       ),
       ...(failure ? ["", `**pb's check after the last lap failed**, so its fixes don't count yet:`, "", failure] : []),
       ...(drift ? ["", `**The fix changed the approved contract.** \`/${cmd("build")} ${spec}\` must re-approve it before \`/${cmd("review")}\` can run.`] : []),
+      // Variants of the next step; a lap that changed the contract has one move, already named above.
+      ...(drift ? [] : ["", tip("fix.done", { spec, ...(open.length && ids ? { ids } : {}) })]),
     ].join("\n");
     // The follow-up review is the next step whenever nothing is left open: offer it rather than leave it to memory.
     const offerReview = !silent && !failure && !open.length && !drift;

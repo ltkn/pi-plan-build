@@ -113,6 +113,17 @@ test("report: status and stats --json return pb.report/2, and pb-report does too
   assert.deepEqual(out.specs[0].review.findings, []);
 });
 
+test("help: a What-now line whose value is missing is left out, and an empty value takes its space with it", async () => {
+  const { tip } = await import("../extensions/pb/help.ts");
+  const withIds = tip("review.pass", { spec: "order-cancellation", ids: "2 3" });
+  assert.match(withIds, /- `\/pb:commit order-cancellation` — commits it/);
+  assert.match(withIds, /- `\/pb:fix order-cancellation 2 3` — fixes the P2 findings first/);
+  const noIds = tip("review.pass", { spec: "order-cancellation" });
+  assert.doesNotMatch(noIds, /\/pb:fix|\{ids\}/); // nothing to fix: no half-filled command
+  const noSpec = tip("review.pass", { spec: "" });
+  assert.match(noSpec, /- `\/pb:commit` — commits it \(you see the files and the message first\), then `\/pb:archive`/);
+});
+
 test("help: every What-now block the code uses exists in the guide, and /pb:help lists the topics", async () => {
   const { tip } = await import("../extensions/pb/help.ts");
   const dir = path.join(path.dirname(new URL(import.meta.url).pathname), "../extensions/pb");

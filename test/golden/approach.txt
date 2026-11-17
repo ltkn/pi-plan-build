@@ -1,4 +1,4 @@
-words: 298
+words: 321
 
 [pb:approach]
 
@@ -22,5 +22,7 @@ No code, no task breakdown; keep it in proportion to the change.
 End your reply with this block, verbatim:
 
 **What now** — the plan is ready to discuss, nothing is built yet
-- React to the plan: agree, disagree, or answer its questions. Example: *"go with option B, but keep the old endpoint"*
-- Done discussing: `/pb:build` writes the spec and starts building. Example: `/pb:build --fresh` builds in a new session · more: `/pb:help plan`
+- Steer it in words: agree, disagree, or answer its questions. Example: *"go with option B, but keep the old endpoint"*
+- `/pb:build` — writes the spec, has it reviewed, and builds here
+- `/pb:build --fresh` — the same, building in a new session with a lean context
+- `/pb:spec` — only writes the spec, to read it before anything is built · more: `/pb:help plan`

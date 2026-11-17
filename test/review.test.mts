@@ -466,6 +466,23 @@ test("fix: a green check is stated as a fact, and the follow-up review is offere
   assert.match(summary, /pb's checks passed: `test -f [^`]+`, `true`/);
   assert.ok(t.selectTitles.includes("Fixes for order-cancellation are in. Review them now?"));
   assert.equal(t.stat.editorText, "/pb:review order-cancellation");
+  // The ways on, as commands to type: a delta review or a full one; nothing is open, so no other lap.
+  assert.match(summary, /- `\/pb:review` — checks only the fixes[\s\S]*- `\/pb:review --full` — reviews the whole change again/);
+  assert.doesNotMatch(summary, /\/pb:fix order-cancellation/);
+});
+
+test("review: the next step comes as commands to type — the fix with its ids, the same with a direction, and a full review", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = CHANGES;
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /- `\/pb:fix order-cancellation 1 2` — fixes them in a fresh fenced session/);
+  assert.match(post, /- `\/pb:fix order-cancellation 1 2 keep the public API unchanged` — the same, with your direction/);
+  assert.match(post, /`\/pb:review --full` reviews everything again/);
+  assert.doesNotMatch(post, /\{\w+\}/); // no placeholder left unfilled
 });
 
 test("fix: a fixed finding needs a test seen failing first, or a stated reason no test can show it", async () => {

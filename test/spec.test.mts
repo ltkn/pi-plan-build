@@ -457,7 +457,7 @@ test("spec-review: a PASS with advisory findings says they are information, and 
   process.env.MOCK_SPEC_REVIEW = "advisory";
   try {
     await t.run("spec-review", "order-cancellation");
-    const hint = /these findings are information; only a P0 holds the build\n- Build with them: `\/pb:build order-cancellation`[\s\S]*Settle one first[^\n]*`\/pb:plan order-cancellation` picks the planning up again and edits the spec/;
+    const hint = /these findings are information; only a P0 holds the build\n- `\/pb:build order-cancellation` — builds and carries them[\s\S]*- `\/pb:build order-cancellation --fresh`[\s\S]*- `\/pb:plan order-cancellation` — settle one first: tell the planner which and how/;
     assert.match(t.posts.at(-1)!, hint);
     await t.run("spec-review", "order-cancellation"); // the stored pass says so too
     assert.match(t.posts.at(-1)!, /PASS \(already on record\)/);

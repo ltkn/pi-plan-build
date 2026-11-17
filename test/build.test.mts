@@ -1369,7 +1369,7 @@ test("/pb:commit: no phase writes a commit message any more; the command commits
   t.agent.script = diligent;
   await t.run("build");
   assert.doesNotMatch(t.posts.at(-1)!, /Commit message|```text/, "the build no longer posts a message to paste");
-  assert.match(t.posts.at(-1)!, /Then `\/pb:commit`/);
+  assert.match(t.posts.at(-1)!, /- `\/pb:commit order-cancellation` — after the review: you see the files and the message first/);
   await t.run("review");
   assert.doesNotMatch(t.posts.at(-1)!, /Commit message|```text/, "nor does the review");
   // Your own unrelated edit is offered too: you leave it out in the editor, as in git's own template.
