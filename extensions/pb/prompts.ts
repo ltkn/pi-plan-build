@@ -829,7 +829,7 @@ export function reviewerBrief(o: ReviewBrief): string {
     lines.push(
       "## This is a follow-up review",
       "",
-      "The previous review confirmed the findings below. For each: is it fixed? Report the ones still open again (same title). Then focus on what changed since that review for new problems; revisit unchanged code only where the change makes an older problem newly relevant.",
+      "This review checks the fixes, nothing else. The previous review confirmed the findings below. For each: is it fixed? Report the ones still open again (same title). Then report what the fixes broke or left inconsistent (code, tests, comments, docs or the spec now saying something the code no longer does), and any new P0 or P1 in the lines changed since that review. Report no new P2 or P3 in code the fixes left alone, and nothing outside the change: the previous review judged that code, and a fresh look always finds more.",
       "",
       ...(o.previous.findings.length ? o.previous.findings.map((f, i) => findingLine(f, i + 1)) : ["(none)"]),
       "",

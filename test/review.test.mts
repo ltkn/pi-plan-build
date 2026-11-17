@@ -911,6 +911,27 @@ test("review: security auto skips the adversarial pass on calm ground", async ()
   assert.doesNotMatch(t.posts.at(-1)!, /adversarial/);
 });
 
+test("review: a follow-up checks the fixes — its brief says so, and it attacks only a fix on sensitive ground", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "auto" } });
+  await written(t, SPEC().replace("## Goal\nCancel orders.", "## Goal\nCancel orders.\n\n## Threats and abuse\n- Another user's order cannot be cancelled."));
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = CHANGES;
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /with an adversarial pass/); // the spec's Threats: the first review attacks the change
+
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
+  t.reviewer.review = [];
+  await t.run("review");
+  assert.match(briefOf(t), /## This is a follow-up review\n\nThis review checks the fixes, nothing else\.[^\n]*Report no new P2 or P3 in code the fixes left alone, and nothing outside the change/);
+  assert.match(t.posts.at(-1)!, /\(follow-up\)\*\* · PASS/);
+  assert.doesNotMatch(t.posts.at(-1)!, /adversarial/); // a calm fix: the Threats were attacked last time
+
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "check the session token before cancelling");
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /\(follow-up\)\*\* · PASS[^\n]*with an adversarial pass/); // a fix on sensitive ground is attacked again
+});
+
 test("review: security off never runs the adversarial pass", async () => {
   const t = setup({ verify: "true", reviewer: { security: "off" } });
   await written(t);

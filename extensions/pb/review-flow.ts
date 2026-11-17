@@ -182,7 +182,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         role: "abuse",
         systemPrompt: ATTACKER_SYSTEM + extraBlock(store.extra("adversarial")),
         brief: run.brief,
-        prompt: "Attack the change in the attached brief: find how it can be abused or broken. Report every finding with report_findings (one call), then stop.",
+        prompt: run.followUp
+          ? "This is a follow-up: attack what changed since the previous review (the brief's follow-up section lists those files), not the code it already judged. Report every finding with report_findings (one call), then stop."
+          : "Attack the change in the attached brief: find how it can be abused or broken. Report every finding with report_findings (one call), then stop.",
         tools: ["read", "grep", "find", "ls", "report_findings"],
         extensions: [REVIEW_TOOLS],
         model: run.model,
@@ -822,8 +824,17 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       })();
 
       // The abuse pass: on sensitive ground by default (reviewer.security "auto"), or on every review ("always").
+      // A follow-up checks the fixes, so its ground is what changed since the last review: the spec's Threats
+      // section was attacked then, and only a fix that touches sensitive code is attacked again.
       const mode = cfg.reviewer.security ?? "auto";
-      const security = mode === "always" ? "always" : mode === "off" ? undefined : sensitiveGround({ spec: loaded?.md, files: changedEverywhere, diff: reviewDiff });
+      const security =
+        mode === "always"
+          ? "always"
+          : mode === "off"
+            ? undefined
+            : previous
+              ? sensitiveGround({ files: previous.changed, diff: `${gitDiff(ctx.cwd, previous.snapshot)}${untrackedText(ctx.cwd, changed.filter((f) => previous?.changed.includes(f)))}` })
+              : sensitiveGround({ spec: loaded?.md, files: changedEverywhere, diff: reviewDiff });
       const acceptance = loaded && name ? acceptanceCriteria(loaded.md, loaded.spec) : undefined;
       const brief = reviewerBrief({
         spec: loaded && name ? { name, parsed: loaded.spec } : undefined,

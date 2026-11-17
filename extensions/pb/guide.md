@@ -1027,9 +1027,11 @@ itself, and it can change nothing else in the spec. A finding that needs the
 Goal, Contracts or Acceptance changed is reported as skipped, for you to revise
 with `/pb:spec`. If the fixes change the approved contract, `/pb:build` must re-approve
 it before the review runs; otherwise the next `/pb:review` is a **follow-up**:
-it checks the previous findings and looks only at what changed since
-(`--full` reviews everything again). If nothing changed, it says so and costs
-nothing.
+it checks the fixes and nothing else: whether each previous finding is fixed,
+what the fixes broke or left inconsistent, and any new P0 or P1 in the lines
+changed since. It reports no new P2 or P3 in code the fixes left alone, and its
+adversarial pass runs only when the fixes touch sensitive code (`--full` reviews
+everything again). If nothing changed, it says so and costs nothing.
 
 **The adversarial pass, when the change looks sensitive.** A background pass (its own fresh
 process, not a session you watch) has a single job: break the change. For every entry point it adds or alters and
