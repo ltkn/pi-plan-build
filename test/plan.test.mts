@@ -1225,6 +1225,40 @@ test("pb_ask: a dialog closed before its time is kept in the chat too; an answer
   assert.match(t.posts.at(-1)!, /^\*\*Unanswered question\*\* \(the dialog was closed; nothing was decided — the question stays open\):\n\nWhich name\?\n\nA\. a\nB\. b\n/);
 });
 
+test("pb_ask: questions or options sent as JSON text are read as the lists they spell, before Pi validates them", async () => {
+  const { prepareAskArguments, ASK_PARAMETERS } = await import("../extensions/pb/ask.ts");
+  const { Value } = await import("typebox/value");
+  const one = { question: "Mail or event?", options: ["mail", "event"], recommended: "event", multiple: false };
+  const two = { question: "Which name?", options: ["a", "b"] };
+  // The shapes models send: the whole list as a string, one question object instead of a list,
+  // and an options list as a string — inside a question and at the top level.
+  for (const [sent, read] of [
+    [{ questions: JSON.stringify([one, two]) }, { questions: [one, two] }],
+    [{ questions: one }, { questions: [one] }],
+    [{ questions: JSON.stringify(one) }, { questions: [one] }],
+    [{ questions: [{ ...two, options: JSON.stringify(two.options) }] }, { questions: [two] }],
+    [{ question: "Mail or event?", options: '["mail", "event"]' }, { question: "Mail or event?", options: ["mail", "event"] }],
+  ] as const) {
+    assert.equal(Value.Check(ASK_PARAMETERS, sent), false, `as sent, Pi refuses ${JSON.stringify(sent)}`);
+    const prepared = prepareAskArguments(structuredClone(sent));
+    assert.deepEqual(prepared, read);
+    assert.ok(Value.Check(ASK_PARAMETERS, prepared), `prepared, Pi accepts ${JSON.stringify(sent)}`);
+  }
+  // Text that does not spell a list is left as sent, so Pi's own validation error still reaches the model.
+  for (const garbled of [{ questions: "Mail or event?" }, { questions: "[{" }, { options: "mail, event", question: "x" }, "x", null]) {
+    assert.deepEqual(prepareAskArguments(structuredClone(garbled)), garbled);
+  }
+
+  // Through the tool, in a planning session: the JSON-string list asks both questions.
+  const t = setup();
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  t.selects.push("mail", "b");
+  const r = await t.callTool("pb_ask", { questions: JSON.stringify([one, two]) });
+  assert.match(r.content![0].text, /^The human's answers:\n1\. Mail or event\? — mail\n2\. Which name\? — b$/);
+});
+
 test("pb_ask: terminal activity restarts the countdown — idle time, not wall time", async () => {
   const t = setup({ askTimeoutSec: 2 });
   process.chdir(t.repo);

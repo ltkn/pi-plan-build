@@ -316,7 +316,9 @@ export function setup(config: object = {}) {
     let result: Result = {};
     if (rt.tools[name]) {
       try {
-        result = await rt.tools[name].execute("call", params, undefined, undefined, rt.ctx);
+        // As Pi does: a tool's prepareArguments shim reads the raw call before anything else sees it.
+        const prepared = rt.tools[name].prepareArguments ? rt.tools[name].prepareArguments(params) : params;
+        result = await rt.tools[name].execute("call", prepared, undefined, undefined, rt.ctx);
       } catch (e) {
         result = { error: (e as Error).message };
       }

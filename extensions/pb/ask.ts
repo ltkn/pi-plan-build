@@ -1,5 +1,6 @@
 /** pb_ask: the one question tool; builds and unattended laps never ask. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Static } from "typebox";
 import { Type } from "./schema.ts";
 import { notifyDesktop } from "./notify.ts";
 import { ASK_DESCRIPTION, checkpointing, patiently, post, reply, specOfSession, specWriting, stop } from "./kit.ts";
@@ -46,6 +47,58 @@ export function resolveAnswer(answer: string, options: string[]): string {
   const picked = letters.map((l) => l.charCodeAt(0) - 65);
   if (picked.some((i) => i < 0 || i >= options.length)) return t;
   return `${letters.join(" and ")} — ${picked.map((i) => options[i]).join("; ")}`;
+}
+
+/** pb_ask's parameters: one question at the top level, or several in `questions`. */
+export const ASK_PARAMETERS = Type.Object({
+  question: Type.Optional(Type.String({ description: "one precise question (or use questions for several)" })),
+  options: Type.Optional(Type.Array(Type.String(), { description: "2 to 4 answers to choose from; the human can always type another" })),
+  recommended: Type.Optional(Type.String({ description: "your recommendation: one of the options (or its letter), or a suggested answer" })),
+  multiple: Type.Optional(Type.Boolean({ description: "true when several options may apply together: the human ticks all that do" })),
+  questions: Type.Optional(
+    Type.Array(
+      Type.Object({
+        question: Type.String(),
+        options: Type.Optional(Type.Array(Type.String())),
+        recommended: Type.Optional(Type.String()),
+        multiple: Type.Optional(Type.Boolean()),
+      }),
+      { description: `several independent questions in one call (at most ${MAX_QUESTIONS}): shown one after another, answered together` },
+    ),
+  ),
+});
+
+const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** A list the model sent as JSON text, parsed; anything else unchanged. */
+const parsedList = (v: unknown): unknown => {
+  if (typeof v !== "string") return v;
+  try {
+    const parsed: unknown = JSON.parse(v);
+    return Array.isArray(parsed) || isRecord(parsed) ? parsed : v;
+  } catch {
+    return v;
+  }
+};
+
+/**
+ * Pi's prepareArguments shim: models often send `questions` (or an `options` list) as JSON text, or one question
+ * object where a list belongs, and Pi's schema check refuses the call before it reaches execute. Each is read as
+ * the list it spells; text that spells no list is left as sent, so the model still meets Pi's validation error.
+ */
+export function prepareAskArguments(args: unknown): unknown {
+  if (!isRecord(args)) return args;
+  const options = parsedList(args.options);
+  if (Array.isArray(options)) args.options = options;
+  const questions = parsedList(args.questions);
+  const list = isRecord(questions) ? [questions] : questions;
+  if (Array.isArray(list))
+    args.questions = list.map((q) => {
+      if (!isRecord(q)) return q;
+      const opts = parsedList(q.options);
+      return Array.isArray(opts) ? { ...q, options: opts } : q;
+    });
+  return args;
 }
 
 /** One question's outcome: the answer, or why there is none (no answer in time, or the dialog was closed). */
@@ -112,23 +165,8 @@ export function registerAsk(pi: ExtensionAPI) {
     name: "pb_ask",
     label: "Ask",
     description: ASK_DESCRIPTION,
-    parameters: Type.Object({
-      question: Type.Optional(Type.String({ description: "one precise question (or use questions for several)" })),
-      options: Type.Optional(Type.Array(Type.String(), { description: "2 to 4 answers to choose from; the human can always type another" })),
-      recommended: Type.Optional(Type.String({ description: "your recommendation: one of the options (or its letter), or a suggested answer" })),
-      multiple: Type.Optional(Type.Boolean({ description: "true when several options may apply together: the human ticks all that do" })),
-      questions: Type.Optional(
-        Type.Array(
-          Type.Object({
-            question: Type.String(),
-            options: Type.Optional(Type.Array(Type.String())),
-            recommended: Type.Optional(Type.String()),
-            multiple: Type.Optional(Type.Boolean()),
-          }),
-          { description: `several independent questions in one call (at most ${MAX_QUESTIONS}): shown one after another, answered together` },
-        ),
-      ),
-    }),
+    parameters: ASK_PARAMETERS,
+    prepareArguments: (args) => prepareAskArguments(args) as Static<typeof ASK_PARAMETERS>,
     // One dialog at a time: Pi shows a single dialog, and a second one opened in parallel dismisses the first.
     executionMode: "sequential",
     async execute(_id, params, _signal, _onUpdate, ctx) {
