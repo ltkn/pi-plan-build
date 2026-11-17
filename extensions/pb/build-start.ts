@@ -8,10 +8,10 @@ import type {
 import { snapshot } from "./checkpoint.ts";
 import { tip } from "./help.ts";
 import { buildIntro, coherePrompt, continuePrompt, findingLine, finishSpecPrompt, fixText, specPrompt } from "./prompts.ts";
-import { type ParsedSpec, blockFingerprints, contractHash, removedLines, sectionOf, specHash, specTextBlocks } from "./spec.ts";
+import { type ParsedSpec, blockFingerprints, blockLabel, contractHash, removedLines, sectionOf, specHash, specTextBlocks } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type Progress, COHERE_TASK_ID, Store, cap, changedSince, gitHead, now, readEvents } from "./store.ts";
-import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, planningEdits, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
+import { type Progress, COHERE_TASK_ID, Store, changedSince, gitHead, now, readEvents } from "./store.ts";
+import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, fitDialog, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, planningEdits, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
 import { whereNext } from "./next.ts";
 import { offerStandards } from "./plan.ts";
 import { dryRunTests, editSpec, readySpecs, showSpec } from "./spec-tools.ts";
@@ -573,21 +573,33 @@ export function registerBuildStart(pi: ExtensionAPI) {
   });
 
   /**
-   * What the resume confirm shows the human: every block the contract binds — everything but
-   * Design and Decisions, which the build itself may change — as it was approved and as it
-   * stands now, each side capped so the dialog stays readable.
+   * What re-approving a paused build would accept, as changed lines: per contract block, the lines it lost and then
+   * the lines it gained, whole (a cut could hide the change itself); then any approved decision that is gone. Posted
+   * to the chat, where it scrolls and stays; the dialog only asks.
    */
-
-  const contractDiff = (store: Store, name: string, md: string): string => {
-    const approved = store.readApprovedSpec(name);
-    if (approved === undefined) return `No approved copy on file: the build would run against ${store.rel("specs", name, "spec.md")} as it stands now.`;
-    const label = (key: string) => (key === "header" ? "the header (Status, Depends on)" : `## ${key.replace(/^section:/, "")}`);
-    const was = new Map(specTextBlocks(approved).map((b) => [b.key, b.text]));
-    const changed = specTextBlocks(md).filter((b) => b.key !== "section:design" && b.key !== "section:decisions" && was.get(b.key) !== b.text);
-    const body = changed
-      .map((b) => [label(b.key), "--- approved ---", cap(was.get(b.key) ?? "(absent)", 700), "--- now ---", cap(b.text, 700)].join("\n"))
-      .join("\n\n");
-    return `${changed.map((b) => label(b.key)).join(", ")}\n\n${body}`;
+  const pausedChanges = (approved: string | undefined, md: string, droppedDecisions: string[]): { diff: string; summary: string } => {
+    const was = new Map(specTextBlocks(approved ?? "").map((b) => [b.key, b]));
+    const contract = (key: string) => key !== "section:design" && key !== "section:decisions";
+    const now = specTextBlocks(md).filter((b) => contract(b.key));
+    const keys = [...new Set([...[...was.keys()].filter(contract), ...now.map((b) => b.key)])];
+    const parts: string[] = [];
+    const summary: string[] = [];
+    const count = (removed: number, added: number) => [removed ? `−${removed}` : "", added ? `+${added}` : ""].filter(Boolean).join(" ");
+    for (const key of keys) {
+      const before = was.get(key)?.text ?? "";
+      const after = now.find((b) => b.key === key)?.text ?? "";
+      if (before === after) continue;
+      const removed = removedLines(before, after);
+      const added = removedLines(after, before);
+      const label = blockLabel(was.get(key) ?? now.find((b) => b.key === key)!);
+      summary.push(`${label} (${count(removed.length, added.length) || "reordered"})`);
+      parts.push(`**${label}** (${count(removed.length, added.length) || "lines reordered"})\n\`\`\`diff\n${[...removed.map((l) => `- ${l}`), ...added.map((l) => `+ ${l}`)].join("\n")}\n\`\`\``);
+    }
+    if (droppedDecisions.length) {
+      summary.push(`## Decisions (${count(droppedDecisions.length, 0)})`);
+      parts.push(`## Decisions — approved lines removed\n\`\`\`diff\n${droppedDecisions.map((l) => `- ${l}`).join("\n")}\n\`\`\``);
+    }
+    return { diff: parts.join("\n\n"), summary: summary.join(", ") };
   };
 
   pi.registerCommand(cmd("build"), {
@@ -647,14 +659,14 @@ export function registerBuildStart(pi: ExtensionAPI) {
         const droppedDecisions = approvedMd ? removedLines(sectionOf(approvedMd, "Decisions"), sectionOf(live.md, "Decisions")) : [];
         const contractChanged = !!p.approval && contractHash(live.md) !== p.approval.contractHash;
         if (p.approval && (contractChanged || droppedDecisions.length) && ctx.hasUI) {
-          const title = `${p.spec}'s ${contractChanged ? "contract" : "approved decisions"} changed while the build was paused`;
-          const body = [
-            contractChanged ? contractDiff(store, p.spec, live.md) : "",
-            droppedDecisions.length ? `## Decisions — approved lines removed\n${droppedDecisions.map((l) => (l.startsWith("- ") ? l : `- ${l}`)).join("\n")}` : "",
-          ]
-            .filter(Boolean)
-            .join("\n\n");
-          if (!(await ctx.ui.confirm(title, body))) {
+          const what = contractChanged ? "contract" : "approved decisions";
+          const changes = pausedChanges(approvedMd, live.md, droppedDecisions);
+          post(`**⚠ ${p.spec}'s ${what} changed while the build was paused** — re-approving accepts these changes, and the build then runs against them:\n\n${changes.diff}`);
+          // Enter keeps the build paused: re-approving is the step that changes what the build follows.
+          const KEEP = "Keep the build paused";
+          const APPROVE = "Re-approve and continue";
+          const choice = await ctx.ui.select(fitDialog(`Re-approve ${p.spec}? Its ${what} changed while the build was paused: ${changes.summary}. The diff is in the chat above.`), [KEEP, APPROVE]);
+          if (choice !== APPROVE) {
             return ctx.ui.notify("Not re-approved: the build stays paused. Edit the spec (or /" + cmd("spec") + ` ${p.spec}), then /${cmd("build")} again.`, "warning");
           }
         }

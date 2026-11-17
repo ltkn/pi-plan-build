@@ -776,15 +776,45 @@ test("build: a resume approves a contract changed while paused only after showin
   const { setSection } = await import("../extensions/pb/spec.ts");
   const specPath = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
   fs.writeFileSync(specPath, setSection(t.read(".pi/pb/specs/order-cancellation/spec.md"), "Contracts", "- T1 owns T1.txt; T2 owns T2.txt; deletes are forbidden."));
-  t.confirmAnswers.push(false); // the human reads the diff and declines
-  await t.run("build");
+  await t.run("build"); // nothing scripted: Enter, on the first option
+  // The diff is in the chat, as changed lines, where it can be scrolled and stays; the dialog is one short question.
+  assert.ok(
+    t.posts.some((p) => /contract changed while the build was paused[\s\S]*```diff\n- - T1 owns T1\.txt; T2 owns T2\.txt; no shared seams beyond the file list above\.\n\+ - T1 owns T1\.txt; T2 owns T2\.txt; deletes are forbidden\.\n```/.test(p)),
+    "the removed line, then the added one",
+  );
+  assert.match(t.selectTitles.at(-1)!, /^Re-approve order-cancellation\? Its contract changed while the build was paused: ## Contracts \(−1 \+1\)\. The diff is in the chat above\.$/);
+  assert.deepEqual(t.selectOptions.at(-1), ["Keep the build paused", "Re-approve and continue"], "Enter keeps it paused");
   assert.match(t.notes.at(-1)!, /Not re-approved: the build stays paused/);
   assert.equal(t.progress("order-cancellation").phase, "paused");
-  await t.run("build"); // then approves it
-  assert.match(t.confirms.at(-1)!, /contract changed while the build was paused/);
-  assert.match(t.confirmBodies.at(-1)!, /deletes are forbidden/); // what the contract now says
-  assert.match(t.confirmBodies.at(-1)!, /no shared seams beyond the file list/); // what it was approved at
+  t.selects.push("Re-approve and continue");
+  await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "built");
+});
+
+test("build: the resume diff shows a change however deep in a long line, and the dialog stays short however long the diff", async () => {
+  const t = setup({ verify: "true" });
+  const long = `- T1 owns T1.txt; ${"every word of this clause matters to the build ".repeat(20)}and the end says ALLOWED.`;
+  await written(t, SPEC().replace("- T1 owns T1.txt; T2 owns T2.txt; no shared seams beyond the file list above.", long));
+  let stopped = false;
+  t.agent.script = async (text, tool) => {
+    if (text.includes("Task T2") && !text.includes("You stopped") && !stopped) {
+      stopped = true;
+      return undefined;
+    }
+    if (text.includes("You stopped without finishing T2")) return undefined;
+    return diligent(text, tool);
+  };
+  await t.run("build");
+  assert.equal(t.progress("order-cancellation").phase, "paused");
+  const specPath = path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md");
+  const many = Array.from({ length: 60 }, (_, i) => `- rule ${i + 1}: deletes are forbidden.`).join("\n");
+  fs.writeFileSync(specPath, fs.readFileSync(specPath, "utf8").replace("and the end says ALLOWED.", `and the end says FORBIDDEN.\n${many}`));
+  t.selects.push("Keep the build paused");
+  await t.run("build");
+  const diff = t.posts.find((p) => p.includes("contract changed while the build was paused"))!;
+  assert.ok(diff.includes("and the end says ALLOWED.") && diff.includes("and the end says FORBIDDEN."), "nothing is cut: the change sat past 700 characters");
+  assert.match(diff, /- rule 60: deletes are forbidden\./);
+  assert.ok(t.selectTitles.at(-1)!.split("\n").length <= 2 && t.selectTitles.at(-1)!.length <= 300, "the dialog fits whatever the diff");
 });
 
 test("build: the build never asks; ambiguity is a reading recorded as an assumption", async () => {
@@ -1401,6 +1431,7 @@ test("/pb:commit: no phase writes a commit message any more; the command commits
   await t.run("commit");
   assert.equal(log(t.repo), "Order cancellation: review fixes\n\n- name the constant");
   // Archived, with the map updated: the map commit names what the map gained.
+  t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
   await t.run("archive");
   assert.match(
     t.posts.at(-1)!,
@@ -2341,6 +2372,7 @@ test("build: a spec rewrite that renumbers a task doesn't strand the resume at '
     fs.writeFileSync(path.join(t.repo, "T3.txt"), "x");
     await tool("pb_task_done", { task: "T3", status: "done", changed: "T3", caveat: "none", rejected: "none", open: "none" });
   };
+  t.selects.push("Re-approve and continue"); // re-approving is chosen, not Enter
   await t.run("build");
   assert.ok(t.posts.some((x) => /Spec re-approved/.test(x)));
   assert.ok(!t.notes.some((n) => /Nothing left to build here/.test(n)));
@@ -2416,6 +2448,7 @@ test("build: a contract edited outside the build pauses it; /pb:build re-approve
     fs.writeFileSync(path.join(t.repo, "T2.txt"), "x");
     await tool("pb_task_done", { task: "T2", status: "done", changed: "T2", caveat: "none", rejected: "none", open: "none" });
   };
+  t.selects.push("Re-approve and continue"); // re-approving is chosen, not Enter
   await t.run("build");
   assert.ok(t.posts.some((x) => /Spec re-approved/.test(x)));
   const built = t.progress("order-cancellation");

@@ -309,27 +309,27 @@ test("archive: a spec with work left asks first and says what — never reviewed
   await t.run("build");
   const live = () => fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/spec.md"));
   // Built but never reviewed: asked, and a no keeps it where /pb:fix and /pb:review reach it.
-  t.confirmAnswers.push(false);
+  t.selects.push("Keep it");
   await t.run("archive", "order-cancellation");
-  assert.equal(t.confirms.at(-1), "order-cancellation isn't finished: it was never reviewed");
+  assert.equal(t.selectTitles.at(-1), "order-cancellation isn't finished: it was never reviewed");
   assert.ok(live());
   // Reviewed with an open finding: both facts are named.
   const progressFile = path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json");
   const p = JSON.parse(fs.readFileSync(progressFile, "utf8"));
   fs.writeFileSync(progressFile, JSON.stringify({ ...p, review: { at: "2026-10-01 10:00:00", verdict: "changes_needed", findings: [{ priority: "P1", title: "the guard is missing" }] } }));
-  t.confirmAnswers.push(false);
+  t.selects.push("Keep it");
   await t.run("archive", "order-cancellation");
-  assert.equal(t.confirms.at(-1), "order-cancellation isn't finished: its last review was CHANGES NEEDED; 1 review finding still open");
+  assert.equal(t.selectTitles.at(-1), "order-cancellation isn't finished: its last review was CHANGES NEEDED; 1 review finding still open");
   assert.ok(live());
   // A name that is not one never reaches a path.
-  const asked = t.confirms.length;
+  const asked = t.selectTitles.length;
   await t.run("archive", "../order-cancellation");
   assert.match(t.notes.at(-1)!, /`\.\.\/order-cancellation` isn't a valid spec name/);
-  assert.equal(t.confirms.length, asked);
+  assert.equal(t.selectTitles.length, asked);
   // A clean pass with nothing open archives without a question.
   fs.writeFileSync(progressFile, JSON.stringify({ ...p, phase: "reviewed", review: { at: "2026-10-01 10:00:00", verdict: "pass", findings: [] } }));
   await t.run("archive", "order-cancellation");
-  assert.equal(t.confirms.length, asked, "nothing owed, nothing asked");
+  assert.equal(t.selectTitles.length, asked, "nothing owed, nothing asked");
   assert.ok(!live());
 });
 
@@ -353,9 +353,9 @@ test("archive: only the archived spec's runs go, a running review is named first
   fs.writeFileSync(progressFile, JSON.stringify({ ...p, phase: "reviewed", review: { at: "2026-10-01 10:00:00", verdict: "pass", findings: [] } }));
   // A clean pass, but a review of it is still kept as running: archiving would end it, so it asks.
   store.saveReviewRun({ id: "run-9", name: "order-cancellation", cwd: t.repo, label: "order-cancellation", brief: "BRIEF", followUp: false, passes: [] } as any);
-  t.confirmAnswers.push(false);
+  t.selects.push("Keep it");
   await t.run("archive", "order-cancellation");
-  assert.equal(t.confirms.at(-1), "order-cancellation isn't finished: a review of it is running or was interrupted: archiving ends it");
+  assert.equal(t.selectTitles.at(-1), "order-cancellation isn't finished: a review of it is running or was interrupted: archiving ends it");
   assert.ok(fs.existsSync(ownRuns), "a no keeps everything");
   store.clearReviewRun("run-9");
   await t.run("archive", "order-cancellation");
@@ -420,10 +420,10 @@ test("archive: --force archives what the spec owes without asking, skips the map
   process.env.MOCK_BRIEF_OUT = mapBrief;
   try {
     // --force never chooses the spec: with no name nothing moves and nothing is asked.
-    const asked = t.confirms.length;
+    const asked = t.selectTitles.length;
     await t.run("archive", "--force");
     assert.match(t.notes.at(-1)!, /`--force` names nothing/);
-    assert.equal(t.confirms.length, asked);
+    assert.equal(t.selectTitles.length, asked);
     assert.ok(fs.existsSync(progressFile), "the spec is where it was");
     for (const bad of ["../order-cancellation", "a b"]) {
       await t.run("archive", `--force ${bad}`);
@@ -434,17 +434,17 @@ test("archive: --force archives what the spec owes without asking, skips the map
     assert.deepEqual(complete("").map((i: any) => i.value).filter((v: string) => v === "--force"), ["--force"], "--force completes beside the spec names");
     assert.ok(complete("").some((i: any) => i.value === "order-cancellation"), "and so do the specs");
     // Without the flag: the same question as ever, and a no keeps everything where it is.
-    t.confirmAnswers.push(false);
+    t.selects.push("Keep it");
     await t.run("archive", "order-cancellation");
-    assert.equal(t.confirms.at(-1), "order-cancellation isn't finished: 2 review findings still open");
-    assert.equal(t.confirmBodies.at(-1), "Archive it anyway? Its open findings leave /pb:fix's reach.", "the body is word for word today's, whatever the reason");
+    assert.equal(t.selectTitles.at(-1), "order-cancellation isn't finished: 2 review findings still open");
+    assert.deepEqual(t.selectOptions.at(-1), ["Keep it", "Archive it anyway (its open findings leave /pb:fix's reach)"], "Enter keeps it, whatever the reason");
     assert.ok(fs.existsSync(progressFile), "a no keeps it live");
     assert.equal(fs.existsSync(mapBrief), false, "a no runs no cartographer");
     // Forced: no dialog, no cartographer, and the map the human reads is untouched.
     const map = fs.readFileSync(path.join(t.repo, "AGENTS.md"), "utf8");
-    const questions = t.confirms.length;
+    const questions = t.selectTitles.length;
     await t.run("archive", "order-cancellation --force");
-    assert.equal(t.confirms.length, questions, "--force asks nothing");
+    assert.equal(t.selectTitles.length, questions, "--force asks nothing");
     assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")), "it went");
     assert.match(t.notes.join("\n"), /Archiving order-cancellation with work left: 2 review findings still open\./, "the reasons it accepted are named");
     assert.match(t.notes.join("\n"), /`--force` skipped the project map update/);
@@ -566,10 +566,10 @@ test("archive: a build live in another session refuses both archives, the build'
     // commandTimeoutSec 0 means no command limit, so the window is the floor: (3600 + 600) s.
     await standBuilding(other, 0);
     for (const args of ["refund-flow --force", "refund-flow"]) {
-      const asked = t.confirms.length;
+      const asked = t.selectTitles.length;
       await t.run("archive", args);
       assert.match(t.notes.at(-1)!, /^refund-flow is building right now: its session was written within the last 4200 s, the window pb judges a build live by\. Archiving would orphan a build still writing the tree, so nothing was moved/);
-      assert.equal(t.confirms.length, asked, "refused before the owed question");
+      assert.equal(t.selectTitles.length, asked, "refused before the owed question");
       assert.ok(fs.existsSync(progressFile), `${args}: the spec stayed`);
     }
     assert.match(t.notes.at(-2)!, /, `--force` included\./);
@@ -605,9 +605,9 @@ test("archive: a build live in another session refuses both archives, the build'
     await t.settle();
     // ...and once Pi is idle it gets through: plainly to today's owed question, forced at once.
     await standBuilding(own, 0);
-    t.confirmAnswers.push(false);
+    t.selects.push("Keep it");
     await t.run("archive", "refund-flow");
-    assert.equal(t.confirms.at(-1), "refund-flow isn't finished: its build is building");
+    assert.equal(t.selectTitles.at(-1), "refund-flow isn't finished: its build is building");
     assert.ok(fs.existsSync(progressFile), "a no keeps it");
     await t.run("archive", "refund-flow --force");
     assert.ok(!fs.existsSync(progressFile), "the crashed build's own session forces it away");
@@ -663,9 +663,11 @@ test("map: /pb:archive updates it by itself: paths that don't resolve go back on
   const briefFile = path.join(os.tmpdir(), `pb-map-brief-${process.pid}.md`);
   process.env.MOCK_BRIEF_OUT = briefFile;
   const asked = t.selectTitles.length;
+  t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
   await t.run("archive");
   delete process.env.MOCK_BRIEF_OUT;
-  assert.equal(t.selectTitles.length, asked); // no question
+  // One question, the archive's own about what the spec still owes; none about the map.
+  assert.deepEqual(t.selectTitles.slice(asked), ["order-cancellation isn't finished: it was never reviewed"]);
   assert.match(fs.readFileSync(briefFile, "utf8"), /# The current map\n\n\(none yet[\s\S]*# The feature just finished: order-cancellation[\s\S]*`src\/order\.ts` holds the model[\s\S]*# Files that feature changed/);
   assert.match(fs.readFileSync(briefFile, "utf8"), /The design as built \(its "## Design"\):\n- One file per task\./); // recorded by the build, in T1
   assert.match(fs.readFileSync(briefFile, "utf8"), /# How far to look: the whole map/, "the first map is a full read, even on an archive");
@@ -706,6 +708,7 @@ test("map: /pb:archive reads only the feature's change against the map, marking 
   process.env.MOCK_BRIEF_OUT = briefFile;
   process.env.MOCK_SYSTEM_OUT = systemFile;
   try {
+    t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
     await t.run("archive");
     const brief = fs.readFileSync(briefFile, "utf8");
     assert.match(brief, /# How far to look: this feature's change\n\nThe map was audited before: this run looks only at what the feature changed \(the files above; `git diff ([0-9a-f]+)` shows the change, uncommitted work included\)/);
@@ -946,6 +949,7 @@ test("map: an unbalanced map section is refused", async () => {
   fs.rmSync(brief2, { force: true });
   process.env.MOCK_BRIEF_OUT = brief2;
   try {
+    u.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
     await u.run("archive");
   } finally {
     delete process.env.MOCK_BRIEF_OUT;
@@ -1085,6 +1089,7 @@ test("fresh calls are saved as sessions to open afterwards, and stream their tex
   assert.match((e as any).details.session, /^\.pi\/pb\/sessions\/explorer\/.+\.jsonl$/);
 
   // The feature is done: its review runs and the explorer runs go with /pb:archive.
+  t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
   t.selects.push("<timeout>");
   await t.run("archive");
   const archived = fs.readdirSync(path.join(t.repo, ".pi/pb-archive")).find((d) => d.endsWith("order-cancellation"))!;
@@ -1523,6 +1528,23 @@ test("dialogs: the footer says pb is waiting for you, and a timed-out choice say
   assert.equal(picked, "Build anyway");
   assert.equal(t.posts.at(-1), '**No answer within 1 min**, so pb went on with its default — "Build anyway" — for: Build order-cancellation?');
   assert.equal(notes.length, 1);
+});
+
+test("dialogs: a title too long to fit is posted to the chat whole, and the dialog asks in one line", async () => {
+  const t = setup();
+  process.chdir(t.repo);
+  const { choose } = await import("../extensions/pb/kit.ts");
+  const { Store } = await import("../extensions/pb/store.ts");
+  const rt = t.runtime();
+  const long = `Build order-cancellation?\n${Array.from({ length: 30 }, (_, i) => `- ⚠ concern ${i + 1}`).join("\n")}`;
+  t.selects.push("Stop here");
+  await choose(rt.ctx, new Store(t.repo), long, ["Build anyway", "Stop here"], "Build anyway");
+  assert.equal(t.selectTitles.at(-1), "Build order-cancellation? (in full in the chat above)");
+  assert.ok(t.posts.at(-1)!.includes("- ⚠ concern 30"));
+  // A short one is left alone.
+  t.selects.push("Stop here");
+  await choose(rt.ctx, new Store(t.repo), "Build order-cancellation?\n- ⚠ one concern", ["Build anyway", "Stop here"], "Build anyway");
+  assert.equal(t.selectTitles.at(-1), "Build order-cancellation?\n- ⚠ one concern");
 });
 
 test("config: a mistyped or replaced setting is named at startup and in /pb:status, with the nearest real key; null turns a command off", async () => {

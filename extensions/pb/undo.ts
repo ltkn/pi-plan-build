@@ -7,7 +7,7 @@ import { changedPaths, restore, snapshot } from "./checkpoint.ts";
 import { tip } from "./help.ts";
 import { type Checkpoint, COHERE_TASK_ID, Store, appendCheckpoint, gitHead, now } from "./store.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
-import { cmd, post, rewindPoint, runtime, showProgress, specOfSession, tree, undoCompletions } from "./kit.ts";
+import { cmd, fitDialog, post, rewindPoint, runtime, showProgress, specOfSession, tree, undoCompletions } from "./kit.ts";
 import { restorePhase } from "./phase.ts";
 
 export function registerUndo(pi: ExtensionAPI) {
@@ -90,10 +90,10 @@ export function registerUndo(pi: ExtensionAPI) {
           ...(uncommitted.length ? [`No finished step changed these (your edits, or the step in progress): ${shown(uncommitted)}`] : []),
           ...(committed.length ? [`Committed since then, so restoring them would undo those commits in your files: ${shown(committed)}`] : []),
         ];
-        const choice = await ctx.ui.select(`${question}\n${summary}\n${lines.join("\n")}`, committed.length ? [STEPS, ALL, "Cancel"] : [ALL, STEPS, "Cancel"]);
+        const choice = await ctx.ui.select(fitDialog(`${question}\n${summary}\n${lines.join("\n")}`), committed.length ? [STEPS, ALL, "Cancel"] : [ALL, STEPS, "Cancel"]);
         if (choice !== ALL && choice !== STEPS) return;
         if (choice === STEPS) only = ours;
-      } else if (ctx.hasUI && !(await ctx.ui.confirm(question, summary))) return;
+      } else if (ctx.hasUI && !(await ctx.ui.confirm(fitDialog(`${question}\n${summary}`), ""))) return;
       const reverted = only && !only.length ? { restored: [], guardFailed: false } : restore(ctx.cwd, cur.commit, target.commit, only ?? []);
       if (reverted.guardFailed) return ctx.ui.notify("Nothing was undone: the guard snapshot for the drift check failed (is git healthy?). Your files are as they were; try again.", "error");
       // The spec lives outside the snapshots, so it is restored from the row's own text — and the same

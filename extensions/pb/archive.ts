@@ -8,7 +8,7 @@ import { parseSpec, sectionOf } from "./spec.ts";
 import { type Progress, Store, changedSince, now, readEvents, reviewLedger, samePath } from "./store.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { buildLivenessMs, cmd, nextLine, post, sessionLive, specCompletions } from "./kit.ts";
+import { buildLivenessMs, cmd, fitDialog, nextLine, post, sessionLive, specCompletions } from "./kit.ts";
 import { updateMap } from "./map-flow.ts";
 import { tip } from "./help.ts";
 
@@ -95,7 +95,12 @@ export function registerArchive(pi: ExtensionAPI) {
       if (owed.length) {
         if (force) ctx.ui.notify(`Archiving ${name} with work left: ${owed.join("; ")}. \`--force\` accepted what it still owes.`, "warning");
         else if (!ctx.hasUI) ctx.ui.notify(`Archiving ${name} with work left: ${owed.join("; ")}.`, "warning");
-        else if (!(await ctx.ui.confirm(`${name} isn't finished: ${owed.join("; ")}`, "Archive it anyway? Its open findings leave /pb:fix's reach."))) return;
+        else {
+          // Enter keeps it: archiving work that is still owed is the step to take on purpose.
+          const KEEP = "Keep it";
+          const ARCHIVE = "Archive it anyway (its open findings leave /pb:fix's reach)";
+          if ((await ctx.ui.select(fitDialog(`${name} isn't finished: ${owed.join("; ")}`), [KEEP, ARCHIVE])) !== ARCHIVE) return;
+        }
       }
       const markdown = store.readSpec(name) ?? "";
       const reviewFindings = reviewLedger(readEvents(path.join(store.specDir(name), "events.jsonl")));

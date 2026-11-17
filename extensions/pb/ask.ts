@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { Static } from "typebox";
 import { Type } from "./schema.ts";
 import { notifyDesktop } from "./notify.ts";
-import { ASK_DESCRIPTION, checkpointing, patiently, post, reply, specOfSession, specWriting, stop } from "./kit.ts";
+import { ASK_DESCRIPTION, checkpointing, fitDialog, patiently, post, reply, specOfSession, specWriting, stop } from "./kit.ts";
 
 interface Question {
   question: string;
@@ -130,7 +130,7 @@ export function registerAsk(pi: ExtensionAPI) {
     }
     if (!q.multiple) {
       const labels = options.map((o, i) => (i === rec ? `${o} (recommended)` : o));
-      const sel = await patiently(ctx, timeoutMs, (opts) => ctx.ui.select(title, [...labels, OTHER], opts));
+      const sel = await patiently(ctx, timeoutMs, (opts) => ctx.ui.select(fitDialog(title), [...labels, OTHER], opts));
       if (sel.result === OTHER) {
         const r = await typed();
         return { q, answer: r.text, timedOut: sel.timedOut || r.timedOut };
@@ -143,7 +143,7 @@ export function registerAsk(pi: ExtensionAPI) {
     for (;;) {
       const labels = options.map((o, i) => `${picked.has(i) ? "[x]" : "[ ]"} ${letter(i)}. ${o}${i === rec ? " (recommended)" : ""}`);
       const done = picked.size ? `Done — ${[...picked].sort((a, b) => a - b).map(letter).join(", ")}` : "Done — none of these";
-      const sel = await patiently(ctx, timeoutMs, (opts) => ctx.ui.select(`${title} (pick all that apply)`, [...labels, done, OTHER], opts));
+      const sel = await patiently(ctx, timeoutMs, (opts) => ctx.ui.select(fitDialog(`${title} (pick all that apply)`), [...labels, done, OTHER], opts));
       if (sel.result === undefined) return { q, timedOut: sel.timedOut }; // nothing half-ticked is ever read as an answer
       if (sel.result === OTHER) {
         const r = await typed();

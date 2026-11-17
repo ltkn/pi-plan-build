@@ -1859,6 +1859,7 @@ test("review ledger: an injected marker cannot reach the project map", async () 
   fs.rmSync(leadBrief, { force: true });
   process.env.MOCK_BRIEF_OUT = leadBrief;
   try {
+    t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
     await t.run("archive");
   } finally {
     delete process.env.MOCK_BRIEF_OUT;
@@ -2083,6 +2084,7 @@ test("archive: a failed archive leaves the live spec's review guard state in pla
   await t.run("review"); // the reviewer session's read-only record now guards it
   fs.writeFileSync(path.join(t.repo, ".pi/pb-archive"), "a file where the archive root belongs"); // archive() will throw
   try {
+    t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
     await t.run("archive");
   } finally {
     fs.rmSync(path.join(t.repo, ".pi/pb-archive"), { force: true });
@@ -2192,6 +2194,7 @@ test("map: completed review findings reach the cartographer as a separate lead s
   if (fs.existsSync(briefFile)) fs.rmSync(briefFile);
   process.env.MOCK_BRIEF_OUT = briefFile;
   try {
+    t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
     await t.run("archive");
   } finally {
     delete process.env.MOCK_BRIEF_OUT;

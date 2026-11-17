@@ -1021,6 +1021,7 @@ test("archive moves a finished spec out of .pi/pb/, and stats still see it", asy
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
+  t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
   await t.run("archive");
   assert.ok(!fs.existsSync(path.join(t.repo, ".pi/pb/specs/order-cancellation")));
   const archived = fs.readdirSync(path.join(t.repo, ".pi/pb-archive")).filter((d) => d.endsWith("order-cancellation"));
@@ -1306,10 +1307,9 @@ test("a resume asks before approving a Decisions line removed while paused, as i
   await t.run("build");
   assert.equal(t.progress("order-cancellation").phase, "paused");
   handEdit(t, `${SOFT_DELETE}\n`, ""); // removed outside the build, by whoever
-  t.confirmAnswers.push(false);
-  await t.run("build");
-  assert.match(t.confirms.at(-1)!, /changed while the build was paused/);
-  assert.match(t.confirmBodies.at(-1)!, /## Decisions — approved lines removed[\s\S]*- Not doing soft delete, because audit lives elsewhere\./);
+  await t.run("build"); // Enter: keeps it paused
+  assert.match(t.selectTitles.at(-1)!, /^Re-approve order-cancellation\? Its approved decisions changed while the build was paused: ## Decisions \(−1\)\. The diff is in the chat above\.$/);
+  assert.ok(t.posts.some((p) => /## Decisions — approved lines removed\n```diff\n- - Not doing soft delete, because audit lives elsewhere\.\n```/.test(p)));
   assert.equal(t.progress("order-cancellation").phase, "paused");
 });
 
@@ -1551,6 +1551,7 @@ test("map: /pb:archive skips the map when the spec established nothing new", asy
   const briefFile = path.join(os.tmpdir(), `pb-map-skip-${process.pid}.md`);
   if (fs.existsSync(briefFile)) fs.rmSync(briefFile);
   process.env.MOCK_BRIEF_OUT = briefFile;
+  t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
   await t.run("archive");
   delete process.env.MOCK_BRIEF_OUT;
   assert.ok(!fs.existsSync(briefFile)); // the cartographer never ran
@@ -1572,6 +1573,7 @@ test("map: by default /pb:archive leaves the map alone and says how to update it
   if (fs.existsSync(briefFile)) fs.rmSync(briefFile);
   process.env.MOCK_BRIEF_OUT = briefFile;
   try {
+    t.selects.push("Archive it anyway (its open findings leave /pb:fix's reach)"); // archiving what it still owes is chosen, not Enter
     await t.run("archive");
   } finally {
     delete process.env.MOCK_BRIEF_OUT;

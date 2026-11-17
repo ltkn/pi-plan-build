@@ -801,6 +801,23 @@ export const patiently = async <T>(ctx: ExtensionContext, ms: number, run: (opts
   }
 };
 
+/** The most a dialog title may hold: Pi draws it whole above the options, with no scrolling. */
+const DIALOG_MAX_LINES = 6;
+const DIALOG_MAX_CHARS = 400;
+
+/**
+ * A dialog title that fits. Pi's selector (and its confirm, a selector titled with the message too) draws the
+ * title whole above the options and cannot scroll, so a long one pushes the options off the screen and Enter
+ * answers a question nobody could read. A title past the limit is posted to the chat whole, where it scrolls and
+ * stays, and the dialog asks with its first line.
+ */
+export const fitDialog = (title: string): string => {
+  if (title.split("\n").length <= DIALOG_MAX_LINES && title.length <= DIALOG_MAX_CHARS) return title;
+  post(title);
+  const first = title.split("\n")[0];
+  return `${first.length > 200 ? `${first.slice(0, 199)}…` : first} (in full in the chat above)`;
+};
+
 /**
  * A dialog that goes on without you: after askTimeoutSec idle (with a countdown), `fallback`
  * is taken and noted in `notes`, so a build started before you walk away doesn't wait all night.
@@ -818,7 +835,8 @@ export const choose = async (ctx: ExtensionContext, store: Store, title: string,
   // It goes on without you: tell you, in case you're in another window.
   if (store.config().notify) notifyDesktop("pb: your choice", title);
   const ms = store.config().askTimeoutSec * 1000;
-  const { result: choice, timedOut } = await patiently(ctx, ms, (opts) => ctx.ui.select(title, options, opts));
+  const shown = fitDialog(title);
+  const { result: choice, timedOut } = await patiently(ctx, ms, (opts) => ctx.ui.select(shown, options, opts));
   if (choice !== undefined) return choice;
   return timedOut ? wentOnWithout(title, fallback, ms, notes) : undefined;
 };
