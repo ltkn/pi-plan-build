@@ -1760,6 +1760,21 @@ test("scope: the Goal is the need asked for, each citation is verified once, and
   assert.match(SPEC_REVIEWER_SYSTEM, /a Goal that bundles a second outcome the change's own need does not require[^\n]*is a finding whose fix is the cut/);
 });
 
+test("values: every role that judges a classification asks what each input gets, and the writer and spec reviewer check keys and cross-source values", async () => {
+  const { specPrompt, finishSpecPrompt, SPEC_REVIEWER_SYSTEM, REVIEWER_SYSTEM, ATTACKER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  // One Values check, word for word, wherever a spec is written or reviewed.
+  const values = specPrompt("", []).match(/- Values: [^\n]*/)?.[0].slice(2);
+  assert.ok(values, "the writer's checks carry Values");
+  for (const prompt of [finishSpecPrompt("x"), SPEC_REVIEWER_SYSTEM]) assert.ok(prompt.includes(values), "the spec reviewer checks the same Values");
+  // Overlap was asked before; the missing cases were not: all/some/none, and an absent or unknown value.
+  assert.match(values, /what every input gets — all, some and none of a set, and an absent or unknown value/);
+  assert.match(values, /a field used as a key \(uniqueness, deduplication, a join\) has evidence that it is unique where it is used/);
+  assert.match(values, /a value compared across two sources \(two APIs, two tables, two formats\) is shown to mean the same thing in both/);
+  // The code reviewer judges the same three in code; the attacker the one that opens a hole: a default nobody chose.
+  assert.match(REVIEWER_SYSTEM, /- Classifications:[^\n]*every input reaches an outcome — all, some and none of a set, an absent or unknown value[^\n]*used as a key[^\n]*unique where it is used[^\n]*compared across two sources[^\n]*means the same thing in both/);
+  assert.match(ATTACKER_SYSTEM, /- Classifications:[^\n]*an input that matches none of them falls to a default: check that default is the safe one/);
+});
+
 test("evidence: the writer and the spec reviewer judge claims by one rule", async () => {
   const { specPrompt, finishSpecPrompt, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
   const rule = specPrompt("", []).match(/A claim is load-bearing when[^\n]*?Anything else needs no evidence\./)?.[0];
