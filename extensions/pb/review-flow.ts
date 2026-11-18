@@ -387,7 +387,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
                       }`
                     : "commit when ready."
               : `\`/${cmd("review")}\` again, or read the sessions below.`;
-    const tipKey = verdict === "pass" ? (midBuild.length ? "review.mid-build" : "review.pass") : verdict === "changes_needed" ? "review.changes" : verdict === "unverified" ? "review.unverified" : "review.other";
+    // Unverified for a red check alone is not unverified acceptance: the next step is the check, not the criteria.
+    const redCheckOnly = verdict === "unverified" && judged === "pass" && failedChecks.length > 0;
+    const tipKey = verdict === "pass" ? (midBuild.length ? "review.mid-build" : "review.pass") : verdict === "changes_needed" ? "review.changes" : redCheckOnly ? "review.red-check" : verdict === "unverified" ? "review.unverified" : "review.other";
     const passMark = finished("review") ? "✓" : run.passes.some((x) => x.role === "review" && x.error) ? "✗" : "—";
     const abuseMark = run.security ? (finished("abuse") ? "✓" : run.passes.some((x) => x.role === "abuse" && x.error) ? "✗" : "—") : "";
     // What pb executed, ahead of what the models judged: a verdict over no checks is judgement alone and says so.
@@ -439,7 +441,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       ...(doubleCheckLines.note ? ["", doubleCheckLines.note] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
       "",
-      tip(tipKey, { spec: run.name ?? "", ...(run.name && fixIds && complete ? { ids: fixIds } : {}) }),
+      tip(tipKey, { spec: run.name ?? "", checks: failedChecks.map((c) => `\`${c}\``).join(", "), ...(run.name && fixIds && complete ? { ids: fixIds } : {}) }),
     ].join("\n");
     return { text, verdict, counts, findings: fixable, acceptance, complete, abuse: finished("abuse") };
   };
@@ -518,7 +520,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       const ledger = ledgerFindings(secondLook.findings);
       if (ledger.length) store.event(run.name, { type: "review-findings", review: run.id, findings: ledger });
       if (m.complete) {
-        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings, acceptance: m.acceptance, ...(run.repoBefore ? { repos: run.repoBefore } : {}) };
+        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings, acceptance: m.acceptance, ...(run.repoBefore ? { repos: run.repoBefore } : {}), ...(run.failedChecks?.length ? { failedChecks: run.failedChecks } : {}) };
         // A pass only finishes a finished build: with tasks still open the phase stays,
         // or the next /pb:build strands and /pb:archive offers a half-built spec. A failed verifier run
         // keeps it unreviewed too: its answers cannot turn a failed check into a clean pass.
@@ -818,10 +820,16 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         }
         const since = [...changedPaths(ctx.cwd, prevReview.snapshot, before.commit), ...siblingSince];
         const unchanged = !since.length && !siblingUnknown && !largeFiles.length;
+        // The last verdict was capped by a red check, which can fail for reasons outside the change (a port in use, a
+        // service down): on an unchanged tree, a check that is green now earns a follow-up instead of "nothing changed".
+        const redBefore = !!prevReview.failedChecks?.length;
+        if (unchanged && redBefore && failedChecks.length) {
+          return ctx.ui.notify(`Nothing changed since the last review, and pb's check still fails: ${failedChecks.map((c) => `\`${c}\``).join(", ")}. Make it pass, then /${cmd("review")} again.`, "warning");
+        }
         // A focus is a question the last review wasn't asked (it may have started by itself after the build): on an
         // unchanged tree it is answered over the whole change, never skipped.
-        if (unchanged && !focus) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
-        if (!unchanged) previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since, acceptance: prevReview.acceptance };
+        if (unchanged && !focus && !redBefore) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
+        if (!unchanged || redBefore) previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since, acceptance: prevReview.acceptance };
       }
       // Fix laps report into their own sessions, not the brief: hand the follow-up review the
       // reports (claims plus test results) so it judges evidence, capped like any test output.

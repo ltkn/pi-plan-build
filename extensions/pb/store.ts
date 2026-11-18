@@ -377,6 +377,8 @@ export interface ReviewState {
   acceptance?: AcceptanceCheck[];
   /** each sibling repository's snapshot when the review started, by its `../<repo>` name: the follow-up's base there */
   repos?: Record<string, string>;
+  /** pb's checks that failed before this review: its verdict never saw a green tree, so "nothing changed" can't stand on it */
+  failedChecks?: string[];
 }
 
 /** The text a build may not rewrite: recorded when the build starts and re-recorded only on re-approval. */

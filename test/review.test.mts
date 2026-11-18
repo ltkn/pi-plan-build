@@ -2615,3 +2615,33 @@ test("fix: the report ends the lap's run, so nothing is done after it that no la
   assert.match(report!.content![0].text, /1 open for the next lap[\s\S]*This lap is over: make no further changes\./);
   assert.ok(t.posts.includes("Fix report sent. pb is checking the fixes now; the result and the next step come in your session."));
 });
+
+test("review: held back by a red check alone, it says to fix the check; an unchanged tree is reviewed again once the check is green", async () => {
+  const flag = path.join(os.tmpdir(), `pb-green-${process.pid}-${Date.now()}`); // outside the repo: the tree never changes
+  fs.writeFileSync(flag, "green");
+  const t = setup({ verify: `test -f ${flag}` });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  fs.rmSync(flag); // the check now fails for a reason outside the change
+  await t.run("review");
+  const held = t.posts.at(-1)!;
+  assert.match(held, /Review — order-cancellation\*\* · UNVERIFIED/);
+  assert.match(held, /\*\*What now\*\* — the reviewers found nothing blocking, but pb's own check failed, so the review can't pass\n- Run `test -f [^`]+` yourself/);
+  assert.doesNotMatch(held, /acceptance items were not verified/);
+  const reviews = () => t.instructions.filter((i) => i.startsWith("[pb:review]")).length;
+  const before = reviews();
+  await t.run("review"); // still red, nothing changed: no review is spent on it
+  assert.match(t.notes.at(-1)!, /Nothing changed since the last review, and pb's check still fails: `test -f [^`]+`\. Make it pass/);
+  assert.equal(reviews(), before);
+  fs.writeFileSync(flag, "green");
+  try {
+    await t.run("review"); // green now, nothing changed: a follow-up, not "nothing changed"
+  } finally {
+    fs.rmSync(flag, { force: true });
+  }
+  assert.equal(reviews(), before + 1);
+  assert.match(t.posts.at(-1)!, /Review — order-cancellation \(follow-up\)\*\* · PASS/);
+  await t.run("review"); // a green review on an unchanged tree is final again
+  assert.match(t.notes.at(-1)!, /Nothing changed since the last review \(pass\)/);
+});

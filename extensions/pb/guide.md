@@ -1066,7 +1066,9 @@ it checks the fixes and nothing else: whether each previous finding is fixed,
 what the fixes broke or left inconsistent, and any new P0 or P1 in the lines
 changed since. It reports no new P2 or P3 in code the fixes left alone, and its
 adversarial pass runs only when the fixes touch sensitive code (`--full` reviews
-everything again). If nothing changed, it says so and costs nothing.
+everything again). If nothing changed, it says so and costs nothing, unless pb's check
+failed under the last review: a check can fail for reasons outside the change (a port
+in use, a service down), so once it runs green the review follows up instead.
 
 **The adversarial pass, when the change looks sensitive.** A background pass (its own fresh
 process, not a session you watch) has a single job: break the change. For every entry point it adds or alters and
@@ -1431,6 +1433,14 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - `/pb:review` — after you checked that behaviour or ran the named test
 - `/pb:review --full` — re-checks the whole change, when nothing else changed
 - `/pb:spec {spec}` — the criterion can't be checked as written: amend it
+<!-- /pb -->
+
+### Review held back by a red check
+<!-- pb:tip review.red-check -->
+**What now** — the reviewers found nothing blocking, but pb's own check failed, so the review can't pass
+- Run {checks} yourself: a failure the change caused is fixed like a finding; one from outside it (a port in use, a service down) only needs a clean run
+- `/pb:review` — once it passes: with nothing else changed, pb re-runs the check and a short follow-up, not the whole review
+- `/pb:review --full` — reviews everything again
 <!-- /pb -->
 
 ### Review without a verdict
