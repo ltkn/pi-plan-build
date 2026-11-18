@@ -2059,6 +2059,25 @@ test("review: untracked files over the snapshot cap are named, since no diff can
   assert.match(t.posts.at(-1)!, /⚠ Untracked files over 20 MB are in no snapshot or diff \(read them yourself\): huge\.bin/);
 });
 
+test("review: the evidence counts the whole change from base, new untracked files as insertions, never as deletions", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  fs.writeFileSync(path.join(t.repo, "added.txt"), "one\ntwo\nthree\n");
+  t.reviewer.review = CHANGES;
+  await t.run("review");
+  const first = t.posts.at(-1)!.match(/^\*\*Evidence:\*\*.*$/m)![0];
+  assert.match(first, /\d+ files? changed, \d+ insertions?\(\+\)/);
+  assert.doesNotMatch(first, /deletion/);
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
+  t.reviewer.review = [];
+  await t.run("review");
+  const followUp = t.posts.at(-1)!.match(/^\*\*Evidence:\*\*.*$/m)![0];
+  assert.match(followUp, /\d+ files? changed, \d+ insertions?\(\+\)/);
+  assert.doesNotMatch(followUp, /deletion/); // the review's snapshot holds untracked files the bare working tree diff would call deleted
+});
+
 test("review: a follow-up isn't 'nothing changed' when only a huge untracked file moved", async () => {
   const t = setup({ verify: "true" });
   await written(t);

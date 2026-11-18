@@ -79,20 +79,38 @@ function addExcludes(cwd: string): string[] {
   }
 }
 
+/** The working tree as a git tree, staged through the private index `file`: ledger and huge untracked files excluded. Throws on failure. */
+function stageTree(cwd: string, file: string): string {
+  const env = indexEnv(cwd, file);
+  const huge = split0(tryRun(cwd, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", LEDGER_EXCLUDE], env)).filter((f) => {
+    try {
+      return fs.statSync(path.join(cwd, f)).size > MAX_UNTRACKED_BYTES;
+    } catch {
+      return false;
+    }
+  });
+  run(cwd, ["add", "-A", "--", ".", ...addExcludes(cwd), ...huge.map((f) => `:(exclude,literal)${f}`)], env);
+  return run(cwd, ["write-tree"], env).trim();
+}
+
+/**
+ * The working tree as a tree id, untracked files included, without minting a checkpoint: what a diff
+ * against "now" compares with, since `git diff <base>` alone leaves out every file git doesn't track yet.
+ */
+export function worktreeTree(cwd: string): string | undefined {
+  if (tryRun(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() !== "true") return;
+  try {
+    return stageTree(cwd, snapshotIndex(cwd));
+  } catch {
+    return undefined;
+  }
+}
+
 /** Snapshot the working tree (ledger and huge untracked files excluded). undefined outside git or on failure. */
 export function snapshot(cwd: string, message: string): Snapshot | undefined {
   if (tryRun(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() !== "true") return;
   try {
-    const env = indexEnv(cwd, snapshotIndex(cwd));
-    const huge = split0(tryRun(cwd, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", LEDGER_EXCLUDE], env)).filter((f) => {
-      try {
-        return fs.statSync(path.join(cwd, f)).size > MAX_UNTRACKED_BYTES;
-      } catch {
-        return false;
-      }
-    });
-    run(cwd, ["add", "-A", "--", ".", ...addExcludes(cwd), ...huge.map((f) => `:(exclude,literal)${f}`)], env);
-    const tree = run(cwd, ["write-tree"], env).trim();
+    const tree = stageTree(cwd, snapshotIndex(cwd));
     // Two pb processes snapshot the same repo concurrently: each reads the ref tip, commits
     // against it and moves the ref. A blind update-ref would let the later writer rewind the
     // tip past the earlier commit, orphaning any stored checkpoint row that names it — so the

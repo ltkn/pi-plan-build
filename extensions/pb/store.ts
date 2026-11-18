@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { worktreeTree } from "./checkpoint.ts";
 import { safeLine } from "./markdown.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { agentDir } from "./standards.ts";
@@ -1648,4 +1649,12 @@ export function untrackedText(cwd: string, files: string[]): string {
   return out;
 }
 
-export const diffStat = (cwd: string, base?: string) => git(cwd, ["diff", "--stat", base ?? "HEAD", "--", ".", ":(exclude).pi"])?.trim() ?? "";
+/**
+ * `git diff --stat` from `base` (HEAD by default) to `to`: a snapshot commit or tree, or the working tree
+ * staged with its untracked files when omitted. Diffing a snapshot against the bare working tree would show
+ * every untracked file the snapshot holds as deleted; diffing a commit against it would leave new files out.
+ */
+export const diffStat = (cwd: string, base?: string, to?: string) => {
+  const target = to ?? worktreeTree(cwd);
+  return git(cwd, ["diff", "--stat", base ?? "HEAD", ...(target ? [target] : []), "--", ".", ":(exclude).pi"])?.trim() ?? "";
+};

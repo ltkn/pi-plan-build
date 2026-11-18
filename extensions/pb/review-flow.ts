@@ -411,7 +411,8 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const abuseMark = run.security ? (finished("abuse") ? "✓" : run.passes.some((x) => x.role === "abuse" && x.error) ? "✗" : "—") : "";
     // What pb executed, ahead of what the models judged: a verdict over no checks is judgement alone and says so.
     const checksFact = run.checksRun === undefined ? "" : run.checksRun === 0 ? "no checks run" : `checks ${run.checksRun - failedChecks.length}/${run.checksRun} green`;
-    const stat = diffStat(run.cwd, run.before?.commit ?? run.base).split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
+    // The whole change under review, base to the tree this review read: not just what moved since the last lap.
+    const stat = diffStat(run.cwd, run.base, run.before?.commit).split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
     const scopeFacts = [stat, run.base ? `base ${run.base.slice(0, 7)}` : ""];
     const result = lost ? "NO VERDICT" : verdict === "pass" ? "PASS" : verdict === "changes_needed" ? "CHANGES NEEDED" : verdict === "unverified" ? "UNVERIFIED" : "no verdict";
     const text = [
@@ -900,7 +901,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         changed: changedEverywhere,
         areaNotes: areaNotesFor(ctx.cwd, changedEverywhere),
         newDependencies,
-        stat: diffStat(ctx.cwd, base),
+        stat: diffStat(ctx.cwd, base, before?.commit),
         check,
         focus,
         previous,
