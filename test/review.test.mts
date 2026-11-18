@@ -2721,6 +2721,35 @@ test("fix: a spec finding's lap edits the section it points at and nothing else,
   assert.ok(t.selectTitles.some((x) => /^Fixes for order-cancellation are done: .*Review them now\?$/.test(x))); // then the review is offered
 });
 
+test("fix: a spec finding unlocks every spec line it cites, an approved decision among them, and nothing another file's line names", async () => {
+  const t = await reviewedWithSpecFinding();
+  // One stale rule stated in three places: Out of scope (its own line, 9), an approved decision (:11) and Contracts
+  // (spec.md:18). src/order.ts:7 is the code's line 7, not the spec's Goal.
+  const progress = t.progress("order-cancellation");
+  progress.review.findings[0] = { ...SPEC_FINDING, fix: "Say: Refunds, partial or full. Reword the decision at :11 and the contract at spec.md:18 to match; src/order.ts:7 already does." };
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"), JSON.stringify(progress));
+  const refused: Record<string, string | undefined> = {};
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix order-cancellation]")) return;
+    const edit = async (section: string, old: string, now: string) => (await tool("pb_update_spec", { section, mode: "edit", old, new: now })).error;
+    refused.goal = await edit("Goal", "Cancel orders.", "Cancel any order.");
+    refused.scope = await edit("Out of scope", "Refunds.", "Refunds, partial or full.");
+    refused.decision = await edit("Decisions", "Only PENDING orders can be cancelled", "Only PENDING orders, refunded in part or in full, can be cancelled");
+    refused.contract = await edit("Contracts", "no shared seams", "no shared seams, refunds included,");
+    await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "spec lines" }], tests: "none: spec lines" });
+  };
+  await t.run("fix", "order-cancellation 1");
+  assert.match(refused.goal ?? "", /may change only order-cancellation's Design and Decisions, and "out of scope", "contracts" for the findings filed against the spec/);
+  assert.deepEqual([refused.scope, refused.decision, refused.contract], [undefined, undefined, undefined]);
+  const spec = t.read(specRel);
+  assert.match(spec, /- Only PENDING orders, refunded in part or in full, can be cancelled/);
+  assert.doesNotMatch(spec, /- Only PENDING orders can be cancelled/); // reworded in place, not a second line beside it
+  const summary = t.posts.find((x) => x.includes("**Spec updated and re-approved:"))!;
+  assert.ok(summary, t.posts.join("\n---\n"));
+  assert.match(summary, /## Out of scope \(−1 \+1\), ## Contracts \(−1 \+1\), ## Decisions \(−1\)/);
+  assert.equal(t.progress("order-cancellation").approval.contractHash, contractHash(spec));
+});
+
 test("fix: a contract change beyond the sections the picked spec findings name is not approved, and no review is offered over it", async () => {
   const t = await reviewedWithSpecFinding();
   const approvedBefore = t.progress("order-cancellation").approval.contractHash;

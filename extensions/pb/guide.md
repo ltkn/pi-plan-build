@@ -1057,8 +1057,9 @@ behaviour the spec's Design or Decisions describe, the lap updates those lines
 itself, and it can change nothing else in the spec. A finding that needs the
 Goal, Contracts or Acceptance changed is reported as skipped, for you to revise
 with `/pb:spec`. **A finding filed against the spec itself is fixed in the spec**:
-its lap may edit the section the finding points at (and no other part of the
-contract), and when the run ends pb re-approves that edit without asking and
+its lap may edit the section the finding points at and every spec line it cites
+(`spec.md:83`, or `:83`), an approved Decisions line among them, and no other
+part of the contract, and when the run ends pb re-approves that edit without asking and
 posts its diff: you picked the finding by number, and its Fix is the text to
 write. Not happy with the wording? `/pb:fix <spec> <n> <how to word it>` runs a
 short lap on the same finding; `/pb:undo` puts a whole lap back. pb approves

@@ -302,7 +302,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
         const unlocked = fixLap.specSections ?? [];
         const allowed = key === "section:design" || key === "section:decisions" || (!!key && unlocked.includes(key));
         if (name !== fixLap.spec || params.status || !allowed) {
-          const extra = unlocked.map((k) => `"${k.replace(/^section:/, "")}"`).join(", ");
+          const extra = unlocked.filter((k) => k !== "section:decisions").map((k) => `"${k.replace(/^section:/, "")}"`).join(", ");
           throw new Error(
             `This fix lap may change only ${fixLap.spec}'s Design and Decisions${extra ? `, and ${extra} for the findings filed against the spec` : ""}. A finding that needs any other part of the contract or the Status changed is reported as skipped, for a spec revision.`,
           );
@@ -355,7 +355,10 @@ export function registerSpecTools(pi: ExtensionAPI) {
       // session, and its fix laps. (A paused build's own session is where they were rewritten from memory before.)
       const spoken = store.progress(name);
       const buildsIt = !!building || !!fixLap || (spoken?.phase === "paused" && !!session && spoken.session === session);
-      if (buildsIt && key === "section:decisions" && mode !== "append") {
+      // A fix lap whose spec finding points at Decisions may reword an approved line there: that is the fix asked for,
+      // and the run's end shows the change and approves only what the findings named.
+      const rewords = !!fixLap && (fixLap.specSections ?? []).includes("section:decisions");
+      if (buildsIt && !rewords && key === "section:decisions" && mode !== "append") {
         const dropped = droppedApprovedDecisions(store, name, md);
         if (dropped.length)
           throw new Error(

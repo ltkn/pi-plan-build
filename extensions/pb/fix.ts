@@ -187,21 +187,28 @@ export function registerFix(pi: ExtensionAPI) {
   /** Run the test suite in the background; its result is posted into the session when it's done. Returns whether it started (a second plan in the same session shares the one in flight). */
 
   const FIX_LAPS = 3;
+  /** Spec lines a finding's text cites: `spec.md:83`, or a bare `:83` not glued to another file's name (`Foo.java:83`). */
+  const citedSpecLines = (text: string): number[] => [...text.matchAll(/(?:\bspec\.md:|(?<![\w./\-\]]):)(\d+)/g)].map((m) => Number(m[1]));
+
   /** Finish-nudges before a silent lap stops the loop (never retried: a second silent session doubles nothing). */
 
   const FIX_NUDGES = 2;
 
   /**
-   * The contract sections a lap may edit beyond Design and Decisions: the ones its findings filed against the spec
-   * point at, by line. A code finding unlocks nothing, and a line pb can't place in a section unlocks nothing either.
+   * The sections a lap may edit beyond what every lap may (Design, and additions to Decisions): the ones its findings
+   * filed against the spec point at, by their own line and by each spec line they cite (`spec.md:83`, or a bare `:83`
+   * in a spec finding, which can only mean its own file). One stale rule is often stated in several places, and a
+   * finding that names them all is fixed in all of them, or it comes back. Decisions listed here means its approved
+   * lines may be reworded too. A code finding unlocks nothing, and a line pb can't place in a section unlocks nothing.
    */
   const unlockedSections = (store: Store, spec: string, findings: Finding[]): { specSections?: string[] } => {
     const md = store.readSpec(spec);
     if (!md) return {};
     const keys = findings
-      .filter((f) => f.line !== undefined && isSpecFinding(f, spec))
-      .map((f) => sectionKeyAtLine(md, f.line!))
-      .filter((k): k is string => !!k && k !== "section:design" && k !== "section:decisions");
+      .filter((f) => isSpecFinding(f, spec))
+      .flatMap((f) => [...(f.line !== undefined ? [f.line] : []), ...citedSpecLines(`${f.title}\n${f.fix ?? ""}`)])
+      .map((line) => sectionKeyAtLine(md, line))
+      .filter((k): k is string => !!k && k !== "section:design");
     return keys.length ? { specSections: [...new Set(keys)] } : {};
   };
 
