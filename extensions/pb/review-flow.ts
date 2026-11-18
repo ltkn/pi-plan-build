@@ -16,7 +16,7 @@ import { runFresh } from "./runner.ts";
 import { acceptanceCriteria } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, mapCounts, mapTagOf, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
+import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, isSpecFinding, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, mapCounts, mapTagOf, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
 import { carriedP1s } from "./spec-review.ts";
 import { runVerify } from "./verify.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
@@ -308,9 +308,10 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const findings = [...o.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
     const inChange = findings.filter((f) => !f.outside);
     const outside = findings.filter((f) => f.outside);
-    // /pb:fix numbers the stored P0-P2 list; display numbers must match it exactly: in-change
-    // first, then outside, P3 nits unnumbered and never fixable.
-    const fixable = [...inChange, ...outside].filter((f) => f.priority !== "P3");
+    // /pb:fix numbers the stored list; display numbers must match it exactly: in-change first, then outside. P3 nits
+    // in code stay unnumbered and are never fixable; a finding filed against the spec is, at any priority, because
+    // only pb can make that edit cleanly (its lap edits the section, the human re-approves the diff).
+    const fixable = [...inChange, ...outside].filter((f) => f.priority !== "P3" || (run.name !== undefined && isSpecFinding(f, run.name)));
     const number = new Map(fixable.map((f, i) => [f, i + 1] as const));
     const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
     const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left && !x.error);

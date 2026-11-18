@@ -296,12 +296,17 @@ export function registerSpecTools(pi: ExtensionAPI) {
           );
       }
       if (fixLap) {
-        // A fix lap keeps the spec true to the code it fixed, as a build does; its contract is not the lap's to change.
-        const sectionName = params.section?.replace(/^#+\s*/, "").trim().toLowerCase();
-        if (name !== fixLap.spec || params.status || (sectionName !== "design" && sectionName !== "decisions"))
+        // A fix lap keeps the spec true to the code it fixed, as a build does. Its contract is not the lap's to change,
+        // except the sections a finding filed against the spec points at: those the human re-approves as a diff.
+        const key = params.section ? sectionKey(params.section) : undefined;
+        const unlocked = fixLap.specSections ?? [];
+        const allowed = key === "section:design" || key === "section:decisions" || (!!key && unlocked.includes(key));
+        if (name !== fixLap.spec || params.status || !allowed) {
+          const extra = unlocked.map((k) => `"${k.replace(/^section:/, "")}"`).join(", ");
           throw new Error(
-            `This fix lap may change only ${fixLap.spec}'s Design and Decisions, to say what the fix changed. A finding that needs its Goal, Contracts, Acceptance or Status changed is reported as skipped, for a spec revision.`,
+            `This fix lap may change only ${fixLap.spec}'s Design and Decisions${extra ? `, and ${extra} for the findings filed against the spec` : ""}. A finding that needs any other part of the contract or the Status changed is reported as skipped, for a spec revision.`,
           );
+        }
       }
       // This session's refused write, if there is one: the edit fixes it. A build or a fix lap edits the spec
       // it was approved against, and another session's draft is never this session's to finish.

@@ -79,6 +79,8 @@ export function setup(config: object = {}) {
   /** Acceptance ids from each review session's brief, for a pass resumed after an interruption. */
   const reviewChecklists = new Map<string, string[]>();
   const stat = { runs: 0, editorText: "", title: "" };
+  /** Whether Pi runs with a UI: like Pi's mode, it holds for every session, the ones opened later included. */
+  let withUI = true;
   /** Esc pressed during the current run: it ends after the agent's step, aborted, as Pi ends one. */
   let escPressed = false;
   /** The footer status lines, by id: pb's is "pb". */
@@ -159,7 +161,7 @@ export function setup(config: object = {}) {
     self.model = MODELS[0]; // like Pi: a new session starts from the settings defaults
     self.thinking = "off";
     self.usage = 10;
-    self.hasUI = true;
+    self.hasUI = withUI;
     self.contextFiles = [];
     self.pi = guard(me, {
       registerCommand: (n: string, o: object) => (self.cmds[n] = o),
@@ -469,6 +471,11 @@ export function setup(config: object = {}) {
     progress,
     events,
     callTool,
+    /** Pi runs headless from here on: this session and every one opened later have no UI. */
+    headless: () => {
+      withUI = false;
+      rt.hasUI = false;
+    },
     /** The human presses Esc: the run going on now ends, aborted, after the agent's current step. */
     esc: () => void (escPressed = true),
     /** Simulate terminal activity (arrow keys, typing): resets idle dialog countdowns. */

@@ -393,6 +393,7 @@ test("fix: a lap that revises the approved contract says re-approve before revie
     await provedFixed(tool, [1]);
     await tool("pb_fix_done", { fixed: [1], skipped: [], tests: "ok" });
   };
+  t.headless(); // nobody can be asked to re-approve, so /pb:build is the way
   await t.run("fix");
   const post = t.posts.at(-1)!;
   assert.match(post, /\*\*The fix changed the approved contract\.\*\*/);
@@ -2644,4 +2645,97 @@ test("review: held back by a red check alone, it says to fix the check; an uncha
   assert.match(t.posts.at(-1)!, /Review — order-cancellation \(follow-up\)\*\* · PASS/);
   await t.run("review"); // a green review on an unchanged tree is final again
   assert.match(t.notes.at(-1)!, /Nothing changed since the last review \(pass\)/);
+});
+
+/* A finding filed against the spec: in SPEC(), line 9 is "Refunds." under "## Out of scope". */
+const SPEC_FINDING = { priority: "P3", file: specRel, line: 9, title: "Out of scope must name partial refunds", fix: "Say: Refunds, partial or full." };
+
+/** A built and reviewed spec whose review left one finding against the spec and one P3 nit in the code. */
+const reviewedWithSpecFinding = async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [SPEC_FINDING, { priority: "P3", file: "src/order.ts", line: 3, title: "a nit in the code" }];
+  await t.run("review");
+  return t;
+};
+
+test("fix: a finding filed against the spec is numbered for /pb:fix at any priority; a P3 in the code is not", async () => {
+  const t = await reviewedWithSpecFinding();
+  const post = t.posts.at(-1)!;
+  assert.match(post, /\n1\. \[P3\] \.pi\/pb\/specs\/order-cancellation\/spec\.md:9 — Out of scope must name partial refunds/);
+  assert.match(post, /\n\[P3\] src\/order\.ts:3 — a nit in the code/); // unnumbered
+  assert.deepEqual(t.progress("order-cancellation").review.findings.map((f: Finding) => f.title), ["Out of scope must name partial refunds"]);
+});
+
+test("fix: a spec finding's lap edits the section it points at and nothing else, and you re-approve the change from its diff", async () => {
+  const t = await reviewedWithSpecFinding();
+  let goalRefusal: string | undefined;
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix order-cancellation]")) return;
+    goalRefusal = (await tool("pb_update_spec", { section: "Goal", mode: "edit", old: "Cancel orders.", new: "Cancel any order." })).error;
+    const edit = await tool("pb_update_spec", { section: "Out of scope", mode: "edit", old: "Refunds.", new: "Refunds, partial or full." });
+    assert.equal(edit.error, undefined, edit.error ?? "");
+    await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a spec line" }], tests: "none: a spec line" });
+  };
+  t.selects.push("Re-approve these changes");
+  await t.run("fix", "order-cancellation 1");
+  assert.match(goalRefusal ?? "", /may change only order-cancellation's Design and Decisions, and "out of scope" for the findings filed against the spec/);
+  assert.match(t.read(specRel), /## Goal\nCancel orders\.\n## Out of scope\nRefunds, partial or full\./);
+  const diff = t.posts.find((x) => x.includes("**The fix changed the approved contract** —"))!;
+  assert.match(diff, /```diff\n- Refunds\.\n\+ Refunds, partial or full\.\n```/);
+  assert.ok(t.selectTitles.some((x) => /^Re-approve order-cancellation\? The fix changed its contract: ## Out of scope \(−1 \+1\)/.test(x)));
+  assert.ok(t.posts.some((x) => /^\*\*Spec re-approved\*\* — order-cancellation's revised contract/.test(x)));
+  assert.equal(t.progress("order-cancellation").approval.contractHash, contractHash(t.read(specRel)));
+  assert.ok(t.selectTitles.some((x) => /^Fixes for order-cancellation are done: .*Review them now\?/.test(x))); // then the review is offered
+});
+
+test("fix: a contract change nobody approves stays unapproved, as it was, and no review is offered over it", async () => {
+  const t = await reviewedWithSpecFinding();
+  const approvedBefore = t.progress("order-cancellation").approval.contractHash;
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix order-cancellation]")) return;
+    await tool("pb_update_spec", { section: "Out of scope", mode: "edit", old: "Refunds.", new: "Refunds, partial or full." });
+    await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a spec line" }], tests: "none" });
+  };
+  await t.run("fix", "order-cancellation 1"); // Enter on the question: its first, safe answer
+  assert.equal(t.progress("order-cancellation").approval.contractHash, approvedBefore);
+  assert.ok(t.posts.some((x) => /^Not re-approved: `\/pb:build order-cancellation` re-approves the contract when you're ready/.test(x)));
+  assert.ok(!t.selectTitles.some((x) => /Review them now\?/.test(x)));
+});
+
+test("fix: a lap fixing only code findings can't touch the contract, even a section a spec finding elsewhere names", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  // The code finding sits on the same line number as the spec finding: only the file tells them apart.
+  pausedWithFindings(t, "order-cancellation", [{ priority: "P2", file: "src/order.ts", line: 9, title: "name the constant" }, SPEC_FINDING]);
+  let refusal: string | undefined;
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix order-cancellation]")) return;
+    refusal = (await tool("pb_update_spec", { section: "Out of scope", mode: "edit", old: "Refunds.", new: "Nothing." })).error;
+    await tool("pb_fix_done", { fixed: [], skipped: [], open: [1], tests: "none" });
+  };
+  await t.run("fix", "order-cancellation 1"); // the code finding only
+  assert.match(refusal ?? "", /may change only order-cancellation's Design and Decisions\. A finding that needs any other part of the contract/);
+  assert.match(t.read(specRel), /## Out of scope\nRefunds\.\n/);
+});
+
+test("fix: re-approval accepts only the text its diff showed — an edit made while the question is open is not approved", async () => {
+  const t = await reviewedWithSpecFinding();
+  const approvedBefore = t.progress("order-cancellation").approval.contractHash;
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix order-cancellation]")) return;
+    await tool("pb_update_spec", { section: "Out of scope", mode: "edit", old: "Refunds.", new: "Refunds, partial or full." });
+    await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a spec line" }], tests: "none" });
+  };
+  t.selects.push("Re-approve these changes");
+  process.env.MOCK_SELECT_TOUCH = path.join(t.repo, specRel); // someone saves the spec while the question is open
+  try {
+    await t.run("fix", "order-cancellation 1");
+  } finally {
+    delete process.env.MOCK_SELECT_TOUCH;
+  }
+  assert.ok(t.posts.some((x) => /^\*\*Not re-approved\*\* — order-cancellation's spec changed after the diff was shown/.test(x)));
+  assert.equal(t.progress("order-cancellation").approval.contractHash, approvedBefore);
 });

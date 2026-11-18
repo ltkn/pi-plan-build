@@ -340,6 +340,13 @@ export interface Finding {
   map?: MapTag;
 }
 
+/**
+ * A finding the reviewer filed against the spec itself, not the code: `/pb:fix` takes it at any priority, and its lap
+ * may edit the spec section it points at, for the human to re-approve.
+ */
+export const isSpecFinding = (f: Pick<Finding, "file">, spec: string): boolean =>
+  !!f.file && path.normalize(f.file) === path.join(PB_DIR, "specs", spec, "spec.md");
+
 /** How a code-review finding relates to the project map: what `/pb:stats` judges the map by. */
 export const MAP_TAGS = ["stated", "wrong"] as const;
 export type MapTag = (typeof MAP_TAGS)[number];
@@ -396,6 +403,8 @@ export interface FixSession {
   findings: Finding[];
   /** finding number (1-based, as the brief shows it) → the test command pb saw fail before the fix */
   reds?: Record<string, string>;
+  /** the contract sections (specTextBlocks keys) the lap's spec findings point at: the only ones beyond Design and Decisions it may edit */
+  specSections?: string[];
 }
 
 export interface Progress {
@@ -1454,10 +1463,11 @@ export class Store {
   }
   fixSession(sessionFile: string | undefined): FixSession | undefined {
     if (!sessionFile) return undefined;
-    const rec = readJson<{ session?: unknown; spec?: unknown; findings?: unknown; reds?: unknown }>(this.fixSessionFile(sessionFile));
+    const rec = readJson<{ session?: unknown; spec?: unknown; findings?: unknown; reds?: unknown; specSections?: unknown }>(this.fixSessionFile(sessionFile));
     if (typeof rec?.session !== "string" || typeof rec?.spec !== "string" || !Array.isArray(rec?.findings)) return undefined;
     const reds = rec.reds && typeof rec.reds === "object" ? Object.fromEntries(Object.entries(rec.reds as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string")) : {};
-    return { spec: rec.spec, findings: rec.findings as Finding[], reds };
+    const specSections = Array.isArray(rec.specSections) ? rec.specSections.filter((k): k is string => typeof k === "string" && k.startsWith("section:")) : [];
+    return { spec: rec.spec, findings: rec.findings as Finding[], reds, ...(specSections.length ? { specSections } : {}) };
   }
   clearFixSession(sessionFile: string): void {
     fs.rmSync(this.fixSessionFile(sessionFile), { force: true });

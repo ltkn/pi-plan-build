@@ -399,6 +399,17 @@ export const specTextBlocks = (md: string): SpecTextBlock[] => {
 /** The key a "## <section>" block is filed under in specTextBlocks. */
 export const sectionKey = (section: string) => `section:${blockName(section.replace(/^#+\s*/, "").replace(/\s*:?\s*$/, ""))}`;
 
+/**
+ * The `##` section a 1-based line of the spec sits in, keyed as specTextBlocks keys it: what a review finding filed
+ * against the spec points at. Undefined for the header, a line inside no section, or a line the text doesn't have.
+ */
+export const sectionKeyAtLine = (md: string, line: number): string | undefined => {
+  const blanked = blankFenced(md);
+  if (!Number.isInteger(line) || line < 1 || line > blanked.length) return undefined;
+  for (let i = line - 1; i >= 0; i--) if (/^##\s+(?!#)/.test(blanked[i])) return sectionKey(blanked[i]);
+  return undefined;
+};
+
 /** How a block is named to a reader: its own heading line as written, or "the header". */
 export const blockLabel = (block: SpecTextBlock) => (block.key === "header" ? "the header" : block.text.split("\n")[0].trim());
 
@@ -426,6 +437,36 @@ export function removedLines(before: string, after: string): string[] {
   }
   return out;
 }
+
+/**
+ * What re-approving a revised contract accepts, as changed lines: per contract block, the lines it lost and then the
+ * lines it gained, whole (a cut could hide the change itself); then any approved decision that is gone. Posted to the
+ * chat, where it scrolls and stays; the dialog only asks.
+ */
+export const contractChanges = (approved: string | undefined, md: string, droppedDecisions: string[]): { diff: string; summary: string } => {
+  const was = new Map(specTextBlocks(approved ?? "").map((b) => [b.key, b]));
+  const contract = (key: string) => key !== "section:design" && key !== "section:decisions";
+  const now = specTextBlocks(md).filter((b) => contract(b.key));
+  const keys = [...new Set([...[...was.keys()].filter(contract), ...now.map((b) => b.key)])];
+  const parts: string[] = [];
+  const summary: string[] = [];
+  const count = (removed: number, added: number) => [removed ? `−${removed}` : "", added ? `+${added}` : ""].filter(Boolean).join(" ");
+  for (const key of keys) {
+    const before = was.get(key)?.text ?? "";
+    const after = now.find((b) => b.key === key)?.text ?? "";
+    if (before === after) continue;
+    const removed = removedLines(before, after);
+    const added = removedLines(after, before);
+    const label = blockLabel(was.get(key) ?? now.find((b) => b.key === key)!);
+    summary.push(`${label} (${count(removed.length, added.length) || "reordered"})`);
+    parts.push(`**${label}** (${count(removed.length, added.length) || "lines reordered"})\n\`\`\`diff\n${[...removed.map((l) => `- ${l}`), ...added.map((l) => `+ ${l}`)].join("\n")}\n\`\`\``);
+  }
+  if (droppedDecisions.length) {
+    summary.push(`## Decisions (${count(droppedDecisions.length, 0)})`);
+    parts.push(`## Decisions — approved lines removed\n\`\`\`diff\n${droppedDecisions.map((l) => `- ${l}`).join("\n")}\n\`\`\``);
+  }
+  return { diff: parts.join("\n\n"), summary: summary.join(", ") };
+};
 
 /** A review answers for the exact markdown it saw: a pass stops covering the spec the moment the text changes. */
 export const specHash = (markdown: string) => createHash("sha256").update(markdown).digest("hex");

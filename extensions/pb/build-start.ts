@@ -8,7 +8,7 @@ import type {
 import { snapshot } from "./checkpoint.ts";
 import { tip } from "./help.ts";
 import { buildIntro, coherePrompt, continuePrompt, findingLine, finishSpecPrompt, fixText, specPrompt } from "./prompts.ts";
-import { type ParsedSpec, blockFingerprints, blockLabel, contractHash, removedLines, sectionOf, specHash, specTextBlocks } from "./spec.ts";
+import { type ParsedSpec, blockFingerprints, contractChanges, contractHash, removedLines, sectionOf, specHash } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type Progress, COHERE_TASK_ID, Store, changedSince, gitHead, now, readEvents } from "./store.ts";
 import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, fitDialog, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, planningEdits, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
@@ -572,36 +572,6 @@ export function registerBuildStart(pi: ExtensionAPI) {
     } else if (!files.length) planningWriteNotes.delete(session);
   });
 
-  /**
-   * What re-approving a paused build would accept, as changed lines: per contract block, the lines it lost and then
-   * the lines it gained, whole (a cut could hide the change itself); then any approved decision that is gone. Posted
-   * to the chat, where it scrolls and stays; the dialog only asks.
-   */
-  const pausedChanges = (approved: string | undefined, md: string, droppedDecisions: string[]): { diff: string; summary: string } => {
-    const was = new Map(specTextBlocks(approved ?? "").map((b) => [b.key, b]));
-    const contract = (key: string) => key !== "section:design" && key !== "section:decisions";
-    const now = specTextBlocks(md).filter((b) => contract(b.key));
-    const keys = [...new Set([...[...was.keys()].filter(contract), ...now.map((b) => b.key)])];
-    const parts: string[] = [];
-    const summary: string[] = [];
-    const count = (removed: number, added: number) => [removed ? `−${removed}` : "", added ? `+${added}` : ""].filter(Boolean).join(" ");
-    for (const key of keys) {
-      const before = was.get(key)?.text ?? "";
-      const after = now.find((b) => b.key === key)?.text ?? "";
-      if (before === after) continue;
-      const removed = removedLines(before, after);
-      const added = removedLines(after, before);
-      const label = blockLabel(was.get(key) ?? now.find((b) => b.key === key)!);
-      summary.push(`${label} (${count(removed.length, added.length) || "reordered"})`);
-      parts.push(`**${label}** (${count(removed.length, added.length) || "lines reordered"})\n\`\`\`diff\n${[...removed.map((l) => `- ${l}`), ...added.map((l) => `+ ${l}`)].join("\n")}\n\`\`\``);
-    }
-    if (droppedDecisions.length) {
-      summary.push(`## Decisions (${count(droppedDecisions.length, 0)})`);
-      parts.push(`## Decisions — approved lines removed\n\`\`\`diff\n${droppedDecisions.map((l) => `- ${l}`).join("\n")}\n\`\`\``);
-    }
-    return { diff: parts.join("\n\n"), summary: summary.join(", ") };
-  };
-
   pi.registerCommand(cmd("build"), {
     description: "Build the planned feature from its spec in a fresh session, task by task (the full check runs after the last task; writes the spec first if there isn't one). --here builds in this session. In a paused build: continue, optionally with guidance",
     getArgumentCompletions: (prefix: string) => [{ value: "--here", label: "--here" }, ...specCompletions(prefix)].filter((c) => c.value.startsWith(prefix)),
@@ -660,7 +630,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
         const contractChanged = !!p.approval && contractHash(live.md) !== p.approval.contractHash;
         if (p.approval && (contractChanged || droppedDecisions.length) && ctx.hasUI) {
           const what = contractChanged ? "contract" : "approved decisions";
-          const changes = pausedChanges(approvedMd, live.md, droppedDecisions);
+          const changes = contractChanges(approvedMd, live.md, droppedDecisions);
           post(`**⚠ ${p.spec}'s ${what} changed while the build was paused** — re-approving accepts these changes, and the build then runs against them:\n\n${changes.diff}`);
           // Enter keeps the build paused: re-approving is the step that changes what the build follows.
           const KEEP = "Keep the build paused";

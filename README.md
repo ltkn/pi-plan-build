@@ -17,8 +17,9 @@ never saw the build. Your engineering standards live in AGENTS.md, written once.
                       the build-start screen with a repair-first choice; P2-P3 are advisory
 /pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default): each finding fixed
                       wherever the change repeats it, proven by a test seen failing first; pb runs the checks after
-                      each lap and offers the follow-up review; each lap is an /pb:undo point. A changed contract is
-                      re-approved by /pb:build first, then /pb:review checks the delta. Text after the ids directs
+                      each lap and offers the follow-up review; each lap is an /pb:undo point. A finding filed against
+                      the spec is fixed in the spec: pb shows the contract's diff and you re-approve it with one
+                      answer, then /pb:review checks the delta. Text after the ids directs
                       the fixes (`/pb:fix spec 5 6 use one REPEATABLE READ read`): it binds where it differs
                       from a finding's Fix, the others take their Fix as written, and the lap records each
                       choice in the spec's Decisions so the next review judges against it

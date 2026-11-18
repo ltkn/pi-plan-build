@@ -10,9 +10,10 @@ import { safeBlock } from "./markdown.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { snapshot } from "./checkpoint.ts";
-import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, now, readEvents } from "./store.ts";
+import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, isSpecFinding, now, readEvents } from "./store.ts";
+import { contractChanges, removedLines, sectionKeyAtLine, sectionOf, specHash } from "./spec.ts";
 import { runVerify } from "./verify.ts";
-import { approvalDrift, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, sleep, specOfSession, specRef, stop, tree, withChecking } from "./kit.ts";
+import { type ReplacedSessionContext, approvalDrift, approveSpec, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, sleep, specOfSession, specRef, stop, tree, withChecking } from "./kit.ts";
 import { tip } from "./help.ts";
 import { notifyDesktop } from "./notify.ts";
 
@@ -172,7 +173,7 @@ export function registerFix(pi: ExtensionAPI) {
       // The lap's reply is not the outcome: pb's checks decide whether a reported fix counts, and the human reads
       // the result in their own session. One fixed line keeps the lap from posting a report that reads as final.
       const line = drift
-        ? `Fix report sent. The fix changed the approved contract: /${cmd("build")} ${rec.spec} re-approves it, then /${cmd("review")}.`
+        ? "Fix report sent. The fix changed the approved contract: pb asks you to re-approve the change when the run ends (or /pb:build does)."
         : "Fix report sent. pb is checking the fixes now; the result and the next step come in your session.";
       // The report ends the run: work after it would land in no lap's record, so the model gets no further turn.
       post(line);
@@ -189,6 +190,20 @@ export function registerFix(pi: ExtensionAPI) {
   /** Finish-nudges before a silent lap stops the loop (never retried: a second silent session doubles nothing). */
 
   const FIX_NUDGES = 2;
+
+  /**
+   * The contract sections a lap may edit beyond Design and Decisions: the ones its findings filed against the spec
+   * point at, by line. A code finding unlocks nothing, and a line pb can't place in a section unlocks nothing either.
+   */
+  const unlockedSections = (store: Store, spec: string, findings: Finding[]): { specSections?: string[] } => {
+    const md = store.readSpec(spec);
+    if (!md) return {};
+    const keys = findings
+      .filter((f) => f.line !== undefined && isSpecFinding(f, spec))
+      .map((f) => sectionKeyAtLine(md, f.line!))
+      .filter((k): k is string => !!k && k !== "section:design" && k !== "section:decisions");
+    return keys.length ? { specSections: [...new Set(keys)] } : {};
+  };
 
   /** The entry id of the lap's last answer when Esc cut it short (Pi's own stop reason), else undefined. */
   const abortedAt = (c: ExtensionCommandContext): string | undefined => {
@@ -231,7 +246,7 @@ export function registerFix(pi: ExtensionAPI) {
         const cc = c as ExtensionCommandContext;
         live = cc;
         const lapFile = cc.sessionManager.getSessionFile() ?? undefined;
-        if (lapFile) store.saveFixSession(lapFile, { spec, findings: remaining });
+        if (lapFile) store.saveFixSession(lapFile, { spec, findings: remaining, ...unlockedSections(store, spec, remaining) });
         store.clearDraft(spec); // a fix lap edits the reviewed spec, never a draft refused before it
         store.event(spec, { type: "fix-start", findings: remaining.map((f) => f.title), ...(direction ? { direction: safeBlock(direction.text) } : {}) });
         from = readEvents(path.join(store.specDir(spec), "events.jsonl")).length;
@@ -315,6 +330,44 @@ export function registerFix(pi: ExtensionAPI) {
   };
 
   /**
+   * The contract change the laps left, as the diff the human approves: computed once, with the exact text it shows,
+   * so an edit made while the question is open is never approved unseen.
+   */
+  const contractReapproval = (store: Store, spec: string): { md: string; changes: ReturnType<typeof contractChanges> } | undefined => {
+    const md = store.readSpec(spec);
+    const approved = store.readApprovedSpec(spec);
+    if (!md || !approved) return undefined;
+    const dropped = removedLines(sectionOf(approved, "Decisions"), sectionOf(md, "Decisions"));
+    const changes = contractChanges(approved, md, dropped);
+    return changes.diff ? { md, changes } : undefined;
+  };
+
+  /**
+   * Ask, in the home session, whether to approve the contract the laps changed. Enter, Esc and no answer all leave it
+   * unapproved, as it was: /pb:build re-approves later and /pb:undo puts a lap back. Approving goes through
+   * approveSpec, the build's own path, and only for the text the diff showed. True when it was approved.
+   */
+  const askReapproval = async (c: ReplacedSessionContext, store: Store, spec: string, shown: { md: string; changes: ReturnType<typeof contractChanges> }): Promise<boolean> => {
+    const LATER = "Not now: leave it unapproved";
+    const APPROVE = "Re-approve these changes";
+    const choice = await choose(c, store, `Re-approve ${spec}? The fix changed its contract: ${shown.changes.summary}. The diff is in the chat above.`, [LATER, APPROVE], LATER);
+    if (choice !== APPROVE) {
+      await c.sendMessage({ customType: "pb", content: `Not re-approved: \`/${cmd("build")} ${spec}\` re-approves the contract when you're ready, or \`/${cmd("undo")}\` puts a lap back.`, display: true }, { triggerTurn: false });
+      return false;
+    }
+    const loaded = loadSpec(store, spec);
+    const p = store.progress(spec);
+    if (!loaded || !p || specHash(loaded.md) !== specHash(shown.md)) {
+      await c.sendMessage({ customType: "pb", content: `**Not re-approved** — ${spec}'s spec changed after the diff was shown, so what you approved isn't what stands. \`/${cmd("build")} ${spec}\` shows it again.`, display: true }, { triggerTurn: false });
+      return false;
+    }
+    approveSpec(store, p, loaded.md, loaded.spec);
+    store.saveProgress(p);
+    await c.sendMessage({ customType: "pb", content: `**Spec re-approved** — ${spec}'s revised contract is the one the review now judges the code against.`, display: true }, { triggerTurn: false });
+    return true;
+  };
+
+  /**
    * Unattended fix loop: lap until every finding is fixed (and pb's checks pass) or skipped-as-spec-revision,
    * up to FIX_LAPS, then come home with the outcome. The report names findings by the numbers the brief shows,
    * so no prose has to be matched back to one. A lap whose fixes leave a check red does not count: the next lap
@@ -373,19 +426,11 @@ export function registerFix(pi: ExtensionAPI) {
     // Cap the lists: a long title per finding makes the evidence line a wall, and /pb:status has the detail.
     const list = (items: string[]) => (items.length <= 6 ? items.join(", ") : `${items.slice(0, 6).join(", ")}, +${items.length - 6} more`);
     // The fix may have revised the approved contract. Review judges the code against that
-    // contract, so it cannot run until `/pb:build` has re-approved whatever stands now.
+    // contract, so it cannot run until the human has re-approved whatever stands now.
     const drift = (() => {
       const p = store.progress(spec);
       return p ? approvalDrift(store, p) : undefined;
     })();
-    const reviewStep = drift
-      ? `\`/${cmd("build")} ${spec}\` re-approves the ${drift === "missing" ? "spec as it stands (its approved copy is missing or changed)" : "revised contract (the fix changed it)"}, then \`/${cmd("review")}\` can check the delta.`
-      : `\`/${cmd("review")}\` checks the delta.`;
-    const next = open.length
-      ? `\`/${cmd("fix")}${ids ? ` ${ids}` : ""}\` (or fix them by hand), then ${reviewStep}`
-      : skipped.length
-        ? `revise the spec with \`/${cmd("spec")}\` for the skipped findings (or fix them by hand), then ${reviewStep}`
-        : reviewStep;
     const time = ms ? duration(ms) : "";
     // The title says what became of each finding, by its review number: "fixed" only once pb's checks passed.
     const numbers = (labels: string[]) => labels.map((l) => l.split(" ")[0]).join(", ");
@@ -400,25 +445,45 @@ export function registerFix(pi: ExtensionAPI) {
       : failure
         ? phaseHeader("❌", "Fixes stopped", spec, "check failed", ...outcome, lapCount, time)
         : phaseHeader(open.length ? "❌" : "✅", open.length ? "Fixes stopped" : "Fixes complete", spec, ...outcome, lapCount, time);
-    const summary = [
-      header,
-      "",
-      nextLine(next),
-      evidenceLine(
-        `fixed ${list(fixed) || "none"}`,
-        skipped.length ? `skipped as needing a spec revision: ${list(skipped)}` : "",
-        open.length ? `still open: ${list(open)}` : "",
-        silent ? `no report after ${FIX_NUDGES} nudges` : "",
-        !silent && checked.length && !failure ? `pb's checks passed: ${checked.map((c) => `\`${c}\``).join(", ")}` : "",
-        !silent && !checked.length && !failure ? "no checks configured for this spec" : "",
-      ),
-      ...(failure ? ["", `**pb's check after the last lap failed**, so its fixes don't count yet:`, "", failure] : []),
-      ...(drift ? ["", `**The fix changed the approved contract.** \`/${cmd("build")} ${spec}\` must re-approve it before \`/${cmd("review")}\` can run.`] : []),
-      // Variants of the next step; a lap that changed the contract has one move, already named above.
-      ...(drift ? [] : ["", tip("fix.done", { spec, ...(open.length && ids ? { ids } : {}) })]),
-    ].join("\n");
+    // A contract the laps changed is re-approved from its diff when the session the run ends in can ask; headless,
+    // /pb:build does it. The summary says which, so it is built once that is known.
+    const summaryFor = (reapproval: ReturnType<typeof contractReapproval>): string => {
+      const reviewStep = reapproval
+        ? `re-approve the contract change below, then \`/${cmd("review")}\` checks the delta.`
+        : drift
+          ? `\`/${cmd("build")} ${spec}\` re-approves the ${drift === "missing" ? "spec as it stands (its approved copy is missing or changed)" : "revised contract (the fix changed it)"}, then \`/${cmd("review")}\` can check the delta.`
+          : `\`/${cmd("review")}\` checks the delta.`;
+      const next = open.length
+        ? `\`/${cmd("fix")}${ids ? ` ${ids}` : ""}\` (or fix them by hand), then ${reviewStep}`
+        : skipped.length
+          ? `revise the spec with \`/${cmd("spec")}\` for the skipped findings (or fix them by hand), then ${reviewStep}`
+          : reviewStep;
+      return [
+        header,
+        "",
+        nextLine(next),
+        evidenceLine(
+          `fixed ${list(fixed) || "none"}`,
+          skipped.length ? `skipped as needing a spec revision: ${list(skipped)}` : "",
+          open.length ? `still open: ${list(open)}` : "",
+          silent ? `no report after ${FIX_NUDGES} nudges` : "",
+          !silent && checked.length && !failure ? `pb's checks passed: ${checked.map((c) => `\`${c}\``).join(", ")}` : "",
+          !silent && !checked.length && !failure ? "no checks configured for this spec" : "",
+        ),
+        ...(failure ? ["", `**pb's check after the last lap failed**, so its fixes don't count yet:`, "", failure] : []),
+        ...(reapproval
+          ? ["", `**The fix changed the approved contract** — re-approving accepts these changes, and the review then judges the code against them:`, "", reapproval.changes.diff]
+          : drift
+            ? ["", `**The fix changed the approved contract.** \`/${cmd("build")} ${spec}\` must re-approve it before \`/${cmd("review")}\` can run.`]
+            : []),
+        // Variants of the next step; a lap that changed the contract has one move, already named above.
+        ...(drift ? [] : ["", tip("fix.done", { spec, ...(open.length && ids ? { ids } : {}) })]),
+      ].join("\n");
+    };
     // The follow-up review is the next step whenever nothing is left open: offer it rather than leave it to memory.
-    const offerReview = !silent && !failure && !open.length && !drift;
+    // A contract change waiting for re-approval comes first; the review is offered once it is approved.
+    const reviewable = !silent && !failure && !open.length;
+    const offerReview = reviewable && !drift;
     // The end of /pb:fix is the moment the human has walked away from: the summary alone goes unseen. A complete
     // run asks whether to review, and that question notifies with the outcome; a stopped one notifies here.
     const outcomeText = outcome.filter(Boolean).join(", ");
@@ -427,8 +492,10 @@ export function registerFix(pi: ExtensionAPI) {
       if (!home) throw new Error("no home session");
       await live.switchSession(home, {
         withSession: async (c) => {
-          await c.sendMessage({ customType: "pb", content: summary, display: true }, { triggerTurn: false });
-          if (!offerReview) return;
+          const reapproval = drift === "changed" && c.hasUI ? contractReapproval(store, spec) : undefined;
+          await c.sendMessage({ customType: "pb", content: summaryFor(reapproval), display: true }, { triggerTurn: false });
+          const approved = reapproval ? await askReapproval(c, store, spec, reapproval) : false;
+          if (!offerReview && !(approved && reviewable)) return;
           const NOW = "Review the fixes now";
           const LATER = "Later";
           if ((await choose(c, store, `Fixes for ${spec} are done: ${outcomeText}. Review them now?`, [NOW, LATER], LATER)) === NOW) {
@@ -439,12 +506,12 @@ export function registerFix(pi: ExtensionAPI) {
       });
     } catch {
       // Home is gone: the summary still lands in the spec's events for the next session to find.
-      store.event(spec, { type: "fix-summary", summary, ms });
+      store.event(spec, { type: "fix-summary", summary: summaryFor(undefined), ms });
     }
   };
 
   pi.registerCommand(cmd("fix"), {
-    description: "Fix P0-P2 review findings in a fresh fenced session: /pb:fix [spec] [finding ids] [direction]. No ids = all open findings (P3 nits are never open: fix those by hand). Text after the ids directs the fixes: it binds where it differs from a finding's Fix, and the rest take their Fix as written. Run /pb:review afterwards: it checks only those findings and what changed",
+    description: "Fix review findings in a fresh fenced session: /pb:fix [spec] [finding ids] [direction]. No ids = all open findings: P0-P2, and any finding filed against the spec (a P3 in the code is never open: fix it by hand). A spec finding is fixed in the spec, and you re-approve the change from its diff. Text after the ids directs the fixes: it binds where it differs from a finding's Fix, and the rest take their Fix as written. Run /pb:review afterwards: it checks only those findings and what changed",
     getArgumentCompletions: fixCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
@@ -467,7 +534,7 @@ export function registerFix(pi: ExtensionAPI) {
       const request = parseFixRequest(rest, open);
       if ("misses" in request) {
         return ctx.ui.notify(
-          `No such finding${request.misses.length === 1 ? "" : "s"}: ${request.misses.join(", ")}. \`/pb:fix\` takes P0–P2 ids (P3 nits are never open: fix those by hand). Open findings for \`${name}\`:${open.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
+          `No such finding${request.misses.length === 1 ? "" : "s"}: ${request.misses.join(", ")}. \`/pb:fix\` takes the numbered ids (a P3 in the code is never open: fix it by hand). Open findings for \`${name}\`:${open.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
           "warning",
         );
       }

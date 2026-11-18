@@ -1031,14 +1031,15 @@ stay advisory.
 The header reads `**✅ Review — <label>** · PASS`, `**❌ Review — <label>** · CHANGES NEEDED` or
 `**⚠ Review — <label>** · UNVERIFIED`, followed by the review's active time: the watched
 reviewer, the adversarial pass and the verification pass together. Findings in the
-Change section and outside it are numbered continuously (P0–P2; P3 nits are unnumbered),
+Change section and outside it are numbered continuously (P0–P2, and any finding filed
+against the spec; a P3 in the code is unnumbered),
 the same numbers `/pb:fix` takes. `**Next:**` names one action — `/pb:fix <ids>` for open
 findings, `/pb:build` when a mid-build review passed with tasks remaining or the fix changed
 the approved contract, or `/pb:review` after fixes.
 
 The findings land in the session you ran it from; run it **in the build
 session** and fix them right there: that session knows the code it just wrote.
-Or fix them in a fresh fenced session: `/pb:fix [ids]` takes P0–P2 finding
+Or fix them in a fresh fenced session: `/pb:fix [ids]` takes the numbered finding
 ids (no ids = all open ones); P3 nits never block and are fixed by hand or
 ignored. A lap treats each finding as a class: it looks for the same defect
 across the change (the diff since the build's base commit) and fixes every
@@ -1055,7 +1056,12 @@ were before it. A fix lap keeps the spec true to what it fixed: when a fix chang
 behaviour the spec's Design or Decisions describe, the lap updates those lines
 itself, and it can change nothing else in the spec. A finding that needs the
 Goal, Contracts or Acceptance changed is reported as skipped, for you to revise
-with `/pb:spec`; one the lap didn't finish is reported open, and the next lap
+with `/pb:spec`. **A finding filed against the spec itself is fixed in the spec**:
+its lap may edit the section the finding points at (and no other part of the
+contract), and when the run ends pb posts the contract's diff and asks you to
+re-approve it. Enter leaves it unapproved, as it was (`/pb:build` re-approves
+later, `/pb:undo` puts a lap back); re-approving accepts exactly the text the
+diff showed, and the follow-up review then judges the code against it. One the lap didn't finish is reported open, and the next lap
 takes it. The report ends the lap: nothing it does afterwards would be checked,
 so it gets no further turn. **Esc in a lap pauses it**: pb doesn't push it to
 report, and waits until you type `continue` or tell it what to do instead. If
@@ -1420,7 +1426,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 ### Review found changes
 <!-- pb:tip review.changes -->
 **What now** — the review found things to fix before merging
-- `/pb:fix {spec} {ids}` — fixes them in a fresh fenced session (P0–P2; a P3 is yours to fix by hand or ignore)
+- `/pb:fix {spec} {ids}` — fixes them in a fresh fenced session (the numbered ones; a P3 in the code is yours to fix by hand or ignore)
 - `/pb:fix {spec} {ids} keep the public API unchanged` — the same, with your direction: it binds where it differs from a finding's Fix
 - Or in words, here: *"fix findings 1 and 3"* — this session knows the code
 - Then `/pb:review` checks only the fixes; `/pb:review --full` reviews everything again · more: `/pb:help review`
