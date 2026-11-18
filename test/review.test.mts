@@ -1100,7 +1100,7 @@ test("review: a fresh review session with the spec first and the diff; you're br
   assert.ok([...t.names.values()].includes("review: order-cancellation · spec"));
   assert.ok(![...t.names.values()].some((n) => n.endsWith("· adversarial"))); // the abuse pass is a background process
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // back where you were
-  assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n\[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session [^`]+`/);
+  assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n\nP3 nits — not numbered: fix them by hand if you want them\n\n\[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session [^`]+`/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
   assert.equal(t.progress("order-cancellation").reviewUnshown, undefined);
   assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /Review — order-cancellation\*\* · PASS/); // kept with the spec
@@ -1290,7 +1290,7 @@ test("review: a pass with open P2 findings offers /pb:fix as optional, after the
   assert.match(post, /PASS · P0 0 · P1 0 · P2 2 · P3 1/);
   assert.match(
     post,
-    /\*\*Next:\*\* `\/pb:commit order-cancellation` \(you see the files and the message first\), then `\/pb:archive order-cancellation`\. The verdict is PASS, so fixing the P2 findings is optional: `\/pb:fix order-cancellation 1 2` fixes them first if you want, then `\/pb:review` again\./,
+    /\*\*Next:\*\* `\/pb:commit order-cancellation` \(you see the files and the message first\), then `\/pb:archive order-cancellation`\. The verdict is PASS, so fixing the numbered findings is optional: `\/pb:fix order-cancellation 1 2` fixes them first if you want, then `\/pb:review` again\./,
   );
 });
 
@@ -1744,6 +1744,28 @@ test("review findings: display numbers run continuously across the change and ou
   assert.match(post, /\*\*Next:\*\* `\/pb:fix 1 2`/);
   // The ids /pb:fix reads are the stored review findings, in the same display order.
   assert.deepEqual(t.progress("order-cancellation").review.findings.map((f: { title: string }) => f.title), ["in the change", "outside the change"]);
+});
+
+test("review: the numbered findings read 1..n down the page, the P3 nits follow them, and a pass offers the change's own", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "off" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [
+    { priority: "P3", file: "src/order.ts", line: 12, title: "a nit in the code", fix: "y" },
+    { priority: "P2", file: "src/order.ts", line: 30, title: "in the change", fix: "x" },
+    { priority: "P3", file: specRel, line: 9, title: "a spec line", fix: "w" },
+    { priority: "P2", file: "src/legacy.ts", line: 1, title: "outside the change", fix: "z", outside: true },
+  ];
+  await t.run("review");
+  const post = t.posts.at(-1)!;
+  assert.match(post, /PASS/);
+  // Numbered 1, 2 in the change, then the unnumbered nit set apart below them, then 3 outside.
+  assert.match(post, /\*\*Findings\*\*\n\n1\. \[P2\] src\/order\.ts:30 — in the change[\s\S]*\n2\. \[P3\] [^\n]*spec\.md:9 — a spec line[^]*?\n\nP3 nits — not numbered: fix them by hand if you want them\n\n\[P3\] src\/order\.ts:12 — a nit in the code[\s\S]*\*\*Outside the change\*\*[^\n]*\n\n3\. \[P2 · Outside the change\]/);
+  // The pass offers the change's findings and names the outside one apart; the What-now tip says "numbered", not "P2".
+  assert.match(post, /fixing the numbered findings is optional: `\/pb:fix order-cancellation 1 2` fixes them first if you want, then `\/pb:review` again\. #3 is outside the change: add its number to fix it too\./);
+  assert.match(post, /- `\/pb:fix order-cancellation 1 2` — fixes the numbered findings first/);
+  assert.doesNotMatch(post, /the P2 findings/);
 });
 
 test("review: a pre-existing problem gets its own outside class instead of a prose note", async () => {

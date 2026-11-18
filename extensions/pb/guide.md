@@ -1411,7 +1411,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 <!-- pb:tip review.pass -->
 **What now** — the review passed, the change is ready to merge
 - `/pb:commit {spec}` — commits it (you see the files and the message first), then `/pb:archive {spec}`
-- `/pb:fix {spec} {ids}` — fixes the P2 findings first, optional; then `/pb:review` checks only the fixes
+- `/pb:fix {spec} {ids}` — fixes the numbered findings first, optional; then `/pb:review` checks only the fixes
 - Or in words, here: *"fix finding 2"* — this session knows the code
 <!-- /pb -->
 

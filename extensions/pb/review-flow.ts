@@ -347,6 +347,22 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const stepName = (id: string) => (id === COHERE_TASK_ID ? "coherence pass" : id === "final" ? "final check" : id);
     const midBuildView = midBuild.map(stepName);
     const fixIds = fixable.map((_, i) => i + 1).join(" ");
+    // The numbered findings run 1..n down the page; the P3 nits /pb:fix leaves alone follow them, set apart.
+    const grouped = (fs: Finding[]) => {
+      const nits = fs.filter((f) => !number.has(f));
+      return [
+        "",
+        ...fs.filter((f) => number.has(f)).map((f) => findingLine(f, number.get(f))),
+        ...(nits.length ? [...(nits.length < fs.length ? [""] : []), "P3 nits — not numbered: fix them by hand if you want them", "", ...nits.map((f) => findingLine(f))] : []),
+      ];
+    };
+    // A pass offers the change's own findings; a pre-existing one is named apart, there for the asking.
+    const ownIds = fixable.filter((f) => !f.outside).map((f) => number.get(f)!);
+    const outsideIds = fixable.filter((f) => f.outside).map((f) => number.get(f)!);
+    const passIds = (ownIds.length ? ownIds : outsideIds).join(" ");
+    const outsideNote = ownIds.length && outsideIds.length
+      ? ` ${outsideIds.map((n) => `#${n}`).join(", ")} ${outsideIds.length === 1 ? "is" : "are"} outside the change: add ${outsideIds.length === 1 ? "its number" : "their numbers"} to fix ${outsideIds.length === 1 ? "it" : "them"} too.`
+      : "";
     // The double check's own words, read once: the mark, the shortfall note, and whether it fell short at all.
     // A follow-up review re-reads only what changed since the one it follows, so a finding the second look left
     // unconfirmed would go unanswered again: only a full review takes it back.
@@ -381,9 +397,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
                   ? `\`/${cmd("review")} --full\` runs the second look again: its run failed, so the spec stays unreviewed.`
                   : run.name
                     ? `\`/${cmd("commit")} ${run.name}\` (you see the files and the message first), then \`/${cmd("archive")} ${run.name}\`.${
-                        // P2s don't block a pass, but they stay open and /pb:fix takes them: offer it, as a choice.
-                        fixIds && complete
-                          ? ` The verdict is PASS, so fixing the P2 findings is optional: \`/${cmd("fix")} ${run.name} ${fixIds}\` fixes them first if you want, then \`/${cmd("review")}\` again.`
+                        // Numbered findings don't block a pass, but they stay open and /pb:fix takes them: offer it, as a choice.
+                        passIds && complete
+                          ? ` The verdict is PASS, so fixing the numbered findings is optional: \`/${cmd("fix")} ${run.name} ${passIds}\` fixes them first if you want, then \`/${cmd("review")}\` again.${outsideNote}`
                           : ""
                       }`
                     : "commit when ready."
@@ -432,8 +448,8 @@ export function registerReviewFlow(pi: ExtensionAPI) {
           ]
         : []),
       ...(run.previousTitles ? ["", sinceLastReview(run.previousTitles, findings, number)] : []),
-      ...(inChange.length ? ["", "**Findings**", "", ...inChange.map((f) => findingLine(f, number.get(f)))] : []),
-      ...(outside.length ? ["", "**Outside the change** — pre-existing, not caused by this revision", "", ...outside.map((f) => findingLine(f, number.get(f)))] : []),
+      ...(inChange.length ? ["", "**Findings**", ...grouped(inChange)] : []),
+      ...(outside.length ? ["", "**Outside the change** — pre-existing, not caused by this revision", ...grouped(outside)] : []),
       ...(o.dismissed.length ? ["", "Dismissed after a second look:", ...o.dismissed.map((d) => `- [${d.finding.priority}${d.finding.outside ? " · Outside the change" : ""}] ${d.finding.title} — ${d.evidence}`)] : []),
       ...(o.changedDuring.length ? ["", `⚠ Files changed while the review ran (left as they are — the reviewer can't write, so these are yours or another session's): ${o.changedDuring.join(", ")}`] : []),
       ...(run.largeFiles?.length ? ["", `⚠ Untracked files over 20 MB are in no snapshot or diff (read them yourself): ${run.largeFiles.join(", ")}`] : []),
@@ -442,7 +458,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       ...(doubleCheckLines.note ? ["", doubleCheckLines.note] : []),
       ...(sessions.length ? ["", `The review sessions: ${sessions.join(" · ")}`] : []),
       "",
-      tip(tipKey, { spec: run.name ?? "", checks: failedChecks.map((c) => `\`${c}\``).join(", "), ...(run.name && fixIds && complete ? { ids: fixIds } : {}) }),
+      tip(tipKey, { spec: run.name ?? "", checks: failedChecks.map((c) => `\`${c}\``).join(", "), ...(run.name && fixIds && complete ? { ids: verdict === "pass" ? passIds : fixIds } : {}) }),
     ].join("\n");
     return { text, verdict, counts, findings: fixable, acceptance, complete, abuse: finished("abuse") };
   };

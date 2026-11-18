@@ -117,7 +117,7 @@ test("help: a What-now line whose value is missing is left out, and an empty val
   const { tip } = await import("../extensions/pb/help.ts");
   const withIds = tip("review.pass", { spec: "order-cancellation", ids: "2 3" });
   assert.match(withIds, /- `\/pb:commit order-cancellation` — commits it/);
-  assert.match(withIds, /- `\/pb:fix order-cancellation 2 3` — fixes the P2 findings first/);
+  assert.match(withIds, /- `\/pb:fix order-cancellation 2 3` — fixes the numbered findings first/);
   const noIds = tip("review.pass", { spec: "order-cancellation" });
   assert.doesNotMatch(noIds, /\/pb:fix|\{ids\}/); // nothing to fix: no half-filled command
   const noSpec = tip("review.pass", { spec: "" });
