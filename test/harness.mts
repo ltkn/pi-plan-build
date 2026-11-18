@@ -312,8 +312,9 @@ export function setup(config: object = {}) {
     pb(self.pi);
     return self;
   };
-  /** The context Pi hands to withSession: the new runtime's, with sendMessage. */
-  const handover = (r: Runtime) => guard(() => r, { ...r.ctx, ui: r.ctx.ui, sessionManager: r.ctx.sessionManager, sendMessage: async (m: any, o: any) => r.pi.sendMessage(m, o) });
+  /** The context Pi hands to withSession: the new runtime's, with sendMessage and sendUserMessage. */
+  const handover = (r: Runtime) =>
+    guard(() => r, { ...r.ctx, ui: r.ctx.ui, sessionManager: r.ctx.sessionManager, sendMessage: async (m: any, o: any) => r.pi.sendMessage(m, o), sendUserMessage: async (m: any, o: any) => r.pi.sendUserMessage(m, o) });
   rt = makeRuntime(path.join(repo, "planning-session.jsonl"));
 
   // A tool result that asks for more (pb_task_done without terminate) continues the run, as in Pi.

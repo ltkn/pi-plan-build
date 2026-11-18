@@ -386,6 +386,8 @@ export interface ReviewState {
   repos?: Record<string, string>;
   /** pb's checks that failed before this review: its verdict never saw a green tree, so "nothing changed" can't stand on it */
   failedChecks?: string[];
+  /** hash of the spec text the review judged against: a spec edited since is a change, even on an unchanged tree */
+  specHash?: string;
 }
 
 /** The text a build may not rewrite: recorded when the build starts and re-recorded only on re-approval. */
@@ -618,6 +620,8 @@ export interface ReviewRun {
   failedChecks?: string[];
   /** how many checks pb ran before the review: the part of a verdict that was executed, not judged */
   checksRun?: number;
+  /** hash of the spec text when the review started: what it judged against */
+  specHash?: string;
 }
 
 export const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);

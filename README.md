@@ -18,8 +18,8 @@ never saw the build. Your engineering standards live in AGENTS.md, written once.
 /pb:fix [ids]         fix review findings in a fresh fenced session (all open ones by default): each finding fixed
                       wherever the change repeats it, proven by a test seen failing first; pb runs the checks after
                       each lap and offers the follow-up review; each lap is an /pb:undo point. A finding filed against
-                      the spec is fixed in the spec: pb shows the contract's diff and you re-approve it with one
-                      answer, then /pb:review checks the delta. Text after the ids directs
+                      the spec is fixed in the spec: pb re-approves that edit and posts its diff (an edit
+                      beyond the picked findings' sections waits for /pb:build), then /pb:review checks the delta. Text after the ids directs
                       the fixes (`/pb:fix spec 5 6 use one REPEATABLE READ read`): it binds where it differs
                       from a finding's Fix, the others take their Fix as written, and the lap records each
                       choice in the spec's Decisions so the next review judges against it
@@ -271,7 +271,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `maxConcurrent` | 0 (uncapped) | cap on concurrent fresh runs (explorer, try, spec-review, map, verifier share one engine); extra runs queue FIFO; `~/.pi/agent/pb/config.json` caps every project, and `PI_PB_MAX_CONCURRENT` outranks both |
 | `taskChecks` | `"end"` | `"end"`: the full check after the last task (each task compiled, and its own `Test:` run when it proved itself red); `"each"`: also a check after every task |
 | `askTimeoutSec` | 300 | how long a planning or spec-writing dialog waits before the question stays open; a dialog on the way into a build takes pb's choice; 0 = forever |
-| `reviewAfterBuildSec` | 600 | how long the "review it now?" question after a completed build waits (idle: any key restarts it) before pb starts `/pb:review` itself; 0 = never ask. Never in a headless run |
+| `reviewAfterBuildSec` | 600 | how long the "review it now?" question after a completed build or fix run waits (idle: any key restarts it) before pb starts `/pb:review` itself; 0 = never ask. Never in a headless run |
 | `specWaitSec` | 0 | how long `/pb:build` waits for the spec before yielding to the pending offer; 0 = wait as long as it takes (for slow local models) |
 | `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, and the planning and spec-review guards |

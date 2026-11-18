@@ -2691,40 +2691,64 @@ test("fix: a finding filed against the spec is numbered for /pb:fix at any prior
   assert.deepEqual(t.progress("order-cancellation").review.findings.map((f: Finding) => f.title), ["Out of scope must name partial refunds"]);
 });
 
-test("fix: a spec finding's lap edits the section it points at and nothing else, and you re-approve the change from its diff", async () => {
+/** The lap a spec finding gets: it rewrites the line the finding points at, as its Fix says. */
+const fixesTheSpecLine = async (text: string, tool: (name: string, params: object) => Promise<{ error?: string }>) => {
+  if (!text.startsWith("[pb:fix order-cancellation]")) return;
+  const edit = await tool("pb_update_spec", { section: "Out of scope", mode: "edit", old: "Refunds.", new: "Refunds, partial or full." });
+  assert.equal(edit.error, undefined, edit.error ?? "");
+  await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a spec line" }], tests: "none: a spec line" });
+};
+
+test("fix: a spec finding's lap edits the section it points at and nothing else, and pb re-approves that edit, showing its diff", async () => {
   const t = await reviewedWithSpecFinding();
   let goalRefusal: string | undefined;
   t.agent.script = async (text, tool) => {
-    if (!text.startsWith("[pb:fix order-cancellation]")) return;
-    goalRefusal = (await tool("pb_update_spec", { section: "Goal", mode: "edit", old: "Cancel orders.", new: "Cancel any order." })).error;
-    const edit = await tool("pb_update_spec", { section: "Out of scope", mode: "edit", old: "Refunds.", new: "Refunds, partial or full." });
-    assert.equal(edit.error, undefined, edit.error ?? "");
-    await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a spec line" }], tests: "none: a spec line" });
+    if (text.startsWith("[pb:fix order-cancellation]")) goalRefusal = (await tool("pb_update_spec", { section: "Goal", mode: "edit", old: "Cancel orders.", new: "Cancel any order." })).error;
+    await fixesTheSpecLine(text, tool);
   };
-  t.selects.push("Re-approve these changes");
   await t.run("fix", "order-cancellation 1");
   assert.match(goalRefusal ?? "", /may change only order-cancellation's Design and Decisions, and "out of scope" for the findings filed against the spec/);
   assert.match(t.read(specRel), /## Goal\nCancel orders\.\n## Out of scope\nRefunds, partial or full\./);
-  const diff = t.posts.find((x) => x.includes("**The fix changed the approved contract** —"))!;
-  assert.match(diff, /```diff\n- Refunds\.\n\+ Refunds, partial or full\.\n```/);
-  assert.ok(t.selectTitles.some((x) => /^Re-approve order-cancellation\? The fix changed its contract: ## Out of scope \(−1 \+1\)/.test(x)));
-  assert.ok(t.posts.some((x) => /^\*\*Spec re-approved\*\* — order-cancellation's revised contract/.test(x)));
+  // No question: the edit you asked for by number is approved, and the summary shows it and how to undo it.
+  assert.ok(!t.selectTitles.some((x) => /^Re-approve/.test(x)), t.selectTitles.join("\n"));
+  const summary = t.posts.find((x) => x.includes("**Spec updated and re-approved: ## Out of scope (−1 +1).**"))!;
+  assert.ok(summary, t.posts.join("\n---\n"));
+  assert.match(summary, /```diff\n- Refunds\.\n\+ Refunds, partial or full\.\n```/);
+  assert.match(summary, /\*\*If you don't agree with them:\*\*\n- The wording only: `\/pb:fix order-cancellation 1 <how to word it>` runs a short lap on the same finding;/);
+  assert.match(summary, /- The whole fix run: `\/pb:undo` puts back the spec and the code/);
+  assert.match(summary, /\*\*Next:\*\* `\/pb:review` checks the delta\./);
   assert.equal(t.progress("order-cancellation").approval.contractHash, contractHash(t.read(specRel)));
-  assert.ok(t.selectTitles.some((x) => /^Fixes for order-cancellation are done: .*Review them now\?/.test(x))); // then the review is offered
+  assert.ok(t.selectTitles.some((x) => /^Fixes for order-cancellation are done: .*Review them now\?$/.test(x))); // then the review is offered
 });
 
-test("fix: a contract change nobody approves stays unapproved, as it was, and no review is offered over it", async () => {
+test("fix: a contract change beyond the sections the picked spec findings name is not approved, and no review is offered over it", async () => {
   const t = await reviewedWithSpecFinding();
   const approvedBefore = t.progress("order-cancellation").approval.contractHash;
   t.agent.script = async (text, tool) => {
-    if (!text.startsWith("[pb:fix order-cancellation]")) return;
-    await tool("pb_update_spec", { section: "Out of scope", mode: "edit", old: "Refunds.", new: "Refunds, partial or full." });
-    await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a spec line" }], tests: "none" });
+    // Someone edits the Goal by hand while the lap runs: no finding you picked asked for that.
+    if (text.startsWith("[pb:fix order-cancellation]")) fs.writeFileSync(path.join(t.repo, specRel), t.read(specRel).replace("Cancel orders.", "Cancel any order."));
+    await fixesTheSpecLine(text, tool);
   };
-  await t.run("fix", "order-cancellation 1"); // Enter on the question: its first, safe answer
+  await t.run("fix", "order-cancellation 1");
   assert.equal(t.progress("order-cancellation").approval.contractHash, approvedBefore);
-  assert.ok(t.posts.some((x) => /^Not re-approved: `\/pb:build order-cancellation` re-approves the contract when you're ready/.test(x)));
+  const summary = t.posts.find((x) => x.includes("pb did not approve it"))!;
+  assert.match(summary, /\*\*The fix changed the approved contract, and pb did not approve it\*\*: it also changed ## goal, which no spec finding you picked points at\. `\/pb:build order-cancellation` shows the change/);
+  assert.match(summary, /\*\*Next:\*\* `\/pb:build order-cancellation` re-approves the revised contract/);
   assert.ok(!t.selectTitles.some((x) => /Review them now\?/.test(x)));
+});
+
+test("fix: with nobody there, the follow-up review starts itself after reviewAfterBuildSec", async () => {
+  const t = await reviewedWithSpecFinding();
+  const reviews = () => t.posts.filter((x) => /Review — order-cancellation/.test(x)).length;
+  const before = reviews();
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/config.json"), JSON.stringify({ ...JSON.parse(t.read(".pi/pb/config.json")), reviewAfterBuildSec: 0.001 }));
+  t.agent.script = fixesTheSpecLine;
+  await t.run("fix", "order-cancellation 1");
+  const offered = t.selectTitles.findIndex((x) => /^Fixes for order-cancellation are done: .*Review them now\? With no answer, pb starts the review in <1s\.$/.test(x));
+  assert.ok(offered >= 0, t.selectTitles.join("\n"));
+  assert.equal(t.dialogTimeouts[offered], 1);
+  assert.equal(reviews(), before + 1);
+  assert.match(t.posts.filter((x) => /Review — order-cancellation/.test(x)).at(-1)!, /Review — order-cancellation \(follow-up\)/);
 });
 
 test("fix: a lap fixing only code findings can't touch the contract, even a section a spec finding elsewhere names", async () => {
@@ -2743,21 +2767,3 @@ test("fix: a lap fixing only code findings can't touch the contract, even a sect
   assert.match(t.read(specRel), /## Out of scope\nRefunds\.\n/);
 });
 
-test("fix: re-approval accepts only the text its diff showed — an edit made while the question is open is not approved", async () => {
-  const t = await reviewedWithSpecFinding();
-  const approvedBefore = t.progress("order-cancellation").approval.contractHash;
-  t.agent.script = async (text, tool) => {
-    if (!text.startsWith("[pb:fix order-cancellation]")) return;
-    await tool("pb_update_spec", { section: "Out of scope", mode: "edit", old: "Refunds.", new: "Refunds, partial or full." });
-    await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a spec line" }], tests: "none" });
-  };
-  t.selects.push("Re-approve these changes");
-  process.env.MOCK_SELECT_TOUCH = path.join(t.repo, specRel); // someone saves the spec while the question is open
-  try {
-    await t.run("fix", "order-cancellation 1");
-  } finally {
-    delete process.env.MOCK_SELECT_TOUCH;
-  }
-  assert.ok(t.posts.some((x) => /^\*\*Not re-approved\*\* — order-cancellation's spec changed after the diff was shown/.test(x)));
-  assert.equal(t.progress("order-cancellation").approval.contractHash, approvedBefore);
-});

@@ -1058,15 +1058,21 @@ itself, and it can change nothing else in the spec. A finding that needs the
 Goal, Contracts or Acceptance changed is reported as skipped, for you to revise
 with `/pb:spec`. **A finding filed against the spec itself is fixed in the spec**:
 its lap may edit the section the finding points at (and no other part of the
-contract), and when the run ends pb posts the contract's diff and asks you to
-re-approve it. Enter leaves it unapproved, as it was (`/pb:build` re-approves
-later, `/pb:undo` puts a lap back); re-approving accepts exactly the text the
-diff showed, and the follow-up review then judges the code against it. One the lap didn't finish is reported open, and the next lap
+contract), and when the run ends pb re-approves that edit without asking and
+posts its diff: you picked the finding by number, and its Fix is the text to
+write. Not happy with the wording? `/pb:fix <spec> <n> <how to word it>` runs a
+short lap on the same finding; `/pb:undo` puts a whole lap back. pb approves
+only a change confined to the sections the picked spec findings point at: a hand
+edit made elsewhere in the contract meanwhile is shown, not approved, and
+`/pb:build` re-approves it. The follow-up review judges the code against the
+approved text, and a reworded spec counts as a change for it. One the lap didn't finish is reported open, and the next lap
 takes it. The report ends the lap: nothing it does afterwards would be checked,
 so it gets no further turn. **Esc in a lap pauses it**: pb doesn't push it to
 report, and waits until you type `continue` or tell it what to do instead. If
 the lap stops on its own without reporting, pb reminds it twice, then ends the
-run as silent. If the fixes change the approved contract, `/pb:build` must re-approve
+run as silent. When everything is fixed, the "review them now?" question starts
+the review itself after `reviewAfterBuildSec` with no answer, as after a build.
+If the contract changed in a way pb didn't approve, `/pb:build` must re-approve
 it before the review runs; otherwise the next `/pb:review` is a **follow-up**:
 it checks the fixes and nothing else: whether each previous finding is fixed,
 what the fixes broke or left inconsistent, and any new P0 or P1 in the lines

@@ -13,7 +13,7 @@ import { tip } from "./help.ts";
 import { acceptanceDrift, designProvenance, extraBlock, findingLine, isNone, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief } from "./prompts.ts";
 import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, type Verification, unparsedReport, verdictOf, verificationLines, verifyFindings } from "./review.ts";
 import { runFresh } from "./runner.ts";
-import { acceptanceCriteria } from "./spec.ts";
+import { acceptanceCriteria, specHash } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, isSpecFinding, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, mapCounts, mapTagOf, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
@@ -537,7 +537,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       const ledger = ledgerFindings(secondLook.findings);
       if (ledger.length) store.event(run.name, { type: "review-findings", review: run.id, findings: ledger });
       if (m.complete) {
-        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings, acceptance: m.acceptance, ...(run.repoBefore ? { repos: run.repoBefore } : {}), ...(run.failedChecks?.length ? { failedChecks: run.failedChecks } : {}) };
+        p.review = { at: now(), snapshot: run.before?.commit, verdict: m.verdict, findings: m.findings, acceptance: m.acceptance, ...(run.repoBefore ? { repos: run.repoBefore } : {}), ...(run.failedChecks?.length ? { failedChecks: run.failedChecks } : {}), ...(run.specHash ? { specHash: run.specHash } : {}) };
         // A pass only finishes a finished build: with tasks still open the phase stays,
         // or the next /pb:build strands and /pb:archive offers a half-built spec. A failed verifier run
         // keeps it unreviewed too: its answers cannot turn a failed check into a clean pass.
@@ -836,7 +836,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
           else siblingSince.push(...changedPaths(r.root, was, now_).map((f) => inRepo(r.name, f)));
         }
         const since = [...changedPaths(ctx.cwd, prevReview.snapshot, before.commit), ...siblingSince];
-        const unchanged = !since.length && !siblingUnknown && !largeFiles.length;
+        // The spec lives outside the snapshot: a fix that only reworded it changed what the code is judged against.
+        const specSince = !!prevReview.specHash && !!loaded && prevReview.specHash !== specHash(loaded.md);
+        const unchanged = !since.length && !siblingUnknown && !largeFiles.length && !specSince;
         // The last verdict was capped by a red check, which can fail for reasons outside the change (a port in use, a
         // service down): on an unchanged tree, a check that is green now earns a follow-up instead of "nothing changed".
         const redBefore = !!prevReview.failedChecks?.length;
@@ -846,7 +848,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         // A focus is a question the last review wasn't asked (it may have started by itself after the build): on an
         // unchanged tree it is answered over the whole change, never skipped.
         if (unchanged && !focus && !redBefore) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
-        if (!unchanged || redBefore) previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since, acceptance: prevReview.acceptance };
+        if (!unchanged || redBefore) previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: specSince ? [...since, store.rel("specs", name!, "spec.md")] : since, acceptance: prevReview.acceptance };
       }
       // Fix laps report into their own sessions, not the brief: hand the follow-up review the
       // reports (claims plus test results) so it judges evidence, capped like any test output.
@@ -937,6 +939,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         passes: [],
         ...(failedChecks.length ? { failedChecks } : {}),
         checksRun: results.length,
+        ...(loaded ? { specHash: specHash(loaded.md) } : {}),
       };
       await reviewNext(ctx, store, run);
     },

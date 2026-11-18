@@ -443,18 +443,20 @@ export function removedLines(before: string, after: string): string[] {
  * lines it gained, whole (a cut could hide the change itself); then any approved decision that is gone. Posted to the
  * chat, where it scrolls and stays; the dialog only asks.
  */
-export const contractChanges = (approved: string | undefined, md: string, droppedDecisions: string[]): { diff: string; summary: string } => {
+export const contractChanges = (approved: string | undefined, md: string, droppedDecisions: string[]): { diff: string; summary: string; keys: string[] } => {
   const was = new Map(specTextBlocks(approved ?? "").map((b) => [b.key, b]));
   const contract = (key: string) => key !== "section:design" && key !== "section:decisions";
   const now = specTextBlocks(md).filter((b) => contract(b.key));
   const keys = [...new Set([...[...was.keys()].filter(contract), ...now.map((b) => b.key)])];
   const parts: string[] = [];
   const summary: string[] = [];
+  const changed: string[] = [];
   const count = (removed: number, added: number) => [removed ? `−${removed}` : "", added ? `+${added}` : ""].filter(Boolean).join(" ");
   for (const key of keys) {
     const before = was.get(key)?.text ?? "";
     const after = now.find((b) => b.key === key)?.text ?? "";
     if (before === after) continue;
+    changed.push(key);
     const removed = removedLines(before, after);
     const added = removedLines(after, before);
     const label = blockLabel(was.get(key) ?? now.find((b) => b.key === key)!);
@@ -462,10 +464,11 @@ export const contractChanges = (approved: string | undefined, md: string, droppe
     parts.push(`**${label}** (${count(removed.length, added.length) || "lines reordered"})\n\`\`\`diff\n${[...removed.map((l) => `- ${l}`), ...added.map((l) => `+ ${l}`)].join("\n")}\n\`\`\``);
   }
   if (droppedDecisions.length) {
+    changed.push("section:decisions");
     summary.push(`## Decisions (${count(droppedDecisions.length, 0)})`);
     parts.push(`## Decisions — approved lines removed\n\`\`\`diff\n${droppedDecisions.map((l) => `- ${l}`).join("\n")}\n\`\`\``);
   }
-  return { diff: parts.join("\n\n"), summary: summary.join(", ") };
+  return { diff: parts.join("\n\n"), summary: summary.join(", "), keys: changed };
 };
 
 /** A review answers for the exact markdown it saw: a pass stops covering the spec the moment the text changes. */

@@ -13,7 +13,7 @@ import { snapshot } from "./checkpoint.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, isSpecFinding, now, readEvents } from "./store.ts";
 import { contractChanges, removedLines, sectionKeyAtLine, sectionOf, specHash } from "./spec.ts";
 import { runVerify } from "./verify.ts";
-import { type ReplacedSessionContext, approvalDrift, approveSpec, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, sleep, specOfSession, specRef, stop, tree, withChecking } from "./kit.ts";
+import { approvalDrift, approveSpec, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, sleep, specOfSession, specRef, stop, tree, withChecking } from "./kit.ts";
 import { tip } from "./help.ts";
 import { notifyDesktop } from "./notify.ts";
 
@@ -343,28 +343,21 @@ export function registerFix(pi: ExtensionAPI) {
   };
 
   /**
-   * Ask, in the home session, whether to approve the contract the laps changed. Enter, Esc and no answer all leave it
-   * unapproved, as it was: /pb:build re-approves later and /pb:undo puts a lap back. Approving goes through
-   * approveSpec, the build's own path, and only for the text the diff showed. True when it was approved.
+   * Approve the contract the laps changed, without asking. You picked the spec findings by number, each carrying the
+   * text to write, and a lap could edit only the sections they point at: a change confined to those sections is the
+   * one you asked for, and a dialog would only hold an unattended run. Anything beyond them (a hand edit made
+   * meanwhile, another session's) is not approved here: /pb:build shows it and asks. Approval goes through
+   * approveSpec, the build's own path, for exactly the text the diff shows.
    */
-  const askReapproval = async (c: ReplacedSessionContext, store: Store, spec: string, shown: { md: string; changes: ReturnType<typeof contractChanges> }): Promise<boolean> => {
-    const LATER = "Not now: leave it unapproved";
-    const APPROVE = "Re-approve these changes";
-    const choice = await choose(c, store, `Re-approve ${spec}? The fix changed its contract: ${shown.changes.summary}. The diff is in the chat above.`, [LATER, APPROVE], LATER);
-    if (choice !== APPROVE) {
-      await c.sendMessage({ customType: "pb", content: `Not re-approved: \`/${cmd("build")} ${spec}\` re-approves the contract when you're ready, or \`/${cmd("undo")}\` puts a lap back.`, display: true }, { triggerTurn: false });
-      return false;
-    }
+  const reapprove = (store: Store, spec: string, shown: { md: string; changes: ReturnType<typeof contractChanges> }, allowed: string[]): { ok: true } | { ok: false; why: string } => {
+    const beyond = shown.changes.keys.filter((k) => !allowed.includes(k));
+    if (beyond.length) return { ok: false, why: `it also changed ${beyond.map((k) => (k === "header" ? "the header" : `## ${k.replace(/^section:/, "")}`)).join(", ")}, which no spec finding you picked points at` };
     const loaded = loadSpec(store, spec);
     const p = store.progress(spec);
-    if (!loaded || !p || specHash(loaded.md) !== specHash(shown.md)) {
-      await c.sendMessage({ customType: "pb", content: `**Not re-approved** — ${spec}'s spec changed after the diff was shown, so what you approved isn't what stands. \`/${cmd("build")} ${spec}\` shows it again.`, display: true }, { triggerTurn: false });
-      return false;
-    }
+    if (!loaded || !p || specHash(loaded.md) !== specHash(shown.md)) return { ok: false, why: "the spec changed while pb was reading it" };
     approveSpec(store, p, loaded.md, loaded.spec);
     store.saveProgress(p);
-    await c.sendMessage({ customType: "pb", content: `**Spec re-approved** — ${spec}'s revised contract is the one the review now judges the code against.`, display: true }, { triggerTurn: false });
-    return true;
+    return { ok: true };
   };
 
   /**
@@ -379,6 +372,9 @@ export function registerFix(pi: ExtensionAPI) {
     // Taken now: each lap replaces the session, and a replaced context must not be read again.
     const cwd = ctx.cwd;
     const numberOf = new Map(allOpen.map((f, i) => [f, i + 1] as const));
+    // Read before any lap edits the spec: the findings' line numbers are the reviewed text's.
+    const allowed = unlockedSections(store, spec, first).specSections ?? [];
+    const specNumbers = first.filter((f) => isSpecFinding(f, spec)).map((f) => numberOf.get(f)!).join(" ");
     const label = (f: Finding) => `#${numberOf.get(f) ?? "?"} ${f.title}`;
     let live: ExtensionCommandContext = ctx;
     let remaining = first;
@@ -447,12 +443,13 @@ export function registerFix(pi: ExtensionAPI) {
         : phaseHeader(open.length ? "❌" : "✅", open.length ? "Fixes stopped" : "Fixes complete", spec, ...outcome, lapCount, time);
     // A contract the laps changed is re-approved from its diff when the session the run ends in can ask; headless,
     // /pb:build does it. The summary says which, so it is built once that is known.
-    const summaryFor = (reapproval: ReturnType<typeof contractReapproval>): string => {
-      const reviewStep = reapproval
-        ? `re-approve the contract change below, then \`/${cmd("review")}\` checks the delta.`
+    const summaryFor = (reapproval?: ReturnType<typeof contractReapproval>, approval?: ReturnType<typeof reapprove>): string => {
+      const approved = approval?.ok === true;
+      const reviewStep = !drift || approved
+        ? `\`/${cmd("review")}\` checks the delta.`
         : drift
           ? `\`/${cmd("build")} ${spec}\` re-approves the ${drift === "missing" ? "spec as it stands (its approved copy is missing or changed)" : "revised contract (the fix changed it)"}, then \`/${cmd("review")}\` can check the delta.`
-          : `\`/${cmd("review")}\` checks the delta.`;
+          : "";
       const next = open.length
         ? `\`/${cmd("fix")}${ids ? ` ${ids}` : ""}\` (or fix them by hand), then ${reviewStep}`
         : skipped.length
@@ -471,47 +468,68 @@ export function registerFix(pi: ExtensionAPI) {
           !silent && !checked.length && !failure ? "no checks configured for this spec" : "",
         ),
         ...(failure ? ["", `**pb's check after the last lap failed**, so its fixes don't count yet:`, "", failure] : []),
-        ...(reapproval
-          ? ["", `**The fix changed the approved contract** — re-approving accepts these changes, and the review then judges the code against them:`, "", reapproval.changes.diff]
-          : drift
-            ? ["", `**The fix changed the approved contract.** \`/${cmd("build")} ${spec}\` must re-approve it before \`/${cmd("review")}\` can run.`]
-            : []),
-        // Variants of the next step; a lap that changed the contract has one move, already named above.
-        ...(drift ? [] : ["", tip("fix.done", { spec, ...(open.length && ids ? { ids } : {}) })]),
+        ...(reapproval && approval?.ok
+          ? [
+              "",
+              `**Spec updated and re-approved: ${reapproval.changes.summary}.** These are the edits the spec findings you picked asked for, and the lap could change nothing else in the contract; the review judges the code against them:`,
+              "",
+              reapproval.changes.diff,
+              "",
+              "**If you don't agree with them:**",
+              `- The wording only: \`/${cmd("fix")} ${spec} ${specNumbers || "<n>"} <how to word it>\` runs a short lap on the same finding${specNumbers.includes(" ") ? "s" : ""}; your text binds over the Fix, and the result is re-approved the same way.`,
+              `- The whole fix run: \`/${cmd("undo")}\` puts back the spec and the code as they were before a lap.`,
+              `- Anything else in the contract: edit it, then \`/${cmd("build")} ${spec}\` shows the change and re-approves it.`,
+            ]
+          : reapproval && approval && !approval.ok
+            ? ["", `**The fix changed the approved contract, and pb did not approve it**: ${approval.why}. \`/${cmd("build")} ${spec}\` shows the change and re-approves it before \`/${cmd("review")}\` can run:`, "", reapproval.changes.diff]
+            : drift
+              ? ["", `**The fix changed the approved contract.** \`/${cmd("build")} ${spec}\` must re-approve it before \`/${cmd("review")}\` can run.`]
+              : []),
+        // Variants of the next step; a contract still waiting for approval has one move, already named above.
+        ...(drift && !approved ? [] : ["", tip("fix.done", { spec, ...(open.length && ids ? { ids } : {}) })]),
       ].join("\n");
     };
     // The follow-up review is the next step whenever nothing is left open: offer it rather than leave it to memory.
-    // A contract change waiting for re-approval comes first; the review is offered once it is approved.
+    // A contract change still waiting for approval comes first; the review is offered once it is approved.
     const reviewable = !silent && !failure && !open.length;
-    const offerReview = reviewable && !drift;
     // The end of /pb:fix is the moment the human has walked away from: the summary alone goes unseen. A complete
     // run asks whether to review, and that question notifies with the outcome; a stopped one notifies here.
     const outcomeText = outcome.filter(Boolean).join(", ");
-    if (!offerReview && store.config().notify) notifyDesktop("pb: fixes stopped", `${spec}: ${outcomeText}`);
+    const stopped = () => store.config().notify && notifyDesktop("pb: fixes stopped", `${spec}: ${outcomeText}`);
     try {
       if (!home) throw new Error("no home session");
       await live.switchSession(home, {
         withSession: async (c) => {
+          // Headless, nothing is approved unseen: /pb:build does it, as before.
           const reapproval = drift === "changed" && c.hasUI ? contractReapproval(store, spec) : undefined;
-          await c.sendMessage({ customType: "pb", content: summaryFor(reapproval), display: true }, { triggerTurn: false });
-          const approved = reapproval ? await askReapproval(c, store, spec, reapproval) : false;
-          if (!offerReview && !(approved && reviewable)) return;
+          const approval = reapproval ? reapprove(store, spec, reapproval, allowed) : undefined;
+          await c.sendMessage({ customType: "pb", content: summaryFor(reapproval, approval), display: true }, { triggerTurn: false });
+          if (!reviewable || (drift && !approval?.ok)) return void stopped();
+          // Like a finished build's offer: with nobody there, the review starts itself after reviewAfterBuildSec,
+          // dispatched as the command you would type. It can't change your files, so starting unasked costs only time.
+          const waitSec = store.config().reviewAfterBuildSec;
+          const auto = waitSec > 0 && c.hasUI;
           const NOW = "Review the fixes now";
           const LATER = "Later";
-          if ((await choose(c, store, `Fixes for ${spec} are done: ${outcomeText}. Review them now?`, [NOW, LATER], LATER)) === NOW) {
-            c.ui.setEditorText(`/${cmd("review")} ${spec}`);
-            c.ui.notify(`Press Enter to review ${spec}: the follow-up looks at the previous findings and what changed since.`, "info");
+          const title = `Fixes for ${spec} are done: ${outcomeText}. Review them now?${auto ? ` With no answer, pb starts the review in ${duration(waitSec * 1000)}.` : ""}`;
+          if ((await choose(c, store, title, [NOW, LATER], auto ? NOW : LATER, undefined, auto ? waitSec : undefined)) !== NOW) return;
+          if (auto) {
+            void Promise.resolve(c.sendUserMessage(`/${cmd("review")} ${spec}`, { expandPromptTemplates: true })).catch(() => undefined);
+            return;
           }
+          c.ui.setEditorText(`/${cmd("review")} ${spec}`);
+          c.ui.notify(`Press Enter to review ${spec}: the follow-up looks at the previous findings and what changed since.`, "info");
         },
       });
     } catch {
       // Home is gone: the summary still lands in the spec's events for the next session to find.
-      store.event(spec, { type: "fix-summary", summary: summaryFor(undefined), ms });
+      stopped();
+      store.event(spec, { type: "fix-summary", summary: summaryFor(), ms });
     }
   };
 
   pi.registerCommand(cmd("fix"), {
-    description: "Fix review findings in a fresh fenced session: /pb:fix [spec] [finding ids] [direction]. No ids = all open findings: P0-P2, and any finding filed against the spec (a P3 in the code is never open: fix it by hand). A spec finding is fixed in the spec, and you re-approve the change from its diff. Text after the ids directs the fixes: it binds where it differs from a finding's Fix, and the rest take their Fix as written. Run /pb:review afterwards: it checks only those findings and what changed",
+    description: "Fix review findings in a fresh fenced session: /pb:fix [spec] [finding ids] [direction]. No ids = all open findings: P0-P2, and any finding filed against the spec (a P3 in the code is never open: fix it by hand). A spec finding is fixed in the spec, and pb re-approves that edit, posting its diff. Text after the ids directs the fixes: it binds where it differs from a finding's Fix, and the rest take their Fix as written. Run /pb:review afterwards: it checks only those findings and what changed",
     getArgumentCompletions: fixCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
