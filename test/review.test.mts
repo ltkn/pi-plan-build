@@ -2492,3 +2492,66 @@ test("overengineering: the review brief names the dependencies the change adds, 
   await t.run("review");
   assert.match(briefOf(t), /## Dependencies this change adds\n\n- left-pad \(package\.json\)\n- requests \(tools\/requirements\.txt\)\n\nEach needs its reason in the spec; one with none is an Overengineering finding\./);
 });
+
+test("review after build: with nobody there to answer, pb starts the review itself, on the offer's own countdown", async () => {
+  const t = setup({ verify: "true", reviewAfterBuildSec: 0.001, askTimeoutSec: 0.001 });
+  await written(t);
+  t.agent.script = diligent;
+  t.selects.push("<timeout>", "<timeout>"); // the offer, then the review's one-time reviewer-model question
+  await t.run("build");
+  const offered = t.selectTitles.findIndex((x) => /^order-cancellation is built\. Review it now\? With no answer, pb starts the review in <1s\.$/.test(x));
+  assert.ok(offered >= 0, t.selectTitles.join("\n"));
+  assert.equal(t.dialogTimeouts[offered], 1); // reviewAfterBuildSec, not askTimeoutSec
+  assert.ok(t.posts.some((x) => /No answer within 1 min\*\*, so pb went on with its default — "Review now, in a fresh session"/.test(x)));
+  // The review's own question went on too: an unattended review never waits on it.
+  assert.ok(t.posts.some((x) => /went on with its default — "Keep p\/m" — for: The reviewer runs on p\/m/.test(x)));
+  assert.equal(JSON.parse(t.read(".pi/pb/config.json")).reviewer.model, undefined);
+  assert.ok([...t.names.values()].includes("review: order-cancellation · spec"));
+  assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS/);
+  assert.equal(t.progress("order-cancellation").phase, "reviewed");
+});
+
+test("review after build: answered Not now, nothing starts and the build stays built", async () => {
+  const t = setup({ verify: "true", reviewAfterBuildSec: 0.001 });
+  await written(t);
+  t.agent.script = diligent;
+  t.selects.push("Not now");
+  await t.run("build");
+  assert.ok(t.selectTitles.some((x) => /^order-cancellation is built\. Review it now\?/.test(x)));
+  assert.equal(t.progress("order-cancellation").phase, "built");
+  assert.ok(![...t.names.values()].some((n) => n.startsWith("review: ")));
+  assert.match(t.posts.at(-1)!, /Build complete — order-cancellation/);
+});
+
+test("review after build: 0 turns the offer off, and a headless build never offers it", async () => {
+  const off = setup({ verify: "true", reviewAfterBuildSec: 0 });
+  await written(off);
+  off.agent.script = diligent;
+  await off.run("build");
+  assert.equal(off.progress("order-cancellation").phase, "built");
+  assert.ok(!off.selectTitles.some((x) => /is built\. Review it now\?/.test(x)));
+
+  const headless = setup({ verify: "true", reviewAfterBuildSec: 0.001 });
+  await written(headless);
+  headless.agent.script = diligent;
+  headless.runtime().hasUI = false;
+  await headless.run("build", "--here");
+  assert.equal(headless.progress("order-cancellation").phase, "built");
+  assert.ok(![...headless.names.values()].some((n) => n.startsWith("review: ")));
+});
+
+test("review: a focus is answered even when nothing changed since the last review", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  await t.run("review");
+  assert.equal(t.progress("order-cancellation").phase, "reviewed");
+  const reviews = t.instructions.filter((i) => i.startsWith("[pb:review]")).length;
+  await t.run("review", "the cancel endpoint's authorization");
+  assert.doesNotMatch(t.notes.at(-1) ?? "", /Nothing changed since the last review/);
+  assert.equal(t.instructions.filter((i) => i.startsWith("[pb:review]")).length, reviews + 1);
+  assert.match(briefOf(t), /# Review: order-cancellation — focus: the cancel endpoint's authorization/);
+  await t.run("review");
+  assert.match(t.notes.at(-1)!, /Nothing changed since the last review \(pass\)/); // no focus, nothing changed: still skipped
+});

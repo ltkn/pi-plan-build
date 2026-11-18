@@ -36,6 +36,7 @@ export function setup(config: object = {}) {
       maxAttempts: 2,
       baseline: false,
       notify: false,
+      reviewAfterBuildSec: 0, // a finished build offers no review unless a test asks for it
       ...config,
       reviewer: { idleSec: 0.2, ...(c.reviewer ?? {}) },
       specReviewer: { ...(c.specReviewer ?? {}) },
@@ -180,7 +181,15 @@ export function setup(config: object = {}) {
         append(file(), { type: "custom_message", content: m.content });
         if (o?.triggerTurn) turn(m.content);
       },
-      sendUserMessage: (t: string) => {
+      sendUserMessage: (t: string, o?: { expandPromptTemplates?: boolean }) => {
+        // As in Pi: with expandPromptTemplates, a /command runs its handler with a command context, once the run
+        // that sent it has settled; nothing reaches the conversation.
+        const [, command, args = ""] = t.match(/^\/(\S+)(?: ([\s\S]*))?$/) ?? [];
+        if (o?.expandPromptTemplates && command && self.cmds[command]) {
+          const after = running;
+          dispatched.push(after.then(() => rt.cmds[command].handler(args, rt.ctx)));
+          return;
+        }
         append(file(), { type: "message", message: { role: "user", content: [{ type: "text", text: t }] } });
         turn(t);
       },
@@ -306,6 +315,8 @@ export function setup(config: object = {}) {
   // A tool result that asks for more (pb_task_done without terminate) continues the run, as in Pi.
   let continuation: string | undefined;
   let running: Promise<void> = Promise.resolve();
+  /** Commands an extension dispatched (sendUserMessage with expandPromptTemplates), each after the run that sent it. */
+  const dispatched: Promise<unknown>[] = [];
   let queued = 0; // runs queued or going: Pi isn't idle
   const callTool: Tool = async (name, params) => {
     const call = { toolName: name, input: params };
@@ -398,10 +409,13 @@ export function setup(config: object = {}) {
 
   const settle = async () => {
     let prev: Promise<void>;
+    let commands: number;
     do {
       prev = running;
+      commands = dispatched.length;
       await prev;
-    } while (prev !== running);
+      await Promise.all(dispatched);
+    } while (prev !== running || commands !== dispatched.length);
   };
   const run = async (name: string, args = "") => {
     await rt.cmds[`pb:${name}`].handler(args, rt.ctx);

@@ -74,6 +74,7 @@ you: "Only PENDING orders. Not soft delete: audit lives elsewhere."
      → coherence (3+ tasks) → full suite → fix → full suite ✓
    → **✅ Build complete — order-cancellation** · 3/3 tasks · 25m (elapsed in parentheses when pauses count)
      **Next:** `/pb:review`, then `/pb:commit` and `/pb:archive`
+   → "Review it now?": with no answer within 10 minutes, pb starts the review itself
 /pb:review
    → a spec pass in a fresh session: every acceptance criterion met with
      evidence, not met, or not verified (silence is not a pass), plus decisions,
@@ -269,6 +270,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `maxConcurrent` | 0 (uncapped) | cap on concurrent fresh runs (explorer, try, spec-review, map, verifier share one engine); extra runs queue FIFO; `~/.pi/agent/pb/config.json` caps every project, and `PI_PB_MAX_CONCURRENT` outranks both |
 | `taskChecks` | `"end"` | `"end"`: the full check after the last task (each task compiled, and its own `Test:` run when it proved itself red); `"each"`: also a check after every task |
 | `askTimeoutSec` | 300 | how long a planning or spec-writing dialog waits before the question stays open; a dialog on the way into a build takes pb's choice; 0 = forever |
+| `reviewAfterBuildSec` | 600 | how long the "review it now?" question after a completed build waits (idle: any key restarts it) before pb starts `/pb:review` itself; 0 = never ask. Never in a headless run |
 | `specWaitSec` | 0 | how long `/pb:build` waits for the spec before yielding to the pending offer; 0 = wait as long as it takes (for slow local models) |
 | `testOutputCap` | 4000 | chars of test output shown to the agent and the reviewer |
 | `checkpoints` | true | per-task snapshots (git only) for `/pb:undo`, the changed-test report, the review's follow-ups, and the planning and spec-review guards |
@@ -279,7 +281,7 @@ latest review's verdict and findings, every acceptance status, and stats with
 | `specReviewer` | `{}` | `{"model": "provider/id", "thinking": "high"}` for the one fresh pre-T1 spec review; unset model = your session's, unset thinking = Pi's default. Only a P0 blocks; P1-P3 are advisory. Point it at `buildModel` to have the implementer model validate the plan |
 | `buildModel` | unset | `"provider/id"` to build on another model than the one you planned with |
 | `mapOnArchive` | false | `true`: `/pb:archive` updates the project map in AGENTS.md from the finished feature (a long cartographer run; `/pb:archive <name> --force` skips it for that one archive). Off, the map is updated when you run `/pb:map` |
-| `notify` | true | a desktop notification when pb asks you something, when a build pauses or finishes, or when a spec review finishes while you're elsewhere |
+| `notify` | true | a desktop notification when pb asks you something, when a build pauses or finishes (the review question stands in for the finish when it's asked), or when a spec review finishes while you're elsewhere |
 | `extra` | unset | your instructions added to a role's prompt: `{"plan", "spec", "build", "review", "adversarial", "map"}`; also read from `~/.pi/agent/pb/config.json`, applied first |
 | `checkpointAt` | 75 | past this % of the window (always before Pi's own compaction): a planning session writes its spec and is reset to it; a build uses it only when `buildReset` is `"threshold"`; 0 turns both off |
 | `buildReset` | `"task"` | what a build does between tasks: `"task"` resets at every boundary (the summary carries the done tasks, and the next task's prompt names their changed files and directs it to inspect what it depends on); `"threshold"` only past `checkpointAt`; `"never"` leaves compaction to Pi |

@@ -50,6 +50,8 @@ export interface Config {
   taskChecks: "end" | "each";
   /** How long a pb_ask dialog in a build waits before the build goes on with the recommendation (seconds; 0 = forever). */
   askTimeoutSec: number;
+  /** How long the "review it now?" offer after a finished build waits before pb starts the review itself (seconds, idle; 0 = never offer). */
+  reviewAfterBuildSec: number;
   /** How long /pb:build waits for the spec before yielding to the pending offer (seconds; 0 = wait as long as it takes). */
   specWaitSec: number;
   /** Chars of test output shown to the agent and the reviewer. */
@@ -124,6 +126,7 @@ export const DEFAULT_CONFIG: Config = {
   maxAttempts: 3,
   taskChecks: "end",
   askTimeoutSec: 300,
+  reviewAfterBuildSec: 600,
   specWaitSec: 0,
   testOutputCap: 4000,
   checkpoints: true,
@@ -163,6 +166,7 @@ function sanitizeConfig(raw: Partial<Config>): Config {
     maxConcurrent: num((raw as { maxConcurrent?: unknown }).maxConcurrent, 0), // unset or 0 = uncapped; the runner still floors non-integers
     taskChecks: (raw as { taskChecks?: unknown }).taskChecks === "each" ? "each" : "end",
     askTimeoutSec: num((raw as { askTimeoutSec?: unknown }).askTimeoutSec, DEFAULT_CONFIG.askTimeoutSec),
+    reviewAfterBuildSec: num((raw as { reviewAfterBuildSec?: unknown }).reviewAfterBuildSec, DEFAULT_CONFIG.reviewAfterBuildSec),
     specWaitSec: num((raw as { specWaitSec?: unknown }).specWaitSec, DEFAULT_CONFIG.specWaitSec),
     testOutputCap: num((raw as { testOutputCap?: unknown }).testOutputCap, DEFAULT_CONFIG.testOutputCap),
     checkpoints: bool((raw as { checkpoints?: unknown }).checkpoints, true),

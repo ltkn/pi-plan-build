@@ -20,7 +20,7 @@ import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Sto
 import { carriedP1s } from "./spec-review.ts";
 import { runVerify } from "./verify.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
-import { P_ORDER, approvalDrift, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, safely, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, withChecking } from "./kit.ts";
+import { P_ORDER, approvalDrift, choose, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, runtime, safely, sessionGone, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, withChecking } from "./kit.ts";
 import { markReviewed, unfinishedPhase } from "./phase.ts";
 import { safeLine } from "./markdown.ts";
 
@@ -547,6 +547,29 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     }
   };
 
+  /**
+   * The review a finished build is owed, offered as the build's turn settles. A build often finishes with nobody
+   * watching, so the offer goes on without you after reviewAfterBuildSec idle (any key restarts the countdown) and
+   * starts the review: it is read-only and frozen at its start, so starting it unasked risks only its cost. Only a
+   * command can open the review's session, so the review is dispatched as one, exactly as if you had typed it.
+   */
+  pi.on("agent_settled", async (e, ctx) => {
+    const offer = runtime.reviewOffer;
+    if (!offer || offer.session !== ctx.sessionManager.getSessionFile()) return;
+    runtime.reviewOffer = undefined;
+    // An aborted run means someone is at the keyboard (Esc): they choose what comes next.
+    if (e.aborted) return;
+    const store = new Store(ctx.cwd);
+    const waitSec = store.config().reviewAfterBuildSec;
+    if (!waitSec || store.progress(offer.spec)?.phase !== "built") return;
+    const REVIEW = "Review now, in a fresh session";
+    const LATER = "Not now";
+    const choice = await choose(ctx, store, `${offer.spec} is built. Review it now? With no answer, pb starts the review in ${duration(waitSec * 1000)}.`, [REVIEW, LATER], REVIEW, undefined, waitSec);
+    // What the dialog waited on may have moved meanwhile (an undo, a review started by hand, another session).
+    if (choice !== REVIEW || sessionGone(ctx) || store.progress(offer.spec)?.phase !== "built") return;
+    pi.sendUserMessage(`/${cmd("review")} ${offer.spec}`, { expandPromptTemplates: true });
+  });
+
   pi.registerCommand(cmd("review"), {
     description:
       "Independent review: a spec pass by a reviewer who never saw the build, in a fresh session you watch, then an adversarial pass in the background, against the spec or any uncommitted change's intent; pb brings you back with the result. Follow-ups look only at what changed (--full: everything). /pb:review done ends a review session now",
@@ -693,9 +716,11 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       const reviewSince = !full && p?.review?.snapshot ? commitTime(ctx.cwd, p.review.snapshot) : undefined;
       const largeFiles = skippedLargeFiles(ctx.cwd, reviewSince ?? (base ? commitTime(ctx.cwd, base) : undefined));
       if (!name && !changed.length && !largeFiles.length) return ctx.ui.notify("Nothing to review: there are no uncommitted changes.", "info");
+      const focus = name ? focusRest.trim() : "";
       const intent = name ? "" : rest || (ctx.hasUI ? ((await ctx.ui.input("What is the change meant to do? (optional)")) ?? "") : "");
 
-      // Once per project: the model that built the change shares its blind spots; offer a different one.
+      // Once per project: the model that built the change shares its blind spots; offer a different one. A review
+      // can start with nobody there (after a build), so the question goes on with the current model unanswered.
       if (!cfg.reviewer.model && ctx.hasUI && !store.asked("reviewer-model")) {
         const current = sessionModel(ctx);
         const registry = (ctx as { modelRegistry?: { getAvailable?(): { provider: string; id: string }[] } }).modelRegistry;
@@ -703,7 +728,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         if (others.length) {
           store.markAsked("reviewer-model");
           const KEEP = `Keep ${current ?? "the session's model"}`;
-          const choice = await ctx.ui.select(`The reviewer runs on ${current ?? "the session's model"}, which likely built this too. A different model family catches different mistakes:`, [KEEP, ...others]);
+          const choice = await choose(ctx, store, `The reviewer runs on ${current ?? "the session's model"}, which likely built this too. A different model family catches different mistakes:`, [KEEP, ...others], KEEP);
           if (choice && choice !== KEEP) {
             store.updateConfig((raw) => ({ ...raw, reviewer: { ...(raw.reviewer ?? {}), model: choice } }));
             cfg.reviewer.model = choice;
@@ -792,8 +817,11 @@ export function registerReviewFlow(pi: ExtensionAPI) {
           else siblingSince.push(...changedPaths(r.root, was, now_).map((f) => inRepo(r.name, f)));
         }
         const since = [...changedPaths(ctx.cwd, prevReview.snapshot, before.commit), ...siblingSince];
-        if (!since.length && !siblingUnknown && !largeFiles.length) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
-        previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since, acceptance: prevReview.acceptance };
+        const unchanged = !since.length && !siblingUnknown && !largeFiles.length;
+        // A focus is a question the last review wasn't asked (it may have started by itself after the build): on an
+        // unchanged tree it is answered over the whole change, never skipped.
+        if (unchanged && !focus) return ctx.ui.notify(`Nothing changed since the last review (${prevReview.verdict}). /${cmd("review")} --full reviews everything again.`, "info");
+        if (!unchanged) previous = { snapshot: prevReview.snapshot, findings: prevReview.findings, changed: since, acceptance: prevReview.acceptance };
       }
       // Fix laps report into their own sessions, not the brief: hand the follow-up review the
       // reports (claims plus test results) so it judges evidence, capped like any test output.
@@ -847,7 +875,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         newDependencies,
         stat: diffStat(ctx.cwd, base),
         check,
-        focus: name ? focusRest : "",
+        focus,
         previous,
         testChanges: p?.testChanges,
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,

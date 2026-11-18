@@ -847,6 +847,14 @@ The harness also watches the existing tests: when a task deletes some, cuts
 their number of cases or adds skip markers, it doesn't stop the build (a
 refactor legitimately moves and merges tests); the changes are listed at the
 end and handed to the reviewer, who judges whether each was justified.
+
+**When the build completes**, pb asks whether to review it now. A build often
+finishes with nobody watching (overnight), so with no answer for
+`reviewAfterBuildSec` (10 minutes by default; any key restarts the countdown)
+pb starts `/pb:review` itself, as if you had typed it. A review can't change
+your files, so the only thing it spends unasked is its model time. "Not now"
+leaves it to you, `0` turns the offer off, and a headless run never makes it.
+pb never starts a fix lap on its own: `/pb:fix` changes code, so it waits for you.
 <!-- /pb -->
 
 <!-- pb:topic verification -->
@@ -959,7 +967,9 @@ standards and security, and reports each finding through a tool, not as prose
 to be parsed.
 It also judges **the spec itself**: a faithful build of a wrong plan is still
 wrong, so problems in the plan come back as findings on the spec file.
-`/pb:review <focus>` points it at something specific.
+`/pb:review <focus>` points it at something specific. A focus is always
+answered, even when nothing changed since the last review (the one pb may have
+started by itself after the build): it is then a review of the whole change.
 
 Every finding carries a priority: **P0** must fix (broken, insecure, data
 loss), **P1** fix before merging (an unmet criterion or decision, a bug,

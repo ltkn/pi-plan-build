@@ -360,7 +360,13 @@ export const stop = (t: string) => ({ content: text(t), details: undefined, term
  * `undoSummary` is set by /pb:undo while it rewinds the conversation: the branch summary
  * pb supplies instead of an LLM's.
  */
-export const runtime = { checking: 0, boundary: false, undoSummary: undefined as string | undefined };
+export const runtime = {
+  checking: 0,
+  boundary: false,
+  undoSummary: undefined as string | undefined,
+  /** A build that just finished in this session, to be offered its review once the turn settles. */
+  reviewOffer: undefined as { session: string; spec: string } | undefined,
+};
 
 let PI: ExtensionAPI | undefined;
 
@@ -819,13 +825,14 @@ export const fitDialog = (title: string): string => {
 };
 
 /**
- * A dialog that goes on without you: after askTimeoutSec idle (with a countdown), `fallback`
- * is taken and noted in `notes`, so a build started before you walk away doesn't wait all night.
- * Esc still cancels (undefined). A replaced session also reads as dismissed (undefined): every
- * caller already treats that as stop, so a moved-on human never gets a stale-context error.
+ * A dialog that goes on without you: after `waitSec` idle (askTimeoutSec unless the caller has a
+ * setting of its own; with a countdown), `fallback` is taken and noted in `notes`, so a build
+ * started before you walk away doesn't wait all night. Esc still cancels (undefined). A replaced
+ * session also reads as dismissed (undefined): every caller already treats that as stop, so a
+ * moved-on human never gets a stale-context error.
  */
 
-export const choose = async (ctx: ExtensionContext, store: Store, title: string, options: string[], fallback: string, notes?: string[]): Promise<string | undefined> => {
+export const choose = async (ctx: ExtensionContext, store: Store, title: string, options: string[], fallback: string, notes?: string[], waitSec = store.config().askTimeoutSec): Promise<string | undefined> => {
   try {
     if (!ctx.hasUI) return fallback;
   } catch (e) {
@@ -834,7 +841,7 @@ export const choose = async (ctx: ExtensionContext, store: Store, title: string,
   }
   // It goes on without you: tell you, in case you're in another window.
   if (store.config().notify) notifyDesktop("pb: your choice", title);
-  const ms = store.config().askTimeoutSec * 1000;
+  const ms = waitSec * 1000;
   const shown = fitDialog(title);
   const { result: choice, timedOut } = await patiently(ctx, ms, (opts) => ctx.ui.select(shown, options, opts));
   if (choice !== undefined) return choice;

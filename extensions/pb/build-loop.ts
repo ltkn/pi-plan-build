@@ -384,8 +384,12 @@ const advanceAfterCheck = async (
       ...rest.map((n, i) => `${i ? "" : "\nStill to build, from the same plan:\n"}- ${n}: \`/${cmd("build")} ${n}\``),
     ].join("\n"),
   );
+  // A build often finishes with nobody watching (overnight): the review is offered once the turn settles, and
+  // starts by itself if nobody answers. Its question is then the notification, so the completion doesn't ring too.
+  const session = ctx.sessionManager.getSessionFile();
+  runtime.reviewOffer = session && cfg.reviewAfterBuildSec > 0 && ctx.hasUI ? { session, spec: p.spec } : undefined;
   // The completion is the other moment the human is reliably away from the terminal.
-  if (cfg.notify) notifyDesktop("pb: build complete", `${p.spec}: ${done}/${tasks.length} tasks done, every check passed`);
+  if (cfg.notify && !runtime.reviewOffer) notifyDesktop("pb: build complete", `${p.spec}: ${done}/${tasks.length} tasks done, every check passed`);
   return stop(`${passed}\n\nBuild complete: every check passed. Stop here; the harness shows the summary.`);
 };
 
