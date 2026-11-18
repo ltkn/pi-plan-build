@@ -536,8 +536,13 @@ export function fixSeedPrompt(spec: string, findings: Finding[], reference = "",
     `If a finding needs a design decision instead of an edit, don't redesign it: report it as skipped. ` +
     `When a fix changes behaviour the spec's Design or Decisions describe, update those lines in this lap with pb_update_spec, so the spec says what the code now does; only Design and Decisions — a finding that needs its Goal, Contracts or Acceptance changed is skipped instead. A rule you write in a doc must match what the code does: check it against the code and its tests. ` +
     `Reply shape, one block per finding: files changed (every instance), test command, result. Do not commit or archive, and write nothing else under .pi/. ${SELF_REVIEW_RULE} ` +
-    `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), untested (number and why, for a fixed finding no test can show), and test results; then stop.`
+    `When done, call pb_fix_done with fixed (the number of each finding it fixed, as shown above), skipped (their numbers), open (the number of each finding you did not finish: the next lap takes it), untested (number and why, for a fixed finding no test can show), and test results. The report ends this lap: make it when the work is done, not before.`
   );
+}
+
+/** What a fix lap is told when it stops without reporting: report what stands, unfinished work included, as open. */
+export function fixNudgePrompt(): string {
+  return "[pb] You stopped without reporting. If the work is done, call pb_fix_done now; if it isn't, carry on and report when it is. A finding you can't finish goes in open (the next lap takes it), never in skipped: skipped means its fix needs the spec's Goal, Contracts or Acceptance changed.";
 }
 
 export function nudgePrompt(taskId: string): string {

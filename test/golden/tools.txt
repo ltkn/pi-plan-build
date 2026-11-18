@@ -1,4 +1,4 @@
-words: 1980
+words: 2037
 
 ## pb_ask
 
@@ -355,7 +355,7 @@ In a pb fixes session (opened by /pb:fix): after writing a test that reproduces 
 
 ## pb_fix_done
 
-In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Name each by the number it was shown as in the brief. Then stop: the home session runs the approved path after the fix — /pb:build to re-approve a revised contract, otherwise /pb:review to check the delta. Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.
+In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed, which need a design decision (spec revision) instead of an edit, and which it did not finish, with the test results. Name each by the number it was shown as in the brief. The report ends the lap: make it when the work is done. The home session runs the approved path after the fix — /pb:build to re-approve a revised contract, otherwise /pb:review to check the delta. Write for someone who hasn't watched this session: what changed, why it's correct, a term defined inline the first time it appears, evidence quoted not paraphrased.
 
 {
   "type": "object",
@@ -377,7 +377,14 @@ In a pb fixes session (opened by /pb:fix): report which review findings this lap
       "items": {
         "type": "number"
       },
-      "description": "the numbers of findings that need a design decision (spec revision), not an edit, as shown in the brief"
+      "description": "the numbers of findings whose fix needs the spec's Goal, Contracts or Acceptance changed (a design decision), not an edit, as shown in the brief"
+    },
+    "open": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "the numbers of findings this lap did not finish: they stay open and the next lap takes them. Never put an unfinished finding in skipped"
     },
     "untested": {
       "type": "array",

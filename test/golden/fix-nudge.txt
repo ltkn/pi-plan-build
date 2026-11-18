@@ -1,0 +1,3 @@
+words: 51
+
+[pb] You stopped without reporting. If the work is done, call pb_fix_done now; if it isn't, carry on and report when it is. A finding you can't finish goes in open (the next lap takes it), never in skipped: skipped means its fix needs the spec's Goal, Contracts or Acceptance changed.

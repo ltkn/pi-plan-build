@@ -5,14 +5,14 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext
 } from "@earendil-works/pi-coding-agent";
-import { type FixDirection, fixSeedPrompt, reportRegister } from "./prompts.ts";
+import { type FixDirection, fixNudgePrompt, fixSeedPrompt, reportRegister } from "./prompts.ts";
 import { safeBlock } from "./markdown.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { snapshot } from "./checkpoint.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, now, readEvents } from "./store.ts";
 import { runVerify } from "./verify.ts";
-import { approvalDrift, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, specOfSession, specRef, withChecking } from "./kit.ts";
+import { approvalDrift, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, sleep, specOfSession, specRef, stop, tree, withChecking } from "./kit.ts";
 import { tip } from "./help.ts";
 import { notifyDesktop } from "./notify.ts";
 
@@ -20,6 +20,8 @@ import { notifyDesktop } from "./notify.ts";
 export interface LapReport {
   fixed: number[];
   skipped: number[];
+  /** reported unfinished: they stay for the next lap */
+  open: number[];
   /** the test commands pb saw fail before the fixes: re-run after the lap, they must now pass */
   reds: string[];
   tests: string;
@@ -34,12 +36,13 @@ export function lapReport(events: readonly Record<string, unknown>[], from: numb
   const last = events
     .slice(from)
     .filter((e) => (e as { type?: unknown }).type === "fix")
-    .at(-1) as { fixedIds?: unknown; skippedIds?: unknown; reds?: unknown; tests?: unknown } | undefined;
+    .at(-1) as { fixedIds?: unknown; skippedIds?: unknown; openIds?: unknown; reds?: unknown; tests?: unknown } | undefined;
   const numbers = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is number => Number.isInteger(x)) : []);
   if (!last || !Array.isArray(last.fixedIds)) return undefined;
   return {
     fixed: numbers(last.fixedIds),
     skipped: numbers(last.skippedIds),
+    open: numbers(last.openIds),
     reds: Array.isArray(last.reds) ? last.reds.filter((x): x is string => typeof x === "string") : [],
     tests: typeof last.tests === "string" ? last.tests : "",
   };
@@ -115,10 +118,11 @@ export function registerFix(pi: ExtensionAPI) {
     name: "pb_fix_done",
     label: "Fixes done",
     description:
-      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed and which need a design decision (spec revision) instead of an edit, with the test results. Name each by the number it was shown as in the brief. Then stop: the home session runs the approved path after the fix — /pb:build to re-approve a revised contract, otherwise /pb:review to check the delta. " + reportRegister,
+      "In a pb fixes session (opened by /pb:fix): report which review findings this lap fixed, which need a design decision (spec revision) instead of an edit, and which it did not finish, with the test results. Name each by the number it was shown as in the brief. The report ends the lap: make it when the work is done. The home session runs the approved path after the fix — /pb:build to re-approve a revised contract, otherwise /pb:review to check the delta. " + reportRegister,
     parameters: Type.Object({
       fixed: Type.Array(Type.Number(), { description: "the numbers of the findings this lap fixed, as shown in the brief (e.g. 1, 3)" }),
-      skipped: Type.Array(Type.Number(), { description: "the numbers of findings that need a design decision (spec revision), not an edit, as shown in the brief" }),
+      skipped: Type.Array(Type.Number(), { description: "the numbers of findings whose fix needs the spec's Goal, Contracts or Acceptance changed (a design decision), not an edit, as shown in the brief" }),
+      open: Type.Optional(Type.Array(Type.Number(), { description: "the numbers of findings this lap did not finish: they stay open and the next lap takes them. Never put an unfinished finding in skipped" })),
       untested: Type.Optional(Type.Array(Type.Object({ finding: Type.Number(), why: Type.String({ description: "why no test can show this fix (a doc or comment, a config value)" }) }), { description: "fixed findings with no reproducing test, each with why" })),
       tests: Type.String({ description: "test commands run and what each showed" }),
     }),
@@ -138,9 +142,10 @@ export function registerFix(pi: ExtensionAPI) {
       };
       const fixed = picked(params.fixed);
       const skipped = picked(params.skipped);
-      const both = fixed.filter((f) => skipped.includes(f));
-      if (both.length) throw new Error(`A finding cannot be both fixed and skipped: ${both.map((f) => f.title).join("; ")}. Pick one.`);
-      if (!fixed.length && !skipped.length) throw new Error("Report at least one finding by its number in fixed or skipped, with the test results.");
+      const open = picked(params.open ?? []);
+      const twice = [...fixed, ...skipped, ...open].filter((f, i, all) => all.indexOf(f) !== i);
+      if (twice.length) throw new Error(`A finding goes in one list only — fixed, skipped or open: ${[...new Set(twice)].map((f) => f.title).join("; ")}. Pick one.`);
+      if (!fixed.length && !skipped.length && !open.length) throw new Error("Report at least one finding by its number in fixed, skipped or open, with the test results.");
       const numberOf = (f: Finding) => rec.findings.indexOf(f) + 1;
       const reds = rec.reds ?? {};
       const untested = new Map((params.untested ?? []).filter((u) => u.why?.trim()).map((u) => [u.finding, u.why.trim()]));
@@ -156,6 +161,7 @@ export function registerFix(pi: ExtensionAPI) {
         skipped: skipped.map((f) => f.title),
         fixedIds: fixed.map(numberOf),
         skippedIds: skipped.map(numberOf),
+        ...(open.length ? { openIds: open.map(numberOf) } : {}),
         reds: [...new Set(fixed.flatMap((f) => reds[String(numberOf(f))] ?? []))],
         ...(untested.size ? { untested: [...untested].map(([finding, why]) => ({ finding, why })) } : {}),
         tests: params.tests,
@@ -168,8 +174,10 @@ export function registerFix(pi: ExtensionAPI) {
       const line = drift
         ? `Fix report sent. The fix changed the approved contract: /${cmd("build")} ${rec.spec} re-approves it, then /${cmd("review")}.`
         : "Fix report sent. pb is checking the fixes now; the result and the next step come in your session.";
-      return reply(
-        `Recorded as reported for \`${rec.spec}\`: ${fixed.length} reported fixed, ${skipped.length} skipped. They are not confirmed yet: ${drift ? "the contract needs re-approval first" : "pb runs the checks now, and a fix counts only if they pass"}. Reply with exactly this one line, nothing else (pb posts the outcome itself), then stop:\n${line}`,
+      // The report ends the run: work after it would land in no lap's record, so the model gets no further turn.
+      post(line);
+      return stop(
+        `Recorded as reported for \`${rec.spec}\`: ${fixed.length} reported fixed, ${skipped.length} skipped${open.length ? `, ${open.length} open for the next lap` : ""}. They are not confirmed yet: ${drift ? "the contract needs re-approval first" : "pb runs the checks now, and a fix counts only if they pass"}. This lap is over: make no further changes.`,
       );
     },
   });
@@ -181,6 +189,12 @@ export function registerFix(pi: ExtensionAPI) {
   /** Finish-nudges before a silent lap stops the loop (never retried: a second silent session doubles nothing). */
 
   const FIX_NUDGES = 2;
+
+  /** The entry id of the lap's last answer when Esc cut it short (Pi's own stop reason), else undefined. */
+  const abortedAt = (c: ExtensionCommandContext): string | undefined => {
+    const last = [...(tree(c).getBranch?.() ?? [])].reverse().find((e) => e.type === "message" && e.message?.role === "assistant");
+    return (last?.message as { stopReason?: string } | undefined)?.stopReason === "aborted" ? last?.id : undefined;
+  };
 
   /**
    * One fixes lap: open a fenced session seeded with the remaining findings and wait for its
@@ -222,12 +236,33 @@ export function registerFix(pi: ExtensionAPI) {
         store.event(spec, { type: "fix-start", findings: remaining.map((f) => f.title), ...(direction ? { direction: safeBlock(direction.text) } : {}) });
         from = readEvents(path.join(store.specDir(spec), "events.jsonl")).length;
         await c.sendMessage({ customType: "pb-fix", content: seed, display: true }, { triggerTurn: true });
-        for (let nudge = 0; nudge < FIX_NUDGES; nudge++) {
+        let nudges = 0;
+        let announced: string | undefined;
+        for (;;) {
           await cc.waitForIdle();
           if (!lapFile || !store.fixSession(lapFile)) return; // reported
-          await c.sendMessage({ customType: "pb-fix", content: "Finish with pb_fix_done now: report fixed ids, skipped ids and test results, then stop.", display: false }, { triggerTurn: true });
+          // Esc stopped the lap: whoever pressed it is here and decides what comes next. A nudge now would make
+          // the model report work it hasn't done; the lap waits for them instead, however long that takes.
+          const stoppedAt = abortedAt(cc);
+          if (stoppedAt) {
+            if (announced !== stoppedAt) {
+              announced = stoppedAt;
+              await c.sendMessage(
+                {
+                  customType: "pb",
+                  content: `**Lap ${lap} paused** — Esc stopped it, and pb is waiting for you. Type \`continue\` to let it carry on, or tell it what to do instead (for example, to report what it has with pb_fix_done).`,
+                  display: true,
+                },
+                { triggerTurn: false },
+              );
+            }
+            await sleep(500);
+            continue;
+          }
+          if (nudges === FIX_NUDGES) return; // silent: the loop escalates
+          nudges++;
+          await c.sendMessage({ customType: "pb-fix", content: fixNudgePrompt(), display: false }, { triggerTurn: true });
         }
-        await cc.waitForIdle();
       },
     }).catch(() => ({ cancelled: true as const }));
     if (result.cancelled || !live) return undefined;
@@ -319,7 +354,9 @@ export function registerFix(pi: ExtensionAPI) {
       const done = report.fixed.map(at).filter((f): f is Finding => !!f && !skip.includes(f));
       skipped.push(...skip.map(label));
       const claimed = done.length ? `${done.map((f) => `#${numberOf.get(f) ?? "?"}`).join(", ")} fixed` : "nothing fixed";
-      const check = await checkAfterLap(cwd, store, spec, laps, report.reds, `${claimed}${skip.length ? `, ${skip.map((f) => `#${numberOf.get(f) ?? "?"}`).join(", ")} skipped` : ""}`);
+      const unfinished = report.open.map(at).filter((f): f is Finding => !!f);
+      const ids = (fs: Finding[]) => fs.map((f) => `#${numberOf.get(f) ?? "?"}`).join(", ");
+      const check = await checkAfterLap(cwd, store, spec, laps, report.reds, `${claimed}${skip.length ? `, ${ids(skip)} skipped` : ""}${unfinished.length ? `, ${ids(unfinished)} not finished (the next lap takes ${unfinished.length === 1 ? "it" : "them"})` : ""}`);
       checked = check.ran;
       if (!check.ok) {
         // Fixes that leave a check red are not fixes yet: they stay open for the next lap, with the failure.

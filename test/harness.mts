@@ -22,7 +22,7 @@ export type Finding = import("../extensions/pb/store.ts").Finding;
 export type Result = { error?: string; content?: { text: string }[]; terminate?: boolean; usage?: { totalTokens: number } };
 export type Tool = (name: string, params: object) => Promise<Result>;
 export type Script = (instruction: string, tool: Tool) => Promise<void> | void;
-export type Entry = { id: string; parentId: string | null; type: string; message?: { role: string; content: { type: "text"; text: string }[] }; content?: string; summary?: string };
+export type Entry = { id: string; parentId: string | null; type: string; message?: { role: string; content: { type: "text"; text: string }[]; stopReason?: string }; content?: string; summary?: string };
 
 export function setup(config: object = {}) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pb-test-"));
@@ -79,6 +79,8 @@ export function setup(config: object = {}) {
   /** Acceptance ids from each review session's brief, for a pass resumed after an interruption. */
   const reviewChecklists = new Map<string, string[]>();
   const stat = { runs: 0, editorText: "", title: "" };
+  /** Esc pressed during the current run: it ends after the agent's step, aborted, as Pi ends one. */
+  let escPressed = false;
   /** The footer status lines, by id: pb's is "pb". */
   const statuses = new Map<string, string>();
   let sessions = 0;
@@ -368,6 +370,7 @@ export function setup(config: object = {}) {
       const asked = [...first.matchAll(/^- ((?:A\d+|R\d+\.\d+|T\d+\.\d+))(?: \([^)]+\))?: /gm)].map((m) => m[1]);
       if (asked.length) reviewChecklists.set(rt.file(), asked);
       let input: string | undefined = first;
+      let aborted = false;
       while (input !== undefined) {
         continuation = undefined;
         // As in Pi: the assistant message (with its tool calls) first, then the tool results.
@@ -384,6 +387,13 @@ export function setup(config: object = {}) {
           if (!reviewer.silent) await callTool("pb_report_findings", { findings: reviewer.review, acceptance });
           append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: reviewer.prose }] } });
         } else await agent.script?.(input, callTool);
+        if (escPressed) {
+          // As in Pi: the answer in progress is cut off with stopReason "aborted", and the run ends without settling hooks.
+          escPressed = false;
+          aborted = true;
+          append(rt.file(), { type: "message", message: { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "aborted" } });
+          break;
+        }
         const usage = { input: 1000, output: 100, cacheRead: 9000, cacheWrite: 0, cost: { total: 0.001 } };
         await fire("message_end", { message: { role: "assistant", usage } });
         for (const r of (await fire("turn_end", {})) as { entries?: Draft[] }[]) applyDrafts(r?.entries);
@@ -400,7 +410,7 @@ export function setup(config: object = {}) {
           }
         }
       }
-      await fire("agent_settled", {});
+      await fire("agent_settled", { aborted });
      } finally {
       queued--;
      }
@@ -459,6 +469,8 @@ export function setup(config: object = {}) {
     progress,
     events,
     callTool,
+    /** The human presses Esc: the run going on now ends, aborted, after the agent's current step. */
+    esc: () => void (escPressed = true),
     /** Simulate terminal activity (arrow keys, typing): resets idle dialog countdowns. */
     key: (d = "key") => terminalInput.slice().forEach((f) => f(d)),
     settle,

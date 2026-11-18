@@ -66,6 +66,7 @@ const RENDERED: Record<string, () => string> = {
   "cohere": () => prompts.coherePrompt("abc1234", 1, 3, reference),
   "check-failed": () => prompts.fixText("T1", "`npm test -- order-cancel`", "1 failing: expected 409, got 200", 1, 3, false, reference),
   "nudge": () => prompts.nudgePrompt("T1"),
+  "fix-nudge": () => prompts.fixNudgePrompt(),
   "fix-seed": () => prompts.fixSeedPrompt("order-cancellation", findings, reference),
   "reviewer": () => prompts.reviewSessionPrompt("(the brief: see reviewer-brief)"),
   "reviewer-brief": () =>

@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, provedFixed, setup, SPEC, specRel, taskOf, written } from "./harness.mts";
+import { type Finding, acceptanceOf, briefOf, CHANGES, contractHash, diligent, INJECTED, pausedWithFindings, provedFixed, setup, SPEC, specRel, taskOf, until, written } from "./harness.mts";
 
 test("overengineering: one rule — build for the needs the change has, the cleanest design within them — carried word for word by the planner, the spec check, the builder, a fix lap and the reviewer", async () => {
   const { REVIEWER_SYSTEM, PLANNER_ROLE, CRAFT_RULE, SPEC_REVIEWER_SYSTEM, SPEC_CHECK_NAMES, OVERENGINEERING_RULE, fixSeedPrompt } = await import("../extensions/pb/prompts.ts");
@@ -357,7 +357,7 @@ test("fix: a report names findings by the number in the brief; a number outside 
   await t.run("fix");
   assert.match(said[0]!, /2 is not one of the findings shown for this lap/);
   assert.match(said[1]!, /Report at least one finding by its number/);
-  assert.match(said[2]!, /cannot be both fixed and skipped/);
+  assert.match(said[2]!, /A finding goes in one list only — fixed, skipped or open/);
   assert.match(t.posts.at(-1)!, /\*\*✅ Fixes complete — order-cancellation\*\* · #1 fixed, checks passed · 1 lap · (?:<1s|\d+s)/);
   assert.match(t.posts.at(-1)!, /#1 name the constant the reviewer named/); // findings carry the number /pb:fix takes
   assert.match(t.posts.at(-1)!, /\*\*Next:\*\* `\/pb:review` checks the delta\./);
@@ -499,8 +499,9 @@ test("fix: a green check is stated as a fact, and the follow-up review is offere
   };
   t.selects.push("Review the fixes now");
   await t.run("fix");
-  // The lap's report is a claim: its reply is one fixed line, and pb says the checks are running before they run.
-  assert.match(done, /1 reported fixed, 0 skipped\. They are not confirmed yet: pb runs the checks now, and a fix counts only if they pass\. Reply with exactly this one line, nothing else[^\n]*\nFix report sent\. pb is checking the fixes now; the result and the next step come in your session\.$/);
+  // The lap's report is a claim: it ends the lap, pb posts one fixed line for it, and says the checks are running before they run.
+  assert.match(done, /1 reported fixed, 0 skipped\. They are not confirmed yet: pb runs the checks now, and a fix counts only if they pass\. This lap is over: make no further changes\.$/);
+  assert.ok(t.posts.includes("Fix report sent. pb is checking the fixes now; the result and the next step come in your session."));
   assert.ok(t.posts.some((x) => /^\*\*Checking the fixes\*\* — the lap reports #1 fixed; none counts as fixed until these pass: `test -f [^`]+`, then `true`\. The outcome and the next step come in your session when they finish\.$/.test(x)));
   const summary = t.posts.at(-1)!;
   assert.match(summary, /\*\*✅ Fixes complete — order-cancellation\*\* · #1 fixed, checks passed · 1 lap/);
@@ -628,7 +629,8 @@ test("fix lap: the report is picked by event order, not the clock", async () => 
   assert.equal(lapReport(events, from), undefined); // the prior report shares the second; it is not this lap's
   const report = { at: "2026-01-01 10:00:02", type: "fix", fixed: ["second"], skipped: ["third"], fixedIds: [1], skippedIds: [2], reds: ["npm test -- second"], tests: "npm test" };
   // Findings by the number the brief showed them as: two findings sharing a title stay two.
-  assert.deepEqual(lapReport([...events, report], from), { fixed: [1], skipped: [2], reds: ["npm test -- second"], tests: "npm test" });
+  assert.deepEqual(lapReport([...events, report], from), { fixed: [1], skipped: [2], open: [], reds: ["npm test -- second"], tests: "npm test" });
+  assert.deepEqual(lapReport([...events, { ...report, fixedIds: [], skippedIds: [], openIds: [1, 2] }], from)?.open, [1, 2]);
   assert.equal(lapReport([...events, { at: "2026-01-01 10:00:03", type: "fix" }], from), undefined); // a fix event without a fixed list is not a report
 });
 
@@ -2554,4 +2556,62 @@ test("review: a focus is answered even when nothing changed since the last revie
   assert.match(briefOf(t), /# Review: order-cancellation — focus: the cancel endpoint's authorization/);
   await t.run("review");
   assert.match(t.notes.at(-1)!, /Nothing changed since the last review \(pass\)/); // no focus, nothing changed: still skipped
+});
+
+/** A paused build whose last review left these findings open, in the session /pb:fix runs from. */
+const openFindings = async (t: ReturnType<typeof setup>, findings: Record<string, unknown>[]) => {
+  process.chdir(t.repo);
+  await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
+  pausedWithFindings(t, "order-cancellation", findings);
+};
+
+test("fix: Esc pauses the lap — pb doesn't push it to report, waits for you, and the lap carries on when you say so", async () => {
+  const t = setup({ verify: "true" });
+  await openFindings(t, [{ priority: "P2", file: "README", line: 1, title: "say what the project is" }]);
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:fix order-cancellation]")) return t.esc(); // stopped mid-work, by mistake
+    if (text === "continue") await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a doc line" }], tests: "none: a doc line" });
+  };
+  const fixing = t.run("fix");
+  await until(() => t.posts.some((x) => /^\*\*Lap 1 paused\*\* — Esc stopped it, and pb is waiting for you\. Type `continue`/.test(x)));
+  await new Promise((r) => setTimeout(r, 1200)); // a few of the lap's checks go by while it waits
+  assert.ok(!t.instructions.some((i) => i.startsWith("[pb] You stopped without reporting")), "no nudge while paused");
+  assert.equal(t.events("order-cancellation").filter((e: any) => e.type === "fix").length, 0); // nothing reported for it
+  t.runtime().pi.sendUserMessage("continue");
+  await fixing;
+  assert.ok(t.posts.some((x) => /^\*\*✅ Fixes complete — order-cancellation\*\* · #1 fixed, checks passed · 1 lap/.test(x)));
+});
+
+test("fix: a lap that didn't finish reports the finding open — the next lap takes it, and it never reads as a spec revision", async () => {
+  const t = setup({ verify: "true" });
+  await openFindings(t, [{ priority: "P2", file: "README", line: 1, title: "say what the project is" }]);
+  let laps = 0;
+  let refusal: string | undefined;
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix order-cancellation]")) return;
+    laps++;
+    if (laps === 1) {
+      refusal = (await tool("pb_fix_done", { fixed: [], skipped: [1], open: [1], tests: "none" })).error;
+      await tool("pb_fix_done", { fixed: [], skipped: [], open: [1], tests: "ran out of time before any edit" });
+    } else await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a doc line" }], tests: "none: a doc line" });
+  };
+  await t.run("fix");
+  assert.match(refusal ?? "", /A finding goes in one list only — fixed, skipped or open: say what the project is/);
+  assert.equal(laps, 2);
+  assert.ok(t.posts.some((x) => /^\*\*Checking the fixes\*\* — the lap reports nothing fixed, #1 not finished \(the next lap takes it\)/.test(x)));
+  assert.ok(!t.posts.some((x) => /spec revision/.test(x)));
+  assert.ok(t.posts.some((x) => /^\*\*✅ Fixes complete — order-cancellation\*\* · #1 fixed, checks passed · 2 laps/.test(x)));
+});
+
+test("fix: the report ends the lap's run, so nothing is done after it that no lap would record", async () => {
+  const t = setup({ verify: "true" });
+  await openFindings(t, [{ priority: "P2", file: "README", line: 1, title: "say what the project is" }]);
+  let report: { terminate?: boolean; content?: { text: string }[] } | undefined;
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:fix order-cancellation]")) report = await tool("pb_fix_done", { fixed: [], skipped: [], open: [1], tests: "none" });
+  };
+  await t.run("fix");
+  assert.equal(report?.terminate, true);
+  assert.match(report!.content![0].text, /1 open for the next lap[\s\S]*This lap is over: make no further changes\./);
+  assert.ok(t.posts.includes("Fix report sent. pb is checking the fixes now; the result and the next step come in your session."));
 });
