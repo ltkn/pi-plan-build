@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.42.1
 
 - **A review with a pass missing reads INCOMPLETE, not PASS.** When the adversarial pass failed (in one run, a model error about an unrecoverable tool call), a review that found nothing blocking still read PASS and told you to `/pb:commit`, while it said further down that its findings were missing and the result incomplete. pb also left out the `/pb:fix` suggestion for its two P2s, rightly, since an incomplete run records nothing for `/pb:fix` to read, but without saying why. Now such a review reads **INCOMPLETE**: its Next line says to run `/pb:review` again, names the pass that didn't finish, and says its findings aren't recorded for `/pb:fix` yet, so a finding that can't wait is fixed by hand. As before, nothing is recorded and the spec isn't marked reviewed. Findings that block still read CHANGES NEEDED.
 
