@@ -1459,6 +1459,13 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 - `/pb:review --full` — reviews everything again
 <!-- /pb -->
 
+### Review with a pass missing
+<!-- pb:tip review.incomplete -->
+**What now** — a reviewer's pass didn't finish, so the findings above may not be all there is, and none of them is recorded yet
+- `/pb:review` — runs the review again; if the same pass fails again, read its session (named above)
+- Fix a finding above by hand meanwhile if it can't wait: `/pb:fix` takes only a complete review's findings
+<!-- /pb -->
+
 ### Review without a verdict
 <!-- pb:tip review.other -->
 **What now** — the review ended without a verdict, read what's above first

@@ -1246,13 +1246,38 @@ test("review: an adversarial pass that fails is named, and the result is not rec
   } finally {
     delete process.env.MOCK_ABUSE;
   }
-  assert.match(t.posts.at(-1)!, /⚠ The adversarial pass failed \(abuse pass exploded\): its findings are missing, so this result is incomplete\. Run `\/pb:review` again\./);
-  assert.doesNotMatch(t.posts.at(-1)!, /with an adversarial pass/);
+  const post = t.posts.at(-1)!;
+  assert.match(post, /⚠ The adversarial pass failed \(abuse pass exploded\): its findings are missing, so this result is incomplete\. Run `\/pb:review` again\./);
+  assert.doesNotMatch(post, /with an adversarial pass/);
+  // Nothing blocking was found, but a pass is missing: that is not a PASS, and the next step is not a commit.
+  assert.match(post, /Review — order-cancellation\*\* · INCOMPLETE/);
+  assert.doesNotMatch(post, /· PASS|\/pb:commit/);
+  assert.match(post, /\*\*Next:\*\* `\/pb:review` again: the adversarial pass didn't finish, so this result is incomplete, and nothing above is recorded for `\/pb:fix` yet\./);
+  assert.match(post, /\*\*What now\*\* — a reviewer's pass didn't finish/);
   assert.ok(!t.progress("order-cancellation").review); // incomplete: nothing recorded as reviewed
 
   await t.run("review"); // the next one completes
   assert.match(t.posts.at(-1)!, /PASS · [\s\S]*with an adversarial pass/);
   assert.ok(t.progress("order-cancellation").review);
+});
+
+test("review: P2 findings over a failed adversarial pass are not a PASS to commit, and their ids are not offered", async () => {
+  const t = setup({ verify: "true", reviewer: { security: "always" } });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [{ priority: "P2", file: "src/order.ts", line: 12, title: "the row key changes on every read", fix: "key by the id" }];
+  process.env.MOCK_ABUSE = "crash";
+  try {
+    await t.run("review");
+  } finally {
+    delete process.env.MOCK_ABUSE;
+  }
+  const post = t.posts.at(-1)!;
+  assert.match(post, /Review — order-cancellation\*\* · INCOMPLETE · P0 0 · P1 0 · P2 1/);
+  assert.doesNotMatch(post, /\/pb:commit|\/pb:fix order-cancellation 1/);
+  assert.match(post, /\n1\. \[P2\] src\/order\.ts:12 — the row key changes on every read/); // still shown, numbered
+  assert.notEqual(t.progress("order-cancellation").phase, "reviewed");
 });
 
 test("review: an incomplete review does not offer /pb:fix ids it never recorded", async () => {

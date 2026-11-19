@@ -332,10 +332,17 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       run.acceptance,
       run.passes.filter((x) => x.role === "review").flatMap((x) => x.acceptance ?? []),
     );
+    // /pb:fix resolves against the recorded review (progress.review.findings), which only a
+    // complete run writes: an incomplete one (the adversarial pass missing) would send the
+    // human after ids that resolve to nothing — or, on a follow-up, to the previous review.
+    const complete = finished("review") && (!run.security || finished("abuse"));
     // pb's own check outranks the reviewers: over a red one the best a review can say is UNVERIFIED.
     const judged = !run.passes.length || lost ? "none" : verdictOf(findings, coverage);
     const failedChecks = run.failedChecks ?? [];
-    const verdict = judged === "pass" && failedChecks.length ? "unverified" : judged;
+    // Nor is a pass a pass when a reviewer's pass never finished: what it would have found is missing, and the run
+    // is neither recorded nor marks the spec reviewed. Findings that already block still say so.
+    const incomplete = judged === "pass" && !complete && !o.partial;
+    const verdict = judged === "pass" && (failedChecks.length || incomplete) ? "unverified" : judged;
     const tally = findings.length || o.dismissed.length ? counts.map((c, n) => `P${n} ${c}`).join(" · ") : "";
     const sessions = run.passes
       .filter((x) => x.session)
@@ -376,12 +383,11 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     // unconfirmed would go unanswered again: only a full review takes it back.
     const doubleCheckLines = verificationLines(o.verification);
     const fullAgain = doubleCheckLines.fellShort ? ` The second look didn't complete, and a follow-up re-reads only what changed — use \`/${cmd("review")} --full\`.` : "";
-    // /pb:fix resolves against the recorded review (progress.review.findings), which only a
-    // complete run writes: an incomplete one (the adversarial pass missing) would send the
-    // human after ids that resolve to nothing — or, on a follow-up, to the previous review.
-    const complete = finished("review") && (!run.security || finished("abuse"));
+    const missingPasses = [...(finished("review") ? [] : [run.name ? "spec" : "intent"]), ...(run.security && !finished("abuse") ? ["adversarial"] : [])];
     const next = o.partial
       ? `\`/${cmd("review")}\` continues this review.`
+      : incomplete && !failedChecks.length
+        ? `\`/${cmd("review")}\` again: the ${missingPasses.join(" and ")} pass didn't finish, so this result is incomplete, and nothing above is recorded for \`/${cmd("fix")}\` yet. A finding that can't wait is fixed by hand meanwhile.`
       : lost
         ? `read the ${unparsed.join(" and ")} session${unparsed.length === 1 ? "" : "s"}, then \`/${cmd("review")}\` again.`
         : verdict === "unverified" && failedChecks.length && judged === "pass"
@@ -418,7 +424,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
               : `\`/${cmd("review")}\` again, or read the sessions below.`;
     // Unverified for a red check alone is not unverified acceptance: the next step is the check, not the criteria.
     const redCheckOnly = verdict === "unverified" && judged === "pass" && failedChecks.length > 0;
-    const tipKey = verdict === "pass" ? (midBuild.length ? "review.mid-build" : "review.pass") : verdict === "changes_needed" ? "review.changes" : redCheckOnly ? "review.red-check" : verdict === "unverified" ? "review.unverified" : "review.other";
+    const tipKey = verdict === "pass" ? (midBuild.length ? "review.mid-build" : "review.pass") : verdict === "changes_needed" ? "review.changes" : redCheckOnly ? "review.red-check" : incomplete ? "review.incomplete" : verdict === "unverified" ? "review.unverified" : "review.other";
     const passMark = finished("review") ? "✓" : run.passes.some((x) => x.role === "review" && x.error) ? "✗" : "—";
     const abuseMark = run.security ? (finished("abuse") ? "✓" : run.passes.some((x) => x.role === "abuse" && x.error) ? "✗" : "—") : "";
     // What pb executed, ahead of what the models judged: a verdict over no checks is judgement alone and says so.
@@ -426,7 +432,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     // The whole change under review, base to the tree this review read: not just what moved since the last lap.
     const stat = diffStat(run.cwd, run.base, run.before?.commit).split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
     const scopeFacts = [stat, run.base ? `base ${run.base.slice(0, 7)}` : ""];
-    const result = lost ? "NO VERDICT" : verdict === "pass" ? "PASS" : verdict === "changes_needed" ? "CHANGES NEEDED" : verdict === "unverified" ? "UNVERIFIED" : "no verdict";
+    const result = lost ? "NO VERDICT" : verdict === "pass" ? "PASS" : verdict === "changes_needed" ? "CHANGES NEEDED" : incomplete && !failedChecks.length ? "INCOMPLETE" : verdict === "unverified" ? "UNVERIFIED" : "no verdict";
     const text = [
       phaseHeader(verdict === "pass" ? "✅" : verdict === "changes_needed" ? "❌" : "⚠", "Review", `${run.label}${run.followUp ? " (follow-up)" : ""}`, result, tally, finished("abuse") ? "with an adversarial pass" : "", run.ms !== undefined ? duration(run.ms) : ""),
       "",
