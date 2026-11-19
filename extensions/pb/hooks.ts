@@ -127,7 +127,10 @@ export function registerHooks(pi: ExtensionAPI) {
     }
     if (ev.toolName !== "edit" && ev.toolName !== "write") return;
     const building = liveBuildOfSession(ctx, store);
-    if (building) {
+    // A fix lap is fenced like a build: the sections it may change go through pb_update_spec, which knows which
+    // ones the findings unlocked. A plain edit of the file would change any of them, approved decisions included.
+    const fixLap = building ? undefined : store.fixSession(session ?? undefined);
+    if (building || fixLap) {
       const specs = path.join(ctx.cwd, ".pi", "pb", "specs");
       const target = path.resolve(ctx.cwd, ev.input.path ?? "");
       // Both spellings count: a symlink under .pi (e.g. specs-link -> pb/specs) must not read as
@@ -135,7 +138,9 @@ export function registerHooks(pi: ExtensionAPI) {
       if (under(target, specs) || under(realPath(target), realPath(specs)))
         return {
           block: true,
-          reason: `The build of ${building.spec} is running: its approved spec is read-only. Record a shape in Design or a decision in Decisions with pb_update_spec; if the contract itself must change, stop the task with pb_task_done status blocked, then revise it and /${cmd("build")} re-approves the revision.`,
+          reason: building
+            ? `The build of ${building.spec} is running: its approved spec is read-only. Record a shape in Design or a decision in Decisions with pb_update_spec; if the contract itself must change, stop the task with pb_task_done status blocked, then revise it and /${cmd("build")} re-approves the revision.`
+            : `This fix lap changes ${fixLap!.spec}'s spec only through pb_update_spec, which allows Design, Decisions and the sections the spec findings point at. A finding that needs any other part of it is reported as skipped, for a spec revision.`,
         };
     }
     if (!session || !store.planningSessions().includes(session)) return;

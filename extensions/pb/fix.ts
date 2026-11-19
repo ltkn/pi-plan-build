@@ -6,14 +6,14 @@ import type {
   ExtensionCommandContext
 } from "@earendil-works/pi-coding-agent";
 import { type FixDirection, fixNudgePrompt, fixSeedPrompt, reportRegister } from "./prompts.ts";
-import { safeBlock } from "./markdown.ts";
+import { blankFenced, safeBlock } from "./markdown.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { snapshot } from "./checkpoint.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, isSpecFinding, now, readEvents } from "./store.ts";
-import { contractChanges, removedLines, sectionKeyAtLine, sectionOf, specHash } from "./spec.ts";
+import { contractChanges, removedLines, sectionKey, sectionKeyAtLine, sectionOf, specHash } from "./spec.ts";
 import { runVerify } from "./verify.ts";
-import { approvalDrift, approveSpec, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, sleep, specOfSession, specRef, stop, tree, withChecking } from "./kit.ts";
+import { approvalDrift, approveSpec, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, sleep, specOfSession, specRef, stop, tree, warnLater, withChecking } from "./kit.ts";
 import { tip } from "./help.ts";
 import { notifyDesktop } from "./notify.ts";
 
@@ -202,13 +202,26 @@ export function registerFix(pi: ExtensionAPI) {
    * finding that names them all is fixed in all of them, or it comes back. Decisions listed here means its approved
    * lines may be reworded too. A code finding unlocks nothing, and a line pb can't place in a section unlocks nothing.
    */
+  /**
+   * The spec's sections a finding names in words, by their heading as written ("the Decisions tails", "Threats :125"):
+   * a fix that says which section to change points at it as surely as a line number does. Case matters, so a
+   * heading that is also an everyday word ("tasks") is named only when it is written the way the spec heads it.
+   */
+  const namedSections = (md: string, text: string): string[] =>
+    [...blankFenced(md).join("\n").matchAll(/^##\s+(?!#)(.+?)\s*:?\s*$/gm)]
+      .map((m) => m[1])
+      .filter((heading) => new RegExp(`(?<![\\w-])${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(text))
+      .map(sectionKey);
+
   const unlockedSections = (store: Store, spec: string, findings: Finding[]): { specSections?: string[] } => {
     const md = store.readSpec(spec);
     if (!md) return {};
     const keys = findings
       .filter((f) => isSpecFinding(f, spec))
-      .flatMap((f) => [...(f.line !== undefined ? [f.line] : []), ...citedSpecLines(`${f.title}\n${f.fix ?? ""}`)])
-      .map((line) => sectionKeyAtLine(md, line))
+      .flatMap((f) => [
+        ...[...(f.line !== undefined ? [f.line] : []), ...citedSpecLines(`${f.title}\n${f.fix ?? ""}`)].map((line) => sectionKeyAtLine(md, line)),
+        ...namedSections(md, `${f.title}\n${f.fix ?? ""}`),
+      ])
       .filter((k): k is string => !!k && k !== "section:design");
     return keys.length ? { specSections: [...new Set(keys)] } : {};
   };
@@ -369,6 +382,27 @@ export function registerFix(pi: ExtensionAPI) {
   };
 
   /**
+   * Ask you to approve a contract change pb would not approve on its own, from the diff the summary just showed.
+   * Enter and no answer keep it unapproved, as /pb:build's own re-approval does. What is approved is exactly the
+   * text that diff was computed from: an edit made while the question was open is not approved unseen.
+   */
+  const askToReapprove = async (c: ExtensionCommandContext, store: Store, spec: string, shown: { md: string; changes: ReturnType<typeof contractChanges> }, why: string): Promise<{ ok: true } | { ok: false; why: string }> => {
+    const LEAVE = `Leave it for /${cmd("build")} ${spec}`;
+    const APPROVE = "Re-approve it";
+    const title = `Re-approve ${spec}'s contract change? pb did not approve it on its own: ${why}. ${shown.changes.summary}. The diff is in the chat above.`;
+    if ((await choose(c, store, title, [LEAVE, APPROVE], LEAVE)) !== APPROVE) return { ok: false, why };
+    const loaded = loadSpec(store, spec);
+    const p = store.progress(spec);
+    if (!loaded || !p || specHash(loaded.md) !== specHash(shown.md)) {
+      warnLater(c, `Not re-approved: ${spec}'s spec changed while the question was open. \`/${cmd("build")} ${spec}\` shows the change as it stands.`);
+      return { ok: false, why: "the spec changed while the question was open" };
+    }
+    approveSpec(store, p, loaded.md, loaded.spec);
+    store.saveProgress(p);
+    return { ok: true };
+  };
+
+  /**
    * Unattended fix loop: lap until every finding is fixed (and pb's checks pass) or skipped-as-spec-revision,
    * up to FIX_LAPS, then come home with the outcome. The report names findings by the numbers the brief shows,
    * so no prose has to be matched back to one. A lap whose fixes leave a check red does not count: the next lap
@@ -510,8 +544,14 @@ export function registerFix(pi: ExtensionAPI) {
         withSession: async (c) => {
           // Headless, nothing is approved unseen: /pb:build does it, as before.
           const reapproval = drift === "changed" && c.hasUI ? contractReapproval(store, spec) : undefined;
-          const approval = reapproval ? reapprove(store, spec, reapproval, allowed) : undefined;
+          let approval = reapproval ? reapprove(store, spec, reapproval, allowed) : undefined;
           await c.sendMessage({ customType: "pb", content: summaryFor(reapproval, approval), display: true }, { triggerTurn: false });
+          // A change pb would not approve on its own is put to you here, from the diff just posted, rather than left
+          // for a /pb:build you would have to know to run. Unanswered, it stays unapproved, as before.
+          if (reapproval && approval && !approval.ok) {
+            approval = await askToReapprove(c, store, spec, reapproval, approval.why);
+            if (approval.ok) post(`**Spec re-approved** — the contract change in the diff above is what \`/${cmd("review")}\` now judges the code against.`);
+          }
           if (!reviewable || (drift && !approval?.ok)) return void stopped();
           // Like a finished build's offer: with nobody there, the review starts itself after reviewAfterBuildSec,
           // dispatched as the command you would type. It can't change your files, so starting unasked costs only time.

@@ -1136,6 +1136,32 @@ test("pb_write_spec: a citation the code doesn't have is fixed in its section, a
   assert.match(t.read(".pi/pb/specs/two-faults/spec.md"), /## Goal\nCancel orders\./);
 });
 
+test("pb_update_spec: a citation that went stale in two sections is fixed one section at a time; a write still answers for one it brings in", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  citedPage(t);
+  // The spec cites src/page.ts:12 in two sections; then the line is gone from the code (the file got shorter).
+  const cites = citingSpec("`src/page.ts:12` holds the model.").replace("## Goal\n", "## Goal\nThe model is at `src/page.ts:12`.\n");
+  assert.equal((await t.callTool("pb_write_spec", { name: "slow-page", content: cites })).error, undefined);
+  fs.writeFileSync(path.join(t.repo, "src/page.ts"), "// line 1\n");
+
+  // Fixing one section is not refused for the other's stale line: it is written, and the other is named.
+  const one = await t.callTool("pb_update_spec", { name: "slow-page", section: "Findings", content: "- `src/page.ts:1` holds the model." });
+  assert.equal(one.error, undefined, one.error ?? "");
+  assert.match(one.content![0].text, /Note: the spec still points at code that isn't there elsewhere — fix it with pb_update_spec too: .*src\/page\.ts:12/);
+  assert.match(t.read(".pi/pb/specs/slow-page/spec.md"), /- `src\/page\.ts:1` holds the model\./);
+
+  // A citation the write itself brings in is still refused, stale lines elsewhere or not.
+  const added = await t.callTool("pb_update_spec", { name: "slow-page", section: "Findings", content: "- `src/page.ts:20` holds the model." });
+  assert.match(added.error!, /Not written: the spec points at code that isn't there:\n- [^\n]*src\/page\.ts:20/);
+  assert.doesNotMatch(added.error!, /src\/page\.ts:12/);
+
+  // Then the other section, and nothing is left to name.
+  const two = await t.callTool("pb_update_spec", { name: "slow-page", section: "Goal", mode: "edit", old: "`src/page.ts:12`", new: "`src/page.ts:1`" });
+  assert.equal(two.error, undefined, two.error ?? "");
+  assert.doesNotMatch(two.content![0].text, /points at code that isn't there/);
+});
+
 test("a draft belongs to the session that wrote it: elsewhere, and once the spec is written whole, edits reach the spec", async () => {
   const t = setup();
   await written(t, SPEC());

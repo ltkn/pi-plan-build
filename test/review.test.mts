@@ -2824,7 +2824,67 @@ test("fix: a contract change beyond the sections the picked spec findings name i
   const summary = t.posts.find((x) => x.includes("pb did not approve it"))!;
   assert.match(summary, /\*\*The fix changed the approved contract, and pb did not approve it\*\*: it also changed ## goal, which no spec finding you picked points at\. `\/pb:build order-cancellation` shows the change/);
   assert.match(summary, /\*\*Next:\*\* `\/pb:build order-cancellation` re-approves the revised contract/);
+  // You are asked, from that diff; Enter leaves it for /pb:build.
+  const asked = t.selectTitles.findIndex((x) => /^Re-approve order-cancellation's contract change\? pb did not approve it on its own: it also changed ## goal/.test(x));
+  assert.ok(asked >= 0, t.selectTitles.join("\n"));
+  assert.deepEqual(t.selectOptions[asked], ["Leave it for /pb:build order-cancellation", "Re-approve it"]);
   assert.ok(!t.selectTitles.some((x) => /Review them now\?/.test(x)));
+});
+
+test("fix: a contract change pb would not approve on its own is approved in place when you say so, and the review is offered", async () => {
+  const t = await reviewedWithSpecFinding();
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:fix order-cancellation]")) fs.writeFileSync(path.join(t.repo, specRel), t.read(specRel).replace("Cancel orders.", "Cancel any order."));
+    await fixesTheSpecLine(text, tool);
+  };
+  t.selects.push("Re-approve it", "Later");
+  await t.run("fix", "order-cancellation 1");
+  assert.equal(t.progress("order-cancellation").approval.contractHash, contractHash(t.read(specRel)));
+  assert.match(t.read(".pi/pb/specs/order-cancellation/approved.md"), /## Goal\nCancel any order\./);
+  assert.ok(t.posts.some((x) => x.startsWith("**Spec re-approved** — the contract change in the diff above")), t.posts.join("\n---\n"));
+  assert.ok(t.selectTitles.some((x) => /^Fixes for order-cancellation are done: .*Review them now\?/.test(x)), t.selectTitles.join("\n"));
+});
+
+test("fix: a spec edited while the re-approval question is open is not approved unseen", async () => {
+  const t = await reviewedWithSpecFinding();
+  const approvedBefore = t.progress("order-cancellation").approval.contractHash;
+  t.agent.script = async (text, tool) => {
+    if (text.startsWith("[pb:fix order-cancellation]")) fs.writeFileSync(path.join(t.repo, specRel), t.read(specRel).replace("Cancel orders.", "Cancel any order."));
+    await fixesTheSpecLine(text, tool);
+  };
+  t.selects.push("Re-approve it");
+  process.env.MOCK_SELECT_TOUCH = path.join(t.repo, specRel); // saved while the dialog is open
+  try {
+    await t.run("fix", "order-cancellation 1");
+  } finally {
+    delete process.env.MOCK_SELECT_TOUCH;
+  }
+  assert.equal(t.progress("order-cancellation").approval.contractHash, approvedBefore);
+  assert.ok(t.notes.some((x) => /Not re-approved: order-cancellation's spec changed while the question was open/.test(x)), t.notes.join("\n"));
+  assert.ok(!t.selectTitles.some((x) => /Review them now\?/.test(x)));
+});
+
+test("fix: a spec finding that names a section in words unlocks it, so rewording an approved decision there is approved with the rest", async () => {
+  const t = await reviewedWithSpecFinding();
+  const progress = t.progress("order-cancellation");
+  progress.review.findings[0] = { ...SPEC_FINDING, fix: "Say: Refunds, partial or full. Then retire the Decisions line about PENDING orders to match." };
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"), JSON.stringify(progress));
+  let reworded: string | undefined = "not called";
+  let direct: string | undefined;
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix order-cancellation]")) return;
+    // Around the tool, the file is fenced: the lap writes the spec only through pb_update_spec.
+    direct = (await tool("write", { path: specRel, content: "# rewritten" })).error;
+    assert.equal((await tool("pb_update_spec", { section: "Out of scope", mode: "edit", old: "Refunds.", new: "Refunds, partial or full." })).error, undefined);
+    reworded = (await tool("pb_update_spec", { section: "Decisions", mode: "edit", old: "Only PENDING orders can be cancelled", new: "Only PENDING orders, refunded in part or in full, can be cancelled" })).error;
+    await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "spec lines" }], tests: "none: spec lines" });
+  };
+  await t.run("fix", "order-cancellation 1");
+  assert.match(direct ?? "", /This fix lap changes order-cancellation's spec only through pb_update_spec/);
+  assert.equal(reworded, undefined);
+  assert.ok(!t.selectTitles.some((x) => /^Re-approve/.test(x)), t.selectTitles.join("\n")); // approved without a question
+  assert.ok(t.posts.some((x) => x.includes("**Spec updated and re-approved:")), t.posts.join("\n---\n"));
+  assert.equal(t.progress("order-cancellation").approval.contractHash, contractHash(t.read(specRel)));
 });
 
 test("fix: with nobody there, the follow-up review starts itself after reviewAfterBuildSec", async () => {

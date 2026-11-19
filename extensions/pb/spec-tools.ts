@@ -3,7 +3,7 @@ import { StringEnum, Type } from "./schema.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
 import { specFormatHandout, specPrompt } from "./prompts.ts";
-import { specAssumptions, acceptanceCriteria, blockFingerprints, blockLabel, isDraftSpec, needsRed, parseSpec, removedLines, removeSection, sectionKey, sectionOf, setSection, setStatus, specLosses, specTextBlocks, tokensOf, unseenBlocks } from "./spec.ts";
+import { type ParsedSpec, specAssumptions, acceptanceCriteria, blockFingerprints, blockLabel, isDraftSpec, needsRed, parseSpec, removedLines, removeSection, sectionKey, sectionOf, setSection, setStatus, specLosses, specTextBlocks, tokensOf, unseenBlocks } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { Store, now } from "./store.ts";
@@ -371,10 +371,19 @@ export function registerSpecTools(pi: ExtensionAPI) {
         throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.join("\n- ")}`);
       }
       const sectionName = sectionLabel?.toLowerCase() ?? "";
+      let inherited: string[] = [];
       // A path:line is a claim about the code the spec was written against. Check it on every
       // ready write except Design, which the build writes and may legitimately describe new code.
       if (spec.status === "ready" && (sectionName !== "design" || draft)) {
-        const pathErrs = [...specPathErrors(md, ctx.cwd), ...specRepoErrors(spec, ctx.cwd)];
+        const errorsOf = (text: string, parsed: ParsedSpec) => [...specPathErrors(text, ctx.cwd), ...specRepoErrors(parsed, ctx.cwd)];
+        const all = errorsOf(md, spec);
+        // A section write answers for what it brings in. A wrong citation the ready spec already had elsewhere is not
+        // this write's: refusing for it would refuse every edit until all of them were fixed at once, one section at a
+        // time being impossible, which is what drives a writer to edit the file around the tool. It is noted instead.
+        const parsedBefore = !draft && before && params.section ? parseSpec(before).spec : undefined;
+        const already = new Set(parsedBefore?.status === "ready" ? errorsOf(before!, parsedBefore) : []);
+        const pathErrs = all.filter((e) => !already.has(e));
+        inherited = all.filter((e) => already.has(e));
         const fix = "Fix the path, line or citation; new files need no line number.";
         if (pathErrs.length && draft) return refuse(store, name, session, md, "Not written: the draft points at code that isn't there:", pathErrs, fix);
         if (pathErrs.length) throw new Error(`Not written: the spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\n${fix}`);
@@ -384,7 +393,8 @@ export function registerSpecTools(pi: ExtensionAPI) {
       const isTasks = sectionName === "tasks" || !!draft;
       const rw = isTasks ? rewriteWarning(name, prev, spec) : undefined;
       const lost = lossNote(before, md);
-      const notes = [...(isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])] : []), ...(lost ? [lost] : [])].map((w) => `\nNote: ${w}.`);
+      const stale = inherited.length ? `the spec still points at code that isn't there elsewhere — fix ${inherited.length === 1 ? "it" : "them"} with pb_update_spec too: ${inherited.join("; ")}` : undefined;
+      const notes = [...(isTasks ? [...specWarnings(md, spec), ...(rw ? [rw] : [])] : []), ...(lost ? [lost] : []), ...(stale ? [stale] : [])].map((w) => `\nNote: ${w}.`);
       const started = session ? specStarted.get(session) : undefined;
       const specMs = !building && spec.status === "ready" && started !== undefined ? Math.max(0, Date.now() - started) : undefined;
       // Answer built from pre-write values above; what follows is the file and its two ledger records.
