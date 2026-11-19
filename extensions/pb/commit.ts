@@ -12,7 +12,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { KEBAB_NAME } from "./names.ts";
 import { commitMessage, parseSpec } from "./spec.ts";
 import { type Progress, Store, changedSince, now, readEvents } from "./store.ts";
-import { cmd, nextLine, post, specCompletions, specOfSession } from "./kit.ts";
+import { cmd, nextLine, offerNext, post, specCompletions, specOfSession } from "./kit.ts";
 import { whereNext } from "./next.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
 import { mapFiles } from "./map.ts";
@@ -161,6 +161,9 @@ export function registerCommit(pi: ExtensionAPI) {
       const next = spec && !spec.archived ? whereNext(store, spec.name).next : `\`/${cmd("plan")} <feature>\` for the next one`;
       const shas = committed.map((c) => `${c.name ? `${c.name} ` : ""}\`${c.sha.slice(0, 7)}\``).join(" · ");
       post([`**✅ Committed** ${shas} — ${subject} · ${total} file${total === 1 ? "" : "s"}${left.length ? ` · left out, still uncommitted: ${left.join(", ")}` : ""}`, "", nextLine(`${next}.`), "", tip("commit.done", spec && !spec.archived ? { spec: spec.name } : {})].join("\n"));
+      // A reviewed spec, committed: archiving is the one step left, offered as Enter.
+      if (spec && !spec.archived && whereNext(store, spec.name).command === `/${cmd("archive")} ${spec.name}`)
+        await offerNext(ctx, store, `${spec.name} is reviewed and committed. Archive it now?`, [{ label: "Archive now", command: `/${cmd("archive")} ${spec.name}` }]);
     },
   });
 }

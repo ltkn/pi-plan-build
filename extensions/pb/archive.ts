@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { dropCheckpoints } from "./checkpoint.ts";
 import { findingsOf, readMap } from "./map.ts";
 import { parseSpec, sectionOf } from "./spec.ts";
-import { type Progress, Store, changedSince, now, readEvents, reviewLedger, samePath } from "./store.ts";
+import { type Progress, Store, changedSince, now, openFindings, readEvents, reviewLedger, samePath } from "./store.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { buildLivenessMs, cmd, fitDialog, nextLine, post, sessionLive, specCompletions } from "./kit.ts";
@@ -22,7 +22,7 @@ export const owedOnArchive = (p: Progress | undefined, reviewOpen = false): stri
   const running = reviewOpen ? ["a review of it is running or was interrupted: archiving ends it"] : [];
   const review = p.review;
   if (!review) return [...running, "it was never reviewed"];
-  const open = review.findings.filter((f) => f.priority !== "P3").length;
+  const open = openFindings(review).length;
   return [
     ...running,
     ...(review.verdict !== "pass" ? [`its last review was ${review.verdict === "changes_needed" ? "CHANGES NEEDED" : review.verdict === "unverified" ? "UNVERIFIED" : "without a verdict"}`] : []),

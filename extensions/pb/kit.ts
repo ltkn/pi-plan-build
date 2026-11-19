@@ -32,7 +32,7 @@ export const cmd = (verb: string) => `${PREFIX}:${verb}`;
 
 /** What the pb_ask dialog promises: plain words, one trade-off per option, a reasoned recommendation. */
 export const ASK_DESCRIPTION =
-  "Ask the human one question and wait for the answer: a choice between options, or an open question. Use it while planning; a pb build never asks — it takes the sensible reading, records it as an assumption, and stops only when the Goal or a Contract cannot be built as written. Ask only what you can't sensibly decide yourself. Ask independent questions together, in one call (questions); ask a question that depends on another's answer only after you have that answer. When several options may apply at once, say so (multiple). Phrase every question in plain words a non-expert can follow: one line per option with its trade-off, and your recommendation with one plain reason why — short enough to read in a dialog.";
+  "Ask the human one question and wait for the answer: a choice between options, or an open question. Use it while planning; a pb build never asks — it takes the sensible reading, records it as an assumption, and stops only when the Goal or a Contract cannot be built as written. Ask only what you can't sensibly decide yourself. Ask independent questions together, in one call (questions); ask a question that depends on another's answer only after you have that answer. When several options may apply at once, say so (multiple). Phrase every question in plain words a non-expert can follow: one line per option with its trade-off, and your recommendation in `recommended` as the option's letter and one plain reason (\"B — fewer moving parts\"): pb lists that option first and shows the reason — short enough to read in a dialog.";
 
 /** One-line display text for markers and session names: collapse whitespace, cap length. */
 export const planTitle = (arg: string, n = 60) => {
@@ -846,6 +846,23 @@ export const choose = async (ctx: ExtensionContext, store: Store, title: string,
   const { result: choice, timedOut } = await patiently(ctx, ms, (opts) => ctx.ui.select(shown, options, opts));
   if (choice !== undefined) return choice;
   return timedOut ? wentOnWithout(title, fallback, ms, notes) : undefined;
+};
+
+/**
+ * The next step, offered as a choice: Enter takes the first, and the chosen command goes into the editor for one more
+ * Enter, so nothing runs that you didn't see. With nobody there the dialog times out to "Later" and nothing starts:
+ * pb never commits, archives or starts a fix on its own.
+ */
+export const offerNext = async (ctx: ExtensionContext, store: Store, question: string, choices: { label: string; command: string }[]): Promise<void> => {
+  const LATER = "Later";
+  try {
+    if (!ctx.hasUI) return;
+  } catch {
+    return;
+  }
+  const pick = await choose(ctx, store, `${question} The command goes into the editor: Enter runs it.`, [...choices.map((c) => c.label), LATER], LATER);
+  const command = choices.find((c) => c.label === pick)?.command;
+  if (command) safely(() => ctx.ui.setEditorText(command));
 };
 
 /** A dialog nobody answered: pb's default is taken, noted for the summary, and said where you will look. */

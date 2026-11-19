@@ -11,7 +11,7 @@ import type {
 import { changedPaths, commitTime, skippedLargeFiles, snapshot, staleProseRefs } from "./checkpoint.ts";
 import { tip } from "./help.ts";
 import { acceptanceDrift, designProvenance, extraBlock, findingLine, isNone, ATTACKER_SYSTEM, reviewSessionPrompt, REVIEW_DIFF_CHARS, reviewerBrief } from "./prompts.ts";
-import { REVIEW_TOOLS, acceptanceCoverage, fromProse, mergeFindings, normalizeAcceptance, sensitiveGround, type Verification, unparsedReport, verdictOf, verificationLines, verifyFindings } from "./review.ts";
+import { REVIEW_TOOLS, acceptanceCoverage, codeOnlyDiff, fromProse, isProsePath, isProseOrTestPath, mergeFindings, normalizeAcceptance, sensitiveGround, type Verification, unparsedReport, verdictOf, verificationLines, verifyFindings } from "./review.ts";
 import { runFresh } from "./runner.ts";
 import { acceptanceCriteria, specHash } from "./spec.ts";
 import { duration } from "./format.ts";
@@ -20,7 +20,7 @@ import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Sto
 import { carriedFindings } from "./spec-review.ts";
 import { runVerify } from "./verify.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
-import { P_ORDER, approvalDrift, choose, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, runtime, safely, sessionGone, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, withChecking } from "./kit.ts";
+import { P_ORDER, approvalDrift, choose, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, offerNext, phaseHeader, post, redNotes, reply, runtime, safely, sessionGone, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, withChecking } from "./kit.ts";
 import { markReviewed, unfinishedPhase } from "./phase.ts";
 import { safeLine } from "./markdown.ts";
 
@@ -375,6 +375,10 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const ownIds = fixable.filter((f) => !f.outside).map((f) => number.get(f)!);
     const outsideIds = fixable.filter((f) => f.outside).map((f) => number.get(f)!);
     const passIds = (ownIds.length ? ownIds : outsideIds).join(" ");
+    // Wording is a finding against the spec or a doc: after a pass, fixing it needs no new review (the fix run says so).
+    const isWording = (f: Finding) => (run.name !== undefined && isSpecFinding(f, run.name)) || (f.file !== undefined && isProsePath(f.file));
+    const offered = fixable.filter((f) => passIds.split(" ").includes(String(number.get(f))));
+    const wordingLeft = offered.length > 0 && offered.every(isWording);
     const outsideNote = ownIds.length && outsideIds.length
       ? ` ${outsideIds.map((n) => `#${n}`).join(", ")} ${outsideIds.length === 1 ? "is" : "are"} outside the change: add ${outsideIds.length === 1 ? "its number" : "their numbers"} to fix ${outsideIds.length === 1 ? "it" : "them"} too.`
       : "";
@@ -414,7 +418,9 @@ export function registerReviewFlow(pi: ExtensionAPI) {
                   : run.name
                     ? `\`/${cmd("commit")} ${run.name}\` (you see the files and the message first), then \`/${cmd("archive")} ${run.name}\`.${
                         // Numbered findings don't block a pass, but they stay open and /pb:fix takes them: offer it, as a choice.
-                        passIds && complete
+                        passIds && complete && wordingLeft
+                          ? ` What is left is wording only, so fixing it is optional: \`/${cmd("fix")} ${run.name} ${passIds}\` fixes it, and needs no new review after.${outsideNote}${nitNote}`
+                          : passIds && complete
                           ? ` The verdict is PASS, so fixing the numbered findings is optional: \`/${cmd("fix")} ${run.name} ${passIds}\` fixes them first if you want, then \`/${cmd("review")}\` again.${outsideNote}${nitNote}`
                           : nitIds.length && complete
                             ? ` The P3 nits are optional: \`/${cmd("fix")} ${run.name} ${nitIds.join(" ")}\` fixes them if you want, then \`/${cmd("review")}\` again.`
@@ -479,7 +485,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       "",
       tip(tipKey, { spec: run.name ?? "", checks: failedChecks.map((c) => `\`${c}\``).join(", "), ...(run.name && fixIds && complete ? { ids: verdict === "pass" ? passIds : fixIds } : {}) }),
     ].join("\n");
-    return { text, verdict, counts, findings: numbered, acceptance, complete, abuse: finished("abuse") };
+    return { text, verdict, counts, findings: numbered, acceptance, complete, abuse: finished("abuse"), fixIds, passIds, nitIds, midBuild: midBuild.length > 0 };
   };
 
   const allFindings = (run: ReviewRun) => run.passes.flatMap((x) => (x.role === "abuse" ? x.findings.map((f) => ({ ...f, title: `Adversarial: ${f.title}` })) : x.findings));
@@ -578,6 +584,16 @@ export function registerReviewFlow(pi: ExtensionAPI) {
             q.reviewUnshown = undefined;
             store.saveProgress(q);
           }
+          // The step after the result, as a choice: Enter takes the one Next names. Only over a recorded review, so
+          // the ids it offers resolve; a build still owed tasks goes back to /pb:build, which Next already says.
+          if (!run.name || !m.complete || m.midBuild) return;
+          const fix = (ids: string) => ({ label: `Fix ${ids.includes(" ") ? "findings" : "finding"} ${ids} now`, command: `/${cmd("fix")} ${run.name} ${ids}` });
+          if (m.verdict === "changes_needed" && m.fixIds) await offerNext(c, store, `The review of ${run.name} needs changes. Fix them now?`, [fix(m.fixIds)]);
+          else if (m.verdict === "pass")
+            await offerNext(c, store, `The review of ${run.name} passed. Commit it now?`, [
+              { label: "Commit now", command: `/${cmd("commit")} ${run.name}` },
+              ...(m.passIds ? [{ ...fix(m.passIds), label: `${fix(m.passIds).label.replace(/ now$/, "")} first` }] : []),
+            ]);
         },
       });
     } catch {
@@ -899,15 +915,19 @@ export function registerReviewFlow(pi: ExtensionAPI) {
 
       // The abuse pass: on sensitive ground by default (reviewer.security "auto"), or on every review ("always").
       // A follow-up checks the fixes, so its ground is what changed since the last review: the spec's Threats
-      // section was attacked then, and only a fix that touches sensitive code is attacked again.
+      // section was attacked then, and only a fix that touches sensitive code is attacked again. Prose and tests
+      // are not that code: a reworded spec line that says "route" or "status" is not an entry point.
       const mode = cfg.reviewer.security ?? "auto";
+      const fixedCode = previous ? previous.changed.filter((f) => !isProseOrTestPath(f)) : [];
       const security =
         mode === "always"
           ? "always"
           : mode === "off"
             ? undefined
             : previous
-              ? sensitiveGround({ files: previous.changed, diff: `${gitDiff(ctx.cwd, previous.snapshot)}${untrackedText(ctx.cwd, changed.filter((f) => previous?.changed.includes(f)))}` })
+              ? fixedCode.length
+                ? sensitiveGround({ files: fixedCode, diff: `${codeOnlyDiff(gitDiff(ctx.cwd, previous.snapshot))}${untrackedText(ctx.cwd, changed.filter((f) => fixedCode.includes(f)))}` })
+                : undefined
               : sensitiveGround({ spec: loaded?.md, files: changedEverywhere, diff: reviewDiff });
       const acceptance = loaded && name ? acceptanceCriteria(loaded.md, loaded.spec) : undefined;
       const brief = reviewerBrief({

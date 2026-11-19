@@ -9,11 +9,12 @@ import { type FixDirection, fixNudgePrompt, fixSeedPrompt, reportRegister } from
 import { blankFenced, safeBlock } from "./markdown.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { snapshot } from "./checkpoint.ts";
+import { changedPaths, snapshot } from "./checkpoint.ts";
+import { isProsePath } from "./review.ts";
 import { type Checkpoint, type Finding, Store, appendCheckpoint, gitHead, isSpecFinding, now, readEvents } from "./store.ts";
 import { contractChanges, removedLines, sectionKey, sectionKeyAtLine, sectionOf, specHash } from "./spec.ts";
 import { runVerify } from "./verify.ts";
-import { approvalDrift, approveSpec, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, repoSnapshots, nextLine, phaseHeader, reply, sleep, specOfSession, specRef, stop, tree, warnLater, withChecking } from "./kit.ts";
+import { approvalDrift, approveSpec, choose, cmd, commands, post, evidenceLine, finalCheckCommands, fixCompletions, loadSpec, offerNext, repoSnapshots, nextLine, phaseHeader, reply, sleep, specOfSession, specRef, stop, tree, warnLater, withChecking } from "./kit.ts";
 import { tip } from "./help.ts";
 import { notifyDesktop } from "./notify.ts";
 
@@ -413,9 +414,13 @@ export function registerFix(pi: ExtensionAPI) {
     const home = ctx.sessionManager.getSessionFile() ?? undefined;
     // Taken now: each lap replaces the session, and a replaced context must not be read again.
     const cwd = ctx.cwd;
+    // What the run changes, from here: a run that touched only prose needs no new review after a pass.
+    const startedAt = snapshot(cwd, `pb: before fixes ${spec}`);
     const numberOf = new Map(numbered.map((f, i) => [f, i + 1] as const));
     // Read before any lap edits the spec: the findings' line numbers are the reviewed text's.
-    const allowed = unlockedSections(store, spec, first).specSections ?? [];
+    // What a lap may change and pb approves unasked: the sections the spec findings unlock, and Findings, which every
+    // lap keeps true to the code it changed (Design and Decisions are outside the contract and need no approval).
+    const allowed = [...new Set([...(unlockedSections(store, spec, first).specSections ?? []), "section:findings"])];
     const specNumbers = first.filter((f) => isSpecFinding(f, spec)).map((f) => numberOf.get(f)!).join(" ");
     const label = (f: Finding) => `#${numberOf.get(f) ?? "?"} ${f.title}`;
     let live: ExtensionCommandContext = ctx;
@@ -470,6 +475,16 @@ export function registerFix(pi: ExtensionAPI) {
       return p ? approvalDrift(store, p) : undefined;
     })();
     const time = ms ? duration(ms) : "";
+    // Wording fixed after a PASS needs no second review: the verdict stands on the same code, and the spec diff is
+    // shown and approved. Only when every finding of the run was wording (the spec or a doc), all of them got fixed
+    // with pb's checks green, and the run changed nothing but prose; anything else is reviewed as before.
+    const wordingOnly = (() => {
+      const review = store.progress(spec)?.review;
+      if (review?.verdict !== "pass" || silent || failure || open.length || skipped.length || !startedAt) return false;
+      if (!first.every((f) => isSpecFinding(f, spec) || (f.file !== undefined && isProsePath(f.file)))) return false;
+      const endedAt = snapshot(cwd, `pb: after fixes ${spec}`);
+      return !!endedAt && changedPaths(cwd, startedAt.commit, endedAt.commit).every(isProsePath);
+    })();
     // The title says what became of each finding, by its review number: "fixed" only once pb's checks passed.
     const numbers = (labels: string[]) => labels.map((l) => l.split(" ")[0]).join(", ");
     const outcome = [
@@ -487,7 +502,9 @@ export function registerFix(pi: ExtensionAPI) {
     // /pb:build does it. The summary says which, so it is built once that is known.
     const summaryFor = (reapproval?: ReturnType<typeof contractReapproval>, approval?: ReturnType<typeof reapprove>): string => {
       const approved = approval?.ok === true;
-      const reviewStep = !drift || approved
+      const reviewStep = wordingOnly && (!drift || approved)
+        ? `\`/${cmd("commit")} ${spec}\`, then \`/${cmd("archive")} ${spec}\`. Only wording changed after a PASS, so no new review is needed: the review's verdict stands, and the spec diff is above.`
+        : !drift || approved
         ? `\`/${cmd("review")}\` checks the delta.`
         : drift
           ? `\`/${cmd("build")} ${spec}\` re-approves the ${drift === "missing" ? "spec as it stands (its approved copy is missing or changed)" : "revised contract (the fix changed it)"}, then \`/${cmd("review")}\` can check the delta.`
@@ -553,6 +570,14 @@ export function registerFix(pi: ExtensionAPI) {
             if (approval.ok) post(`**Spec re-approved** — the contract change in the diff above is what \`/${cmd("review")}\` now judges the code against.`);
           }
           if (!reviewable || (drift && !approval?.ok)) return void stopped();
+          if (wordingOnly) {
+            const p = store.progress(spec);
+            if (p?.review) {
+              p.review.settled = [...new Set([...(p.review.settled ?? []), ...first.map((f) => numberOf.get(f)!)])].sort((a, b) => a - b);
+              store.saveProgress(p);
+            }
+            return offerNext(c, store, `Wording fixed for ${spec}: ${outcomeText}. The review's PASS stands. Commit now?`, [{ label: "Commit now", command: `/${cmd("commit")} ${spec}` }]);
+          }
           // Like a finished build's offer: with nobody there, the review starts itself after reviewAfterBuildSec,
           // dispatched as the command you would type. It can't change your files, so starting unasked costs only time.
           const waitSec = store.config().reviewAfterBuildSec;
@@ -595,8 +620,10 @@ export function registerFix(pi: ExtensionAPI) {
         else if (mine.length > 1) return ctx.ui.notify(`Several specs here (${mine.join(", ")}): name one: \`/${cmd("fix")} <spec> [ids].`, "warning");
       }
       if (!name) return ctx.ui.notify(`No spec here: run /${cmd("fix")} from a build or review session, or name a spec.`, "warning");
-      const numbered = store.progress(name)?.review?.findings ?? [];
-      const open = numbered.filter((f) => f.priority !== "P3" || isSpecFinding(f, name!));
+      const review = store.progress(name)?.review;
+      const numbered = review?.findings ?? [];
+      // A wording fix after a pass settled its findings: they keep their numbers, and are no longer open.
+      const open = numbered.filter((f, i) => !review?.settled?.includes(i + 1) && (f.priority !== "P3" || isSpecFinding(f, name!)));
       if (!numbered.length) return ctx.ui.notify(`\`${name}\` has no open review findings to fix.`, "info");
       if (!open.length && !/^[\s,]*\d/.test(rest))
         return ctx.ui.notify(

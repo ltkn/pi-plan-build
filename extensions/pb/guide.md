@@ -22,7 +22,10 @@ only what its events already carry (the build's own start and end).
 **You always know the next step.** The footer reads `pb · <spec> · <state> ·
 next: <command>` and follows every command and turn; the terminal title carries
 the spec and its state. **alt+n** puts that command in the editor (press Enter
-to run it); `/pb:help` with no topic opens with where you are and what's next,
+to run it). At the end of a review, a fix run and a commit, pb also asks the next
+step as a choice with the one Next names first ("Fix findings 1 2 now", "Commit
+now", "Archive now"): Enter puts its command in the editor, and one more Enter
+runs it. With nobody there the question times out to "Later" and nothing starts; `/pb:help` with no topic opens with where you are and what's next,
 and `/pb:status` says it for every spec. Starting Pi on work in progress says it
 once. Finding numbers (`/pb:fix`) and checkpoint ids (`/pb:undo`)
 complete with what each one is.
@@ -1052,9 +1055,12 @@ project checks as the build's final step. A red check means the lap's fixes
 don't count: the next lap gets the failure, and with no lap left the run stops
 on it. When everything is fixed and green, pb offers the follow-up review. Each
 lap is an undo point: `/pb:undo fix1` restores the files and the spec as they
-were before it. A fix lap keeps the spec true to what it fixed: when a fix changes
-behaviour the spec's Design or Decisions describe, the lap updates those lines
-itself, and it can change nothing else in the spec. A finding that needs the
+were before it. **A fix lap keeps the spec and the map true to what it fixed**:
+before it reports, it searches the whole spec and AGENTS.md for every name, path
+and behaviour its fixes changed, and corrects the lines that went stale: Design,
+Decisions and Findings in the spec (pb approves a Findings edit without asking:
+it is evidence, not a rule the build follows), and AGENTS.md directly. A stale
+line in the Goal, Contracts, Acceptance or Tasks it leaves and names in its reply. A finding that needs the
 Goal, Contracts or Acceptance changed is reported as skipped, for you to revise
 with `/pb:spec`. **A finding filed against the spec itself is fixed in the spec**:
 its lap may edit the section the finding points at, every spec line it cites
@@ -1076,13 +1082,20 @@ report, and waits until you type `continue` or tell it what to do instead. If
 the lap stops on its own without reporting, pb reminds it twice, then ends the
 run as silent. When everything is fixed, the "review them now?" question starts
 the review itself after `reviewAfterBuildSec` with no answer, as after a build.
+**Wording fixed after a PASS needs no new review**: when every finding of the run
+was against the spec or a doc, all of them were fixed with pb's checks green, and
+the run changed nothing but prose, the review's PASS stands. pb marks those
+findings settled (they keep their numbers and are no longer open) and offers the
+commit instead.
 If the contract changed in a way nobody approved, `/pb:build` must re-approve
 it before the review runs; otherwise the next `/pb:review` is a **follow-up**:
 it checks the fixes and nothing else: whether each previous finding is fixed,
 what the fixes broke or left inconsistent, and any new P0 or P1 in the lines
-changed since. It reports no new P2 or P3 in code the fixes left alone, and its
-adversarial pass runs only when the fixes touch sensitive code (`--full` reviews
-everything again). If nothing changed, it says so and costs nothing, unless pb's check
+changed since. It reports no new P2 or P3 in code, docs or spec text the fixes
+left alone; a doc or spec line the fixes left stale is a P3 with its corrected
+wording, unless it is in the Goal, Contracts or Acceptance. Its adversarial pass
+runs only when the fixes touch sensitive code: a fix to docs, the spec or tests
+alone is never attacked again (`--full` reviews everything again). If nothing changed, it says so and costs nothing, unless pb's check
 failed under the last review: a check can fail for reasons outside the change (a port
 in use, a service down), so once it runs green the review follows up instead.
 

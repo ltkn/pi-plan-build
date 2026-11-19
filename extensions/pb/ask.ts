@@ -17,23 +17,54 @@ const MAX_QUESTIONS = 8;
 
 const letter = (i: number) => String.fromCharCode(65 + i);
 
+/** A recommendation's leading letter and the reason after it: "B", "b.", "B — fewer moving parts", "B: …". */
+const LETTER_LEAD = /^([A-Za-z])(?:[.)]?\s*$|[.)]?\s*[—–:-]\s*|[.)]\s+)([\s\S]*)$/;
+
+/** An option's label: its words before the first dash, where the model usually puts the trade-off. */
+const labelOf = (text: string) => text.split(/\s+[—–-]\s+/, 1)[0].trim().toLowerCase();
+
 /**
- * Which option the recommendation names, however the model wrote it: the option itself, its letter ("B", "b."),
- * or the one option it is part of (or that is part of it). -1 when none, or when it could be several.
+ * Which option the recommendation names, however the model wrote it: the option itself, its letter ("B", "b.",
+ * "B — why"), the one option whose label (the words before its dash) the recommendation starts with, or the one
+ * option it is part of (or that is part of it). -1 when none, or when it could be several.
  */
 export function recommendedIndex(rec: string | undefined, options: string[]): number {
   const r = rec?.trim();
   if (!r || !options.length) return -1;
   const exact = options.indexOf(r);
   if (exact >= 0) return exact;
-  const byLetter = r.match(/^([A-Za-z])\.?$/)?.[1];
+  const byLetter = r.match(LETTER_LEAD)?.[1];
   if (byLetter) {
     const i = byLetter.toUpperCase().charCodeAt(0) - 65;
     return i < options.length ? i : -1;
   }
   const low = r.toLowerCase();
   const near = options.map((o, i) => [o.toLowerCase(), i] as const).filter(([o]) => o === low || o.includes(low) || low.includes(o));
-  return near.length === 1 ? near[0][1] : -1;
+  if (near.length === 1) return near[0][1];
+  const label = labelOf(r);
+  const sameLabel = options.map((o, i) => [labelOf(o), i] as const).filter(([l]) => l === label);
+  return sameLabel.length === 1 ? sameLabel[0][1] : -1;
+}
+
+/**
+ * Why the recommendation was made, when the model said: the words after its letter or after the option's label.
+ * Undefined when the recommendation is only the option, or names none (then it is shown whole, as written).
+ */
+export function recommendationReason(rec: string | undefined, options: string[]): string | undefined {
+  const r = rec?.trim();
+  const i = recommendedIndex(r, options);
+  if (!r || i < 0 || r === options[i]) return undefined;
+  const byLetter = r.match(LETTER_LEAD);
+  const reason = byLetter ? byLetter[2] : labelOf(r) === labelOf(options[i]) ? r.split(/\s+[—–-]\s+/).slice(1).join(" — ") : "";
+  return reason.trim() || undefined;
+}
+
+/** The recommendation as a reader sees it under the options: its letter and reason, or its own words when it names no option. */
+export function recommendationLine(rec: string | undefined, options: string[]): string | undefined {
+  const i = recommendedIndex(rec, options);
+  if (i < 0) return rec?.trim() && options.length ? `Recommendation: ${rec.trim()}` : undefined;
+  const why = recommendationReason(rec, options);
+  return why ? `Recommended: ${letter(i)} — ${why}` : undefined;
 }
 
 /**
@@ -53,14 +84,14 @@ export function resolveAnswer(answer: string, options: string[]): string {
 export const ASK_PARAMETERS = Type.Object({
   question: Type.Optional(Type.String({ description: "one precise question (or use questions for several)" })),
   options: Type.Optional(Type.Array(Type.String(), { description: "2 to 4 answers to choose from; the human can always type another" })),
-  recommended: Type.Optional(Type.String({ description: "your recommendation: one of the options (or its letter), or a suggested answer" })),
+  recommended: Type.Optional(Type.String({ description: 'your recommendation: the letter of the option, then one plain reason ("B — fewer moving parts"); for an open question, a suggested answer' })),
   multiple: Type.Optional(Type.Boolean({ description: "true when several options may apply together: the human ticks all that do" })),
   questions: Type.Optional(
     Type.Array(
       Type.Object({
         question: Type.String(),
         options: Type.Optional(Type.Array(Type.String())),
-        recommended: Type.Optional(Type.String()),
+        recommended: Type.Optional(Type.String({ description: 'the letter of the option you recommend, then one plain reason ("B — fewer moving parts")' })),
         multiple: Type.Optional(Type.Boolean()),
       }),
       { description: `several independent questions in one call (at most ${MAX_QUESTIONS}): shown one after another, answered together` },
@@ -120,7 +151,8 @@ export function registerAsk(pi: ExtensionAPI) {
     const typed = async (): Promise<{ text?: string; timedOut: boolean }> => {
       // The options vanish the moment the typing dialog opens, and the choice is often
       // written from them: keep them in the chat, where they stay visible while typing.
-      if (options.length) post([`**Answering with your own words:**`, "", q.question, "", ...lettered, "", `Type it here — a letter is enough, or write guidance based on the options above.`].join("\n"));
+      const recLine = recommendationLine(q.recommended, options);
+      if (options.length) post([`**Answering with your own words:**`, "", q.question, "", ...lettered, ...(recLine ? ["", recLine] : []), "", `Type it here — a letter is enough, or write guidance based on the options above.`].join("\n"));
       const inp = await patiently(ctx, timeoutMs, (opts) => ctx.ui.input(title, options.length ? "A letter is enough, or your own words based on the options above" : (q.recommended ?? ""), opts));
       return { text: inp.result?.trim() ? resolveAnswer(inp.result, options) : undefined, timedOut: inp.timedOut };
     };
@@ -128,22 +160,27 @@ export function registerAsk(pi: ExtensionAPI) {
       const r = await typed();
       return { q, answer: r.text, timedOut: r.timedOut };
     }
+    const recLine = recommendationLine(q.recommended, options);
+    const titled = recLine ? `${title}\n${recLine}` : title;
     if (!q.multiple) {
-      const labels = options.map((o, i) => (i === rec ? `${o} (recommended)` : o));
-      const sel = await patiently(ctx, timeoutMs, (opts) => ctx.ui.select(fitDialog(title), [...labels, OTHER], opts));
+      // The recommended option comes first, so Enter takes it; each keeps its letter, so the chat's copy and a
+      // typed letter still name the same option.
+      const order = rec >= 0 ? [rec, ...[...options.keys()].filter((i) => i !== rec)] : [...options.keys()];
+      const labels = order.map((i) => lettered[i]);
+      const sel = await patiently(ctx, timeoutMs, (opts) => ctx.ui.select(fitDialog(titled), [...labels, OTHER], opts));
       if (sel.result === OTHER) {
         const r = await typed();
         return { q, answer: r.text, timedOut: sel.timedOut || r.timedOut };
       }
-      const i = sel.result ? labels.indexOf(sel.result) : -1;
-      return { q, answer: i >= 0 ? options[i] : undefined, timedOut: sel.timedOut };
+      const at = sel.result ? labels.indexOf(sel.result) : -1;
+      return { q, answer: at >= 0 ? options[order[at]] : undefined, timedOut: sel.timedOut };
     }
     // Several may apply: a checklist — each pick toggles one, Done answers with all that are ticked.
     const picked = new Set<number>();
     for (;;) {
       const labels = options.map((o, i) => `${picked.has(i) ? "[x]" : "[ ]"} ${letter(i)}. ${o}${i === rec ? " (recommended)" : ""}`);
       const done = picked.size ? `Done — ${[...picked].sort((a, b) => a - b).map(letter).join(", ")}` : "Done — none of these";
-      const sel = await patiently(ctx, timeoutMs, (opts) => ctx.ui.select(fitDialog(`${title} (pick all that apply)`), [...labels, done, OTHER], opts));
+      const sel = await patiently(ctx, timeoutMs, (opts) => ctx.ui.select(fitDialog(`${title} (pick all that apply)${recLine ? `\n${recLine}` : ""}`), [...labels, done, OTHER], opts));
       if (sel.result === undefined) return { q, timedOut: sel.timedOut }; // nothing half-ticked is ever read as an answer
       if (sel.result === OTHER) {
         const r = await typed();
@@ -192,7 +229,8 @@ export function registerAsk(pi: ExtensionAPI) {
       const unattended = specWriting.has(session) || store.pendingBuild(session) || planning;
       const show = (q: Question) => {
         const rec = recommendedIndex(q.recommended, q.options ?? []);
-        return `${q.question}${q.options?.length ? `\n\n${q.options.map((o, i) => `${letter(i)}. ${o}${i === rec ? " (recommended)" : ""}`).join("\n")}` : ""}`;
+        const recLine = recommendationLine(q.recommended, q.options ?? []);
+        return `${q.question}${q.options?.length ? `\n\n${q.options.map((o, i) => `${letter(i)}. ${o}${i === rec ? " (recommended)" : ""}`).join("\n")}` : ""}${recLine ? `\n${recLine}` : ""}`;
       };
       if (!ctx.hasUI) {
         // No one to answer: the questions stay open. A planning reading would decide for the human.

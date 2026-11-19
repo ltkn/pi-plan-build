@@ -300,11 +300,12 @@ export function registerSpecTools(pi: ExtensionAPI) {
         // except the sections a finding filed against the spec points at: those the human re-approves as a diff.
         const key = params.section ? sectionKey(params.section) : undefined;
         const unlocked = fixLap.specSections ?? [];
-        const allowed = key === "section:design" || key === "section:decisions" || (!!key && unlocked.includes(key));
+        // Findings is evidence, not a rule the build follows: a lap that changed the code corrects what it cites.
+        const allowed = key === "section:design" || key === "section:decisions" || key === "section:findings" || (!!key && unlocked.includes(key));
         if (name !== fixLap.spec || params.status || !allowed) {
           const extra = unlocked.filter((k) => k !== "section:decisions").map((k) => `"${k.replace(/^section:/, "")}"`).join(", ");
           throw new Error(
-            `This fix lap may change only ${fixLap.spec}'s Design and Decisions${extra ? `, and ${extra} for the findings filed against the spec` : ""}. A finding that needs any other part of the contract or the Status changed is reported as skipped, for a spec revision.`,
+            `This fix lap may change only ${fixLap.spec}'s Design, Decisions and Findings${extra ? `, and ${extra} for the findings filed against the spec` : ""}. A finding that needs any other part of the contract or the Status changed is reported as skipped, for a spec revision.`,
           );
         }
       }

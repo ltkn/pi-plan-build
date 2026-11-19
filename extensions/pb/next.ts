@@ -4,7 +4,7 @@
  * computed from the spec's own records (progress, events, the text on disk), never stored, so it cannot go stale.
  */
 import * as path from "node:path";
-import { type Progress, PREFIX, Store, readEvents } from "./store.ts";
+import { type Progress, PREFIX, Store, openFindings, readEvents } from "./store.ts";
 import { parseSpec, specHash } from "./spec.ts";
 
 const cmd = (verb: string) => `${PREFIX}:${verb}`;
@@ -54,7 +54,7 @@ export function whereNext(store: Store, name: string): Where {
     const events = readEvents(path.join(store.specDir(name), "events.jsonl")).map((e) => e.type);
     if (events.lastIndexOf("commit") > events.lastIndexOf("review")) return { spec: name, state: "reviewed and committed", next: `/${cmd("archive")} ${name}`, command: `/${cmd("archive")} ${name}` };
     // A pass can leave findings open; P3 is polish, the rule /pb:archive's owed list uses too.
-    const open = (p?.review?.findings ?? []).filter((f) => f.priority !== "P3").length;
+    const open = openFindings(p?.review).length;
     const state = open ? `reviewed: PASS (${open} finding${open === 1 ? "" : "s"} open)` : "reviewed: PASS";
     return { spec: name, state, next: `/${cmd("commit")} ${name}, then /${cmd("archive")} ${name}`, command: `/${cmd("commit")} ${name}` };
   }
@@ -65,7 +65,7 @@ export function whereNext(store: Store, name: string): Where {
   const lastReview = events.map((e) => e.type).lastIndexOf("review");
   const fixedSince = events.slice(lastReview + 1).some((e) => e.type === "fix");
   if (fixedSince) return { spec: name, state: "fixed, not re-reviewed", next: `/${cmd("review")} ${name} checks the fixes`, command: `/${cmd("review")} ${name}` };
-  const open = review.findings.filter((f) => f.priority !== "P3").length;
+  const open = openFindings(review).length;
   if (review.verdict === "changes_needed" && open)
     return { spec: name, state: `review: CHANGES NEEDED (${open} open)`, next: `/${cmd("fix")} ${name} fixes them (or fix by hand), then /${cmd("review")} ${name}`, command: `/${cmd("fix")} ${name}` };
   if (review.verdict === "unverified") return { spec: name, state: "review: UNVERIFIED", next: `make the failing check pass or verify the open criteria, then /${cmd("review")} ${name}`, command: `/${cmd("review")} ${name}` };

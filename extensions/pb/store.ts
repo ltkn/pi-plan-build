@@ -389,7 +389,16 @@ export interface ReviewState {
   failedChecks?: string[];
   /** hash of the spec text the review judged against: a spec edited since is a change, even on an unchanged tree */
   specHash?: string;
+  /**
+   * The numbers of findings a fix run settled without a new review: wording only (the spec or a doc), after a PASS,
+   * changing nothing but prose. They keep their numbers; they are no longer open.
+   */
+  settled?: number[];
 }
+
+/** A review's findings still owed: P0-P2 and every spec finding's number, minus what a wording fix settled. */
+export const openFindings = (review: ReviewState | undefined): Finding[] =>
+  (review?.findings ?? []).filter((f, i) => f.priority !== "P3" && !review?.settled?.includes(i + 1));
 
 /** The text a build may not rewrite: recorded when the build starts and re-recorded only on re-approval. */
 export interface SpecApproval {

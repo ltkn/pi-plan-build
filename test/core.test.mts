@@ -1045,7 +1045,7 @@ test("notify: a desktop notification when pb asks, and none when it's turned off
     process.chdir(t.repo);
     t.selects.push("No thanks");
     await t.run("plan", "cancel orders");
-    t.selects.push("mail");
+    t.selects.push("A. mail");
     await t.callTool("pb_ask", { question: "Mail\nor event;\x07 now?", options: ["mail", "event"] });
     assert.deepEqual(sent.at(-1), ["pb: a question for you", "Mail or event now?"]); // one line, nothing that ends the escape sequence
     const v = setup({ verify: "true", notify: true }); // a dialog that goes on without you

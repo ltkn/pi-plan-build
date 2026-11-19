@@ -1,8 +1,8 @@
-words: 2054
+words: 2100
 
 ## pb_ask
 
-Ask the human one question and wait for the answer: a choice between options, or an open question. Use it while planning; a pb build never asks — it takes the sensible reading, records it as an assumption, and stops only when the Goal or a Contract cannot be built as written. Ask only what you can't sensibly decide yourself. Ask independent questions together, in one call (questions); ask a question that depends on another's answer only after you have that answer. When several options may apply at once, say so (multiple). Phrase every question in plain words a non-expert can follow: one line per option with its trade-off, and your recommendation with one plain reason why — short enough to read in a dialog.
+Ask the human one question and wait for the answer: a choice between options, or an open question. Use it while planning; a pb build never asks — it takes the sensible reading, records it as an assumption, and stops only when the Goal or a Contract cannot be built as written. Ask only what you can't sensibly decide yourself. Ask independent questions together, in one call (questions); ask a question that depends on another's answer only after you have that answer. When several options may apply at once, say so (multiple). Phrase every question in plain words a non-expert can follow: one line per option with its trade-off, and your recommendation in `recommended` as the option's letter and one plain reason ("B — fewer moving parts"): pb lists that option first and shows the reason — short enough to read in a dialog.
 
 {
   "type": "object",
@@ -20,7 +20,7 @@ Ask the human one question and wait for the answer: a choice between options, or
     },
     "recommended": {
       "type": "string",
-      "description": "your recommendation: one of the options (or its letter), or a suggested answer"
+      "description": "your recommendation: the letter of the option, then one plain reason (\"B — fewer moving parts\"); for an open question, a suggested answer"
     },
     "multiple": {
       "type": "boolean",
@@ -44,7 +44,8 @@ Ask the human one question and wait for the answer: a choice between options, or
             }
           },
           "recommended": {
-            "type": "string"
+            "type": "string",
+            "description": "the letter of the option you recommend, then one plain reason (\"B — fewer moving parts\")"
           },
           "multiple": {
             "type": "boolean"

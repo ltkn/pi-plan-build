@@ -1216,7 +1216,7 @@ test("pb_ask: a dialog closed before its time is kept in the chat too; an answer
   t.selects.push("No thanks");
   await t.run("plan", "cancel orders");
   const posted = t.posts.length;
-  t.selects.push("mail");
+  t.selects.push("A. mail");
   assert.match((await t.callTool("pb_ask", { question: "Mail or event?", options: ["mail", "event"] })).content![0].text, /^The human answered: mail$/);
   assert.equal(t.posts.length, posted);
   t.selects.push("<timeout>");
@@ -1254,7 +1254,7 @@ test("pb_ask: questions or options sent as JSON text are read as the lists they 
   process.chdir(t.repo);
   t.selects.push("No thanks");
   await t.run("plan", "cancel orders");
-  t.selects.push("mail", "b");
+  t.selects.push("A. mail", "B. b");
   const r = await t.callTool("pb_ask", { questions: JSON.stringify([one, two]) });
   assert.match(r.content![0].text, /^The human's answers:\n1\. Mail or event\? — mail\n2\. Which name\? — b$/);
 });
@@ -1594,13 +1594,45 @@ test("pb_ask: a recommendation is found however it is written, and typed letters
   assert.equal(resolveAnswer("Z", options), "Z");
 });
 
+test("pb_ask: a recommendation written as prose still marks its option, goes first, and keeps its reason; one naming no option is shown as written", async () => {
+  const { recommendedIndex, recommendationReason, recommendationLine } = await import("../extensions/pb/ask.ts");
+  // As one planner wrote it: the option's label, then its own reason instead of the option's trade-off.
+  const options = [
+    "Editor + manage — both keep their content and note the failure",
+    "Editor only, as asked — manage stays as it is and I note it as a follow-up",
+    "Editor + manage + the /commute resolver — tidy all three callers of that read",
+  ];
+  const prose = "Editor + manage — same read, same two sentences, about 2 lines plus one test";
+  assert.equal(recommendedIndex(prose, options), 0);
+  assert.equal(recommendationReason(prose, options), "same read, same two sentences, about 2 lines plus one test");
+  assert.equal(recommendedIndex("B — keeps the change as asked", options), 1);
+  assert.equal(recommendationLine("B: keeps the change as asked", options), "Recommended: B — keeps the change as asked");
+  assert.equal(recommendationLine(options[0], options), undefined, "the option alone adds no line");
+  assert.equal(recommendationLine("whatever is cheapest", options), "Recommendation: whatever is cheapest");
+
+  const t = setup();
+  process.chdir(t.repo);
+  t.selects.push("No thanks");
+  await t.run("plan", "cancel orders");
+  const asked = t.selectTitles.length;
+  const r = await t.callTool("pb_ask", { question: "Fix the manage page too?", options, recommended: prose });
+  assert.equal(t.selectTitles[asked], "Fix the manage page too?\nRecommended: A — same read, same two sentences, about 2 lines plus one test");
+  assert.equal(t.selectOptions[asked][0], `A. ${options[0]} (recommended)`); // first, so Enter takes it
+  assert.equal(r.content![0].text, `The human answered: ${options[0]}`);
+  // Not first by letter: the recommended option still leads, and keeps its own letter.
+  t.selects.push("C. a webhook (recommended)");
+  const third = await t.callTool("pb_ask", { question: "Notify how?", options: ["mail", "events", "a webhook"], recommended: "C — the client already exposes one" });
+  assert.deepEqual(t.selectOptions.at(-1), ["C. a webhook (recommended)", "A. mail", "B. events", "Something else (type it)"]);
+  assert.equal(third.content![0].text, "The human answered: a webhook");
+});
+
 test("pb_ask: several questions in one call, a checklist where several apply, and every answer reaches the spec", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   t.selects.push("No thanks");
   await t.run("plan", "cancel orders");
   const asked = t.selectTitles.length;
-  t.selects.push("events (recommended)", "[ ] A. orders", "[ ] C. refunds", "Done — A, C", "Something else (type it)", "b");
+  t.selects.push("B. events (recommended)", "[ ] A. orders", "[ ] C. refunds", "Done — A, C", "Something else (type it)", "b");
   const r = await t.callTool("pb_ask", {
     questions: [
       { question: "Mail or event?", options: ["mail", "events"], recommended: "B" },
@@ -1615,7 +1647,7 @@ test("pb_ask: several questions in one call, a checklist where several apply, an
     "Question 2 of 3: Which flows notify? (pick all that apply)",
     "Question 3 of 3: Retry how?",
   ]);
-  assert.deepEqual(t.selectOptions[asked], ["mail", "events (recommended)", "Something else (type it)"], "the letter B marks events");
+  assert.deepEqual(t.selectOptions[asked], ["B. events (recommended)", "A. mail", "Something else (type it)"], "the letter B marks events, listed first so Enter takes it");
   assert.deepEqual(t.selectOptions[asked + 2], ["[x] A. orders", "[ ] B. users", "[ ] C. refunds", "Done — A", "Something else (type it)"]);
   assert.equal(r.content![0].text, "The human's answers:\n1. Mail or event? — events\n2. Which flows notify? — A and C — orders; refunds\n3. Retry how? — B — with backoff");
   // Kept with the planning session, then handed to the spec writer: nothing answered is lost to a reset.

@@ -44,7 +44,9 @@ Add `.pi/` to your `.gitignore`. pb keeps its run state there.
 ```
 
 Every step ends with a header, a **Next:** line naming the one command to run,
-and the evidence behind the result. `alt+n` puts the next command in the editor.
+and the evidence behind the result. After a review, a fix run or a commit, pb asks
+the next step as a choice: Enter puts its command in the editor, and one more Enter
+runs it. `alt+n` does the same at any time.
 For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
 
 ## Commands

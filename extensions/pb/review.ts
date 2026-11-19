@@ -249,6 +249,31 @@ export function sensitiveGround(o: { spec?: string; files: string[]; diff: strin
   return line ? `the diff mentions "${line.slice(1).trim().match(words)![0]}"` : undefined;
 }
 
+/**
+ * A file whose change is prose or tests: docs, the spec and pb's own state, and test sources. A follow-up whose fixes
+ * touched only these has nothing new to attack: the spec pass reads them, and checks a changed test was not weakened.
+ */
+export const isProseOrTestPath = (file: string): boolean =>
+  /\.(md|mdx|rst|adoc)$/i.test(file) ||
+  /^\.pi\//.test(file) ||
+  /(^|\/)(test|tests|__tests__|__mocks__)\//.test(file) ||
+  /\.(test|spec)\.[cm]?[jt]sx?$/.test(file) ||
+  /(Test|Tests|IT)\.(java|kt)$/.test(file) ||
+  /_test\.(go|py)$|(^|\/)test_[^/]*\.py$/.test(file);
+
+/** A file that is prose only: docs, and the spec and pb's own state under .pi/. */
+export const isProsePath = (file: string): boolean => /\.(md|mdx|rst|adoc)$/i.test(file) || /^\.pi\//.test(file);
+
+/** The part of a unified diff that changes code: each file's block kept only when it is not prose or tests. */
+export const codeOnlyDiff = (diff: string): string =>
+  diff
+    .split(/(?=^diff --git )/m)
+    .filter((block) => {
+      const file = block.match(/^diff --git a\/(\S+) b\//)?.[1];
+      return !file || !isProseOrTestPath(file);
+    })
+    .join("");
+
 /** Noise words for comparing two fixes: shared filler must not count as overlap. */
 const FIX_STOPWORDS = new Set(
   "a,an,the,to,of,in,on,and,or,for,with,that,this,it,as,at,by,be,is,are,was,were,so,either,neither,not,no,nor,than,then,from,into,over,under,its,their,they,them,you,your,our,will,would,should,could,can,just,only,also,when,what,which,who,how,all,any,each,per,such,via,using,use,add,made,keep,left,still,more,most,between,without,within".split(","),
@@ -258,10 +283,25 @@ const FIX_STOPWORDS = new Set(
 const fixTokens = (fix?: string): Set<string> =>
   new Set((fix ?? "").toLowerCase().split(/[\W_]+/).filter((w) => w.length > 1 && !FIX_STOPWORDS.has(w)));
 
+/** How far apart two reports of one defect may cite it: the spec and adversarial passes point at neighbouring lines. */
+export const MERGE_LINE_WINDOW = 3;
+/** Shared significant fix words, as a share of the shorter fix, that make two nearby findings one defect. */
+const MERGE_FIX_OVERLAP = 0.5;
 /**
- * Merge findings with the same concrete fix: same file and line, plus fix prescriptions
- * that substantially overlap (near-duplicate fixes for one defect, e.g. filed twice at
- * different priorities). Keeps the highest priority (with its prescription) and joins titles,
+ * A lower bar for fixes that also name the same code: two prescriptions for one defect share its identifiers
+ * (`sameCommuteId`, `toLowerCase`), while two different remedies at one line share only ordinary words.
+ */
+const MERGE_FIX_OVERLAP_WITH_CODE = 0.35;
+const MERGE_SHARED_IDENTIFIERS = 2;
+
+/** The code identifiers a fix names: camelCase, snake_case, dotted or called names, as written. */
+const fixIdentifiers = (fix?: string): Set<string> =>
+  new Set((fix ?? "").match(/\b(?:[a-z]+[A-Z]\w*|[A-Za-z]+_\w+|\w+\.\w+|\w+(?=\())/g) ?? []);
+
+/**
+ * Merge findings with the same concrete fix: same file, lines at most MERGE_LINE_WINDOW apart, plus fix
+ * prescriptions that substantially overlap (near-duplicate fixes for one defect, e.g. filed twice at
+ * different priorities, or by the spec pass and the adversarial pass at neighbouring lines). Keeps the highest priority (with its prescription) and joins titles,
  * so nothing reported is lost — only the duplication. Findings without a file, without a
  * fix, or with genuinely different prescriptions stay split: the model is separately
  * instructed to merge same-defect findings itself (which also covers same defect with a
@@ -276,11 +316,16 @@ export function mergeFindings(findings: Finding[]): Finding[] {
       f.file === undefined
         ? undefined
         : out.find((o) => {
-            if (o.file !== f.file || (o.line ?? -1) !== (f.line ?? -1)) return false;
+            if (o.file !== f.file) return false;
+            const near = o.line === undefined || f.line === undefined ? o.line === f.line : Math.abs(o.line - f.line) <= MERGE_LINE_WINDOW;
+            if (!near) return false;
             const ot = fixTokens(o.fix);
             if (!ft.size || !ot.size) return false;
-            const inter = [...ft].filter((w) => ot.has(w)).length;
-            return inter / Math.min(ft.size, ot.size) >= 0.5;
+            const overlap = [...ft].filter((w) => ot.has(w)).length / Math.min(ft.size, ot.size);
+            if (overlap >= MERGE_FIX_OVERLAP) return true;
+            const oi = fixIdentifiers(o.fix);
+            const sharedCode = [...fixIdentifiers(f.fix)].filter((w) => oi.has(w)).length;
+            return overlap >= MERGE_FIX_OVERLAP_WITH_CODE && sharedCode >= MERGE_SHARED_IDENTIFIERS;
           });
     if (!same) {
       out.push({ ...f });

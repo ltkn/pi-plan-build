@@ -354,7 +354,7 @@ test("fix: a lap updates the spec's Design and Decisions to what it fixed, and n
   };
   await t.run("fix");
   assert.deepEqual(said.slice(0, 2), ["written", "written"], "Design and Decisions follow the fix");
-  for (const refusal of said.slice(2, 6)) assert.match(refusal, /This fix lap may change only order-cancellation's Design and Decisions[\s\S]*reported as skipped, for a spec revision/);
+  for (const refusal of said.slice(2, 6)) assert.match(refusal, /This fix lap may change only order-cancellation's Design, Decisions and Findings[\s\S]*reported as skipped, for a spec revision/);
   assert.match(said[6]!, /This fix lap for order-cancellation can't rewrite a spec/);
   const after = fs.readFileSync(specFile, "utf8");
   assert.match(after, /Today advances with the clock/);
@@ -364,7 +364,7 @@ test("fix: a lap updates the spec's Design and Decisions to what it fixed, and n
   // The spec stays owned by the session that wrote it, not the lap that edited it.
   assert.equal(JSON.parse(fs.readFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"), "utf8")).writtenIn, owner);
   const { fixSeedPrompt } = await import("../extensions/pb/prompts.ts");
-  assert.match(fixSeedPrompt("order-cancellation", []), /update those lines in this lap with pb_update_spec, so the spec says what the code now does; only Design and Decisions/);
+  assert.match(fixSeedPrompt("order-cancellation", []), /correct every line that no longer says what the code does — Design, Decisions and Findings with pb_update_spec \(mode edit\), AGENTS\.md directly\. A stale line elsewhere in the spec \(Goal, Contracts, Acceptance, Tasks\) you leave as it is and name in your reply/);
 });
 
 test("fix: a report names findings by the number in the brief; a number outside it is refused", async () => {
@@ -1012,9 +1012,17 @@ test("review: a follow-up checks the fixes — its brief says so, and it attacks
   fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
   t.reviewer.review = [];
   await t.run("review");
-  assert.match(briefOf(t), /## This is a follow-up review\n\nThis review checks the fixes, nothing else\.[^\n]*Report no new P2 or P3 in code the fixes left alone, and nothing outside the change/);
+  assert.match(briefOf(t), /## This is a follow-up review\n\nThis review checks the fixes, nothing else\.[^\n]*Report no new P2 or P3 in code, docs or spec text the fixes left alone, and nothing outside the change[^\n]*A doc or spec line the fixes left describing what the code no longer does is a P3 with the corrected wording as its fix, unless it is in the spec's Goal, Contracts or Acceptance/);
   assert.match(t.posts.at(-1)!, /\(follow-up\)\*\* · PASS/);
   assert.doesNotMatch(t.posts.at(-1)!, /adversarial/); // a calm fix: the Threats were attacked last time
+
+  // Prose and tests that talk about sensitive things are not sensitive code: nothing new to attack.
+  fs.writeFileSync(path.join(t.repo, "NOTES.md"), "The cancel route checks the session token and the user's role.");
+  fs.mkdirSync(path.join(t.repo, "test"), { recursive: true });
+  fs.writeFileSync(path.join(t.repo, "test", "auth.test.ts"), "// a session token from another user is refused");
+  await t.run("review");
+  assert.match(t.posts.at(-1)!, /\(follow-up\)\*\* · PASS/);
+  assert.doesNotMatch(t.posts.at(-1)!, /adversarial/);
 
   fs.writeFileSync(path.join(t.repo, "T1.txt"), "check the session token before cancelling");
   await t.run("review");
@@ -1171,7 +1179,10 @@ test("review: the review session is read-only; a pass you leave can be continued
   } finally {
     delete process.env.MOCK_ABUSE_FINDINGS;
   }
-  assert.match(t.selectTitles.at(-1)!, /A review was interrupted/);
+  const interrupted = t.selectTitles.findIndex((x) => /A review was interrupted/.test(x));
+  assert.ok(interrupted >= 0, t.selectTitles.join("\n"));
+  assert.match(t.selectTitles.at(-1)!, /^The review of order-cancellation passed\. Commit it now\?/); // then, once it passed, the next step
+  assert.ok(t.selectTitles.length - 1 > interrupted);
   assert.ok(t.instructions.some((i) => i.startsWith("[pb] You were interrupted. Carry on where you were")));
   assert.ok(!t.notes.some((n) => /This review was interrupted/.test(n))); // pb was continuing it: no hint needed
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // and back home at the end
@@ -2436,6 +2447,20 @@ test("review: findings with the same concrete fix merge; distinct ones stay spli
   assert.equal(classed[0].outside, undefined); // a defect the change reaches is not outside it
 });
 
+test("review: one defect the spec pass and the adversarial pass cite a line apart is one finding; the same fix far away is not", async () => {
+  const { mergeFindings, MERGE_LINE_WINDOW } = await import("../extensions/pb/review.ts");
+  // As one real review filed them: the same guard, lines 70 and 71, fixes worded differently.
+  const spec = { priority: "P2", file: "src/Board.vue", line: 70, title: "the id guard compares case-sensitively", fix: "Compare canonically: held.commuteId.toLowerCase() === commuteId.value.toLowerCase(), so an uppercase bookmarked UUID renders its rows instead of spinning forever" };
+  const abuse = { priority: "P2", file: "src/Board.vue", line: 71, title: "Adversarial: a bookmark in uppercase spins forever", fix: "Compare ids canonically (toLowerCase on both commuteId values) and state a refused answer as COMMUTE_NOT_FOUND instead of an endless spinner; add an uppercase-id case that renders the rows" };
+  const merged = mergeFindings([spec, abuse] as any);
+  assert.equal(merged.length, 1);
+  assert.match(merged[0].title, /case-sensitively \/ Adversarial: a bookmark in uppercase/);
+  // The same words further down the file are another place, and another finding.
+  assert.equal(mergeFindings([spec, { ...abuse, line: 71 + MERGE_LINE_WINDOW }] as any).length, 2);
+  // Neighbouring lines with unrelated fixes stay apart.
+  assert.equal(mergeFindings([spec, { ...abuse, fix: "Debounce the station search by 300 ms and cancel it when the field loses focus" }] as any).length, 2);
+});
+
 test("review: the brief carries stale prose references for judgment, absent when clean", async () => {
   const { reviewerBrief } = await import("../extensions/pb/prompts.ts");
   const base = { changed: [], stat: "", check: "", focus: "" };
@@ -2793,7 +2818,7 @@ test("fix: a spec finding's lap edits the section it points at and nothing else,
     await fixesTheSpecLine(text, tool);
   };
   await t.run("fix", "order-cancellation 1");
-  assert.match(goalRefusal ?? "", /may change only order-cancellation's Design and Decisions, and "out of scope" for the findings filed against the spec/);
+  assert.match(goalRefusal ?? "", /may change only order-cancellation's Design, Decisions and Findings, and "out of scope" for the findings filed against the spec/);
   assert.match(t.read(specRel), /## Goal\nCancel orders\.\n## Out of scope\nRefunds, partial or full\./);
   // No question: the edit you asked for by number is approved, and the summary shows it and how to undo it.
   assert.ok(!t.selectTitles.some((x) => /^Re-approve/.test(x)), t.selectTitles.join("\n"));
@@ -2802,9 +2827,13 @@ test("fix: a spec finding's lap edits the section it points at and nothing else,
   assert.match(summary, /```diff\n- Refunds\.\n\+ Refunds, partial or full\.\n```/);
   assert.match(summary, /\*\*If you don't agree with them:\*\*\n- The wording only: `\/pb:fix order-cancellation 1 <how to word it>` runs a short lap on the same finding;/);
   assert.match(summary, /- The whole fix run: `\/pb:undo` puts back the spec and the code/);
-  assert.match(summary, /\*\*Next:\*\* `\/pb:review` checks the delta\./);
   assert.equal(t.progress("order-cancellation").approval.contractHash, contractHash(t.read(specRel)));
-  assert.ok(t.selectTitles.some((x) => /^Fixes for order-cancellation are done: .*Review them now\?$/.test(x))); // then the review is offered
+  // Wording fixed after a PASS, and nothing but prose changed: the PASS stands, so the commit is next, not a review.
+  assert.match(summary, /\*\*Next:\*\* `\/pb:commit order-cancellation`, then `\/pb:archive order-cancellation`\. Only wording changed after a PASS, so no new review is needed/);
+  assert.ok(t.selectTitles.some((x) => /^Wording fixed for order-cancellation: .*The review's PASS stands\. Commit now\?/.test(x)), t.selectTitles.join("\n"));
+  assert.ok(!t.selectTitles.some((x) => /Review them now\?/.test(x)));
+  assert.equal(t.stat.editorText, "/pb:commit order-cancellation"); // Enter took it: one more Enter commits
+  assert.deepEqual(t.progress("order-cancellation").review.settled, [1]); // no longer open, still numbered
 });
 
 test("fix: a spec finding unlocks every spec line it cites, an approved decision among them, and nothing another file's line names", async () => {
@@ -2825,7 +2854,7 @@ test("fix: a spec finding unlocks every spec line it cites, an approved decision
     await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "spec lines" }], tests: "none: spec lines" });
   };
   await t.run("fix", "order-cancellation 1");
-  assert.match(refused.goal ?? "", /may change only order-cancellation's Design and Decisions, and "out of scope", "contracts" for the findings filed against the spec/);
+  assert.match(refused.goal ?? "", /may change only order-cancellation's Design, Decisions and Findings, and "out of scope", "contracts" for the findings filed against the spec/);
   assert.deepEqual([refused.scope, refused.decision, refused.contract], [undefined, undefined, undefined]);
   const spec = t.read(specRel);
   assert.match(spec, /- Only PENDING orders, refunded in part or in full, can be cancelled/);
@@ -2856,7 +2885,7 @@ test("fix: a contract change beyond the sections the picked spec findings name i
   assert.ok(!t.selectTitles.some((x) => /Review them now\?/.test(x)));
 });
 
-test("fix: a contract change pb would not approve on its own is approved in place when you say so, and the review is offered", async () => {
+test("fix: a contract change pb would not approve on its own is approved in place when you say so, and the next step is offered", async () => {
   const t = await reviewedWithSpecFinding();
   t.agent.script = async (text, tool) => {
     if (text.startsWith("[pb:fix order-cancellation]")) fs.writeFileSync(path.join(t.repo, specRel), t.read(specRel).replace("Cancel orders.", "Cancel any order."));
@@ -2867,7 +2896,7 @@ test("fix: a contract change pb would not approve on its own is approved in plac
   assert.equal(t.progress("order-cancellation").approval.contractHash, contractHash(t.read(specRel)));
   assert.match(t.read(".pi/pb/specs/order-cancellation/approved.md"), /## Goal\nCancel any order\./);
   assert.ok(t.posts.some((x) => x.startsWith("**Spec re-approved** — the contract change in the diff above")), t.posts.join("\n---\n"));
-  assert.ok(t.selectTitles.some((x) => /^Fixes for order-cancellation are done: .*Review them now\?/.test(x)), t.selectTitles.join("\n"));
+  assert.ok(t.selectTitles.some((x) => /^Wording fixed for order-cancellation: .*Commit now\?/.test(x)), t.selectTitles.join("\n")); // prose only, after a PASS
 });
 
 test("fix: a spec edited while the re-approval question is open is not approved unseen", async () => {
@@ -2912,12 +2941,110 @@ test("fix: a spec finding that names a section in words unlocks it, so rewording
   assert.equal(t.progress("order-cancellation").approval.contractHash, contractHash(t.read(specRel)));
 });
 
+test("fix: a lap keeps the spec's Findings true to the code it changed, and pb approves that without asking", async () => {
+  const t = setup({ verify: "true" });
+  await written(t, SPEC().replace("## Out of scope", "## Findings\n- Cancellation lives in the order service.\n## Out of scope"));
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = [{ priority: "P2", file: "src/order.ts", line: 3, title: "cancel belongs on the aggregate", fix: "Move cancel() onto Order" }];
+  await t.run("review");
+  // The brief asks for the sweep: every changed name searched in the spec and AGENTS.md before the report.
+  let brief = "";
+  t.agent.script = async (text, tool) => {
+    if (!text.startsWith("[pb:fix order-cancellation]")) return;
+    brief = text;
+    const edit = await tool("pb_update_spec", { section: "Findings", mode: "edit", old: "lives in the order service", new: "lives on the Order aggregate" });
+    assert.equal(edit.error, undefined, edit.error ?? "");
+    await tool("pb_fix_done", { fixed: [1], skipped: [], untested: [{ finding: 1, why: "a move" }], tests: "none: a move" });
+  };
+  await t.run("fix", "order-cancellation 1");
+  assert.match(brief, /search the whole spec and AGENTS\.md for each \(grep\), and correct every line that no longer says what the code does/);
+  assert.match(t.read(specRel), /- Cancellation lives on the Order aggregate\./);
+  assert.ok(!t.selectTitles.some((x) => /^Re-approve/.test(x)), t.selectTitles.join("\n"));
+  assert.ok(t.posts.some((x) => x.includes("**Spec updated and re-approved: ## Findings (−1 +1).**")), t.posts.join("\n---\n"));
+  assert.equal(t.progress("order-cancellation").approval.contractHash, contractHash(t.read(specRel)));
+});
+
+test("review: the next step is one Enter — CHANGES NEEDED offers the fix, a PASS the commit — and Later leaves nothing", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.reviewer.review = CHANGES;
+  await t.run("review");
+  assert.match(t.selectTitles.at(-1)!, /^The review of order-cancellation needs changes\. Fix them now\? The command goes into the editor: Enter runs it\.$/);
+  assert.deepEqual(t.selectOptions.at(-1), ["Fix findings 1 2 now", "Later"]);
+  assert.equal(t.stat.editorText, "/pb:fix order-cancellation 1 2"); // Enter: the command waits for one more Enter
+
+  t.stat.editorText = "";
+  t.reviewer.review = [];
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
+  t.selects.push("Later");
+  await t.run("review");
+  assert.match(t.selectTitles.at(-1)!, /^The review of order-cancellation passed\. Commit it now\?/);
+  assert.deepEqual(t.selectOptions.at(-1), ["Commit now", "Later"]);
+  assert.equal(t.stat.editorText, "", "Later leaves nothing in the editor, and nothing runs");
+});
+
+test("review: a PASS whose open findings are only wording says fixing them is optional and needs no new review", async () => {
+  const t = await reviewedWithSpecFinding();
+  const post = t.posts.at(-1)!;
+  assert.match(post, /\*\*Next:\*\* `\/pb:commit order-cancellation`[^\n]*What is left is wording only, so fixing it is optional: `\/pb:fix order-cancellation 1` fixes it, and needs no new review after\./);
+  assert.deepEqual(t.selectOptions.at(-1), ["Commit now", "Fix finding 1 first", "Later"]);
+});
+
+test("fix: a finding a wording fix settled is no longer open: a bare /pb:fix and the archive leave it out", async () => {
+  const t = await reviewedWithSpecFinding();
+  t.agent.script = fixesTheSpecLine;
+  await t.run("fix", "order-cancellation 1");
+  assert.deepEqual(t.progress("order-cancellation").review.settled, [1]);
+  const { owedOnArchive } = await import("../extensions/pb/archive.ts");
+  assert.deepEqual(owedOnArchive(t.progress("order-cancellation")), []);
+  // Only the code nit (#2) is left, and a nit is never taken by default.
+  await t.run("fix", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /Only P3 nits are left for `order-cancellation`/);
+});
+
+test("fix: a wording fix after CHANGES NEEDED is still reviewed: only a PASS stands without one", async () => {
+  const t = await reviewedWithSpecFinding();
+  const p = t.progress("order-cancellation");
+  p.review.verdict = "changes_needed";
+  fs.writeFileSync(path.join(t.repo, ".pi/pb/specs/order-cancellation/progress.json"), JSON.stringify(p));
+  t.agent.script = fixesTheSpecLine;
+  await t.run("fix", "order-cancellation 1");
+  assert.ok(t.selectTitles.some((x) => /^Fixes for order-cancellation are done: .*Review them now\?/.test(x)), t.selectTitles.join("\n"));
+  assert.ok(!t.selectTitles.some((x) => /^Wording fixed/.test(x)));
+  assert.equal(t.progress("order-cancellation").review.settled, undefined);
+});
+
+test("commit: a reviewed spec, once committed, offers the archive as one Enter; a spec not yet reviewed does not", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = diligent;
+  await t.run("build");
+  t.editors.push((prefill) => prefill);
+  await t.run("commit"); // built, never reviewed: the review is next, not the archive
+  assert.ok(!t.selectTitles.some((x) => /Archive it now\?/.test(x)), t.selectTitles.join("\n"));
+  fs.writeFileSync(path.join(t.repo, "T1.txt"), "polished");
+  await t.run("review"); // its "Commit now?" takes Enter: the command waits in the editor
+  assert.equal(t.stat.editorText, "/pb:commit order-cancellation");
+  t.editors.push((prefill) => prefill);
+  await t.run("commit");
+  assert.match(t.posts.at(-1)!, /^\*\*✅ Committed\*\*/);
+  assert.match(t.selectTitles.at(-1)!, /^order-cancellation is reviewed and committed\. Archive it now\?/);
+  assert.equal(t.stat.editorText, "/pb:archive order-cancellation");
+});
+
 test("fix: with nobody there, the follow-up review starts itself after reviewAfterBuildSec", async () => {
   const t = await reviewedWithSpecFinding();
   const reviews = () => t.posts.filter((x) => /Review — order-cancellation/.test(x)).length;
   const before = reviews();
   fs.writeFileSync(path.join(t.repo, ".pi/pb/config.json"), JSON.stringify({ ...JSON.parse(t.read(".pi/pb/config.json")), reviewAfterBuildSec: 0.001 }));
-  t.agent.script = fixesTheSpecLine;
+  t.agent.script = async (text, tool) => {
+    // The lap changes code as well as the spec line, so its fixes are reviewed.
+    if (text.startsWith("[pb:fix order-cancellation]")) fs.writeFileSync(path.join(t.repo, "T1.txt"), "fixed");
+    await fixesTheSpecLine(text, tool);
+  };
   await t.run("fix", "order-cancellation 1");
   const offered = t.selectTitles.findIndex((x) => /^Fixes for order-cancellation are done: .*Review them now\? With no answer, pb starts the review in <1s\.$/.test(x));
   assert.ok(offered >= 0, t.selectTitles.join("\n"));
@@ -2938,7 +3065,7 @@ test("fix: a lap fixing only code findings can't touch the contract, even a sect
     await tool("pb_fix_done", { fixed: [], skipped: [], open: [1], tests: "none" });
   };
   await t.run("fix", "order-cancellation 1"); // the code finding only
-  assert.match(refusal ?? "", /may change only order-cancellation's Design and Decisions\. A finding that needs any other part of the contract/);
+  assert.match(refusal ?? "", /may change only order-cancellation's Design, Decisions and Findings\. A finding that needs any other part of the contract/);
   assert.match(t.read(specRel), /## Out of scope\nRefunds\.\n/);
 });
 
