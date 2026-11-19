@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.42.0
 
 - **A fix run asks about a contract change it won't approve itself, and a spec finding can fix the spec it describes.** In one unattended run a spec finding's Fix said to retire "the Decisions tails" too. pb unlocked only the sections the finding cited by line, so the end of the run refused to approve the edit ("it also changed ## decisions") and told you to run `/pb:build`, and the follow-up review refused to start until you did. The lap had got there by editing `spec.md` with the plain file tool: every `pb_update_spec` edit was refused because a stale citation stood in another section too, so fixing one section at a time was impossible. Four changes. A contract change pb won't approve on its own is now put to you at the end of the run, from the diff it just posted: **Leave it for /pb:build** is first, Enter or no answer leaves it for `/pb:build`, and choosing to re-approve approves only the text the diff showed, then offers the review. A spec finding unlocks the sections it names by their heading, as well as those it cites by line. A `pb_update_spec` write is refused only for a wrong citation it brings in; one the ready spec already had elsewhere is named in a note. And a fix lap can't edit a spec file with the plain `edit` or `write` tools, as a build already couldn't.
 

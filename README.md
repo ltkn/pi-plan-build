@@ -44,7 +44,7 @@ pb-report [--cwd dir] [--stats] [--review]   # the same pb.report/2 JSON, for sc
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.41.0   # a tagged release
+pi install git:github.com/ltkn/pi-plan-build@v1.42.0   # a tagged release
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 
