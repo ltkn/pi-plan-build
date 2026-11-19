@@ -19,9 +19,6 @@
  *   /pb:status             every spec and where it stands
  *   /pb:help [topic]       what to do next
  *
- * Inspired by GVS5H (Gao et al., arXiv:2608.26480): small tasks, a verifier that
- * outranks the model's own "done", and fresh eyes against anchoring. pb has since
- * deviated far from it; see the README's credits.
  *
  * The implementation is split by role; kit.ts holds the shared machinery, so the trust
  * boundaries (the build's approval gate, the read-only review, the fix numbering) stay
