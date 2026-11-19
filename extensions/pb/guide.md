@@ -1031,17 +1031,17 @@ stay advisory.
 The header reads `**✅ Review — <label>** · PASS`, `**❌ Review — <label>** · CHANGES NEEDED` or
 `**⚠ Review — <label>** · UNVERIFIED`, followed by the review's active time: the watched
 reviewer, the adversarial pass and the verification pass together. Findings in the
-Change section and outside it are numbered continuously (P0–P2, and any finding filed
-against the spec; a P3 in the code is unnumbered),
-the same numbers `/pb:fix` takes. `**Next:**` names one action — `/pb:fix <ids>` for open
+Change section and outside it are numbered continuously, each section's P3 nits (a P3 in
+the code) after its other findings, the same numbers `/pb:fix` takes. `**Next:**` names one action — `/pb:fix <ids>` for open
 findings, `/pb:build` when a mid-build review passed with tasks remaining or the fix changed
 the approved contract, or `/pb:review` after fixes.
 
 The findings land in the session you ran it from; run it **in the build
 session** and fix them right there: that session knows the code it just wrote.
 Or fix them in a fresh fenced session: `/pb:fix [ids]` takes the numbered finding
-ids (no ids = all open ones); P3 nits never block and are fixed by hand or
-ignored. A lap treats each finding as a class: it looks for the same defect
+ids (no ids = all open ones: P0–P2, and any finding filed against the spec). A P3 nit
+never blocks and is never open: it carries its Fix like any finding, and `/pb:fix`
+takes it when you name its number. A lap treats each finding as a class: it looks for the same defect
 across the change (the diff since the build's base commit) and fixes every
 instance, reporting any outside the change instead. Each behavioural fix is
 proven like a build task: the lap writes a test that reproduces the finding and
@@ -1433,7 +1433,7 @@ backup stay exactly as they are, and `/pb:map undo` refuses the same way.
 ### Review found changes
 <!-- pb:tip review.changes -->
 **What now** — the review found things to fix before merging
-- `/pb:fix {spec} {ids}` — fixes them in a fresh fenced session (the numbered ones; a P3 in the code is yours to fix by hand or ignore)
+- `/pb:fix {spec} {ids}` — fixes them in a fresh fenced session (add a P3 nit's number to fix it too)
 - `/pb:fix {spec} {ids} keep the public API unchanged` — the same, with your direction: it binds where it differs from a finding's Fix
 - Or in words, here: *"fix findings 1 and 3"* — this session knows the code
 - Then `/pb:review` checks only the fixes; `/pb:review --full` reviews everything again · more: `/pb:help review`

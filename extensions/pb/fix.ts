@@ -59,22 +59,23 @@ export type FixRequest = { picked: Finding[]; direction?: string } | { misses: s
  * Reads `/pb:fix` arguments after the spec name: leading finding numbers, then free text that
  * directs the run (an optional `:` or `--` may separate them). With no number, words that each
  * name exactly one finding by its title select those findings, and anything else is a direction
- * for every open finding. Numbers index `open`, the list the review numbered.
+ * for every open finding. Numbers index `numbered`, the list the review numbered; a request that names none takes
+ * `open`, the ones the review left open (a P3 nit in the code is numbered but never open: it is fixed when named).
  */
-export function parseFixRequest(rest: string, open: readonly Finding[]): FixRequest {
+export function parseFixRequest(rest: string, numbered: readonly Finding[], open: readonly Finding[] = numbered): FixRequest {
   const lead = /^(?:[\s,]*\d+\b)+/.exec(rest.trimStart())?.[0] ?? "";
   const numbers = lead.match(/\d+/g) ?? [];
   const after = rest.trimStart().slice(lead.length).trim().replace(/^(?::|--)\s*/, "").trim();
   if (numbers.length) {
-    const misses = numbers.filter((n) => !open[Number(n) - 1]);
+    const misses = numbers.filter((n) => !numbered[Number(n) - 1]);
     if (misses.length) return { misses };
-    const picked = [...new Set(numbers.map((n) => open[Number(n) - 1]!))];
+    const picked = [...new Set(numbers.map((n) => numbered[Number(n) - 1]!))];
     return after ? { picked, direction: after } : { picked };
   }
   if (!after) return { picked: [...open] };
   const words = after.split(/\s+/);
   const byTitle = words.map((w) => {
-    const hits = open.filter((f) => f.title.toLowerCase().includes(w.toLowerCase()));
+    const hits = numbered.filter((f) => f.title.toLowerCase().includes(w.toLowerCase()));
     return hits.length === 1 ? hits[0] : undefined;
   });
   if (byTitle.every((f) => f)) return { picked: [...new Set(byTitle as Finding[])] };
@@ -374,11 +375,11 @@ export function registerFix(pi: ExtensionAPI) {
    * gets the failure, and with no lap left the run stops on it.
    */
 
-  const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[], allOpen: Finding[], direction?: string): Promise<void> => {
+  const driveFix = async (ctx: ExtensionCommandContext, store: Store, spec: string, first: Finding[], numbered: Finding[], direction?: string): Promise<void> => {
     const home = ctx.sessionManager.getSessionFile() ?? undefined;
     // Taken now: each lap replaces the session, and a replaced context must not be read again.
     const cwd = ctx.cwd;
-    const numberOf = new Map(allOpen.map((f, i) => [f, i + 1] as const));
+    const numberOf = new Map(numbered.map((f, i) => [f, i + 1] as const));
     // Read before any lap edits the spec: the findings' line numbers are the reviewed text's.
     const allowed = unlockedSections(store, spec, first).specSections ?? [];
     const specNumbers = first.filter((f) => isSpecFinding(f, spec)).map((f) => numberOf.get(f)!).join(" ");
@@ -536,7 +537,7 @@ export function registerFix(pi: ExtensionAPI) {
   };
 
   pi.registerCommand(cmd("fix"), {
-    description: "Fix review findings in a fresh fenced session: /pb:fix [spec] [finding ids] [direction]. No ids = all open findings: P0-P2, and any finding filed against the spec (a P3 in the code is never open: fix it by hand). A spec finding is fixed in the spec, and pb re-approves that edit, posting its diff. Text after the ids directs the fixes: it binds where it differs from a finding's Fix, and the rest take their Fix as written. Run /pb:review afterwards: it checks only those findings and what changed",
+    description: "Fix review findings in a fresh fenced session: /pb:fix [spec] [finding ids] [direction]. No ids = all open findings: P0-P2, and any finding filed against the spec (a P3 nit in the code is numbered but never open: name its number to fix it). A spec finding is fixed in the spec, and pb re-approves that edit, posting its diff. Text after the ids directs the fixes: it binds where it differs from a finding's Fix, and the rest take their Fix as written. Run /pb:review afterwards: it checks only those findings and what changed",
     getArgumentCompletions: fixCompletions,
     handler: async (args, ctx) => {
       const store = new Store(ctx.cwd);
@@ -554,12 +555,18 @@ export function registerFix(pi: ExtensionAPI) {
         else if (mine.length > 1) return ctx.ui.notify(`Several specs here (${mine.join(", ")}): name one: \`/${cmd("fix")} <spec> [ids].`, "warning");
       }
       if (!name) return ctx.ui.notify(`No spec here: run /${cmd("fix")} from a build or review session, or name a spec.`, "warning");
-      const open = store.progress(name)?.review?.findings ?? [];
-      if (!open.length) return ctx.ui.notify(`\`${name}\` has no open review findings to fix.`, "info");
-      const request = parseFixRequest(rest, open);
+      const numbered = store.progress(name)?.review?.findings ?? [];
+      const open = numbered.filter((f) => f.priority !== "P3" || isSpecFinding(f, name!));
+      if (!numbered.length) return ctx.ui.notify(`\`${name}\` has no open review findings to fix.`, "info");
+      if (!open.length && !/^[\s,]*\d/.test(rest))
+        return ctx.ui.notify(
+          `Only P3 nits are left for \`${name}\`: name their numbers to fix them, e.g. \`/${cmd("fix")} ${name} ${numbered.map((_, i) => i + 1).join(" ")}\`.${numbered.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
+          "info",
+        );
+      const request = parseFixRequest(rest, numbered, open);
       if ("misses" in request) {
         return ctx.ui.notify(
-          `No such finding${request.misses.length === 1 ? "" : "s"}: ${request.misses.join(", ")}. \`/pb:fix\` takes the numbered ids (a P3 in the code is never open: fix it by hand). Open findings for \`${name}\`:${open.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
+          `No such finding${request.misses.length === 1 ? "" : "s"}: ${request.misses.join(", ")}. \`/pb:fix\` takes the numbered ids. Numbered findings for \`${name}\`:${numbered.map((f, i) => `\n${i + 1}. ${f.title}`).join("")}`,
           "warning",
         );
       }
@@ -572,7 +579,7 @@ export function registerFix(pi: ExtensionAPI) {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy. Wait for the current turn to finish.", "warning");
       const cctx = ctx as ExtensionCommandContext;
       if (typeof cctx.newSession !== "function") return ctx.ui.notify("This Pi can't open sessions: fix the findings here instead.", "warning");
-      await driveFix(cctx, store, name!, request.picked, open, request.direction);
+      await driveFix(cctx, store, name!, request.picked, numbered, request.direction);
     },
   });
 

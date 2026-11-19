@@ -71,7 +71,7 @@ export interface ReportStats {
 export interface ReportReview {
   at: string | null;
   verdict: string | null;
-  /** P0–P2 findings from the latest review (P3 nits never open) */
+  /** P0–P2 findings from the latest review (P3 nits are numbered but never open) */
   open: number;
   total: number;
   /** full findings, only with review details */

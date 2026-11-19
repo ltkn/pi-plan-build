@@ -562,7 +562,7 @@ test("fix: a fixed finding needs a test seen failing first, or a stated reason n
   await t.callTool("pb_write_spec", { name: "order-cancellation", content: SPEC() });
   pausedWithFindings(t, "order-cancellation", [
     { priority: "P2", file: "src/order.ts", line: 12, title: "the guard is missing" },
-    { priority: "P3", file: "README.md", line: 3, title: "the doc names the old flag" },
+    { priority: "P2", file: "README.md", line: 3, title: "the doc names the old flag" },
   ]);
   const said: string[] = [];
   t.agent.script = async (text, tool) => {
@@ -1127,7 +1127,7 @@ test("review: a fresh review session with the spec first and the diff; you're br
   assert.ok([...t.names.values()].includes("review: order-cancellation · spec"));
   assert.ok(![...t.names.values()].some((n) => n.endsWith("· adversarial"))); // the abuse pass is a background process
   assert.equal(t.runtime().ctx.sessionManager.getSessionFile(), home); // back where you were
-  assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n\nP3 nits — not numbered: fix them by hand if you want them\n\n\[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session [^`]+`/);
+  assert.match(t.posts.at(-1)!, /Review — order-cancellation\*\* · PASS[\s\S]*Acceptance: all met\.[\s\S]*1\. \[P2\] src\/order\.ts:30 — name the constant\n\nP3 nits — left out of the suggested \/pb:fix: add their numbers to fix them too\n\n2\. \[P3\] src\/order\.ts:12 — consider a guard clause\n   Fix: return early[\s\S]*The review sessions: spec `pi --session build-session-\d+` · adversarial `pi --session [^`]+`/);
   assert.equal(t.progress("order-cancellation").phase, "reviewed");
   assert.equal(t.progress("order-cancellation").reviewUnshown, undefined);
   assert.match(t.read(".pi/pb/specs/order-cancellation/review.md"), /Review — order-cancellation\*\* · PASS/); // kept with the spec
@@ -1321,16 +1321,19 @@ test("review: a pass with open P2 findings offers /pb:fix as optional, after the
   );
 });
 
-test("review: a pass with no P0-P2 finding offers no /pb:fix", async () => {
+test("review: a pass with only a P3 nit offers it by its number, as a choice", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
   await t.run("build");
-  t.reviewer.review = [{ priority: "P3", file: "src/order.ts", line: 40, title: "a nit" }];
+  t.reviewer.review = [{ priority: "P3", file: "src/order.ts", line: 40, title: "a nit", fix: "inline it" }];
   await t.run("review");
   const post = t.posts.at(-1)!;
-  assert.match(post, /\*\*Next:\*\* `\/pb:commit order-cancellation` \(you see the files and the message first\), then `\/pb:archive order-cancellation`\.\n/);
-  assert.doesNotMatch(post, /\/pb:fix/);
+  assert.match(post, /\*\*Next:\*\* `\/pb:commit order-cancellation` \(you see the files and the message first\), then `\/pb:archive order-cancellation`\. The P3 nits are optional: `\/pb:fix order-cancellation 1` fixes them if you want, then `\/pb:review` again\.\n/);
+  assert.match(post, /\n1\. \[P3\] src\/order\.ts:40 — a nit\n   Fix: inline it/);
+  // A bare /pb:fix never spends a lap on a nit: it says how to name one.
+  await t.run("fix", "order-cancellation");
+  assert.match(t.notes.at(-1)!, /Only P3 nits are left for `order-cancellation`: name their numbers to fix them, e\.g\. `\/pb:fix order-cancellation 1`\.\n1\. a nit/);
 });
 
 test("review: an adversarial empty report with a long explanation is not a lost report", async () => {
@@ -1766,14 +1769,15 @@ test("review findings: display numbers run continuously across the change and ou
   await t.run("review");
   const post = t.posts.at(-1)!;
   assert.match(post, /1\. \[P2\] src\/order\.ts:30 — in the change/);
-  assert.match(post, /\n\[P3\] src\/order\.ts:12 — nit/); // nits are never numbered
-  assert.match(post, /2\. \[P1 · Outside the change\] src\/legacy\.ts:1 — outside the change/);
-  assert.match(post, /\*\*Next:\*\* `\/pb:fix 1 2`/);
+  assert.match(post, /\n2\. \[P3\] src\/order\.ts:12 — nit/); // a nit is numbered in page order
+  assert.match(post, /3\. \[P1 · Outside the change\] src\/legacy\.ts:1 — outside the change/);
+  // The ids pb suggests leave the nit out, and say how to add it.
+  assert.match(post, /\*\*Next:\*\* `\/pb:fix 1 3` \(or fix them by hand\), then `\/pb:review` again\. Add 2 to fix the P3 nit too\./);
   // The ids /pb:fix reads are the stored review findings, in the same display order.
-  assert.deepEqual(t.progress("order-cancellation").review.findings.map((f: { title: string }) => f.title), ["in the change", "outside the change"]);
+  assert.deepEqual(t.progress("order-cancellation").review.findings.map((f: { title: string }) => f.title), ["in the change", "nit", "outside the change"]);
 });
 
-test("review: the numbered findings read 1..n down the page, the P3 nits follow them, and a pass offers the change's own", async () => {
+test("review: the numbers run 1..n down the page, each section's P3 nits after its other findings, and a pass offers the change's own", async () => {
   const t = setup({ verify: "true", reviewer: { security: "off" } });
   await written(t);
   t.agent.script = diligent;
@@ -1787,10 +1791,10 @@ test("review: the numbered findings read 1..n down the page, the P3 nits follow 
   await t.run("review");
   const post = t.posts.at(-1)!;
   assert.match(post, /PASS/);
-  // Numbered 1, 2 in the change, then the unnumbered nit set apart below them, then 3 outside.
-  assert.match(post, /\*\*Findings\*\*\n\n1\. \[P2\] src\/order\.ts:30 — in the change[\s\S]*\n2\. \[P3\] [^\n]*spec\.md:9 — a spec line[^]*?\n\nP3 nits — not numbered: fix them by hand if you want them\n\n\[P3\] src\/order\.ts:12 — a nit in the code[\s\S]*\*\*Outside the change\*\*[^\n]*\n\n3\. \[P2 · Outside the change\]/);
-  // The pass offers the change's findings and names the outside one apart; the What-now tip says "numbered", not "P2".
-  assert.match(post, /fixing the numbered findings is optional: `\/pb:fix order-cancellation 1 2` fixes them first if you want, then `\/pb:review` again\. #3 is outside the change: add its number to fix it too\./);
+  // Numbered 1, 2 in the change, the nit 3 set apart below them, then 4 outside.
+  assert.match(post, /\*\*Findings\*\*\n\n1\. \[P2\] src\/order\.ts:30 — in the change[\s\S]*\n2\. \[P3\] [^\n]*spec\.md:9 — a spec line[^]*?\n\nP3 nits — left out of the suggested \/pb:fix: add their numbers to fix them too\n\n3\. \[P3\] src\/order\.ts:12 — a nit in the code[\s\S]*\*\*Outside the change\*\*[^\n]*\n\n4\. \[P2 · Outside the change\]/);
+  // The pass offers the change's findings and names the outside one and the nit apart; the What-now tip says "numbered", not "P2".
+  assert.match(post, /fixing the numbered findings is optional: `\/pb:fix order-cancellation 1 2` fixes them first if you want, then `\/pb:review` again\. #4 is outside the change: add its number to fix it too\. Add 3 to fix the P3 nit too\./);
   assert.match(post, /- `\/pb:fix order-cancellation 1 2` — fixes the numbered findings first/);
   assert.doesNotMatch(post, /the P2 findings/);
 });
@@ -2729,12 +2733,23 @@ const reviewedWithSpecFinding = async () => {
   return t;
 };
 
-test("fix: a finding filed against the spec is numbered for /pb:fix at any priority; a P3 in the code is not", async () => {
+test("fix: a spec finding is open at any priority; a P3 nit in the code is numbered, and /pb:fix takes it only by its number", async () => {
   const t = await reviewedWithSpecFinding();
   const post = t.posts.at(-1)!;
   assert.match(post, /\n1\. \[P3\] \.pi\/pb\/specs\/order-cancellation\/spec\.md:9 — Out of scope must name partial refunds/);
-  assert.match(post, /\n\[P3\] src\/order\.ts:3 — a nit in the code/); // unnumbered
-  assert.deepEqual(t.progress("order-cancellation").review.findings.map((f: Finding) => f.title), ["Out of scope must name partial refunds"]);
+  assert.match(post, /P3 nits — left out of the suggested \/pb:fix: add their numbers to fix them too\n\n2\. \[P3\] src\/order\.ts:3 — a nit in the code/);
+  assert.deepEqual(t.progress("order-cancellation").review.findings.map((f: Finding) => f.title), ["Out of scope must name partial refunds", "a nit in the code"]);
+  // A bare /pb:fix takes the open findings only; the nit's number takes the nit.
+  const seeds: string[] = [];
+  t.agent.script = async (text) => {
+    if (text.startsWith("[pb:fix")) seeds.push(text);
+  };
+  await t.run("fix", "order-cancellation");
+  assert.match(seeds.at(-1)!, /Out of scope must name partial refunds/);
+  assert.doesNotMatch(seeds.at(-1)!, /a nit in the code/);
+  await t.run("fix", "order-cancellation 2");
+  assert.match(seeds.at(-1)!, /a nit in the code/);
+  assert.doesNotMatch(seeds.at(-1)!, /Out of scope must name partial refunds/);
 });
 
 /** The lap a spec finding gets: it rewrites the line the finding points at, as its Fix says. */

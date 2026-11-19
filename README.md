@@ -134,8 +134,8 @@ For a small change, skip the flow: work with Pi as usual, then `/pb:review`.
   (`**✅ Build complete — order-cancellation** · 3/3 tasks · 25m`) — then a `**Next:**` line
   naming the one primary action, a `**Evidence:**` line with the facts behind the result
   (gates, progress, counts, where it ran), and the details below. Review findings are
-  numbered continuously in the display, the same numbers `/pb:fix` takes (P3 nits are
-  unnumbered). Times are active time: pauses are left out, and the elapsed wall time
+  numbered continuously in the display, the same numbers `/pb:fix` takes (P3 nits too, though
+  `/pb:fix` takes a nit only when you name its number). Times are active time: pauses are left out, and the elapsed wall time
   follows in parentheses when a pause made them differ. `/pb:stats` keeps the same numbers
   after the message scrolls away. A spec written by an older pb has no recorded phase
   times; those parts of the line simply don't appear.

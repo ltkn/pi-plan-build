@@ -308,11 +308,19 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const findings = [...o.findings].sort((a, b) => P_ORDER.indexOf(a.priority) - P_ORDER.indexOf(b.priority));
     const inChange = findings.filter((f) => !f.outside);
     const outside = findings.filter((f) => f.outside);
-    // /pb:fix numbers the stored list; display numbers must match it exactly: in-change first, then outside. P3 nits
-    // in code stay unnumbered and are never fixable; a finding filed against the spec is, at any priority, because
-    // only pb can make that edit cleanly (its lap edits the section, the human re-approves the diff).
-    const fixable = [...inChange, ...outside].filter((f) => f.priority !== "P3" || (run.name !== undefined && isSpecFinding(f, run.name)));
-    const number = new Map(fixable.map((f, i) => [f, i + 1] as const));
+    // /pb:fix numbers the stored list, so display numbers must match it exactly: each finding is numbered in page
+    // order (in-change, then outside; within each, the nits last). A nit is a P3 in the code: it carries its fix like
+    // any finding, so it is numbered, but it is never open: /pb:fix takes it only by its number, and the ids pb
+    // suggests leave it out. A P3 filed against the spec is not a nit: only pb can make that edit cleanly.
+    const isNit = (f: Finding) => f.priority === "P3" && !(run.name !== undefined && isSpecFinding(f, run.name));
+    const pageOrder = (fs: Finding[]) => [...fs.filter((f) => !isNit(f)), ...fs.filter(isNit)];
+    const numbered = [...pageOrder(inChange), ...pageOrder(outside)];
+    const number = new Map(numbered.map((f, i) => [f, i + 1] as const));
+    const fixable = numbered.filter((f) => !isNit(f));
+    const nitIds = numbered.filter(isNit).map((f) => number.get(f)!);
+    const nitNote = nitIds.length
+      ? ` Add ${nitIds.join(" ")} to fix the P3 nit${nitIds.length === 1 ? "" : "s"} too.`
+      : "";
     const counts = P_ORDER.map((k) => findings.filter((f) => f.priority === k).length);
     const finished = (role: "review" | "abuse") => run.passes.some((x) => x.role === role && !x.left && !x.error);
     const unparsed = run.passes.filter((x) => x.unparsed && !x.left).map((x) => (x.role === "review" ? (run.name ? "spec" : "intent") : "adversarial"));
@@ -346,14 +354,14 @@ export function registerReviewFlow(pi: ExtensionAPI) {
     const midBuild = o.midBuild ?? [];
     const stepName = (id: string) => (id === COHERE_TASK_ID ? "coherence pass" : id === "final" ? "final check" : id);
     const midBuildView = midBuild.map(stepName);
-    const fixIds = fixable.map((_, i) => i + 1).join(" ");
-    // The numbered findings run 1..n down the page; the P3 nits /pb:fix leaves alone follow them, set apart.
+    const fixIds = fixable.map((f) => number.get(f)!).join(" ");
+    // The numbers run 1..n down the page; each section's P3 nits follow its other findings, set apart.
     const grouped = (fs: Finding[]) => {
-      const nits = fs.filter((f) => !number.has(f));
+      const nits = fs.filter(isNit);
       return [
         "",
-        ...fs.filter((f) => number.has(f)).map((f) => findingLine(f, number.get(f))),
-        ...(nits.length ? [...(nits.length < fs.length ? [""] : []), "P3 nits — not numbered: fix them by hand if you want them", "", ...nits.map((f) => findingLine(f))] : []),
+        ...fs.filter((f) => !isNit(f)).map((f) => findingLine(f, number.get(f))),
+        ...(nits.length ? [...(nits.length < fs.length ? [""] : []), "P3 nits — left out of the suggested /pb:fix: add their numbers to fix them too", "", ...nits.map((f) => findingLine(f, number.get(f)))] : []),
       ];
     };
     // A pass offers the change's own findings; a pre-existing one is named apart, there for the asking.
@@ -383,10 +391,12 @@ export function registerReviewFlow(pi: ExtensionAPI) {
           : verdict === "changes_needed"
             ? `${
                 run.name && fixIds && complete
-                  ? `\`/${cmd("fix")} ${fixIds}\` (or fix them by hand), then \`/${cmd("review")}\` again`
+                  ? `\`/${cmd("fix")} ${fixIds}\` (or fix them by hand), then \`/${cmd("review")}\` again${nitNote ? `.${nitNote.replace(/\.$/, "")}` : ""}`
                   : run.name && fixIds
                     ? `fix them by hand for now, then \`/${cmd("review")}\` again — this result is incomplete, so \`/${cmd("fix")}\` does not see these findings yet`
-                    : run.name
+                    : run.name && nitIds.length && complete
+                      ? `\`/${cmd("fix")} ${nitIds.join(" ")}\` fixes the P3 nits if you want them, then \`/${cmd("review")}\` again`
+                      : run.name
                       ? `fix the P3 nits by hand if you want them, then \`/${cmd("review")}\` again`
                       : `fix what is above, then \`/${cmd("review")}\` again`
               }.${fullAgain}`
@@ -399,8 +409,10 @@ export function registerReviewFlow(pi: ExtensionAPI) {
                     ? `\`/${cmd("commit")} ${run.name}\` (you see the files and the message first), then \`/${cmd("archive")} ${run.name}\`.${
                         // Numbered findings don't block a pass, but they stay open and /pb:fix takes them: offer it, as a choice.
                         passIds && complete
-                          ? ` The verdict is PASS, so fixing the numbered findings is optional: \`/${cmd("fix")} ${run.name} ${passIds}\` fixes them first if you want, then \`/${cmd("review")}\` again.${outsideNote}`
-                          : ""
+                          ? ` The verdict is PASS, so fixing the numbered findings is optional: \`/${cmd("fix")} ${run.name} ${passIds}\` fixes them first if you want, then \`/${cmd("review")}\` again.${outsideNote}${nitNote}`
+                          : nitIds.length && complete
+                            ? ` The P3 nits are optional: \`/${cmd("fix")} ${run.name} ${nitIds.join(" ")}\` fixes them if you want, then \`/${cmd("review")}\` again.`
+                            : ""
                       }`
                     : "commit when ready."
               : `\`/${cmd("review")}\` again, or read the sessions below.`;
@@ -461,7 +473,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
       "",
       tip(tipKey, { spec: run.name ?? "", checks: failedChecks.map((c) => `\`${c}\``).join(", "), ...(run.name && fixIds && complete ? { ids: verdict === "pass" ? passIds : fixIds } : {}) }),
     ].join("\n");
-    return { text, verdict, counts, findings: fixable, acceptance, complete, abuse: finished("abuse") };
+    return { text, verdict, counts, findings: numbered, acceptance, complete, abuse: finished("abuse") };
   };
 
   const allFindings = (run: ReviewRun) => run.passes.flatMap((x) => (x.role === "abuse" ? x.findings.map((f) => ({ ...f, title: `Adversarial: ${f.title}` })) : x.findings));
