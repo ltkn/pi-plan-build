@@ -1,4 +1,4 @@
-words: 2037
+words: 2054
 
 ## pb_ask
 
@@ -257,7 +257,8 @@ In a pb review session: report the review's findings and acceptance checklist, o
         "type": "object",
         "required": [
           "priority",
-          "title"
+          "title",
+          "fix"
         ],
         "properties": {
           "priority": {
@@ -282,7 +283,7 @@ In a pb review session: report the review's findings and acceptance checklist, o
           },
           "fix": {
             "type": "string",
-            "description": "a concrete fix"
+            "description": "the single change you would make, concrete enough to apply without asking; required for every finding, a P3 included"
           },
           "outside": {
             "type": "boolean",

@@ -1,4 +1,4 @@
-words: 1447
+words: 1465
 
 [pb:review] You are an independent REVIEWER in a fresh session. You did not take part in planning or building, and you are deliberately not shown the build conversation: judge the actual code.
 
@@ -42,7 +42,7 @@ Against the project map (the "Project map" section of AGENTS.md, when there is o
 
 ## Report
 
-Report the findings with the pb_report_findings tool: one call with all of them (an empty list when there are none), each with its priority, made as soon as you have them and before your reply: pb reads the call, never your prose.
+Report the findings with the pb_report_findings tool: one call with all of them (an empty list when there are none), each with its priority and its fix (the single change you would make, concrete enough to apply without asking; a P3 too), made as soon as you have them and before your reply: pb reads the call, never your prose.
 Report acceptance in the same call: one entry for every id in the brief's checklist, with status met, not met, or not verified and evidence. Met and not met need evidence; not met also needs a P1 finding. An id you leave out is not verified, not passed: never write "all met" in prose instead of reporting the list.
 Then reply briefly in markdown: only what is not a finding — context, a judgement call, a question. Don't repeat the findings or the acceptance checklist, and never leave a real problem here: a problem is a finding, with a priority and, when pre-existing, `outside`.
 

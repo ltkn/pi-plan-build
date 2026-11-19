@@ -666,7 +666,7 @@ ${MAP_FINDING_RULE}
 
 ## Report
 
-Report the findings with the pb_report_findings tool: one call with all of them (an empty list when there are none), each with its priority, made as soon as you have them and before your reply: pb reads the call, never your prose.
+Report the findings with the pb_report_findings tool: one call with all of them (an empty list when there are none), each with its priority and its fix (the single change you would make, concrete enough to apply without asking; a P3 too), made as soon as you have them and before your reply: pb reads the call, never your prose.
 Report acceptance in the same call: one entry for every id in the brief's checklist, with status met, not met, or not verified and evidence. Met and not met need evidence; not met also needs a P1 finding. An id you leave out is not verified, not passed: never write "all met" in prose instead of reporting the list.
 Then reply briefly in markdown: only what is not a finding — context, a judgement call, a question. Don't repeat the findings or the acceptance checklist, and never leave a real problem here: a problem is a finding, with a priority and, when pre-existing, \`outside\`.`;
 
@@ -754,8 +754,8 @@ export interface ReviewBrief {
   redNotes?: string[];
   /** what the build itself reported as still unchecked, one line per task: claims to verify, not evidence */
   openNotes?: string[];
-  /** the spec review's P1s the build carried: the spec itself may be the flaw, so the code is checked for each */
-  specP1s?: Finding[];
+  /** every finding the spec review raised that the build went ahead with: the spec itself may be the flaw, so the code is checked for each */
+  specFindings?: Finding[];
   /** what the fix laps reported (fixed/skipped titles plus their test results): judge the evidence, not the claim */
   fixReports?: Array<{ fixed: string[]; skipped: string[]; tests: string }>;
   /** where the spec's Design comes from: how hard to look for drift between Design, Decisions and code */
@@ -897,13 +897,13 @@ export function reviewerBrief(o: ReviewBrief): string {
           ...o.openNotes.map((n) => `- ${n}`),
         ]
       : []),
-    ...(o.specP1s?.length
+    ...(o.specFindings?.length
       ? [
           "",
           "## What the spec review raised before the build",
           "",
-          "These P1s were raised against the spec, and the build went ahead carrying them. The spec itself may be the flaw, so code that follows the spec faithfully does not settle one: check each against the code, and report one that still holds as a finding of its own, citing the code.",
-          ...o.specP1s.map((f) => `- ${findingLine(f)}`),
+          "These were raised against the spec, and the build went ahead without the spec changing for them. The spec itself may be the flaw, so code that follows the spec faithfully does not settle one: check each against the code, and report one that still holds as a finding of its own at the priority it deserves now, citing the code. One the build settled, or the code proves wrong, is not reported.",
+          ...o.specFindings.map((f) => `- ${findingLine(f)}`),
         ]
       : []),
     ...(o.fixReports?.length
@@ -935,7 +935,7 @@ export function reviewerBrief(o: ReviewBrief): string {
 
 export const SPEC_REVIEWER_SYSTEM = `You are a SPEC REVIEWER in a fresh context: you review one feature spec before anything is built, so design flaws are caught at 1x cost instead of 3x. The spec is a frozen draft: this is the only pass; there are no earlier findings, rounds or outside lane. Inspect the repository with read/grep/find/ls only: you have no shell, so you cannot run commands, tests or builds. Do not create, modify or delete files.
 
-Report every finding with report_findings in one call, an empty list when there are none, and make that call as soon as you have them, before writing your reply: pb reads the call, never your prose, so a reply is not a report. The title is one sentence a tired human can act on: what goes wrong, for whom, and where. The optional file:line and fix are the supporting evidence and the single change you would make. If you weighed another fix and rejected it, say why in the same fix line; do not report an either/or as a finding.
+Report every finding with report_findings in one call, an empty list when there are none, and make that call as soon as you have them, before writing your reply: pb reads the call, never your prose, so a reply is not a report. The title is one sentence a tired human can act on: what goes wrong, for whom, and where. The file:line is optional supporting evidence; the fix is not: every finding, a P3 included, carries the single change you would make, concrete enough to apply without asking. If you weighed another fix and rejected it, say why in the same fix line; do not report an either/or as a finding.
 
 Priority:
 - P0 — unsafe to build: a security or authorization hole, data loss or corruption, or a contract contradiction that cannot be built as written. Only P0 blocks the build.

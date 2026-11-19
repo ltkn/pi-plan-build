@@ -17,7 +17,7 @@ import { acceptanceCriteria, specHash } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type AcceptanceCheck, type Finding, type ReviewRun, COHERE_TASK_ID, Store, isSpecFinding, cap, changedSince, diffStat, gitDiff, gitRepo, ledgerFindings, mapCounts, mapTagOf, now, readEvents, resolvesRevision, untrackedText } from "./store.ts";
-import { carriedP1s } from "./spec-review.ts";
+import { carriedFindings } from "./spec-review.ts";
 import { runVerify } from "./verify.ts";
 import { inRepo, resolveRepos } from "./repos.ts";
 import { P_ORDER, approvalDrift, choose, cmd, commands, contentText, evidenceLine, finalCheckCommands, loadSpec, nextLine, normSpecArg, phaseHeader, post, redNotes, reply, runtime, safely, sessionGone, sessionIdOf, sessionModel, sleep, specCompletions, specOfSession, suspiciousCommand, tree, withChecking } from "./kit.ts";
@@ -58,7 +58,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
           file: Type.Optional(Type.String({ description: "path relative to the repository root" })),
           line: Type.Optional(Type.Number()),
           title: Type.String({ description: "the problem, in one sentence" }),
-          fix: Type.Optional(Type.String({ description: "a concrete fix" })),
+          fix: Type.String({ description: "the single change you would make, concrete enough to apply without asking; required for every finding, a P3 included" }),
           outside: Type.Optional(Type.Boolean({ description: "true when the problem pre-dates this change (outside it): still a finding — give it the priority it deserves, and a serious one (P0/P1) still blocks" })),
           map: Type.Optional(StringEnum(["stated", "wrong"], { description: "in a code review: \"stated\" when the problem breaks a rule the project map in AGENTS.md states; \"wrong\" when the problem is that a map line is wrong (the code contradicts it)" })),
         }),
@@ -909,7 +909,7 @@ export function registerReviewFlow(pi: ExtensionAPI) {
         redNotes: loaded && p ? redNotes(loaded.spec, p) : undefined,
         openNotes: loaded && p ? p.tasks.flatMap((t) => (t.open && !isNone(t.open) ? [`${t.id}: ${t.open}`] : [])) : undefined,
         // The first review of a build only: a follow-up looks at what changed since, and already judged these.
-        specP1s: name && p?.approval && !previous ? carriedP1s(store, name, p.approval.at) : undefined,
+        specFindings: name && p?.approval && !previous ? carriedFindings(store, name, p.approval.at) : undefined,
         fixReports,
         designNote: loaded && name ? designProvenance(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,
         acceptanceDrift: loaded && name ? acceptanceDrift(loaded.md, readEvents(path.join(store.specDir(name), "events.jsonl"))) : undefined,

@@ -1725,7 +1725,7 @@ test("spec: every observable contract value cites the code or test that pins it"
   assert.match(review, /one frozen draft[\s\S]*only a P0 blocks/);
   assert.match(SPEC_REVIEWER_SYSTEM, /the claims a Contract, a Decision or an Acceptance line rests on carry the evidence the rule below asks for, and that evidence says what the claim says/);
   assert.match(SPEC_REVIEWER_SYSTEM, /one sentence a tired human can act on: what goes wrong, for whom, and where/);
-  assert.match(SPEC_REVIEWER_SYSTEM, /supporting evidence and the single change/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /optional supporting evidence; the fix is not: every finding, a P3 included, carries the single change you would make/);
 });
 
 test("contract values are computed: the format shows each formula's result for the cases Acceptance pins", async () => {

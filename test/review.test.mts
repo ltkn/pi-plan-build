@@ -33,6 +33,26 @@ test("every reviewer reports through its tool before writing its reply", async (
   assert.match(SPEC_REVIEWER_SYSTEM, /report_findings in one call[^.]*as soon as you have them, before writing your reply/);
 });
 
+test("every reviewer's finding carries a fix, a P3 included: a report without one is refused", async () => {
+  const { Value } = await import("typebox/value");
+  const { default: pb } = await import("../extensions/pb/index.ts");
+  const { default: reviewTools } = await import("../extensions/pb/review-tools.ts");
+  const tools: Record<string, { parameters: never }> = {};
+  const recording = new Proxy({}, { get: (_t, key) => (key === "registerTool" ? (t: { name: string; parameters: never }) => (tools[t.name] = t) : () => undefined) });
+  pb(recording as never);
+  reviewTools(recording as never);
+  // Pi validates every call against the tool's schema and hands a refusal back to the model, which
+  // reports again: a finding with nothing to apply never reaches /pb:fix, or the merge by fix.
+  const nit = { priority: "P3", file: "src/a.ts", line: 3, title: "The aria target is missing while the list is closed." };
+  for (const name of ["pb_report_findings", "report_findings"]) {
+    assert.equal(Value.Check(tools[name].parameters, { findings: [nit] }), false, `${name} accepted a finding without a fix`);
+    assert.equal(Value.Check(tools[name].parameters, { findings: [{ ...nit, fix: "Render the ids only while the list is open." }] }), true, name);
+  }
+  const { REVIEWER_SYSTEM, SPEC_REVIEWER_SYSTEM } = await import("../extensions/pb/prompts.ts");
+  assert.match(REVIEWER_SYSTEM, /each with its priority and its fix[^.]*a P3 too/);
+  assert.match(SPEC_REVIEWER_SYSTEM, /the fix is not: every finding, a P3 included, carries/);
+});
+
 test("review brief: fix reports and acceptance drift render as sections", async () => {
   const { reviewerBrief, acceptanceDrift } = await import("../extensions/pb/prompts.ts");
   assert.equal(acceptanceDrift("# T", []), undefined); // no build-start: nothing to compare
@@ -89,7 +109,7 @@ test("review brief: every acceptance id is listed; a follow-up carries the previ
   assert.match(brief, /an id left out counts as not verified/i);
 });
 
-test("review brief: the spec review's P1s the build carried reach the code reviewer as leads to check against the code", async () => {
+test("spec review: its verdict is kept beside the spec and named in the build's session, and every finding reaches the code reviewer as a lead", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
@@ -99,10 +119,16 @@ test("review brief: the spec review's P1s the build carried reach the code revie
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
   }
+  // The build runs in a session of its own: the verdict posted where it was started is kept in a file, and
+  // the build's session names it, so an unattended run's spec review is found where its build is read.
+  const kept = t.read(".pi/pb/specs/order-cancellation/spec-review.md");
+  assert.equal(kept, `${t.posts.find((p) => p.startsWith("**✅ Spec review"))}\n`);
+  assert.match(kept, /\[P1\][\s\S]*\[P2\]/);
+  assert.match(t.posts.find((p) => p.startsWith("▶ Building"))!, /\nSpec review: PASS · P1 1 · P2 1 — \.pi\/pb\/specs\/order-cancellation\/spec-review\.md; the code review checks each finding against the code\.\n/);
   await t.run("review");
-  const lead = /## What the spec review raised before the build\n\nThese P1s were raised against the spec, and the build went ahead carrying them\. The spec itself may be the flaw, so code that follows the spec faithfully does not settle one: check each against the code, and report one that still holds as a finding of its own, citing the code\.\n- \[P1\] src\/order\.ts:42 — Context — the transition has no guard/;
+  // Every priority: a P2 left to the build is the one nobody reads when no one is there.
+  const lead = /## What the spec review raised before the build\n\nThese were raised against the spec, and the build went ahead without the spec changing for them\. The spec itself may be the flaw, so code that follows the spec faithfully does not settle one: check each against the code, and report one that still holds as a finding of its own at the priority it deserves now, citing the code\. One the build settled, or the code proves wrong, is not reported\.\n- \[P1\] src\/order\.ts:42 — Context — the transition has no guard[^\n]*(\n {3}Fix: [^\n]*)?\n- \[P2\][^\n]*Contracts — unmeasured window/;
   assert.match(briefOf(t), lead);
-  assert.doesNotMatch(briefOf(t), /Contracts — unmeasured window/, "only the P1s: P2 and P3 are the build's to carry");
 
   // Reviewed once, then edited: the build rides on the earlier pass, so its P1 is still the one carried.
   const u = setup({ verify: "true" });
@@ -124,6 +150,7 @@ test("review brief: the spec review's P1s the build carried reach the code revie
   await written(w);
   w.agent.script = diligent;
   await w.run("build");
+  assert.match(w.posts.find((p) => p.startsWith("▶ Building"))!, /\nSpec review: PASS · no findings — \.pi\/pb\/specs\/order-cancellation\/spec-review\.md\.\n/);
   await w.run("review");
   assert.doesNotMatch(briefOf(w), /What the spec review raised before the build/);
 });

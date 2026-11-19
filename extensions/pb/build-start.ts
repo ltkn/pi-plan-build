@@ -1,4 +1,5 @@
 /** /pb:build: the build-start screen, its checks and baseline questions, launching here or fresh, the pending-build offer, and resuming a paused build. */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
   ExtensionAPI,
@@ -10,8 +11,8 @@ import { tip } from "./help.ts";
 import { buildIntro, coherePrompt, continuePrompt, findingLine, finishSpecPrompt, fixText, specPrompt } from "./prompts.ts";
 import { type ParsedSpec, blockFingerprints, contractChanges, contractHash, removedLines, sectionOf, specHash } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
-import { type Progress, COHERE_TASK_ID, Store, changedSince, gitHead, now, readEvents } from "./store.ts";
-import { agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, fitDialog, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, planningEdits, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
+import { type Finding, type Progress, COHERE_TASK_ID, Store, changedSince, gitHead, now, readEvents } from "./store.ts";
+import { P_ORDER, agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, fitDialog, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, planningEdits, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
 import { whereNext } from "./next.ts";
 import { offerStandards } from "./plan.ts";
 import { dryRunTests, editSpec, readySpecs, showSpec } from "./spec-tools.ts";
@@ -265,11 +266,12 @@ export function registerBuildStart(pi: ExtensionAPI) {
           );
           return;
         }
+        const reviewLine = specReviewLine(store, name);
         const prompt = cohereFirst ? coherePrompt(p.baseCommit, 1, cfg.maxAttempts, specRef(store, name)) : task!.prompt;
         await c.sendMessage(
           {
             customType: "pb",
-            content: `▶ Building **${name}** from ${store.rel("specs", name, "spec.md")}${carried.model ? `, on ${carried.model}` : ""}${carried.thinking ? `, thinking ${carried.thinking}` : ""}.\nThis session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\`\n${cohereFirst ? COHERE_MARKER : task!.marker}`,
+            content: `▶ Building **${name}** from ${store.rel("specs", name, "spec.md")}${carried.model ? `, on ${carried.model}` : ""}${carried.thinking ? `, thinking ${carried.thinking}` : ""}.\n${reviewLine ? `${reviewLine}\n` : ""}This session: "build: ${name}" · back to it with /resume, or \`pi --session ${c.sessionManager.getSessionId()}\`\n${cohereFirst ? COHERE_MARKER : task!.marker}`,
             display: true,
           },
           { triggerTurn: false },
@@ -295,6 +297,19 @@ export function registerBuildStart(pi: ExtensionAPI) {
    * question — only a P0 holds a build. A pass the review just ran posted them already; a recorded pass is reused
    * silently, so its P1s are posted here. A text already approved (a restart or resume) was seen before.
    */
+  /**
+   * One line for the build's own session: the spec review's verdict was posted where the build was started,
+   * and a fresh build session (often read the next morning) would otherwise not say a review ran at all.
+   */
+  const specReviewLine = (store: Store, name: string): string | undefined => {
+    if (!fs.existsSync(store.specReviewFile(name))) return undefined;
+    const last = readEvents(path.join(store.specDir(name), "events.jsonl")).filter((e) => e.type === "spec-review" && (e.verdict === "pass" || e.verdict === "block")).at(-1);
+    if (!last) return undefined;
+    const reported = Array.isArray(last.reported) ? (last.reported as Finding[]) : [];
+    const tally = P_ORDER.map((k) => [k, reported.filter((f) => f.priority === k).length] as const).filter(([, c]) => c).map(([k, c]) => `${k} ${c}`).join(" · ");
+    return `Spec review: ${last.verdict === "pass" ? "PASS" : "FAIL"}${tally ? ` · ${tally}` : " · no findings"} — ${store.rel("specs", name, "spec-review.md")}${reported.length ? "; the code review checks each finding against the code" : ""}.`;
+  };
+
   const postCarriedP1s = (store: Store, name: string, md: string, reused: boolean) => {
     if (!reused || store.progress(name)?.approval?.hash === specHash(md)) return;
     const p1 = recordedFindings(store, name, md).filter(({ f }) => f.priority === "P1");

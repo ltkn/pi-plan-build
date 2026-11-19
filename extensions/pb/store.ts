@@ -922,6 +922,14 @@ export class Store {
     writeFileAtomic(path.join(this.specDir(name), "reviewed.md"), markdown);
   }
 
+  /** The spec review's verdict as it was posted: the build runs in another session, so this is where it is read. */
+  specReviewFile(name: string): string {
+    return path.join(this.specDir(name), "spec-review.md");
+  }
+  writeSpecReview(name: string, text: string): void {
+    writeFileAtomic(this.specReviewFile(name), `${text}\n`);
+  }
+
   /** The text a build was approved against: the build may add Design and Decisions, never rewrite this. */
   readApprovedSpec(name: string): string | undefined {
     try {

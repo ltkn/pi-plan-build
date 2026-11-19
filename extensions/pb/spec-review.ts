@@ -273,8 +273,14 @@ export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, na
     return "changed";
   }
   const sessionNote = review.session ? `The whole run: \`pi --session ${path.relative(ctx.cwd, review.session)}\`.` : "";
+  // A fresh verdict is also kept beside the spec: the build opens its own session, so a post in this one is
+  // where nobody reading the build, or an unattended run's results, would look.
+  const verdict = (text: string) => {
+    store.writeSpecReview(name, text);
+    post(text);
+  };
   if (review.block && !review.findings.length) {
-    post([
+    verdict([
       phaseHeader("❌", "Spec review", name, "FAIL", "no report", review.ms !== undefined ? duration(review.ms) : ""),
       "",
       nextLine(`\`${door.retryCmd}\` to try again, or point the reviewer at a model that reports: \`"specReviewer": {"model": "provider/id"}\` in ${store.rel("config.json")}.`),
@@ -302,9 +308,9 @@ export const ensureSpecReviewed = async (ctx: ExtensionContext, store: Store, na
     if (rest.length) sections.push("", "**Advisory**", "", ...rest);
     if (rest.length && door.advisoryHint) sections.push("", door.advisoryHint);
     if (sessionNote) sections.push("", sessionNote);
-    post(sections.join("\n"));
+    verdict(sections.join("\n"));
   } else {
-    post([
+    verdict([
       phaseHeader("✅", "Spec review", name, "PASS", "no findings", review.ms !== undefined ? duration(review.ms) : ""),
       "",
       nextLine(door.passNext),
@@ -369,11 +375,11 @@ const lastReviewOn = (store: Store, name: string, md: string) => {
  * per spec, an edit after that pass is built unreviewed, so the pass on the earlier text is still the one the
  * build carried. Leads for the code review, which otherwise judges the code only against the spec.
  */
-export const carriedP1s = (store: Store, name: string, approvedAt: string): Finding[] => {
+export const carriedFindings = (store: Store, name: string, approvedAt: string): Finding[] => {
   const pass = readEvents(path.join(store.specDir(name), "events.jsonl"))
     .filter((e) => e.type === "spec-review" && e.verdict === "pass" && typeof e.at === "string" && e.at <= approvedAt)
     .at(-1);
-  return (Array.isArray(pass?.reported) ? (pass.reported as Finding[]) : []).filter((f) => f.priority === "P1");
+  return Array.isArray(pass?.reported) ? (pass.reported as Finding[]) : [];
 };
 
 export const recordedFindings = (store: Store, name: string, md: string): { id: number; f: Finding }[] => {
