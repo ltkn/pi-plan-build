@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.41.0
 
 - **P3 nits are numbered, and `/pb:fix` takes one by its number.** A nit in the code was listed without a number, so fixing one meant doing it by hand or describing it in words, though it now carries its Fix like any finding. Now every finding is numbered down the page, each section's nits after its other findings, and the stored list `/pb:fix` reads holds them. A nit is still never open: it never blocks, a bare `/pb:fix` leaves it out, the ids pb suggests leave it out and add "Add 10 11 to fix the P3 nits too", and with only nits left `/pb:fix` names them instead of starting a lap.
 - **A spec review's verdict is kept, and every finding reaches the code review.** The verdict was posted only in the session `/pb:build` was run from, and the build opens a session of its own. So an unattended run's build session and `review.md` never said a spec review had run, and its P2s and P3s went nowhere: only P1s reached the code reviewer, and the builder sees none by design (it builds the approved spec). In one run a P2 (the way-home board still titled "home → work") was lost that way and found again by the code review five hours later. Now the verdict is also written to `spec-review.md` beside the spec, the build session's first message names it with its tally, and every finding of the pass, at any priority, reaches the first code review as a lead to check against the code: reported again when it still holds, dropped when the build settled it or the code proves it wrong.
