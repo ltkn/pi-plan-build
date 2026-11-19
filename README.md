@@ -26,7 +26,7 @@ pb asks you only for decisions that are yours to make.
 ## Install
 
 ```bash
-pi install git:github.com/ltkn/pi-plan-build@v1.42.1   # a tagged release
+pi install git:github.com/ltkn/pi-plan-build@v1.43.0   # a tagged release
 pi install /path/to/pi-plan-build                      # a local checkout, loaded in place
 ```
 

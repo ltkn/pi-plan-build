@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.43.0
 
 - **Fewer fix rounds, and the next step is one Enter.** One feature took four review rounds, and most of the later findings were pb's own leftovers: a fix lap changed the code and left spec lines describing the old code, the follow-up review reported them, the next lap fixed those and left others. The spec pass and the adversarial pass also reported the same defects at neighbouring lines, so every `/pb:fix` needed a written "3 and 6 are one", and each round was a typed command. Now:
   - **A fix lap keeps the spec and the map true.** Before it reports, it searches the whole spec and AGENTS.md for every name, path and behaviour it changed and corrects the stale lines, Findings included: pb approves a Findings edit without asking, since it is evidence, not a rule the build follows.
