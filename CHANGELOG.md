@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.44.0
 
 - **A refused spec can always be fixed in its draft.** A planner wrote `Also changes: ../platform-core (apps-tempo: the Journey Planner fetch, …)`, and `pb_write_spec` refused it with the same error eight times, once per word of the note. It then told the planner to fix the draft with `pb_update_spec` and not to resend the spec. But `pb_update_spec` could change only sections and the Status, never a header line, so the planner had no allowed way to make the fix.
   - **`pb_update_spec` sets header lines by name.** `fields: {"Also changes": "../platform-core"}` replaces a line or adds it in its place in the header; `null` removes an optional line. `Title` sets the `# <title>` line. `status` still works, as another spelling of `fields.Status`. A value must be one line of text, so a field can never add a heading, and an unknown name is refused.
