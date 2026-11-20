@@ -41,7 +41,8 @@ complete with what each one is.
    spec first. Then Pi writes a short **spec** from the discussion (goal, findings,
    decisions, tasks); every spec gets one independent review before the first
    task — fresh eyes, read-only — and a P0 stops it for you to amend or rebut;
-   P1-P3 are shown and the build carries them (see `/pb:help spec`). `/pb:spec-review
+   P1-P3 are shown and the build carries them; a P1 with a fix is offered first,
+   applied by Pi and shown to you as a diff before the build (see `/pb:help spec`). `/pb:spec-review
    [name]` is that same review on its own, for a spec you want judged before
    deciding to build. Run `/pb:build` again to go on after a block. A clean or advisory-only review
    starts by itself, so you can walk away. The
@@ -607,7 +608,18 @@ are information: the build carries them and the code review judges the result.
 The P1s reach the code reviewer as leads: the spec itself may be the flaw, so it
 checks each against the code and reports one that still holds.
 A pass recorded earlier posts its P1s again when the build starts, since you may
-not have seen them. A finding has a
+not have seen them.
+
+**A P1 that comes with a fix is applied before the build if you say so, and
+Enter says so.** The build-start screen offers "Apply the review's P1 fixes
+first, then see the change", ahead of "Build as reviewed" and "Stop here". Pi
+applies each fix to the spec, nothing else, and may word a suggested format or
+name more clearly. When its turn ends, pb shows what changed since the reviewed
+text as a diff and asks again: build, undo the fixes and build the text the
+review read, edit the spec, or not now. The fixed text is not reviewed again:
+you just read the change. The offer comes once per reviewed text, only before a
+spec's first build, and never without someone there: headless, or when nobody
+answers the screen, the build carries the P1s as before. A P1 with no fix is carried too. A finding has a
 priority, the check it fails (Claims, Values, Proof, Coverage, Reach,
 Consistency, Overengineering, Evidence or Other; `/pb:stats` counts findings per check), a
 one-sentence title naming what goes wrong and where, and optionally

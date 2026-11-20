@@ -1457,7 +1457,7 @@ test("what's next: always on screen — the footer, the title, situational help 
   assert.ok(undo.some((i: any) => i.value === "T1" && i.description), "checkpoints complete with what they undo");
 });
 
-test("build-start screen: an unbuilt dependency and a full session are one screen with one choice, and the review's P1 is not a question", async () => {
+test("build-start screen: an unbuilt dependency and the review's P1 fix are one screen with one choice, never a dialog each", async () => {
   const t = setup({ verify: "true" });
   process.chdir(t.repo);
   const { Store } = await import("../extensions/pb/store.ts");
@@ -1475,9 +1475,13 @@ test("build-start screen: an unbuilt dependency and a full session are one scree
   assert.equal(screens.length, 1, "one screen, not a dialog per concern");
   assert.equal(
     screens[0],
-    "Build order-cancellation?\n- ⚠ order-cancellation depends on base-feature, which isn't built yet",
+    "Build order-cancellation?\n- ⚠ order-cancellation depends on base-feature, which isn't built yet\n- The spec review's P1 finding 1 comes with a fix (listed above): Pi can apply it to the spec, and you see the diff before anything is built",
   );
-  assert.deepEqual(t.selectOptions.at(-1), ["Build anyway", "Stop here"], "a P1 is information the build carries, never a choice; where to build is not asked");
+  assert.deepEqual(
+    t.selectOptions.at(-1),
+    ["Apply the review's P1 fix (1) first, then see the change", "Build as reviewed", "Stop here"],
+    "the P1's fix is an option on the one screen, not a dialog of its own; where to build is not asked",
+  );
   assert.equal(t.progress("order-cancellation").phase, "written", "stopped: nothing approved");
 });
 

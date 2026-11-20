@@ -487,11 +487,16 @@ export function removedLines(before: string, after: string): string[] {
  * lines it gained, whole (a cut could hide the change itself); then any approved decision that is gone. Posted to the
  * chat, where it scrolls and stays; the dialog only asks.
  */
-export const contractChanges = (approved: string | undefined, md: string, droppedDecisions: string[]): { diff: string; summary: string; keys: string[] } => {
+export const contractChanges = (approved: string | undefined, md: string, droppedDecisions: string[]): { diff: string; summary: string; keys: string[] } =>
+  blockChanges(approved, md, (key) => key !== "section:design" && key !== "section:decisions", droppedDecisions);
+
+/** Every block that differs between two texts of a spec, header and Decisions included, as a diff per block. */
+export const specChanges = (before: string, after: string) => blockChanges(before, after, () => true, []);
+
+const blockChanges = (approved: string | undefined, md: string, include: (key: string) => boolean, droppedDecisions: string[]): { diff: string; summary: string; keys: string[] } => {
   const was = new Map(specTextBlocks(approved ?? "").map((b) => [b.key, b]));
-  const contract = (key: string) => key !== "section:design" && key !== "section:decisions";
-  const now = specTextBlocks(md).filter((b) => contract(b.key));
-  const keys = [...new Set([...[...was.keys()].filter(contract), ...now.map((b) => b.key)])];
+  const now = specTextBlocks(md).filter((b) => include(b.key));
+  const keys = [...new Set([...[...was.keys()].filter(include), ...now.map((b) => b.key)])];
   const parts: string[] = [];
   const summary: string[] = [];
   const changed: string[] = [];

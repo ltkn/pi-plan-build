@@ -1,0 +1,12 @@
+words: 173
+
+[pb:spec order-cancellation] The spec review passed .pi/pb/specs/order-cancellation/spec.md with a P1 that comes with a fix. Apply it to the spec now, before the build:
+
+1. [P1 · Values] src/order.ts:42 — C3 doesn't say which node stands for each end of a call
+   Fix: pin it in C3: the first node of originNodes
+
+- Edit with pb_update_spec: mode edit to change a line or two, fields for a header line. Change only what each fix needs, in the section it is about; nothing else in the spec, no other spec, no code.
+- A Fix is the reviewer's proposal: keep what it asks for, written in the spec's own terms. Where its suggested wording reads badly (a display format, a name), choose a clearer one that meets it.
+- Where the spec already says it, or a fix would change the Goal, leave it and say so in one line.
+
+Then reply with one line per finding, nothing else, and stop: pb shows me the change as a diff and asks whether to build.

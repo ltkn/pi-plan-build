@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { type Result, citedPage, citingSpec, diligent, needsRed, parseSpec, PLANNING, redExemption, reviewEvents, reviewRuns, setup, SPEC, specHash, specRel, taskOf, TASKS_PLAIN, until, written } from "./harness.mts";
+import { type Result, type Script, citedPage, citingSpec, diligent, needsRed, parseSpec, PLANNING, redExemption, reviewEvents, reviewRuns, setup, SPEC, specHash, specRel, taskOf, TASKS_PLAIN, until, written } from "./harness.mts";
 
 test("pb_write_spec rejects a spec that doesn't parse, and a bad name", async () => {
   const t = setup();
@@ -109,11 +109,11 @@ test("spec review: P1 and P2 are advisory and the build proceeds", async () => {
   assert.match(t.posts.find((p) => p.startsWith("**✅ Build complete"))!, / · (?:<1s|\d+s)/);
 });
 
-test("spec review: a P1 is information the build carries — never a question — and a reused pass posts it again", async () => {
+test("spec review: a P1 with no fix is information the build carries — never a question — and a reused pass posts it again", async () => {
   const t = setup({ verify: "true" });
   await written(t);
   t.agent.script = diligent;
-  process.env.MOCK_SPEC_REVIEW = "advisory";
+  process.env.MOCK_SPEC_REVIEW = "advisory-nofix";
   try {
     // A review on its own: the verdict is recorded, nothing is built.
     await t.run("spec-review", "order-cancellation");
@@ -122,8 +122,100 @@ test("spec review: a P1 is information the build carries — never a question �
     await t.run("build", "order-cancellation");
     const shown = t.posts.slice(posted).join("\n");
     assert.match(shown, /\*\*The build carries 1 P1 finding from the spec review\*\* — not blocking; the code review judges the result:\n\n- 1\. \[P1\]/);
-    assert.ok(!t.selectTitles.some((x) => x.startsWith("Build order-cancellation")), "no build-start screen for a P1");
+    assert.ok(!t.selectTitles.some((x) => x.startsWith("Build order-cancellation")), "no build-start screen for a P1 with nothing to apply");
     assert.equal(t.progress("order-cancellation").phase, "built");
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+});
+
+/** The planner applying the review's fixes when asked, and building like `diligent` otherwise. */
+const appliesFixes =
+  (decision: string): Script =>
+  async (text, tool) => {
+    if (text.includes("The spec review passed")) {
+      await tool("pb_update_spec", { name: "order-cancellation", section: "Decisions", mode: "append", content: decision });
+      return;
+    }
+    await diligent(text, tool);
+  };
+
+test("spec review: a P1 with a fix is applied on Enter, shown as a diff before anything is built, and the fixed text is built without a second review", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = appliesFixes("- The transition is guarded in src/order.ts, because the review found it unguarded.");
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("build", "order-cancellation");
+    // One screen, with applying first: Enter takes it.
+    const screen = t.selectTitles.findIndex((x) => x.startsWith("Build order-cancellation?"));
+    assert.ok(screen >= 0, t.selectTitles.join("\n"));
+    assert.match(t.selectTitles[screen], /P1 finding 1 comes with a fix/);
+    assert.deepEqual(t.selectOptions[screen], ["Apply the review's P1 fix (1) first, then see the change", "Build as reviewed", "Stop here"]);
+    assert.match(t.posts.find((p) => p.startsWith("**✅ Spec review"))!, /1\. \[P1\][\s\S]*Fix: guard it/, "the findings to apply are on screen");
+    // Pi's turn applied it; the offer after it shows the change and builds nothing yet.
+    assert.match(t.posts.join("\n"), /The review's fixes \(1\), as Pi applied them\*\* — ## Decisions \(\+1\)[\s\S]*\+ - The transition is guarded in src\/order\.ts/);
+    const offer = t.selectTitles.findIndex((x) => /Build order-cancellation now\? .*with the review's fixes \(diff above\)/.test(x));
+    assert.ok(offer > screen, t.selectTitles.join("\n"));
+    assert.deepEqual(t.selectOptions[offer], ["Build in a fresh session, from the spec", "Undo the fixes: build the text the review read", "Edit the spec first", "Not now"]);
+    // Enter on that offer is the human accepting the diff: only then does the build start, on the one review.
+    const diffAt = t.posts.findIndex((p) => p.includes("as Pi applied them"));
+    const buildAt = t.posts.findIndex((p) => p.startsWith("▶ Building"));
+    assert.ok(diffAt >= 0 && buildAt > diffAt, "the change is shown before the build starts");
+    assert.equal(t.progress("order-cancellation").phase, "built");
+    assert.equal(reviewEvents(t).length, 1, "the fixed text is not reviewed again");
+    assert.equal(t.selectTitles.filter((x) => x.startsWith("Build order-cancellation?")).length, 1, "neither the fixes nor the lines they changed are asked about again");
+    assert.match(t.read(".pi/pb/specs/order-cancellation/approved.md"), /The transition is guarded in src\/order\.ts/);
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+});
+
+test("spec review: undoing the applied fixes builds the text the review read, and they are not offered again", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  const reviewedText = t.read(specRel);
+  t.agent.script = appliesFixes("- A decision the human did not want.");
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    t.selects.push("Apply the review's P1 fix (1) first, then see the change", "Undo the fixes: build the text the review read", "Not now");
+    await t.run("build", "order-cancellation");
+    assert.equal(t.read(specRel), reviewedText, "the reviewed text is back");
+    assert.match(t.posts.join("\n"), /The review's fixes are undone/);
+    await t.run("build", "order-cancellation");
+    assert.equal(t.progress("order-cancellation").phase, "built");
+    assert.ok(!t.selectOptions.slice(1).some((o) => o.some((x) => x.startsWith("Apply the review's"))), "the fixes are offered once per reviewed text");
+    assert.doesNotMatch(t.read(".pi/pb/specs/order-cancellation/approved.md"), /did not want/);
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+});
+
+test("spec review: a build-start screen nobody answers builds as reviewed, never waiting on fixes no one will see", async () => {
+  const t = setup({ verify: "true", askTimeoutSec: 0.001 });
+  await written(t);
+  t.agent.script = appliesFixes("- Should never be written.");
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    t.selects.push("<timeout>");
+    await t.run("build", "order-cancellation");
+    assert.equal(t.progress("order-cancellation").phase, "built");
+    assert.doesNotMatch(t.read(specRel), /Should never be written/);
+  } finally {
+    delete process.env.MOCK_SPEC_REVIEW;
+  }
+});
+
+test("spec review: with nobody there, a P1 with a fix is carried, not applied", async () => {
+  const t = setup({ verify: "true" });
+  await written(t);
+  t.agent.script = appliesFixes("- Should never be written.");
+  t.headless();
+  process.env.MOCK_SPEC_REVIEW = "advisory";
+  try {
+    await t.run("build", "order-cancellation");
+    assert.equal(t.progress("order-cancellation").phase, "built");
+    assert.doesNotMatch(t.read(specRel), /Should never be written/);
   } finally {
     delete process.env.MOCK_SPEC_REVIEW;
   }

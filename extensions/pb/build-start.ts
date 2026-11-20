@@ -8,8 +8,8 @@ import type {
  } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
 import { tip } from "./help.ts";
-import { buildIntro, coherePrompt, continuePrompt, findingLine, finishSpecPrompt, fixText, specPrompt } from "./prompts.ts";
-import { type ParsedSpec, blockFingerprints, contractChanges, contractHash, removedLines, sectionOf, specHash } from "./spec.ts";
+import { buildIntro, coherePrompt, continuePrompt, findingLine, finishSpecPrompt, fixText, specPrompt, specReviewFixesPrompt } from "./prompts.ts";
+import { type ParsedSpec, blockFingerprints, contractChanges, contractHash, parseSpec, removedLines, sectionOf, specChanges, specHash } from "./spec.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { type Finding, type Progress, COHERE_TASK_ID, Store, changedSince, gitHead, now, readEvents } from "./store.ts";
 import { P_ORDER, agree, appendDecision, approveSpec, changedFilesSection, choose, cmd, fitDialog, commands, findModel, instruct, liftPlanning, loadSpec, normSpecArg, planningEdits, sessionLive, pauseBuild, planningWriteNotes, post, reviewPlanningChanges, sessionGone, sessionModel, showProgress, sleep, specCompletions, specOfSession, specRef, repoHeads, repoSnapshots, specStarted, specWriting, standardsFor, syncTasks, tree } from "./kit.ts";
@@ -17,7 +17,7 @@ import { whereNext } from "./next.ts";
 import { offerStandards } from "./plan.ts";
 import { dryRunTests, editSpec, readySpecs, showSpec } from "./spec-tools.ts";
 import { COHERE_MARKER, beginCohereEntry, beginTask, confirmLiveBuild, needsCohere, staleness } from "./build-loop.ts";
-import { ensureSpecReviewed, recordedFindings, reviewDoor, sinceReview } from "./spec-review.ts";
+import { ensureSpecReviewed, lastReviewFixes, recordedFindings, reviewDoor, reviewFixesToOffer, sinceReview } from "./spec-review.ts";
 import { enterStep, nextPhase, nextTodo, unfinishedPhase } from "./phase.ts";
 
 /**
@@ -310,10 +310,30 @@ export function registerBuildStart(pi: ExtensionAPI) {
     return `Spec review: ${last.verdict === "pass" ? "PASS" : "FAIL"}${tally ? ` · ${tally}` : " · no findings"} — ${store.rel("specs", name, "spec-review.md")}${reported.length ? "; the code review checks each finding against the code" : ""}.`;
   };
 
-  const postCarriedP1s = (store: Store, name: string, md: string, reused: boolean) => {
+  const postCarriedP1s = (store: Store, name: string, md: string, reused: boolean, fixesOffered: boolean) => {
     if (!reused || store.progress(name)?.approval?.hash === specHash(md)) return;
     const p1 = recordedFindings(store, name, md).filter(({ f }) => f.priority === "P1");
-    if (p1.length) post([`**The build carries ${p1.length} P1 finding${p1.length === 1 ? "" : "s"} from the spec review** — not blocking; the code review judges the result:`, "", ...p1.map(({ id, f }) => `- ${findingLine(f, id)}`)].join("\n"));
+    const s = p1.length === 1 ? "" : "s";
+    const heading = fixesOffered
+      ? `**The spec review raised ${p1.length} P1 finding${s}** — not blocking; pb offers to apply the fixes first:`
+      : `**The build carries ${p1.length} P1 finding${s} from the spec review** — not blocking; the code review judges the result:`;
+    if (p1.length) post([heading, "", ...p1.map(({ id, f }) => `- ${findingLine(f, id)}`)].join("\n"));
+  };
+
+  /**
+   * Hand the review's P1 fixes to Pi in this session, before anything is approved. The build waits on the pending
+   * offer: when Pi's turn ends, pb shows the change as a diff and asks again (offerPendingBuild), so nothing is built
+   * from text the human has not seen. The record names the reviewed text, which is also what an undo goes back to.
+   */
+  const applyReviewFixes = (ctx: ExtensionContext, store: Store, name: string, md: string, fixes: { id: number; f: Finding }[], fresh: boolean) => {
+    const session = ctx.sessionManager.getSessionFile();
+    store.event(name, { type: "spec-fixes", from: specHash(md), findings: fixes.map(({ id }) => id), here: !fresh });
+    // This session writes the fixes, so the offer that follows its turn finds the spec as one it wrote.
+    const p = store.progress(name);
+    if (p) store.saveProgress({ ...p, writtenIn: session, updatedAt: now() });
+    store.setPendingBuild(session);
+    const ids = fixes.map(({ id }) => id).join(", ");
+    instruct(`▶ Applying the spec review's P1 fix${fixes.length === 1 ? "" : "es"} to ${name} (${ids}); pb shows the change before the build.`, specReviewFixesPrompt(name, store.rel("specs", name, "spec.md"), fixes));
   };
 
   const startBuild = async (
@@ -336,9 +356,12 @@ export function registerBuildStart(pi: ExtensionAPI) {
     const reviewsBefore = specReviewCount(store, name);
     if ((await ensureSpecReviewed(ctx, store, name, md, reviewDoor(name, "build"))) !== "pass") return;
     // Lines the review read and this text no longer has: listed with the review's answer, and asked about here.
-    const gone = sinceReview(store, name, md).removed.length;
+    // The review's fixes were shown as a diff and accepted: what they removed is not news a second time.
+    const gone = fixesSeenOn(store, name) === specHash(md) ? 0 : sinceReview(store, name, md).removed.length;
     if (gone) checked.concerns.push(`${gone} line${gone === 1 ? "" : "s"} the spec review read ${gone === 1 ? "is" : "are"} gone from this text (listed above)`);
-    postCarriedP1s(store, name, md, specReviewCount(store, name) === reviewsBefore);
+    // Offered only where someone can see the change: with nobody there, the build carries the P1s as before.
+    const fixes = ctx.hasUI && ctx.sessionManager.getSessionFile() ? reviewFixesToOffer(store, name, md) : [];
+    postCarriedP1s(store, name, md, specReviewCount(store, name) === reviewsBefore, fixes.length > 0);
     const buildModel = cfg.buildModel ? findModel(ctx, cfg.buildModel) : undefined;
     const switching = !!buildModel && cfg.buildModel !== sessionModel(ctx);
     const canOpenSession = typeof (ctx as Partial<ExtensionCommandContext>).newSession === "function";
@@ -346,12 +369,22 @@ export function registerBuildStart(pi: ExtensionAPI) {
     // spec's uncommitted files), shown once, with one choice. Where to build is not one of them: a build runs from
     // the spec, so it gets a session of its own unless --here asked for this one.
     const concerns = checked.concerns;
-    if (concerns.length && ctx.hasUI) {
-      const GO = "Build anyway";
+    if ((concerns.length || fixes.length) && ctx.hasUI) {
+      const ids = fixes.map(({ id }) => id).join(", ");
+      const APPLY = `Apply the review's P1 fix${fixes.length === 1 ? "" : "es"} (${ids}) first, then see the change`;
+      const GO = fixes.length ? "Build as reviewed" : "Build anyway";
       const STOP = "Stop here";
-      const title = [`Build ${name}?`, ...concerns.map((c) => `- ⚠ ${c}`)].join("\n");
-      const choice = await choose(ctx, store, title, [GO, STOP], GO, notes);
+      const title = [
+        `Build ${name}?`,
+        ...concerns.map((c) => `- ⚠ ${c}`),
+        ...(fixes.length ? [`- The spec review's P1 ${fixes.length === 1 ? "finding" : "findings"} ${ids} ${fixes.length === 1 ? "comes" : "come"} with a fix (listed above): Pi can apply ${fixes.length === 1 ? "it" : "them"} to the spec, and you see the diff before anything is built`] : []),
+      ].join("\n");
+      const options = fixes.length ? [APPLY, GO, STOP] : [GO, STOP];
+      // Enter applies the fixes, but a screen nobody answered builds as reviewed: the fixes are worth taking only
+      // with someone there to see the diff, and the build would otherwise wait on that offer for nobody.
+      const choice = await choose(ctx, store, title, options, GO, notes);
       if (!choice || choice === STOP) return;
+      if (choice === APPLY) return applyReviewFixes(ctx, store, name, md, fixes, fresh);
     }
     // Without a UI the build-start screen is never shown: everything it would have listed goes on the record the
     // build's closing summary reads, so a headless build says what it went ahead over.
@@ -526,6 +559,7 @@ export function registerBuildStart(pi: ExtensionAPI) {
     const loaded = loadSpec(store, name);
     if (!loaded) return true;
     const { spec } = loaded;
+    const fixing = reviewFixesShown(store, name);
     const dry = await dryRunTests(ctx, store, name);
     if (sessionGone(ctx)) {
       // Replaced during the dry run: offer again on a later turn instead of dying mid-offer.
@@ -534,20 +568,22 @@ export function registerBuildStart(pi: ExtensionAPI) {
     }
     showSpec(store, name, {
       names,
-      next: ctx.hasUI ? "build it in a fresh session, or edit the spec first." : `\`/${cmd("build")} ${name}\` builds it in a fresh session.`,
-      extra: dry,
+      next: ctx.hasUI ? `build it ${fixing?.here ? "here" : "in a fresh session"}, or edit the spec first.` : `\`/${cmd("build")} ${name}\` builds it in a fresh session.`,
+      extra: [...dry, ...(fixing ? fixing.lines : [])],
     });
     if (!ctx.hasUI) {
       post(tip("spec.next"));
       return true;
     }
-    const BUILD = "Build in a fresh session, from the spec";
+    const BUILD = fixing?.here ? "Build here, from the spec" : "Build in a fresh session, from the spec";
+    const UNDO = "Undo the fixes: build the text the review read";
     const EDIT = "Edit the spec first";
     const LATER = "Not now";
     const notes: string[] = [];
+    let undoable = !!fixing?.changed;
     for (;;) {
       // Only a command can open a session, so from here the build is left one Enter away — answered or not.
-      const choice = await choose(ctx, store, `Build ${name} now? ${spec.tasks.length} tasks`, [BUILD, EDIT, LATER], BUILD, notes);
+      const choice = await choose(ctx, store, `Build ${name} now? ${spec.tasks.length} tasks${undoable ? " · with the review's fixes (diff above)" : ""}`, undoable ? [BUILD, UNDO, EDIT, LATER] : [BUILD, EDIT, LATER], BUILD, notes);
       if (sessionGone(ctx)) {
         // Replaced while deciding: offer again on a later turn instead of dying mid-offer.
         if (session) store.setPendingBuild(session);
@@ -557,10 +593,46 @@ export function registerBuildStart(pi: ExtensionAPI) {
         await editSpec(ctx, store, name);
         continue;
       }
-      if (choice === BUILD) await startBuild(ctx, store, name, true, { notes });
+      if (choice === UNDO && fixing) {
+        undoReviewFixes(store, name, fixing.reviewed);
+        undoable = false;
+        post(`The review's fixes are undone: ${store.rel("specs", name, "spec.md")} is the text the review read.`);
+        continue;
+      }
+      if (choice === BUILD && undoable) store.event(name, { type: "spec-fixes-seen", hash: specHash(store.readSpec(name) ?? "") });
+      if (choice === BUILD) await startBuild(ctx, store, name, !fixing?.here, { notes });
       else post(tip("spec.next"));
       return true;
     }
+  };
+
+  /**
+   * After Pi applied the review's fixes: the change since the reviewed text, for the offer to show before it asks.
+   * Only while the spec still starts from the text those fixes were handed (a later review or rewrite ends it).
+   */
+  const reviewFixesShown = (store: Store, name: string): { reviewed: string; here: boolean; changed: boolean; lines: string[] } | undefined => {
+    const applied = lastReviewFixes(store, name);
+    const reviewed = store.readReviewedSpec(name);
+    const md = store.readSpec(name);
+    if (!applied || reviewed === undefined || md === undefined || specHash(reviewed) !== applied.from || store.progress(name)?.approval) return undefined;
+    if (md === reviewed) return { reviewed, here: applied.here, changed: false, lines: ["", `**The review's fixes (${applied.findings.join(", ")})**: Pi left the spec unchanged; its reply says why.`] };
+    const { diff, summary } = specChanges(reviewed, md);
+    return { reviewed, here: applied.here, changed: true, lines: ["", `**The review's fixes (${applied.findings.join(", ")}), as Pi applied them** — ${summary}:`, "", diff] };
+  };
+
+  /** The spec text whose review fixes the human accepted after seeing them as a diff. */
+  const fixesSeenOn = (store: Store, name: string): string | undefined => {
+    const e = readEvents(path.join(store.specDir(name), "events.jsonl")).filter((x) => x.type === "spec-fixes-seen").at(-1);
+    return typeof e?.hash === "string" ? e.hash : undefined;
+  };
+
+  /** Put the reviewed text back, as a hand edit would, so the build that follows is the one the review passed. */
+  const undoReviewFixes = (store: Store, name: string, reviewed: string) => {
+    const parsed = parseSpec(reviewed).spec;
+    store.writeSpec(name, reviewed);
+    const p = store.progress(name);
+    if (p && parsed) store.saveProgress({ ...p, tasks: syncTasks(parsed, p.tasks), updatedAt: now() });
+    store.event(name, { type: "spec", update: "review fixes undone", by: "human" });
   };
 
   /**

@@ -388,6 +388,26 @@ export const recordedFindings = (store: Store, name: string, md: string): { id: 
   return reported.map((f, i) => ({ id: i + 1, f }));
 };
 
+/**
+ * The spec review's P1s that come with a fix, offered once before a spec's first build: Pi applies them and the
+ * human sees the change before anything is built. Never on a spec a build was already approved against (a restart
+ * or a revision goes through its own re-approval), and never twice for one reviewed text — undoing the fixes builds
+ * that text as reviewed instead of asking again.
+ */
+export const reviewFixesToOffer = (store: Store, name: string, md: string): { id: number; f: Finding }[] => {
+  if (store.progress(name)?.approval) return [];
+  if (lastReviewFixes(store, name)?.from === specHash(md)) return [];
+  return recordedFindings(store, name, md).filter(({ f }) => f.priority === "P1" && !!f.fix?.trim());
+};
+
+/** The last time the review's fixes were handed to Pi: the reviewed text they start from, and where the build runs. */
+export const lastReviewFixes = (store: Store, name: string): { from: string; findings: number[]; here: boolean } | undefined => {
+  const e = readEvents(path.join(store.specDir(name), "events.jsonl"))
+    .filter((x) => x.type === "spec-fixes")
+    .at(-1);
+  return e && typeof e.from === "string" ? { from: e.from, findings: Array.isArray(e.findings) ? (e.findings as number[]) : [], here: e.here === true } : undefined;
+};
+
 export const verdictOn = (store: Store, name: string, md: string): "pass" | "block" | undefined => {
   const verdict = lastReviewOn(store, name, md)?.verdict;
   return verdict === "pass" || verdict === "block" ? verdict : undefined;

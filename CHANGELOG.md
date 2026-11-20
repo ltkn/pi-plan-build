@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **The spec review's P1 fixes can be applied before the build, with one Enter.** A review passed a spec with two P1s whose fixes were ready to paste: which station node each end of a TfL call uses, and a display format for a floor of 60 minutes or more. pb only carried them, so the build would either guess or stop at the task that needed them, since a build can't change its own contract. Now the build-start screen offers "Apply the review's P1 fixes first, then see the change" as its first option, ahead of "Build as reviewed" and "Stop here".
+  - **Pi applies them, you see the diff.** Pi edits the spec with `pb_update_spec`, changing only what each fix needs, and may word a suggested format more clearly. When its turn ends, pb shows the change since the reviewed text and asks again: build, undo the fixes (the text the review read comes back), edit, or not now. Nothing is approved before you have seen it.
+  - **No second review, no second question.** The fixed text rides on the one pass, as any edit after a pass already does, and the build-start screen doesn't list again the lines the diff showed.
+  - **Offered once, and never unattended.** Only before a spec's first build, once per reviewed text (an undo builds that text without asking again), and only with someone there: headless, or when nobody answers the screen, the build carries the P1s as before and starts as it always did. A P1 with no fix is carried too.
+
 ## 1.44.0
 
 - **A refused spec can always be fixed in its draft.** A planner wrote `Also changes: ../platform-core (apps-tempo: the Journey Planner fetch, …)`, and `pb_write_spec` refused it with the same error eight times, once per word of the note. It then told the planner to fix the draft with `pb_update_spec` and not to resend the spec. But `pb_update_spec` could change only sections and the Status, never a header line, so the planner had no allowed way to make the fix.

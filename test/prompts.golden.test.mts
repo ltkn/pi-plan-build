@@ -68,6 +68,8 @@ const RENDERED: Record<string, () => string> = {
   "nudge": () => prompts.nudgePrompt("T1"),
   "fix-nudge": () => prompts.fixNudgePrompt(),
   "fix-seed": () => prompts.fixSeedPrompt("order-cancellation", findings, reference),
+  "spec-review-fixes": () =>
+    prompts.specReviewFixesPrompt("order-cancellation", ".pi/pb/specs/order-cancellation/spec.md", [{ id: 1, f: { priority: "P1", check: "Values", file: "src/order.ts", line: 42, title: "C3 doesn't say which node stands for each end of a call", fix: "pin it in C3: the first node of originNodes" } }]),
   "reviewer": () => prompts.reviewSessionPrompt("(the brief: see reviewer-brief)"),
   "reviewer-brief": () =>
     prompts.reviewerBrief({

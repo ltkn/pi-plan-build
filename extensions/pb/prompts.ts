@@ -720,6 +720,22 @@ const oneLine = (s: string) => s.replace(/\s*\n\s*/g, " ");
 
 export const findingDetails = (f: Finding) => `${f.fix ? `\n   Fix: ${oneLine(f.fix)}` : ""}`;
 
+/**
+ * The turn that applies the spec review's P1 fixes before a first build. The reviewer's Fix is a proposal: Pi keeps
+ * its meaning in the spec's own words, and changes nothing else, since the human approves this change as a diff and
+ * the review is not run again on it.
+ */
+export const specReviewFixesPrompt = (name: string, specPath: string, findings: { id: number; f: Finding }[]) =>
+  `[pb:spec ${name}] The spec review passed ${specPath} with ${findings.length === 1 ? "a P1 that comes" : `${findings.length} P1s that come`} with a fix. Apply ${findings.length === 1 ? "it" : "them"} to the spec now, before the build:
+
+${findings.map(({ id, f }) => findingLine(f, id)).join("\n")}
+
+- Edit with pb_update_spec: mode edit to change a line or two, fields for a header line. Change only what each fix needs, in the section it is about; nothing else in the spec, no other spec, no code.
+- A Fix is the reviewer's proposal: keep what it asks for, written in the spec's own terms. Where its suggested wording reads badly (a display format, a name), choose a clearer one that meets it.
+- Where the spec already says it, or a fix would change the Goal, leave it and say so in one line.
+
+Then reply with one line per finding, nothing else, and stop: pb shows me the change as a diff and asks whether to build.`;
+
 export const findingLine = (f: Finding, n?: number) =>
   `${n !== undefined ? `${n}. ` : ""}[${f.priority}${f.check ? ` · ${f.check}` : ""}${f.outside ? " · Outside the change" : ""}${f.map === "stated" ? " · The map states this rule" : f.map === "wrong" ? " · The map is wrong here" : ""}] ${f.file ? `${oneLine(f.file)}${f.line ? `:${f.line}` : ""} — ` : ""}${oneLine(f.title)}${findingDetails(f)}`;
 
