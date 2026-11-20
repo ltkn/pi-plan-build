@@ -404,11 +404,15 @@ says why. The header tells the build how to check the work:
 ```
 # Order cancellation
 Status: ready                  (planning: a checkpoint — no tasks yet)
-Depends on: none               (or: <spec name> — an optional note)
+Depends on: none               (or: <spec name>)
 Also changes: ../frontend      (optional: sibling repositories the change also edits)
 Verification: tests            (or: build — why · none — why)
 New tests: yes                 (or: no — why)
 ```
+
+Every header line takes a note after its value, after a dash or in
+parentheses (`Also changes: ../frontend (the page that shows it)`); the note
+is the reason where a line needs one, and never part of the value.
 
 **A change that spans two repositories** (a backend and its frontend, side by
 side) names the sibling in `Also changes:`; it must be a git repository one
@@ -512,7 +516,11 @@ performance), planning tries it in a scratch copy first.
 the discussion ended, without re-analysing and without being buried. Pi points to code instead of copying it and states each
 fact once; `pb_write_spec` reports the size and only suggests tightening a long
 spec. `pb_update_spec` changes one section at a time, or a line or two inside one
-(`mode edit`, quoting the exact text it changes).
+(`mode edit`, quoting the exact text it changes), and sets header lines by name
+(`fields`, e.g. `{"Also changes": "../frontend"}`; `null` drops an optional one).
+When `pb_write_spec` refuses a spec, the text is kept as a draft and each error
+names the call that fixes it: a header line by its field, anything else by its
+section.
 
 **A spec is never overwritten from an older copy.** pb remembers what each session
 has seen of a spec: what it wrote, read whole, or was seeded with. A section

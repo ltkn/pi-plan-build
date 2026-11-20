@@ -548,7 +548,7 @@ test("spec: design provenance states where the Design comes from", async () => {
 test("spec: Status: ready can't have Open questions; planning can", async () => {
   const t = setup();
   process.chdir(t.repo);
-  assert.match(parseSpec(`${SPEC()}## Open questions\n- undecided\n`).errors.join("; "), /can't have "## Open questions"/);
+  assert.match(parseSpec(`${SPEC()}## Open questions\n- undecided\n`).errors.map((e) => e.message).join("; "), /can't have "## Open questions"/);
   assert.deepEqual(parseSpec(SPEC().replace("# Order cancellation\n", "# Order cancellation\nStatus: planning\n") + "## Open questions\n- undecided\n").errors, []);
   assert.match((await t.callTool("pb_write_spec", { name: "x", content: `${SPEC()}## Open questions\n- undecided\n` })).error!, /can't have "## Open questions"/);
   // An empty header carries no undecided questions: treated as absent, not rejected.
@@ -566,7 +566,7 @@ test("spec: Depends on names a spec; a note after the name is not part of it", (
   assert.equal(withDep("none — nothing to order before this").spec!.dependsOn, undefined);
   const bad = withDep("the live trains spec — implemented and on HEAD");
   assert.equal(bad.spec, undefined);
-  assert.match(bad.errors.join("; "), /"Depends on: the live trains spec — implemented and on HEAD" must name a spec \(short kebab-case, e\.g\. order-cancellation\) or none/);
+  assert.match(bad.errors.map((e) => e.message).join("; "), /"Depends on: the live trains spec — implemented and on HEAD" must name a spec \(short kebab-case, e\.g\. order-cancellation\) or none/);
 });
 
 test("spec: a behaviour task without Test:, or with a no-op one, warns — refactors stay quiet", async () => {
@@ -1076,7 +1076,7 @@ test("spec: a planning spec needs no tasks or verification yet; a ready one does
   const { spec, errors } = parseSpec(PLANNING);
   assert.deepEqual(errors, []);
   assert.equal(spec!.status, "planning");
-  assert.ok(parseSpec(PLANNING.replace("Status: planning", "Status: ready")).errors.some((e) => /no tasks/.test(e)));
+  assert.ok(parseSpec(PLANNING.replace("Status: planning", "Status: ready")).errors.some((e) => /no tasks/.test(e.message)));
   assert.equal(parseSpec(SPEC()).spec!.status, "ready");
 });
 
@@ -1160,6 +1160,76 @@ test("pb_update_spec: a citation that went stale in two sections is fixed one se
   const two = await t.callTool("pb_update_spec", { name: "slow-page", section: "Goal", mode: "edit", old: "`src/page.ts:12`", new: "`src/page.ts:1`" });
   assert.equal(two.error, undefined, two.error ?? "");
   assert.doesNotMatch(two.content![0].text, /points at code that isn't there/);
+});
+
+test("spec: Also changes takes a note after a dash or in parentheses, like every header line, and a bad repository is one error that names it", () => {
+  const withAlso = (line: string) => parseSpec(SPEC().replace("Depends on: none", `Depends on: none\nAlso changes: ${line}`));
+  assert.deepEqual(withAlso("../platform-core (apps-tempo: the Journey Planner fetch, the matcher, the departures response)").spec!.repos, ["../platform-core"]);
+  assert.deepEqual(withAlso("../platform-core, ../tempo-ui — the backend and its page").spec!.repos, ["../platform-core", "../tempo-ui"]);
+  assert.deepEqual(withAlso("none (nothing beside the project)").spec!.repos, []);
+  // The same note rule holds on the other header lines.
+  assert.equal(parseSpec(SPEC().replace("Depends on: none", "Status: ready (written after the probes)\nDepends on: none")).spec!.status, "ready");
+  assert.equal(parseSpec(SPEC({ verification: "build (a docs change)" })).spec!.gateReason, "a docs change");
+
+  const bad = withAlso("../platform-core apps-tempo the fetch, ../../far");
+  assert.equal(bad.spec, undefined);
+  assert.equal(bad.errors.length, 1, bad.errors.map((e) => e.message).join("\n"));
+  assert.equal(bad.errors[0].field, "Also changes");
+  assert.match(bad.errors[0].message, /must name sibling repositories as \.\.\/<name>[\s\S]*"apps-tempo", "the", "fetch", "\.\.\/\.\.\/far" are not[\s\S]*a note goes after a dash or in parentheses/);
+});
+
+test("pb_write_spec: a refused header line is fixed in the kept draft with pb_update_spec fields, never by sending the spec whole", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  const content = SPEC().replace("Depends on: none", "Depends on: none\nAlso changes: ../platform-core apps-tempo the fetch");
+  const refused = (await t.callTool("pb_write_spec", { name: "journey-times", content })).error!;
+  assert.match(refused, /The draft is kept[\s\S]*pb_update_spec[\s\S]*fields[\s\S]*"Also changes"/);
+  assert.doesNotMatch(refused, /a section's new content/, "a header error is not sent to the section tools");
+
+  // A value that would add a line, or a heading, is refused: a field is one header line.
+  const smuggled = await t.callTool("pb_update_spec", { name: "journey-times", fields: { "Also changes": "../platform-core\n## Goal\nsomething else" } });
+  assert.match(smuggled.error!, /one line/);
+  assert.match((await t.callTool("pb_update_spec", { name: "journey-times", fields: { Owner: "me" } })).error!, /"Owner" is not a header line/);
+  assert.ok(fs.existsSync(draftOf(t, "journey-times")));
+
+  const saved = await t.callTool("pb_update_spec", { name: "journey-times", fields: { "Also changes": null } });
+  assert.equal(saved.error, undefined, saved.error ?? "");
+  assert.match(saved.content![0].text, /^✅ Wrote .*journey-times\/spec\.md from the draft \(Also changes\)/);
+  const md = t.read(".pi/pb/specs/journey-times/spec.md");
+  assert.doesNotMatch(md, /Also changes/);
+  assert.match(md, /^# Order cancellation\nDepends on: none\nVerification: tests\n/);
+  assert.ok(!fs.existsSync(draftOf(t, "journey-times")));
+
+  // On a written spec, a field is set in place, and an absent one is added to the header.
+  assert.equal((await t.callTool("pb_update_spec", { name: "journey-times", fields: { "Depends on": "order-cancellation (built)", Status: "planning" } })).error, undefined);
+  assert.match(t.read(".pi/pb/specs/journey-times/spec.md"), /^# Order cancellation\nStatus: planning\nDepends on: order-cancellation \(built\)\nVerification: tests\n/);
+  assert.match((await t.callTool("pb_update_spec", { name: "journey-times", status: "ready", fields: { Status: "planning" } })).error!, /status and fields\.Status disagree/);
+});
+
+test("every parse error a refused write reports is fixed by the pb_update_spec call its advice names", async () => {
+  const t = setup();
+  await written(t, SPEC());
+  type Case = { name: string; content: string; advice: RegExp; fix: Record<string, unknown> };
+  const cases: Case[] = [
+    { name: "no-title", content: SPEC().replace("# Order cancellation\n", ""), advice: /fields[\s\S]*"Title"/, fix: { fields: { Title: "Order cancellation" } } },
+    { name: "bad-status", content: SPEC().replace("Depends on: none", "Status: done\nDepends on: none"), advice: /fields[\s\S]*"Status"/, fix: { fields: { Status: "ready" } } },
+    { name: "bad-depends", content: SPEC().replace("Depends on: none", "Depends on: the trains spec"), advice: /fields[\s\S]*"Depends on"/, fix: { fields: { "Depends on": "none" } } },
+    { name: "bad-repos", content: SPEC().replace("Depends on: none", "Depends on: none\nAlso changes: ../../far"), advice: /fields[\s\S]*"Also changes"/, fix: { fields: { "Also changes": null } } },
+    { name: "bad-verification", content: SPEC({ verification: "manual" }), advice: /fields[\s\S]*"Verification"/, fix: { fields: { Verification: "tests" } } },
+    { name: "no-verification", content: SPEC().replace("Verification: tests\n", ""), advice: /fields[\s\S]*"Verification"/, fix: { fields: { Verification: "tests" } } },
+    { name: "bad-new-tests", content: SPEC({ newTests: "no" }), advice: /fields[\s\S]*"New tests"/, fix: { fields: { "New tests": "yes" } } },
+    { name: "no-goal", content: SPEC().replace("## Goal\nCancel orders.\n", ""), advice: /a section's new content/, fix: { section: "Goal", content: "Cancel orders." } },
+    { name: "open-questions", content: READY_WITH_NO_OPEN_QUESTIONS, advice: /mode remove/, fix: { section: "Open questions", mode: "remove" } },
+    { name: "bad-task", content: SPEC().replace("### T2:", "### Second:"), advice: /a section's new content/, fix: { section: "Tasks", mode: "edit", old: "### Second:", new: "### T2:" } },
+  ];
+  for (const c of cases) {
+    const refused = (await t.callTool("pb_write_spec", { name: c.name, content: c.content })).error!;
+    assert.match(refused, /The draft is kept/, c.name);
+    assert.match(refused, c.advice, `${c.name}: ${refused}`);
+    const fixed = await t.callTool("pb_update_spec", { name: c.name, ...c.fix });
+    assert.equal(fixed.error, undefined, `${c.name}: ${fixed.error ?? ""}`);
+    assert.ok(fs.existsSync(path.join(t.repo, ".pi/pb/specs", c.name, "spec.md")), c.name);
+  }
 });
 
 test("a draft belongs to the session that wrote it: elsewhere, and once the spec is written whole, edits reach the spec", async () => {

@@ -3,7 +3,7 @@ import { StringEnum, Type } from "./schema.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { snapshot } from "./checkpoint.ts";
 import { specFormatHandout, specPrompt } from "./prompts.ts";
-import { type ParsedSpec, specAssumptions, acceptanceCriteria, blockFingerprints, blockLabel, isDraftSpec, needsRed, parseSpec, removedLines, removeSection, sectionKey, sectionOf, setSection, setStatus, specLosses, specTextBlocks, tokensOf, unseenBlocks } from "./spec.ts";
+import { type HeaderField, type ParsedSpec, type SpecError, HEADER_FIELDS, specAssumptions, acceptanceCriteria, blockFingerprints, blockLabel, isDraftSpec, needsRed, parseSpec, removedLines, removeSection, sectionKey, sectionOf, setHeaderField, setSection, specLosses, specTextBlocks, tokensOf, unseenBlocks } from "./spec.ts";
 import { duration } from "./format.ts";
 import { KEBAB_NAME } from "./names.ts";
 import { Store, now } from "./store.ts";
@@ -113,18 +113,56 @@ export const showSpec = (store: Store, name: string, o: { names?: string[]; next
   appendEntry("pb-spec", { name, markdown: loaded.md });
 };
 
-/** What a refused write tells the model when its text was kept: fix what's listed, by section. */
-const DRAFT_KEPT =
-  "The draft is kept: fix only what's listed with pb_update_spec (a section's new content, or mode remove for a section that shouldn't be there), which edits this draft while it's pending — not the whole spec again.";
+/**
+ * What a refused write tells the model when its text was kept: the pb_update_spec call that reaches each error, from
+ * where the error is — a header line by its field, anything else by its section — so the advice never names a call
+ * that can't make the fix.
+ */
+const draftAdvice = (errors: SpecError[]) => {
+  const fields = [...new Set(errors.flatMap((e) => (e.field ? [e.field] : [])))];
+  const calls = [
+    ...(fields.length ? [`a header line with fields (${fields.map((f) => `"${f}"`).join(", ")}: its new value, or null to drop an optional line), e.g. fields: {"${fields[0]}": "<value>"}`] : []),
+    ...(errors.some((e) => !e.field) ? ["a section's new content or mode edit, or mode remove for a section that shouldn't be there"] : []),
+  ];
+  return `The draft is kept: fix only what's listed with pb_update_spec — ${calls.join("; ")} — which edits this draft while it's pending, not the whole spec again.`;
+};
 
 /**
  * A write the checks refused: kept as the session's draft when there is a session to own it, so the fix is a
- * section edit; the thrown error lists what to fix either way.
+ * field or section edit; the thrown error lists what to fix either way.
  */
-const refuse = (store: Store, name: string, session: string | undefined, content: string, head: string, errors: string[], tail: string): never => {
-  if (session) store.writeDraft(name, { session, content, errors, at: now() });
-  throw new Error(`${head}\n- ${errors.join("\n- ")}\n${tail}${session ? `\n${DRAFT_KEPT}` : ""}`);
+const refuse = (store: Store, name: string, session: string | undefined, content: string, head: string, errors: SpecError[], tail: string): never => {
+  const messages = errors.map((e) => e.message);
+  if (session) store.writeDraft(name, { session, content, errors: messages, at: now() });
+  throw new Error(`${head}\n- ${messages.join("\n- ")}\n${tail}${session ? `\n${draftAdvice(errors)}` : ""}`);
 };
+
+/**
+ * The header lines a pb_update_spec call sets, checked before anything is read: each value is one line of text,
+ * since a line break would write a line — or a heading — of its own, and the title can't be removed. `status` is
+ * the older spelling of `fields.Status`.
+ */
+const headerFields = (fields: Partial<Record<HeaderField, string | null>> | undefined, status: string | undefined): [HeaderField, string | null][] => {
+  if (status !== undefined && fields?.Status !== undefined && fields.Status !== status)
+    throw new Error(`Not written: status and fields.Status disagree ("${status}", "${fields.Status}"): give one.`);
+  const unknown = Object.keys(fields ?? {}).filter((k) => !(HEADER_FIELDS as readonly string[]).includes(k));
+  if (unknown.length) throw new Error(`Not written: ${unknown.map((k) => `"${k}"`).join(", ")} ${unknown.length === 1 ? "is" : "are"} not a header line; fields names ${HEADER_FIELDS.join(", ")}.`);
+  const all: Partial<Record<HeaderField, string | null>> = { ...fields, ...(status !== undefined ? { Status: status } : {}) };
+  return HEADER_FIELDS.flatMap((field): [HeaderField, string | null][] => {
+    const value = all[field];
+    if (value === undefined) return [];
+    if (value === null) {
+      if (field === "Title") throw new Error('Not written: the "# <title>" line can\'t be removed; give fields.Title a value.');
+      return [[field, null]];
+    }
+    const text = value.trim();
+    if (!text || /[\p{Cc}\u2028\u2029]/u.test(text)) throw new Error(`Not written: fields."${field}" must be one line of text, not empty and with no line break or control character.`);
+    return [[field, text]];
+  });
+};
+
+/** A citation error is about the text that cites it, wherever that is: never a header field. */
+const citationErrors = (md: string, cwd: string): SpecError[] => specPathErrors(md, cwd).map((message) => ({ message }));
 
 /**
  * The answer to a write built from a copy of the spec older than the file: the blocks as they stand now, so the
@@ -159,7 +197,7 @@ export const editSpec = async (ctx: ExtensionContext, store: Store, name: string
     if (edited === undefined || edited === md) return;
     const { spec, errors } = parseSpec(edited);
     if (!spec) {
-      ctx.ui.notify(`Not saved, the spec doesn't parse: ${errors.join("; ")}`, "warning");
+      ctx.ui.notify(`Not saved, the spec doesn't parse: ${errors.map((e) => e.message).join("; ")}`, "warning");
       md = edited;
       continue;
     }
@@ -229,7 +267,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
       }
       const { spec, errors } = parseSpec(params.content);
       if (!spec) return refuse(store, params.name, session, params.content, "The spec doesn't parse:", errors, "Fix it.");
-      const pathErrs = spec.status === "ready" ? [...specPathErrors(params.content, ctx.cwd), ...specRepoErrors(spec, ctx.cwd)] : [];
+      const pathErrs = spec.status === "ready" ? [...citationErrors(params.content, ctx.cwd), ...specRepoErrors(spec, ctx.cwd)] : [];
       if (pathErrs.length) return refuse(store, params.name, session, params.content, "The spec points at code that isn't there:", pathErrs, "Fix the path, line or citation; new files need no line number.");
       const prev = store.progress(params.name);
       // Everything the answer needs is settled first: from the write down, the only work left is the
@@ -265,7 +303,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
     name: "pb_update_spec",
     label: "Update spec",
     description:
-      "Change part of an existing pb spec instead of rewriting it: edit text inside one section (mode edit: old, the exact text as it stands, and new — the way to change a line or two), replace, append to or remove one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). A replace or remove is refused when the section changed since this session last read the spec, with the section as it stands; edit then, or read the file first. The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, \"none — <why>\". When this session's pb_write_spec was refused, this edits that kept draft, and the spec is written once the draft passes.",
+      "Change part of an existing pb spec instead of rewriting it: edit text inside one section (mode edit: old, the exact text as it stands, and new — the way to change a line or two), replace, append to or remove one section (e.g. Findings, Decisions, Design, Tasks), and/or set header lines by name (fields: Title, Status, Depends on, Also changes, Verification, New tests; null drops an optional line). A replace or remove is refused when the section changed since this session last read the spec, with the section as it stands; edit then, or read the file first. The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, \"none — <why>\". When this session's pb_write_spec was refused, this edits that kept draft, and the spec is written once the draft passes.",
     parameters: Type.Object({
       name: Type.Optional(Type.String({ description: "the spec's name; the one this session is building or writing, if omitted" })),
       section: Type.Optional(Type.String({ description: 'the "## " section to change, e.g. Decisions; created if missing' })),
@@ -273,7 +311,15 @@ export function registerSpecTools(pi: ExtensionAPI) {
       mode: Type.Optional(StringEnum(["replace", "append", "remove", "edit"])),
       old: Type.Optional(Type.String({ description: "mode edit: the exact text to change, as it stands in the section, enough of it to name one place" })),
       new: Type.Optional(Type.String({ description: "mode edit: what replaces it (empty deletes it)" })),
-      status: Type.Optional(StringEnum(["planning", "ready"])),
+      status: Type.Optional(StringEnum(["planning", "ready"], { description: "the same as fields.Status" })),
+      fields: Type.Optional(
+        Type.Object(
+          Object.fromEntries(
+            HEADER_FIELDS.map((f) => [f, Type.Optional(Type.Union([Type.String(), Type.Null()]))]),
+          ),
+          { description: 'header lines to set, by name (Title is the "# <title>" line): one line of text replaces or adds the line, null removes an optional one, e.g. {"Also changes": "../tempo-ui"}', additionalProperties: false },
+        ),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const store = new Store(ctx.cwd);
@@ -284,11 +330,13 @@ export function registerSpecTools(pi: ExtensionAPI) {
       const fixLap = store.fixSession(session);
       const name = params.name ?? fixLap?.spec ?? mine;
       if (!name) throw new Error("Which spec? Give its name.");
+      const fields = headerFields(params.fields, params.status);
+      const setsHeader = fields.length > 0;
       if (building) {
         if (name !== building.spec)
           throw new Error(`The build of ${building.spec} is running in this session: only its Design and Decisions may change, not ${name}.`);
-        if (params.status)
-          throw new Error(`The build of ${building.spec} is running: its status can't change. Only its Design and Decisions may change; a contract change pauses the build and /${cmd("build")} re-approves the revision.`);
+        if (setsHeader)
+          throw new Error(`The build of ${building.spec} is running: its header lines and status can't change. Only its Design and Decisions may change; a contract change pauses the build and /${cmd("build")} re-approves the revision.`);
         const sectionName = params.section?.replace(/^#+\s*/, "").trim().toLowerCase();
         if (sectionName !== "design" && sectionName !== "decisions")
           throw new Error(
@@ -302,10 +350,10 @@ export function registerSpecTools(pi: ExtensionAPI) {
         const unlocked = fixLap.specSections ?? [];
         // Findings is evidence, not a rule the build follows: a lap that changed the code corrects what it cites.
         const allowed = key === "section:design" || key === "section:decisions" || key === "section:findings" || (!!key && unlocked.includes(key));
-        if (name !== fixLap.spec || params.status || !allowed) {
+        if (name !== fixLap.spec || setsHeader || !allowed) {
           const extra = unlocked.filter((k) => k !== "section:decisions").map((k) => `"${k.replace(/^section:/, "")}"`).join(", ");
           throw new Error(
-            `This fix lap may change only ${fixLap.spec}'s Design, Decisions and Findings${extra ? `, and ${extra} for the findings filed against the spec` : ""}. A finding that needs any other part of the contract or the Status changed is reported as skipped, for a spec revision.`,
+            `This fix lap may change only ${fixLap.spec}'s Design, Decisions and Findings${extra ? `, and ${extra} for the findings filed against the spec` : ""}. A finding that needs any other part of the contract or a header line changed is reported as skipped, for a spec revision.`,
           );
         }
       }
@@ -351,7 +399,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
           throw new Error(`Not written: replacing ${params.section.replace(/^#+\s*/, "").trim()} with nothing leaves it empty — a section with nothing to say is one line, "none — <why>".`);
         md = setSection(md, params.section, params.content, (params.mode as "replace" | "append" | undefined) ?? "replace");
       }
-      if (params.status) md = setStatus(md, params.status as "planning" | "ready");
+      for (const [field, value] of fields) md = setHeaderField(md, field, value);
       // Approved decisions hold for the autonomous writers of a live build: the build, running or paused in its own
       // session, and its fix laps. (A paused build's own session is where they were rewritten from memory before.)
       const spoken = store.progress(name);
@@ -369,25 +417,25 @@ export function registerSpecTools(pi: ExtensionAPI) {
       const { spec, errors } = parseSpec(md);
       if (!spec) {
         if (draft) return refuse(store, name, session, md, "Not written: the draft still doesn't parse:", errors, "Fix it.");
-        throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.join("\n- ")}`);
+        throw new Error(`Not written: the spec wouldn't parse:\n- ${errors.map((e) => e.message).join("\n- ")}`);
       }
       const sectionName = sectionLabel?.toLowerCase() ?? "";
       let inherited: string[] = [];
       // A path:line is a claim about the code the spec was written against. Check it on every
       // ready write except Design, which the build writes and may legitimately describe new code.
       if (spec.status === "ready" && (sectionName !== "design" || draft)) {
-        const errorsOf = (text: string, parsed: ParsedSpec) => [...specPathErrors(text, ctx.cwd), ...specRepoErrors(parsed, ctx.cwd)];
+        const errorsOf = (text: string, parsed: ParsedSpec) => [...citationErrors(text, ctx.cwd), ...specRepoErrors(parsed, ctx.cwd)];
         const all = errorsOf(md, spec);
         // A section write answers for what it brings in. A wrong citation the ready spec already had elsewhere is not
         // this write's: refusing for it would refuse every edit until all of them were fixed at once, one section at a
         // time being impossible, which is what drives a writer to edit the file around the tool. It is noted instead.
         const parsedBefore = !draft && before && params.section ? parseSpec(before).spec : undefined;
-        const already = new Set(parsedBefore?.status === "ready" ? errorsOf(before!, parsedBefore) : []);
-        const pathErrs = all.filter((e) => !already.has(e));
-        inherited = all.filter((e) => already.has(e));
+        const already = new Set(parsedBefore?.status === "ready" ? errorsOf(before!, parsedBefore).map((e) => e.message) : []);
+        const pathErrs = all.filter((e) => !already.has(e.message));
+        inherited = all.filter((e) => already.has(e.message)).map((e) => e.message);
         const fix = "Fix the path, line or citation; new files need no line number.";
         if (pathErrs.length && draft) return refuse(store, name, session, md, "Not written: the draft points at code that isn't there:", pathErrs, fix);
-        if (pathErrs.length) throw new Error(`Not written: the spec points at code that isn't there:\n- ${pathErrs.join("\n- ")}\n${fix}`);
+        if (pathErrs.length) throw new Error(`Not written: the spec points at code that isn't there:\n- ${pathErrs.map((e) => e.message).join("\n- ")}\n${fix}`);
       }
       const prev = store.progress(name);
       // A draft becomes the spec whole, so it gets a whole write's notes.
@@ -405,7 +453,7 @@ export function registerSpecTools(pi: ExtensionAPI) {
         // What this write showed the session: all of a draft (its own text), the blocks it replaced, edited or removed;
         // an append or a status change leaves a block seen only if it was seen as it stood before.
         const after = blockFingerprints(md);
-        const touched = [...(key ? [key] : []), ...(params.status ? ["header"] : [])];
+        const touched = [...(key ? [key] : []), ...(setsHeader ? ["header"] : [])];
         if (draft) store.markSeen(name, session, after);
         else {
           const seen = store.seenBlocks(name, session) ?? {};
@@ -428,8 +476,9 @@ export function registerSpecTools(pi: ExtensionAPI) {
         writtenIn: ownerStays && prev ? prev.writtenIn : session,
         updatedAt: now(),
       });
-      store.event(name, { type: "spec", update: params.section ?? "status", ...(draft ? { fromDraft: true } : {}), status: spec.status, tokens: tokensOf(md), ...(specMs !== undefined ? { ms: specMs } : {}) });
-      const change = sectionLabel ? ` (${sectionLabel}${mode === "remove" ? " removed" : mode === "edit" ? " edited" : ""})` : "";
+      store.event(name, { type: "spec", update: params.section ?? (fields.some(([f]) => f !== "Status") ? "header" : "status"), ...(draft ? { fromDraft: true } : {}), status: spec.status, tokens: tokensOf(md), ...(specMs !== undefined ? { ms: specMs } : {}) });
+      const changed = [...(sectionLabel ? [`${sectionLabel}${mode === "remove" ? " removed" : mode === "edit" ? " edited" : ""}`] : []), ...Object.keys(params.fields ?? {})];
+      const change = changed.length ? ` (${changed.join(", ")})` : "";
       const what = draft ? `✅ Wrote ${store.rel("specs", name, "spec.md")} from the draft${change}` : `✅ Updated ${store.rel("specs", name, "spec.md")}${change}`;
       return reply(`${what}: status ${spec.status}; ${sizeNote(tokensOf(md))}${timeSuffix(specMs)}.${notes.join("")}`);
     },

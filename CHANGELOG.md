@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **A refused spec can always be fixed in its draft.** A planner wrote `Also changes: ../platform-core (apps-tempo: the Journey Planner fetch, …)`, and `pb_write_spec` refused it with the same error eight times, once per word of the note. It then told the planner to fix the draft with `pb_update_spec` and not to resend the spec. But `pb_update_spec` could change only sections and the Status, never a header line, so the planner had no allowed way to make the fix.
+  - **`pb_update_spec` sets header lines by name.** `fields: {"Also changes": "../platform-core"}` replaces a line or adds it in its place in the header; `null` removes an optional line. `Title` sets the `# <title>` line. `status` still works, as another spelling of `fields.Status`. A value must be one line of text, so a field can never add a heading, and an unknown name is refused.
+  - **Each error says where it is, and the advice comes from that.** A header error sends the planner to `fields` with the line's name; a section error, to the section edit. A test drives every kind of parse error through the call its refusal names.
+  - **One rule for every header line.** On any header line, a note may follow the value after a dash or in parentheses, and it is never part of the value: `Also changes: ../platform-core (the backend)` is now accepted, as `Depends on` already was. A bad repository list is one error that quotes the parts that aren't `../<name>`.
+
 ## 1.43.0
 
 - **Fewer fix rounds, and the next step is one Enter.** One feature took four review rounds, and most of the later findings were pb's own leftovers: a fix lap changed the code and left spec lines describing the old code, the follow-up review reported them, the next lap fixed those and left others. The spec pass and the adversarial pass also reported the same defects at neighbouring lines, so every `/pb:fix` needed a written "3 and 6 are one", and each round was a typed command. Now:

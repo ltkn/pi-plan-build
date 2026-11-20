@@ -258,10 +258,11 @@ ${SPEC_CHECKS.replace(/^- /gm, "  - ")}
 /** The format, and what earns a place in a spec: shared by writing and finishing. */
 const SPEC_FORMAT = `# <title>
 Status: ready | planning
-Depends on: <spec name> | none (a note may follow, after a dash or in parentheses)
+Depends on: <spec name> | none
 Also changes: ../<repo>, … (only when the change also edits a sibling repository, e.g. its frontend: omit the line otherwise)
 Verification: tests | build — <why> | none — <why>
 New tests: yes | no — <why>
+(On every header line a note may follow the value, after a dash or in parentheses; pb_update_spec sets a header line by name with fields.)
 
 ## Goal
 The outcome in a few sentences: what is true after the change, for whom, and how we'll know it worked — no implementation. It is the need I asked for, in my terms, plus what the change itself must not break or let through (its abuse cases, the behaviour it changes). An outcome you think would also be worth having (a record, a recovery path, a report, a second use) is not in the Goal: name it under Out of scope, and I add it back if I want it. Every task and acceptance line serves the Goal; anything beyond it belongs in Out of scope.

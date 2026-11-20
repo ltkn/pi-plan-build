@@ -5,9 +5,13 @@
  *
  *   # <title>
  *   Status: planning | ready                 (optional; ready by default)
- *   Depends on: <spec name> | none (an optional note may follow a dash or sit in parentheses)
+ *   Depends on: <spec name> | none
+ *   Also changes: ../<repo>, … | none        (optional)
  *   Verification: tests | build | none — <why, unless tests>
  *   New tests: yes | no — <why, if no>
+ *
+ * Every header line is `Key: value`, optionally followed by a note after a dash or in parentheses
+ * (`headerValue`); the note is a reason where the line needs one, and never part of the value.
  *
  *   ## Goal · ## Findings · ## Decisions · ## Open questions · ## Tasks
  *   (optional: Out of scope, Contracts, Migration and rollback, Threats and abuse;
@@ -52,71 +56,101 @@ export interface ParsedSpec {
 /** The rest is optional: specs stay as short as the change allows. Tasks are required once the spec is ready. */
 export const REQUIRED_SECTIONS = ["Goal", "Decisions"];
 
-const header = (md: string, label: string) => headerBlock(md).match(new RegExp(`^\\s{0,3}${escapeRegExp(label)}:\\s*(.+)$`, "im"))?.[1].trim();
-const splitReason = (v: string) => {
-  const m = v.match(/^(.*?)\s*[—–]\s*(.+)$/) ?? v.match(/^(.*?)\s+-\s+(.+)$/);
-  if (!m) return { value: v.trim().toLowerCase(), reason: undefined as string | undefined };
-  return { value: m[1].trim().toLowerCase(), reason: m[2].trim() || undefined };
-};
+/** The spec's header lines, in the order they are written; Title is the `# <title>` line. */
+export const HEADER_FIELDS = ["Title", "Status", "Depends on", "Also changes", "Verification", "New tests"] as const;
+export type HeaderField = (typeof HEADER_FIELDS)[number];
 
-/** Parse a spec; `errors` lists what's missing or malformed (empty = valid). */
+/**
+ * What a spec gets wrong, and where: `field` names the header line it is about, absent for anything in the
+ * sections. A refusal's advice is built from it, so every error says which tool call fixes it.
+ */
+export interface SpecError {
+  message: string;
+  field?: HeaderField;
+}
+
+const TITLE_LINE = /^\s{0,3}#\s+(.+)$/m;
+const fieldLine = (label: string) => new RegExp(`^\\s{0,3}${escapeRegExp(label)}:[ \\t]*(.*)$`, "im");
+const header = (md: string, label: string) => headerBlock(md).match(fieldLine(label))?.[1].trim() || undefined;
+
+/**
+ * A header line's value and its note: the note follows an em or en dash, a spaced hyphen, or sits in parentheses.
+ * One rule for every header line, so a writer never has to know which lines take a note.
+ */
+export function headerValue(raw: string): { value: string; note?: string } {
+  const m = /^(.*?)(?:\s*[—–]|\s+-\s|\s*\()\s*(.*)$/s.exec(raw);
+  if (!m) return { value: raw.trim() };
+  const inParentheses = raw.slice(m[1].length).trimStart().startsWith("(");
+  const note = (inParentheses ? m[2].replace(/\)\s*$/, "") : m[2]).trim();
+  return { value: m[1].trim(), note: note || undefined };
+}
+
 /** Whether the text declares itself a draft (`Status: planning`); anything else is meant to be built. */
-export const isDraftSpec = (md: string) => header(md, "Status")?.toLowerCase() === "planning";
+export const isDraftSpec = (md: string) => headerValue(header(md, "Status") ?? "").value.toLowerCase() === "planning";
 
-export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
-  const errors: string[] = [];
+/** Parse a spec; `errors` lists what's missing or malformed, each with where it is (empty = valid). */
+export function parseSpec(md: string): { spec?: ParsedSpec; errors: SpecError[] } {
+  const errors: SpecError[] = [];
+  const fail = (message: string, field?: HeaderField) => errors.push(field ? { message, field } : { message });
   const blanked = blankFenced(md);
-  const title = headerBlock(md).match(/^\s{0,3}#\s+(.+)$/m)?.[1].trim();
-  if (!title) errors.push('missing the "# <title>" line');
+  const title = headerBlock(md).match(TITLE_LINE)?.[1].trim();
+  if (!title) fail('missing the "# <title>" line', "Title");
 
-  const statusLine = header(md, "Status")?.toLowerCase();
-  if (statusLine && statusLine !== "planning" && statusLine !== "ready") errors.push(`"Status: ${statusLine}" must be planning or ready`);
-  const status = statusLine === "planning" ? "planning" : "ready";
+  const statusLine = header(md, "Status");
+  const statusValue = statusLine ? headerValue(statusLine).value.toLowerCase() : undefined;
+  if (statusValue !== undefined && statusValue !== "planning" && statusValue !== "ready") fail(`"Status: ${statusLine}" must be planning or ready`, "Status");
+  const status = statusValue === "planning" ? "planning" : "ready";
 
   const verification = header(md, "Verification");
   let gate: Gate = "tests";
   let gateReason: string | undefined;
   if (!verification) {
-    if (status === "ready") errors.push('missing "Verification: tests | build | none"');
+    if (status === "ready") fail('missing "Verification: tests | build | none"', "Verification");
   } else {
-    const v = splitReason(verification);
-    if (v.value === "tests" || v.value === "build" || v.value === "none") [gate, gateReason] = [v.value, v.reason];
-    else errors.push(`"Verification: ${verification}" must be tests, build or none`);
-    if (gate !== "tests" && !gateReason) errors.push(`"Verification: ${gate}" needs a reason ("Verification: ${gate} — why")`);
+    const v = headerValue(verification);
+    const value = v.value.toLowerCase();
+    if (value === "tests" || value === "build" || value === "none") [gate, gateReason] = [value, v.note];
+    else fail(`"Verification: ${verification}" must be tests, build or none`, "Verification");
+    if (gate !== "tests" && !gateReason) fail(`"Verification: ${gate}" needs a reason ("Verification: ${gate} — why")`, "Verification");
   }
 
   const nt = header(md, "New tests");
   let newTests = true;
   let newTestsReason: string | undefined;
   if (nt) {
-    const v = splitReason(nt);
-    if (v.value !== "yes" && v.value !== "no") errors.push(`"New tests: ${nt}" must be yes or no`);
-    newTests = v.value !== "no";
-    newTestsReason = v.reason;
-    if (!newTests && !newTestsReason) errors.push('"New tests: no" needs a reason ("New tests: no — why")');
+    const v = headerValue(nt);
+    const value = v.value.toLowerCase();
+    if (value !== "yes" && value !== "no") fail(`"New tests: ${nt}" must be yes or no`, "New tests");
+    newTests = value !== "no";
+    newTestsReason = v.note;
+    if (!newTests && !newTestsReason) fail('"New tests: no" needs a reason ("New tests: no — why")', "New tests");
   }
 
+  // A spec name is one kebab-case token: every consumer turns it into the spec directory.
   const dep = header(md, "Depends on");
-  // A spec name is one kebab-case token; a note may follow it after a dash or in parentheses and is
-  // never part of the name — every consumer turns this bare name into the spec directory.
-  const depName = dep?.split(/\s+/, 1)[0];
-  const depNote = dep && depName ? dep.slice(depName.length).trim() : "";
-  if (depName && depName !== "none" && (!KEBAB_NAME.test(depName) || (depNote !== "" && !/^(?:[—–-]|\()/.test(depNote))))
-    errors.push(`"Depends on: ${dep}" must name a spec (short kebab-case, e.g. order-cancellation) or none; a note may follow after a dash or in parentheses`);
+  const depName = dep ? headerValue(dep).value : undefined;
+  if (dep && depName !== "none" && !KEBAB_NAME.test(depName ?? ""))
+    fail(`"Depends on: ${dep}" must name a spec (short kebab-case, e.g. order-cancellation) or none; a note may follow after a dash or in parentheses`, "Depends on");
   const dependsOn = depName && depName !== "none" ? depName : undefined;
 
   // Sibling repositories the change also edits: `../<name>` each, comma- or space-separated, or none.
   const also = header(md, "Also changes");
-  const repos = also && !/^none\b/i.test(also) ? [...new Set(also.split(/[,\s]+/).filter(Boolean))] : [];
-  for (const r of repos) if (!SIBLING_REPO.test(r)) errors.push(`"Also changes: ${also}" must name sibling repositories as ../<name> (one folder beside the project), or none`);
+  const alsoValue = also ? headerValue(also).value : "";
+  const repos = alsoValue && !/^none$/i.test(alsoValue) ? [...new Set(alsoValue.split(/[,\s]+/).filter(Boolean))] : [];
+  const notRepos = repos.filter((r) => !SIBLING_REPO.test(r));
+  if (notRepos.length)
+    fail(
+      `"Also changes: ${also}" must name sibling repositories as ../<name> (one folder beside the project), or none: ${notRepos.map((r) => `"${r}"`).join(", ")} ${notRepos.length === 1 ? "is" : "are"} not; a note goes after a dash or in parentheses`,
+      "Also changes",
+    );
 
   for (const s of REQUIRED_SECTIONS) {
     const found = blanked.filter((l) => sectionHeading(s).test(l));
-    if (!found.length) errors.push(`missing the "## ${s}" section`);
-    else if (found.length > 1) errors.push(`duplicate "## ${s}" section: keep one`);
+    if (!found.length) fail(`missing the "## ${s}" section`);
+    else if (found.length > 1) fail(`duplicate "## ${s}" section: keep one`);
   }
   if (status === "ready" && sectionOf(md, "Open questions").trim())
-    errors.push('Status: ready can\'t have "## Open questions": settle each into Decisions, tag the claim \`assumed: <what would falsify it>\`, or ask with pb_ask; if nothing is open, remove the section (pb_update_spec, mode remove)');
+    fail('Status: ready can\'t have "## Open questions": settle each into Decisions, tag the claim \`assumed: <what would falsify it>\`, or ask with pb_ask; if nothing is open, remove the section (pb_update_spec, mode remove)');
 
   // Tasks: fence-aware, line-based. ## Tasks allows a trailing colon; ### T1 is case-insensitive
   // and normalized to T1; a ### line that looks like a task but doesn't parse is an error, not silence.
@@ -131,12 +165,12 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
     if (/^###\s/.test(l)) {
       const m = l.match(/^###\s+[Tt](\d+)\s*[:.—–-]?\s*(.*)$/);
       if (m) headAt.push(i);
-      else errors.push(`"${l.trim()}" didn't parse as a task: write each as "### T1: <title>" under "## Tasks"`);
+      else fail(`"${l.trim()}" didn't parse as a task: write each as "### T1: <title>" under "## Tasks"`);
     }
   });
   const ready = status === "ready";
-  if (ready && tasksIdx < 0) errors.push('no tasks: write each as "### T1: <title>" under "## Tasks"');
-  else if (ready && !headAt.length && !errors.some((e) => e.includes("didn't parse as a task"))) errors.push('no tasks: write each as "### T1: <title>" under "## Tasks"');
+  if (ready && tasksIdx < 0) fail('no tasks: write each as "### T1: <title>" under "## Tasks"');
+  else if (ready && !headAt.length && !errors.some((e) => e.message.includes("didn't parse as a task"))) fail('no tasks: write each as "### T1: <title>" under "## Tasks"');
   const tasks: SpecTask[] = headAt.map((lineIdx, k) => {
     const next = headAt[k + 1] ?? tasksLines.length;
     const text = tasksLines.slice(lineIdx, next).join("\n").trim();
@@ -145,13 +179,13 @@ export function parseSpec(md: string): { spec?: ParsedSpec; errors: string[] } {
     const title = (idLine[2] ?? "").trim() || id;
     const hasTestLine = /^\s*[-*]\s*Test:/im.test(text);
     const test = text.match(/^\s*[-*]\s*Test:\s*`([^`]+)`/m)?.[1].trim();
-    if (hasTestLine && !test) errors.push(`${id} has a Test: line without \`command\`: write it as "- Test: \`<command>\`"`);
-    if (ready && !/^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/im.test(text)) errors.push(`${id} has no "- Acceptance:" line`);
+    if (hasTestLine && !test) fail(`${id} has a Test: line without \`command\`: write it as "- Test: \`<command>\`"`);
+    if (ready && !/^\s*[-*]\s*Acceptance(\s*\([^)]*\))?:/im.test(text)) fail(`${id} has no "- Acceptance:" line`);
     return { id, title, text, test };
   });
   const ids = tasks.map((t) => t.id);
   const dup = ids.filter((id, i) => ids.indexOf(id) !== i);
-  if (dup.length) errors.push(`duplicate task ids: ${[...new Set(dup)].join(", ")}`);
+  if (dup.length) fail(`duplicate task ids: ${[...new Set(dup)].join(", ")}`);
 
   return errors.length ? { errors } : { spec: { title: title!, status, dependsOn, repos, gate, gateReason, newTests, newTestsReason, tasks }, errors };
 }
@@ -180,21 +214,31 @@ export function acceptanceCriteria(md: string, parsed?: ParsedSpec): AcceptanceC
   return out;
 }
 
-/** Set the "Status:" header line (header block only, so examples in Findings are untouched). */
-export function setStatus(md: string, status: "planning" | "ready"): string {
+/** Set the "Status:" header line. */
+export const setStatus = (md: string, status: "planning" | "ready") => setHeaderField(md, "Status", status);
+
+/**
+ * Set one header line, or remove it (`null`), touching only the header block so an example in a section is never
+ * changed. An absent line is added after the header lines that come before it in `HEADER_FIELDS`. The value must
+ * be one line: the caller checks that, since a line break would write a heading of its own.
+ */
+export function setHeaderField(md: string, field: HeaderField, value: string | null): string {
   const block = headerBlock(md);
-  const m = block.match(/^\s{0,3}Status:.*$/im);
-  if (m && m.index !== undefined) {
-    const start = m.index;
-    const end = start + m[0].length;
-    // Only replace when the match is in the header block (it is, by construction).
-    void end;
-    return md.slice(0, start) + `Status: ${status}` + md.slice(start + m[0].length);
+  const pattern = field === "Title" ? TITLE_LINE : fieldLine(field);
+  const line = field === "Title" ? `# ${value}` : `${field}: ${value}`;
+  const found = pattern.exec(block);
+  if (found) {
+    const end = found.index + found[0].length;
+    if (value !== null) return md.slice(0, found.index) + line + md.slice(end);
+    return md.slice(0, found.index) + md.slice(md[end] === "\n" ? end + 1 : end);
   }
-  const title = block.match(/^\s{0,3}#\s+.+$/m);
-  if (!title || title.index === undefined) return md;
-  const at = title.index + title[0].length;
-  return `${md.slice(0, at)}\nStatus: ${status}${md.slice(at)}`;
+  if (value === null) return md;
+  const before = HEADER_FIELDS.slice(0, HEADER_FIELDS.indexOf(field))
+    .map((f) => (f === "Title" ? TITLE_LINE : fieldLine(f)).exec(block))
+    .filter((m): m is RegExpExecArray => !!m);
+  if (!before.length) return `${line}\n${md}`;
+  const at = Math.max(...before.map((m) => m.index + m[0].length));
+  return `${md.slice(0, at)}\n${line}${md.slice(at)}`;
 }
 
 /** Rough token count (4 characters a token): enough to tell a spec's size. */

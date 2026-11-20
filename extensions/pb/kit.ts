@@ -17,7 +17,7 @@ import { notifyDesktop } from "./notify.ts";
 import { tip } from "./help.ts";
 import { PI_RESERVE_TOKENS, specReference, taskPrompt } from "./prompts.ts";
 import { areaNotesFor, ignoredPathsFor, mapPaths, projectFiles, resolveProjectPath, resolveSiblingFile } from "./map.ts";
-import { type ParsedSpec, type SpecTask, addDecision, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sharedTestCommands, specHash, specPathRefs } from "./spec.ts";
+import { type ParsedSpec, type SpecError, type SpecTask, addDecision, contractHash, earlierProof, isAcceptanceLine, needsRed, parseSpec, redExemption, sharedTestCommands, specHash, specPathRefs } from "./spec.ts";
 import { duration } from "./format.ts";
 import { type Stack, findStandards, isUserTemplate, standardsLoaded } from "./standards.ts";
 import { buildTimeLabel, buildTiming } from "./stats.ts";
@@ -179,8 +179,8 @@ export const repoHeads = (cwd: string, spec: ParsedSpec): Record<string, string>
   Object.fromEntries(resolveRepos(cwd, spec.repos).flatMap((r) => (r.root ? [[r.name, gitHead(r.root) ?? ""]] : [])).filter(([, h]) => h));
 
 /** A ready spec's sibling repositories must exist beside the project as git repositories: undo, review and commit act on them. */
-export const specRepoErrors = (spec: ParsedSpec, cwd: string): string[] =>
-  resolveRepos(cwd, spec.repos).flatMap((r) => (r.error ? [`"Also changes: ${r.name}" is ${r.error}`] : []));
+export const specRepoErrors = (spec: ParsedSpec, cwd: string): SpecError[] =>
+  resolveRepos(cwd, spec.repos).flatMap((r) => (r.error ? [{ message: `"Also changes: ${r.name}" is ${r.error}`, field: "Also changes" as const }] : []));
 
 export const specWarnings = (md: string, spec: ParsedSpec): string[] => {
   const redEligible = (t: SpecTask) => spec.gate === "tests" && spec.newTests && !/^\(refactor\)/i.test(t.title);
@@ -560,7 +560,7 @@ export const appendDecision = (store: Store, name: string, text: string, update:
   if (!md) return `no spec "${name}"`;
   const updated = addDecision(md, text);
   const errors = parseSpec(updated).errors;
-  if (errors.length) return `the spec wouldn't parse afterwards: ${errors.join("; ")}`;
+  if (errors.length) return `the spec wouldn't parse afterwards: ${errors.map((e) => e.message).join("; ")}`;
   store.writeSpec(name, updated);
   store.event(name, { type: "spec", update });
   return undefined;

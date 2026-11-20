@@ -197,7 +197,7 @@ function reportSpec(store: Store, name: string, options: ReportOptions, stats: M
     name,
     title: parsed.spec?.title ?? null,
     phase: progress?.phase ?? "written",
-    parse: { ok: !!parsed.spec, errors: parsed.errors },
+    parse: { ok: !!parsed.spec, errors: parsed.errors.map((e) => e.message) },
     status: parsed.spec?.status ?? null,
     verification: {
       gate: parsed.spec?.gate ?? null,

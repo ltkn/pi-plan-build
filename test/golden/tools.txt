@@ -1,4 +1,4 @@
-words: 2100
+words: 2247
 
 ## pb_ask
 
@@ -115,7 +115,7 @@ Write or rewrite a pb feature spec (.pi/pb/specs/<name>/spec.md). Use it when th
 
 ## pb_update_spec
 
-Change part of an existing pb spec instead of rewriting it: edit text inside one section (mode edit: old, the exact text as it stands, and new — the way to change a line or two), replace, append to or remove one section (e.g. Findings, Decisions, Design, Tasks), and/or set its Status (planning | ready). A replace or remove is refused when the section changed since this session last read the spec, with the section as it stands; edit then, or read the file first. The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, "none — <why>". When this session's pb_write_spec was refused, this edits that kept draft, and the spec is written once the draft passes.
+Change part of an existing pb spec instead of rewriting it: edit text inside one section (mode edit: old, the exact text as it stands, and new — the way to change a line or two), replace, append to or remove one section (e.g. Findings, Decisions, Design, Tasks), and/or set header lines by name (fields: Title, Status, Depends on, Also changes, Verification, New tests; null drops an optional line). A replace or remove is refused when the section changed since this session last read the spec, with the section as it stands; edit then, or read the file first. The result must still parse, or nothing is written. A replace whose body is blank is refused — a section with nothing to say is one line, "none — <why>". When this session's pb_write_spec was refused, this edits that kept draft, and the spec is written once the draft passes.
 
 {
   "type": "object",
@@ -154,7 +154,75 @@ Change part of an existing pb spec instead of rewriting it: edit text inside one
       "enum": [
         "planning",
         "ready"
-      ]
+      ],
+      "description": "the same as fields.Status"
+    },
+    "fields": {
+      "type": "object",
+      "properties": {
+        "Title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Depends on": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Also changes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Verification": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "New tests": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "header lines to set, by name (Title is the \"# <title>\" line): one line of text replaces or adds the line, null removes an optional one, e.g. {\"Also changes\": \"../tempo-ui\"}",
+      "additionalProperties": false
     }
   }
 }
